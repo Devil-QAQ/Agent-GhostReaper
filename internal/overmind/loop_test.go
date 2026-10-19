@@ -1,0 +1,786 @@
+package overmind
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime/pprof"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/Autumn-27/norma/harness"
+	"github.com/Autumn-27/norma/llm"
+
+	"ghostreaper/internal/failover"
+	"ghostreaper/internal/manager"
+	"ghostreaper/internal/rings"
+	"ghostreaper/internal/runlog"
+	"ghostreaper/internal/swarm"
+)
+
+func waitFor(t *testing.T, timeout time.Duration, msg string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	// 失败现场:goroutine 转储 + 事件流尾巴,便于钉死停滞点。
+	if p := pprof.Lookup("goroutine"); p != nil {
+		var buf bytes.Buffer
+		_ = p.WriteTo(&buf, 1)
+		lines := strings.Split(buf.String(), "\n")
+		if len(lines) > 90 {
+			lines = append(lines[:45], lines[len(lines)-45:]...)
+		}
+		t.Logf("goroutine 转储(截断):\n%s", strings.Join(lines, "\n"))
+	}
+	t.Fatalf("等待超时: %s", msg)
+}
+
+func countNodes(t *testing.T, store *rings.Store, task string, nt rings.NodeType, status string) int {
+	t.Helper()
+	nodes, err := store.NodesByType(context.Background(), task, nt, status)
+	if err != nil {
+		t.Fatalf("查节点 %s(%s) 失败: %v", nt, status, err)
+	}
+	return len(nodes)
+}
+
+// seedAssets 种一批本地靶标资产(title=host:port)。
+func seedAssets(t *testing.T, store *rings.Store, task string, ids []string, hostPorts map[string]string) {
+	t.Helper()
+	for _, id := range ids {
+		if _, err := store.Append(context.Background(), task, rings.Event{
+			Kind: rings.EventNodeAdded, Actor: "creator",
+			Payload: rings.NodeAdded{NodeID: id, NodeType: rings.NodeAsset,
+				Title: hostPorts[id], Status: "active", AssetClass: rings.AssetHost},
+		}); err != nil {
+			t.Fatalf("种资产 %s 失败: %v", id, err)
+		}
+	}
+}
+
+// ---- 完成标准:mock 数据下连续派发 3+ 意图、并发受限、事件驱动唤醒 ----
+
+// TestOvermindLoopE2E 主宰循环端到端:5 个本地真实 TCP 靶标 + 脚本模型
+// (拆解与虫群执行分流)。断言三件事:
+//  1. 事件驱动:无唤醒时主宰零模型调用;唤醒后一轮"拆解→执行→收割"
+//     完成,再回静默;新事件 + 唤醒开启新一轮。
+//  2. 连续派发 3+ 意图:首轮一次拆解派 5 条、二轮再派 1 条,全部经
+//     actor=overmind 的派发事件入图并执行到 done。
+//  3. 并发受限(默认 3):闸门挂起恰 3 只单位的首轮请求时,第 4/5
+//     步保持 dispatched;全程并发峰值恰为 3。
+func TestOvermindLoopE2E(t *testing.T) {
+	dir := t.TempDir()
+	store := openStore(t)
+	ctx := context.Background()
+	const task = "loop-task"
+
+	// 6 个本地真实 TCP 靶标(第 6 个留作第二轮唤醒的新资产)。
+	hostPorts := map[string]string{}
+	for i := 1; i <= 6; i++ {
+		host, port := seedTCPTarget(t, fmt.Sprintf("banner-%d\r\n", i))
+		hostPorts[fmt.Sprintf("a%d", i)] = net.JoinHostPort(host, strconv.Itoa(port))
+	}
+
+	// 脚本模型:拆解请求(无工具)按态势中"未覆盖"资产逐个派意图;
+	// 虫群请求(带工具)按任务包资产行 探测 → 提交候选 → 收口。
+	uncoveredRe := regexp.MustCompile(`-\s+(a\d+) \[host\] (\S+) \(未覆盖\)`)
+	packAssetRe := regexp.MustCompile(`-\s+(a\d+) \[host\] (\S+)`)
+	model := newGatedScriptedModel(func(rr *recordedRequest) scriptedReply {
+		if len(rr.ToolsOffered) == 0 {
+			var plans []string
+			for _, m := range uncoveredRe.FindAllStringSubmatch(rr.LastUser, -1) {
+				plans = append(plans, fmt.Sprintf(
+					`{"intent":"探测 %s 的 TCP 端口开放状态并识别服务 banner","expected_observation":"端口开放状态与服务 banner","action_level":"只读探测","covers":["%s"]}`,
+					m[2], m[1]))
+			}
+			return scriptedReply{Text: `{"new_intents":[` + strings.Join(plans, ",") + `]}`, Finish: "stop"}
+		}
+		am := packAssetRe.FindStringSubmatch(rr.LastUser)
+		if am == nil {
+			return scriptedReply{Text: "任务包无绑定资产,无事可做。", Finish: "stop"}
+		}
+		assetID, hostPort := am[1], am[2]
+		host, portStr, _ := net.SplitHostPort(hostPort)
+		switch {
+		case !seenToolResult(rr, "port_probe", "state="):
+			return scriptedReply{ToolCalls: []scriptedToolCall{{
+				ID: "p" + strconv.Itoa(rr.Index), Name: "port_probe",
+				Args: fmt.Sprintf(`{"host":%q,"port":%s}`, host, portStr),
+			}}, Finish: "tool_calls"}
+		case !seenToolResult(rr, "submit_candidate_fact", "已入候选事实"):
+			return scriptedReply{ToolCalls: []scriptedToolCall{{
+				ID: "s" + strconv.Itoa(rr.Index), Name: "submit_candidate_fact",
+				Args: fmt.Sprintf(`{"statement":"%s 端口开放,服务 banner 已确认","evidence":"port_probe 实测 state=open","asset_id":"%s"}`, hostPort, assetID),
+			}}, Finish: "tool_calls"}
+		default:
+			return scriptedReply{Text: "意图完成:端口已探测,候选事实已提交待收割。", Finish: "stop"}
+		}
+	})
+	t.Cleanup(model.Close)
+	prov, err := model.provider()
+	if err != nil {
+		t.Fatalf("构建 provider 失败: %v", err)
+	}
+	root := filepath.Join(dir, "tasks")
+	ex := swarm.NewExecutor(store, prov, root, swarm.Budget{})
+
+	loop := &Loop{TaskID: task, Store: store, Swarm: ex, Provider: prov}
+	if loop.unitLimit() != DefaultMaxConcurrentUnits || DefaultMaxConcurrentUnits != 3 {
+		t.Fatalf("虫群并发上限默认应为 3,实际 %d", loop.unitLimit())
+	}
+	m, err := manager.New(manager.Config{
+		Store: store, RootDir: root, MaxConcurrentTasks: 2,
+		OnTaskRun: func(tctx context.Context, taskID string, wake <-chan struct{}) {
+			loop.Run(tctx, wake)
+		},
+	})
+	if err != nil {
+		t.Fatalf("构建 Manager 失败: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = m.Stop(task)
+		m.Close()
+	})
+	tk, err := m.CreateTask(ctx, task, "主宰循环验证", rings.RoeUpdated{}, nil)
+	if err != nil {
+		t.Fatalf("创建任务失败: %v", err)
+	}
+
+	// ---- ① 事件驱动(负例):无事件唤醒,主宰静默,零模型调用 ----
+	time.Sleep(200 * time.Millisecond)
+	if got := len(model.requests()); got != 0 {
+		t.Fatalf("无唤醒时主宰不得调用模型,实际 %d 次", got)
+	}
+
+	// 种目标与前 5 个资产,首次唤醒。
+	if err := SeedGoal(ctx, store, task, "g1", "确认本地靶标暴露面", nil); err != nil {
+		t.Fatalf("种目标失败: %v", err)
+	}
+	seedAssets(t, store, task, []string{"a1", "a2", "a3", "a4", "a5"}, hostPorts)
+	tk.Wake()
+
+	// ---- ② 并发受限(默认 3):恰 3 只单位在飞,第 4/5 步不得起飞 ----
+	waitFor(t, 30*time.Second, "3 只虫群单位并发在飞(首轮请求被闸门挂起)",
+		func() bool { return model.maxInflight.Load() == 3 })
+	if running := countNodes(t, store, task, rings.NodeStep, "running"); running != 3 {
+		t.Fatalf("并发上限 3 下应恰 3 步 running,实际 %d", running)
+	}
+	if dispatched := countNodes(t, store, task, rings.NodeStep, "dispatched"); dispatched != 2 {
+		t.Fatalf("其余 2 步应保持 dispatched 待调度,实际 %d", dispatched)
+	}
+	// 拆解确实看见了图:系统提示词是主宰提示词,态势含目标与 5 个未覆盖资产。
+	first := model.decomposeRequests()[0]
+	if !strings.Contains(first.System, "主宰(Overmind)") || !strings.Contains(first.LastUser, "态势快照") ||
+		!strings.Contains(first.LastUser, "确认本地靶标暴露面") || strings.Count(first.LastUser, "未覆盖") != 5 {
+		t.Fatalf("拆解请求态势注入不符:\n system=%s\n user=%s", first.System, first.LastUser)
+	}
+	model.release()
+
+	// ---- ③ 连续派发 5 条意图:全部执行到 done,收割在环内完成 ----
+	waitFor(t, 60*time.Second, "5 条意图全部 done", func() bool {
+		return countNodes(t, store, task, rings.NodeStep, "") == 5 &&
+			countNodes(t, store, task, rings.NodeStep, "done") == 5
+	})
+	// P4-04:拆解轮与单位落地紧邻(每只落地可有增量轮),整轮闭环 =
+	// 拆解数停止增长(静默;确定性增量证明见 TestLandingWakesIncrementalRoundE2E)。
+	waitFor(t, 30*time.Second, "落地增量轮收尾、拆解数稳定(静默)", func() bool {
+		a := len(model.decomposeRequests())
+		time.Sleep(300 * time.Millisecond)
+		return len(model.decomposeRequests()) == a
+	})
+	quiet := len(model.decomposeRequests())
+	if facts := countNodes(t, store, task, rings.NodeFact, "confirmed"); facts != 5 {
+		t.Fatalf("环内收割应确认 5 条事实,实际 %d", facts)
+	}
+
+	// ---- ④ 事件驱动(正例):新资产入图 + 唤醒 → 新一轮拆解派发 ----
+	seedAssets(t, store, task, []string{"a6"}, hostPorts)
+	tk.Wake()
+	waitFor(t, 60*time.Second, "第二轮唤醒:新意图执行完成且后续轮到达", func() bool {
+		return countNodes(t, store, task, rings.NodeStep, "done") == 6 &&
+			len(model.decomposeRequests()) >= quiet+2
+	})
+	if facts := countNodes(t, store, task, rings.NodeFact, "confirmed"); facts != 6 {
+		t.Fatalf("二轮收割后应确认 6 条事实,实际 %d", facts)
+	}
+
+	// ---- 收尾断言:派发归属、血缘、并发峰值、无未暴露错误 ----
+	evs, err := store.Events(ctx, task, 0, 0)
+	if err != nil {
+		t.Fatalf("查事件流失败: %v", err)
+	}
+	dispatchedByOvermind := 0
+	for _, ev := range evs {
+		if ev.Kind != rings.EventNodeAdded || ev.Actor != ActorOvermind {
+			continue
+		}
+		var n rings.NodeAdded
+		if err := json.Unmarshal(ev.Payload, &n); err != nil {
+			t.Fatalf("解码 node.added: %v", err)
+		}
+		if n.NodeType == rings.NodeStep {
+			dispatchedByOvermind++
+		}
+	}
+	if dispatchedByOvermind != 6 {
+		t.Fatalf("主宰经拆解应派发 6 条意图(5+1),实际 %d", dispatchedByOvermind)
+	}
+	covers, err := store.Edges(ctx, task, rings.EdgeCovers)
+	if err != nil || len(covers) != 6 {
+		t.Fatalf("6 步应各带 covers 边: %v %+v", err, covers)
+	}
+	produces, err := store.Edges(ctx, task, rings.EdgeProduces)
+	if err != nil || len(produces) != 6 {
+		t.Fatalf("6 条事实应各带 produces 血缘: %v %+v", err, produces)
+	}
+	if peak := model.maxInflight.Load(); peak != 3 {
+		t.Fatalf("全程并发峰值应恰为 3(上限生效且真并发),实际 %d", peak)
+	}
+	if err := loop.LastErr(); err != nil {
+		t.Fatalf("干净运行不应残留错误: %v", err)
+	}
+}
+
+// ---- 拆解回复解析 ----
+
+func TestParseIntents(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{"裸 JSON", `{"new_intents":[{"intent":"a","covers":["a1"]}]}`, 1},
+		{"围栏", "```json\n{\"new_intents\":[{\"intent\":\"a\"}]}\n```", 1},
+		{"前后杂文", "好的,以下是:\n{\"new_intents\":[{\"intent\":\"a\"},{\"intent\":\"b\"}]} 以上。", 2},
+		{"空列表", `{"new_intents":[]}`, 0},
+		{"空意图过滤", `{"new_intents":[{"intent":"  "},{"intent":"b"}]}`, 1},
+	}
+	for _, c := range cases {
+		got, err := parseIntents(c.in)
+		if err != nil || len(got.NewIntents) != c.want {
+			t.Fatalf("%s: err=%v got=%+v want=%d", c.name, err, got, c.want)
+		}
+	}
+	if _, err := parseIntents("根本不是 JSON"); err == nil {
+		t.Fatalf("非 JSON 应回错")
+	}
+	if _, err := parseIntents(""); err == nil {
+		t.Fatalf("空回复应回错")
+	}
+}
+
+// ---- P3-14a b:拆解终态解析(d3/d4 截断续写两形态复算) ----
+
+// asstTextMsg Terminal.Messages 用的 assistant 纯文本消息。
+func asstTextMsg(s string) llm.Message {
+	return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock(s)}}
+}
+
+// d3D4 样本:一条跨两轮才能写完的完整拆解 JSON 与其截断切分点。
+// 截断点落在第二条意图的字符串内部——拼接修复必须逐字节接回才能解析。
+const p314aFullJSON = `{"assessment":{"q_access":"指纹已确认"},"new_intents":[` +
+	`{"intent":"验证 SQL 注入","expected_observation":"报错回显","action_level":"主动测试","covers":["a1"],"priority":"high"},` +
+	`{"intent":"深挖上传模块","expected_observation":"上传点","action_level":"只读探测","covers":["a1"]}]` +
+	`,"combined_claims":[],"advices":[]}`
+
+// TestParseDecomposeTerminalForms d3(续写接上)与 d4(重写再续)两失败
+// 样本形态复算:拼接/回退解析成功,且旧口径(单解析 Terminal.Text 尾段)
+// 确实失败——修复直证。非截断运行单条 assistant 文本,行为不变。
+func TestParseDecomposeTerminalForms(t *testing.T) {
+	cut := strings.Index(p314aFullJSON, "挖上传模块")
+	if cut <= 0 {
+		t.Fatalf("样本切分点异常")
+	}
+	part1, tail := p314aFullJSON[:cut], p314aFullJSON[cut:]
+
+	// d3 续写接上:首段截断 + 尾段接续(引擎注入续写提示后的第二段)。
+	t.Run("d3续写接上", func(t *testing.T) {
+		if _, err := parseIntents(tail); err == nil {
+			t.Fatalf("负对照失效:旧口径解析尾段应失败(截断报废形态)")
+		}
+		term := &harness.Terminal{
+			Messages: []llm.Message{llm.UserText("态势快照"), asstTextMsg(part1),
+				llm.UserText("Output token limit hit. Resume directly…"), asstTextMsg(tail)},
+			Text: tail, // v0.4.1:Text 只带最后一轮
+		}
+		r, err := parseDecomposeTerminal(term)
+		if err != nil {
+			t.Fatalf("d3 形态应拼接解析成功: %v", err)
+		}
+		if len(r.NewIntents) != 2 || r.NewIntents[1].Intent != "深挖上传模块" ||
+			r.NewIntents[0].Priority != "high" || r.Assessment.QAccess != "指纹已确认" {
+			t.Fatalf("拼接产物不完整: %+v", r)
+		}
+	})
+
+	// d4 重写再续:首段截断 + 模型整段重写的完整 JSON(与首段语义不同源)。
+	t.Run("d4重写再续", func(t *testing.T) {
+		frag := `{"new_intents":[{"intent":"被截断的旧方向`
+		if _, err := parseIntents(frag + p314aFullJSON); err == nil {
+			t.Fatalf("负对照失效:拼接段不应直接可解析")
+		}
+		term := &harness.Terminal{
+			Messages: []llm.Message{llm.UserText("态势快照"), asstTextMsg(frag),
+				llm.UserText("Output token limit hit. Resume directly…"), asstTextMsg(p314aFullJSON)},
+			Text: p314aFullJSON,
+		}
+		r, err := parseDecomposeTerminal(term)
+		if err != nil {
+			t.Fatalf("d4 形态应回退逐条解析成功: %v", err)
+		}
+		if len(r.NewIntents) != 2 {
+			t.Fatalf("重写段应解析出 2 条意图: %+v", r)
+		}
+	})
+
+	// 非截断运行:单条 assistant 文本,与旧口径结果一致(行为不变)。
+	t.Run("非截断不变", func(t *testing.T) {
+		text := "```json\n" + p314aFullJSON + "\n```"
+		term := &harness.Terminal{
+			Messages: []llm.Message{llm.UserText("态势快照"), asstTextMsg(text)},
+			Text:     text,
+		}
+		r, err := parseDecomposeTerminal(term)
+		if err != nil {
+			t.Fatalf("非截断解析应不变: %v", err)
+		}
+		if len(r.NewIntents) != 2 {
+			t.Fatalf("非截断解析应得 2 条意图: %+v", r)
+		}
+	})
+
+	// 全灭防护:所有段皆非 JSON → 如实报错(触发 WARN 路径)。
+	t.Run("全灭报错", func(t *testing.T) {
+		term := &harness.Terminal{
+			Messages: []llm.Message{llm.UserText("态势快照"), asstTextMsg("抱歉,我无法给出 JSON。")},
+			Text:     "抱歉,我无法给出 JSON。",
+		}
+		if _, err := parseDecomposeTerminal(term); err == nil {
+			t.Fatalf("全灭形态应报错")
+		}
+		if _, err := parseDecomposeTerminal(nil); err == nil {
+			t.Fatalf("无终态应报错")
+		}
+	})
+}
+
+// TestDecomposeResumeRepairThroughEngine 引擎级复算:真实 norma 会话,
+// 首轮拆解 finish_reason=length 截断 → 引擎注入续写提示 → 第二轮接续
+// (d3)或整段重写(d4)。拆解经 Terminal.Messages 解析修复后意图照常
+// 派发入图执行;修复前 Text 只带尾段,该形态解析必败、零派发。
+func TestDecomposeResumeRepairThroughEngine(t *testing.T) {
+	cut := strings.Index(p314aFullJSON, "挖上传模块")
+	part1, tail := p314aFullJSON[:cut], p314aFullJSON[cut:]
+
+	for _, tc := range []struct {
+		name  string
+		first string // 截断段
+		next  string // 续写轮回复(d3=尾段接续;d4=整段重写)
+	}{
+		{"d3续写接上", part1, tail},
+		{"d4重写再续", `{"new_intents":[{"intent":"被截断的旧方向`, p314aFullJSON},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store := openStore(t)
+			ctx := context.Background()
+			const task = "loop-resume"
+
+			host, port := seedTCPTarget(t, "x\r\n")
+			var decomposed atomic.Int32
+			model := newGatedScriptedModel(func(rr *recordedRequest) scriptedReply {
+				if len(rr.ToolsOffered) == 0 {
+					n := decomposed.Add(1)
+					switch {
+					case n == 1:
+						return scriptedReply{Text: tc.first, Finish: "length"} // max_tokens 截断
+					case n == 2 && strings.Contains(rr.LastUser, "Output token limit hit"):
+						return scriptedReply{Text: tc.next, Finish: "stop"} // 续写轮
+					default:
+						return scriptedReply{Text: `{"new_intents":[]}`, Finish: "stop"}
+					}
+				}
+				return scriptedReply{Text: "意图完成。", Finish: "stop"}
+			})
+			t.Cleanup(model.Close)
+			model.release()
+			prov, err := model.provider()
+			if err != nil {
+				t.Fatalf("构建 provider 失败: %v", err)
+			}
+			root := filepath.Join(dir, "tasks")
+			ex := swarm.NewExecutor(store, prov, root, swarm.Budget{})
+			loop := &Loop{TaskID: task, Store: store, Swarm: ex, Provider: prov}
+			m, err := manager.New(manager.Config{
+				Store: store, RootDir: root,
+				OnTaskRun: func(tctx context.Context, _ string, wake <-chan struct{}) { loop.Run(tctx, wake) },
+			})
+			if err != nil {
+				t.Fatalf("构建 Manager 失败: %v", err)
+			}
+			t.Cleanup(func() {
+				_ = m.Stop(task)
+				m.Close()
+			})
+			tk, err := m.CreateTask(ctx, task, "续写复算", rings.RoeUpdated{}, nil)
+			if err != nil {
+				t.Fatalf("创建任务失败: %v", err)
+			}
+			if err := SeedGoal(ctx, store, task, "g1", "续写复算目标", nil); err != nil {
+				t.Fatalf("种目标失败: %v", err)
+			}
+			seedAssets(t, store, task, []string{"a1"},
+				map[string]string{"a1": net.JoinHostPort(host, strconv.Itoa(port))})
+
+			tk.Wake()
+			// 截断续写两轮都发生在首个拆解会话内;修复后两条意图派发入图并执行。
+			waitFor(t, 30*time.Second, "截断续写后两条意图派发执行完成", func() bool {
+				return countNodes(t, store, task, rings.NodeStep, "done") == 2
+			})
+			if got := len(model.decomposeRequests()); got < 2 {
+				t.Fatalf("截断会话应发生续写第二轮请求,实际 %d 次", got)
+			}
+			if err := loop.LastErr(); err != nil {
+				t.Fatalf("续写修复后不应残留错误: %v", err)
+			}
+		})
+	}
+}
+
+// ---- P3-14a a:拆解输出上限跟模型库配置走 ----
+
+// TestDecomposeMaxTokensFollowsLibraryConfig 拆解请求不带本地上限:裸
+// provider(库未配置上限)时 max_tokens 字段不发送走服务端默认;库配置
+// 上限时经 failover capTokensProvider 压到配置值。修复前硬编码 4096 恒在。
+func TestDecomposeMaxTokensFollowsLibraryConfig(t *testing.T) {
+	t.Run("未配置字段不发送", func(t *testing.T) {
+		store := openStore(t)
+		model := newGatedScriptedModel(func(rr *recordedRequest) scriptedReply {
+			return scriptedReply{Text: `{"new_intents":[]}`, Finish: "stop"}
+		})
+		t.Cleanup(model.Close)
+		prov, err := model.provider()
+		if err != nil {
+			t.Fatalf("构建 provider 失败: %v", err)
+		}
+		l := &Loop{TaskID: "cap-none", Store: store, Provider: prov}
+		if _, _, err := l.decompose(context.Background()); err != nil {
+			t.Fatalf("拆解失败: %v", err)
+		}
+		reqs := model.decomposeRequests()
+		if len(reqs) != 1 || reqs[0].MaxTokens != nil {
+			t.Fatalf("未配置上限时 max_tokens 字段应不发送: %+v", reqs)
+		}
+	})
+
+	t.Run("配置上限压入", func(t *testing.T) {
+		store := openStore(t)
+		model := newGatedScriptedModel(func(rr *recordedRequest) scriptedReply {
+			return scriptedReply{Text: `{"new_intents":[]}`, Finish: "stop"}
+		})
+		t.Cleanup(model.Close)
+		prov, err := failover.BuildProvider(failover.ModelConfig{
+			Format: "openai", BaseURL: model.srv.URL, APIKey: "test-key",
+			Model: "scripted-overmind-model", MaxTokens: 2048,
+		}, nil)
+		if err != nil {
+			t.Fatalf("构建库配置 provider 失败: %v", err)
+		}
+		l := &Loop{TaskID: "cap-set", Store: store, Provider: prov}
+		if _, _, err := l.decompose(context.Background()); err != nil {
+			t.Fatalf("拆解失败: %v", err)
+		}
+		reqs := model.decomposeRequests()
+		if len(reqs) != 1 || reqs[0].MaxTokens == nil || *reqs[0].MaxTokens != 2048 {
+			t.Fatalf("库配置上限 2048 应压入请求: %+v", reqs)
+		}
+	})
+}
+
+// ---- P3-14a d:拆解解析失败落 WARN 日志 ----
+
+// TestDecomposeParseFailureWarns 解析失败落 WARN:任务号 + 会话号 + 原因
+// 截断可查(修复前 setErr 只进内存,零日志)。
+func TestDecomposeParseFailureWarns(t *testing.T) {
+	dir := t.TempDir()
+	lg, err := runlog.Open(dir, runlog.Options{NoStderr: true})
+	if err != nil {
+		t.Fatalf("开运行日志失败: %v", err)
+	}
+	t.Cleanup(func() { lg.Close() })
+
+	store := openStore(t)
+	model := newGatedScriptedModel(func(rr *recordedRequest) scriptedReply {
+		return scriptedReply{Text: "抱歉,我无法给出 JSON。", Finish: "stop"}
+	})
+	t.Cleanup(model.Close)
+	prov, err := model.provider()
+	if err != nil {
+		t.Fatalf("构建 provider 失败: %v", err)
+	}
+	const task = "warn-task"
+	l := &Loop{TaskID: task, Store: store, Provider: prov}
+	if _, _, err := l.decompose(context.Background()); err == nil {
+		t.Fatalf("坏回复应报错")
+	}
+	want := []string{"[WARN]", "拆解解析失败: 任务 " + task + " 会话 overmind-" + task + "-d1", "不是合法 JSON"}
+	joined := readRunlogForTest(t, dir)
+	for _, w := range want {
+		if !strings.Contains(joined, w) {
+			t.Fatalf("WARN 日志缺 %q:\n%s", w, joined)
+		}
+	}
+}
+
+// readRunlogForTest 拼接目录下全部日志文件内容(测试观测用)。
+func readRunlogForTest(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("读日志目录失败: %v", err)
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("读日志文件失败: %v", err)
+		}
+		b.Write(data)
+	}
+	return b.String()
+}
+
+// ---- 坏回复韧性:拆解失败不派发不崩溃,下一轮唤醒恢复 ----
+
+func TestLoopSurvivesBadDecomposeReply(t *testing.T) {
+	dir := t.TempDir()
+	store := openStore(t)
+	ctx := context.Background()
+	const task = "loop-bad"
+
+	host, port := seedTCPTarget(t, "x\r\n")
+	hostPort := net.JoinHostPort(host, strconv.Itoa(port))
+
+	var badReply atomic.Bool
+	badReply.Store(true) // 首轮拆解给坏回复,修复后恢复正常
+	model := newGatedScriptedModel(func(rr *recordedRequest) scriptedReply {
+		if len(rr.ToolsOffered) == 0 {
+			if badReply.Load() {
+				return scriptedReply{Text: "抱歉,我无法给出 JSON。", Finish: "stop"}
+			}
+			// 状态感知:图中已有步骤(任何状态)即不再派发等价意图,
+			// 与提示词规则 2 同构——否则循环会永续派发(主宰信任拆解回复)。
+			if !strings.Contains(rr.LastUser, "步骤:\n  (无)") {
+				return scriptedReply{Text: `{"new_intents":[]}`, Finish: "stop"}
+			}
+			return scriptedReply{Text: fmt.Sprintf(
+				`{"new_intents":[{"intent":"探测 %s","expected_observation":"端口状态","action_level":"只读探测","covers":["a1"]}]}`,
+				hostPort), Finish: "stop"}
+		}
+		return scriptedReply{Text: "意图完成。", Finish: "stop"}
+	})
+	t.Cleanup(model.Close)
+	model.release() // 本测试不观测并发,闸门常开
+	prov, err := model.provider()
+	if err != nil {
+		t.Fatalf("构建 provider 失败: %v", err)
+	}
+	root := filepath.Join(dir, "tasks")
+	ex := swarm.NewExecutor(store, prov, root, swarm.Budget{})
+	loop := &Loop{TaskID: task, Store: store, Swarm: ex, Provider: prov}
+	m, err := manager.New(manager.Config{
+		Store: store, RootDir: root,
+		OnTaskRun: func(tctx context.Context, _ string, wake <-chan struct{}) { loop.Run(tctx, wake) },
+	})
+	if err != nil {
+		t.Fatalf("构建 Manager 失败: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = m.Stop(task)
+		m.Close()
+	})
+	tk, err := m.CreateTask(ctx, task, "坏回复韧性", rings.RoeUpdated{}, nil)
+	if err != nil {
+		t.Fatalf("创建任务失败: %v", err)
+	}
+
+	if err := SeedGoal(ctx, store, task, "g1", "韧性目标", nil); err != nil {
+		t.Fatalf("种目标失败: %v", err)
+	}
+	seedAssets(t, store, task, []string{"a1"}, map[string]string{"a1": hostPort})
+
+	// 坏回复:不派发任何意图,错误可查,循环存活。
+	tk.Wake()
+	waitFor(t, 10*time.Second, "坏拆解请求到达", func() bool { return len(model.decomposeRequests()) == 1 })
+	waitFor(t, 5*time.Second, "坏回复记入 LastErr", func() bool { return loop.LastErr() != nil })
+	if got := countNodes(t, store, task, rings.NodeStep, ""); got != 0 {
+		t.Fatalf("坏回复不得派发任何意图,实际 %d 步", got)
+	}
+
+	// 模型恢复正常:同一循环继续服务下一次唤醒。
+	badReply.Store(false)
+	tk.Wake()
+	waitFor(t, 60*time.Second, "修复后派发并执行完成", func() bool {
+		return countNodes(t, store, task, rings.NodeStep, "done") == 1
+	})
+	if facts := countNodes(t, store, task, rings.NodeFact, "confirmed"); facts > 0 {
+		t.Fatalf("该意图未提交候选,不应有事实被确认(实际 %d)", facts)
+	}
+}
+
+// ---- 审核期修复:派发全败不热循环 ----
+
+// TestLoopNoDispatchSpin 拆解持续返回不可派发的意图(covers 指向幽灵
+// 资产,账本整批拒):本轮零成功派发即留 LastErr 回静默,不得立即重拆解
+// 形成零进展热循环(修复前:单次唤醒内无限次 LLM 调用原地空转)。
+func TestLoopNoDispatchSpin(t *testing.T) {
+	dir := t.TempDir()
+	store := openStore(t)
+	ctx := context.Background()
+	const task = "loop-spin"
+
+	model := newGatedScriptedModel(func(rr *recordedRequest) scriptedReply {
+		if len(rr.ToolsOffered) == 0 {
+			// 永远返回同一条坏意图(covers 幽灵资产),状态无关——
+			// 模拟 live 模型反复幻觉不存在的资产 ID。
+			return scriptedReply{Text: `{"new_intents":[{"intent":"探测幽灵资产","expected_observation":"端口状态","action_level":"只读探测","covers":["ghost-1"]}]}`, Finish: "stop"}
+		}
+		return scriptedReply{Text: "意图完成。", Finish: "stop"}
+	})
+	t.Cleanup(model.Close)
+	model.release() // 本测试无并发观测,闸门常开
+	prov, err := model.provider()
+	if err != nil {
+		t.Fatalf("构建 provider 失败: %v", err)
+	}
+	root := filepath.Join(dir, "tasks")
+	ex := swarm.NewExecutor(store, prov, root, swarm.Budget{})
+	loop := &Loop{TaskID: task, Store: store, Swarm: ex, Provider: prov}
+	m, err := manager.New(manager.Config{
+		Store: store, RootDir: root,
+		OnTaskRun: func(tctx context.Context, _ string, wake <-chan struct{}) { loop.Run(tctx, wake) },
+	})
+	if err != nil {
+		t.Fatalf("构建 Manager 失败: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = m.Stop(task)
+		m.Close()
+	})
+	tk, err := m.CreateTask(ctx, task, "抗空转", rings.RoeUpdated{}, nil)
+	if err != nil {
+		t.Fatalf("创建任务失败: %v", err)
+	}
+	if err := SeedGoal(ctx, store, task, "g1", "抗空转目标", nil); err != nil {
+		t.Fatalf("种目标失败: %v", err)
+	}
+
+	tk.Wake()
+	waitFor(t, 30*time.Second, "坏意图已拆解且派发失败留痕", func() bool { return loop.LastErr() != nil })
+	if got := len(model.decomposeRequests()); got != 1 {
+		t.Fatalf("派发全败应恰拆解 1 次即回静默,实际 %d 次(热循环)", got)
+	}
+	if got := countNodes(t, store, task, rings.NodeStep, ""); got != 0 {
+		t.Fatalf("幽灵资产意图不得入图,实际 %d 步", got)
+	}
+	time.Sleep(500 * time.Millisecond) // 静默确认:不再重拆解
+	if got := len(model.decomposeRequests()); got != 1 {
+		t.Fatalf("回静默后不得再拆解,实际 %d 次", got)
+	}
+}
+
+// ---- P2-06b:主宰收割可见审批拒绝原因(快照「审批拒绝」节) ----
+
+// TestSnapshotShowsApprovalDenials 快照是主宰研判的输入:被审批拒绝终止
+// 熔断的单位,其拒绝原因(拒绝线自动拒绝/面板拒绝)必须在快照可见,
+// 主宰据此重新研判;研判后放行的记录同样可见。
+func TestSnapshotShowsApprovalDenials(t *testing.T) {
+	store := openStore(t)
+	ctx := context.Background()
+	const task = "t-snap-deny"
+
+	if _, err := store.Append(ctx, task,
+		rings.Event{Kind: rings.EventTaskLifecycle, Actor: "manager",
+			Payload: rings.TaskLifecycle{Action: "created", Title: "快照拒绝可见"}},
+		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
+			NodeID: "g1", NodeType: rings.NodeGoal, Title: "验证拒绝可见", Status: "active"}},
+		// s1:危害类(数据销毁)被拒绝线熔断,后经造物主研判后放行。
+		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
+			NodeID: "s1", NodeType: rings.NodeStep, Title: "销毁演练", Status: "approval_denied",
+			Detail: map[string]any{"goal_id": "g1", "action_level": "修改与持久化",
+				"harm_class": "data_destruction"}}},
+		rings.Event{Kind: rings.EventApprovalRecord, Actor: "swarm:u1", Payload: rings.ApprovalRecord{
+			RequestID: "ap-1", StepID: "s1", UnitID: "u1", Type: rings.ApprovalRecDenied,
+			ActionLevel: rings.ActionModifyPersist, HarmClass: rings.HarmDataDestruction,
+			Intent: "销毁演练", ToolName: "bash", ToolArgs: []byte(`{"command":"rm x"}`),
+			DenyLine: rings.DenyLineHarm, Reason: "拒绝线(非常严重):数据销毁动作直接拒绝"}},
+		rings.Event{Kind: rings.EventApprovalRecord, Actor: "creator", Payload: rings.ApprovalRecord{
+			RequestID: "ap-1", StepID: "s1", UnitID: "u1", Type: rings.ApprovalRecForced,
+			ActionLevel: rings.ActionModifyPersist, HarmClass: rings.HarmDataDestruction,
+			Intent: "销毁演练", ToolName: "bash", ToolArgs: []byte(`{"command":"rm x"}`),
+			DecidedBy: "creator", Reason: "复核后放行"}},
+		// s2:弹门级被面板拒绝熔断。
+		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
+			NodeID: "s2", NodeType: rings.NodeStep, Title: "修改配置", Status: "approval_denied",
+			Detail: map[string]any{"goal_id": "g1", "action_level": "修改与持久化"}}},
+		rings.Event{Kind: rings.EventApprovalRecord, Actor: "creator", Payload: rings.ApprovalRecord{
+			RequestID: "ap-2", StepID: "s2", UnitID: "u2", Type: rings.ApprovalRecDenied,
+			ActionLevel: rings.ActionModifyPersist, Intent: "修改配置", ToolName: "bash",
+			ToolArgs: []byte(`{"command":"echo x"}`), DenyLine: rings.DenyLinePanel,
+			DecidedBy: "creator", Reason: "目标环境不允许修改"}},
+		// s3:等待审批期间任务收尾结案(closeout)——不是审批裁决,不入节。
+		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
+			NodeID: "s3", NodeType: rings.NodeStep, Title: "写验证", Status: "aborted",
+			Detail: map[string]any{"goal_id": "g1", "action_level": "修改与持久化"}}},
+		rings.Event{Kind: rings.EventApprovalRecord, Actor: "swarm:u3", Payload: rings.ApprovalRecord{
+			RequestID: "ap-3", StepID: "s3", UnitID: "u3", Type: rings.ApprovalRecDenied,
+			ActionLevel: rings.ActionModifyPersist, Intent: "写验证", ToolName: "bash",
+			ToolArgs: []byte(`{"command":"echo y"}`), DenyLine: rings.DenyLineCloseout,
+			Reason: "等待审批期间任务收尾/熔断,按拒绝结案"}},
+	); err != nil {
+		t.Fatalf("种图失败: %v", err)
+	}
+
+	l := &Loop{TaskID: task, Store: store}
+	snap, _, err := l.snapshot(ctx)
+	if err != nil {
+		t.Fatalf("快照失败: %v", err)
+	}
+	// 拒绝线原因 + 研判后放行可见。
+	for _, want := range []string{
+		"审批拒绝",
+		"s1 销毁演练 | 工具 bash",
+		"数据销毁动作直接拒绝",
+		"造物主已研判后放行",
+		"s2 修改配置",
+		"目标环境不允许修改",
+	} {
+		if !strings.Contains(snap, want) {
+			t.Fatalf("快照应含 %q:\n%s", want, snap)
+		}
+	}
+	// closeout 结案不进「审批拒绝」节(任务级中断,非审批裁决)。
+	sec := snap[strings.Index(snap, "审批拒绝"):]
+	if end := strings.Index(sec, "\n心跳标记"); end > 0 {
+		sec = sec[:end]
+	}
+	if strings.Contains(sec, "s3") || strings.Contains(sec, "收尾") {
+		t.Fatalf("closeout 结案不得进审批拒绝节:\n%s", sec)
+	}
+}

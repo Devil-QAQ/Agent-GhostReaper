@@ -1,0 +1,851 @@
+"use client";
+
+import * as React from "react";
+import { toast } from "sonner";
+
+import { EmptyState } from "@/components/empty-state";
+import { Field, Fold, INPUT, NUM } from "@/components/form-bits";
+import { iconOf } from "@/components/icons";
+import { PageHeader } from "@/components/page-header";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { cn } from "@/lib/utils";
+import { postJSON, usePolling } from "@/lib/api";
+
+// LLM 配置页(P2-08c,第七章 §5 模型库 v2):模型卡片墙 + 弹窗(必填在前,
+// 其余收进「高级选项」折叠)+ 测试连通 + 主备轮询抽屉。key 只存服务端,
+// 呈现一律打码;代理只作用于模型出站。质感按 8.9:间距只取阶梯值
+//(4/8/12/16/24/32/48)、卡片 stagger 进场、加载骨架屏、hover 微投影。
+const EMPTY_FORM = {
+  name: "",
+  platform: "",
+  format: "openai",
+  base_url: "",
+  api_key: "",
+  model: "",
+  context_window: 200000,
+  proxy: "",
+  rate_per_second: 0,
+  rate_per_minute: 0,
+  poll_priority: 1,
+  poll_disabled: false,
+  max_tokens: 0,
+  max_tokens_field: "max_tokens",
+  stream_disabled: false,
+  thinking: "",
+  thinking_effort: "",
+  retry_connect: 0,
+  retry_empty: 0,
+  retry_replay: 0,
+  retry_breaker: 0,
+  retry_rerun: 0,
+};
+
+// 上下文窗口以 M 呈现(主流 1M 级):≥1M 两位小数去尾零,不足 1M 退 K。
+const fmtCtx = (v) => {
+  if (!v || v <= 0) return "";
+  if (v >= 1e6) return `${+(v / 1e6).toFixed(2)}M`;
+  if (v >= 1e3) return `${Math.round(v / 1e3)}K`;
+  return String(v);
+};
+
+export function LLMPage() {
+  const { data, error, setData } = usePolling("/api/models", 5000, { immediate: true });
+  const [dialogOpen, setDialogOpen] = React.useState(false);
+  const [form, setForm] = React.useState(null); // null=关闭;表单=新增/编辑
+  const [drawerOpen, setDrawerOpen] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  // 已存 key 明文查看(P3-05c ②):按配置名记明文,按钮切换显隐;
+  // 查看走受控端点(服务端记审计),面板只暂存最近一次结果。
+  const [revealed, setRevealed] = React.useState({});
+  const [revealBusy, setRevealBusy] = React.useState(false);
+
+  const refresh = async () => {
+    const r = await fetch("/api/models");
+    if (r.ok) setData(await r.json().catch(() => null));
+  };
+
+  const revealKey = async (name) => {
+    if (revealed[name]) {
+      setRevealed((m) => ({ ...m, [name]: undefined }));
+      return;
+    }
+    setRevealBusy(true);
+    const { ok, body } = await postJSON(`/api/models/${encodeURIComponent(name)}/reveal-key`, {});
+    setRevealBusy(false);
+    if (!ok) {
+      toast.error(`查看失败:${body.error || "原因未说明"}`);
+      return;
+    }
+    setRevealed((m) => ({ ...m, [name]: body.api_key || "" }));
+  };
+
+  const openNew = () => {
+    setForm({ ...EMPTY_FORM });
+    setDialogOpen(true);
+  };
+  const openEdit = (c) => {
+    setForm({
+      ...EMPTY_FORM, ...c, api_key: "", platform: "",
+      context_window: c.context_window > 0 ? c.context_window : 200000,
+    });
+    setDialogOpen(true);
+  };
+
+  const save = async () => {
+    const f = form || {};
+    if (!f.name?.trim() || !f.base_url?.trim() || !f.model?.trim()) {
+      toast.error("名称、端点、模型不能为空");
+      return;
+    }
+    if (!f.api_key?.trim() && !f.has_key) {
+      toast.error("新增配置须填 key(编辑时留空保留原 key)");
+      return;
+    }
+    setBusy(true);
+    const { ok, body } = await postJSON("/api/models", {
+      name: f.name, create: !f.has_key, format: f.format || "openai",
+      base_url: f.base_url, api_key: f.api_key || "", model: f.model,
+      context_window: Number(f.context_window) || 0,
+      proxy: f.proxy || "",
+      rate_per_second: Number(f.rate_per_second) || 0,
+      rate_per_minute: Number(f.rate_per_minute) || 0,
+      poll_priority: Number(f.poll_priority) || 0,
+      poll_disabled: Boolean(f.poll_disabled),
+      max_tokens: Number(f.max_tokens) || 0,
+      max_tokens_field: f.max_tokens_field || "max_tokens",
+      stream_disabled: Boolean(f.stream_disabled),
+      thinking: f.thinking || "",
+      thinking_effort: f.thinking_effort || "",
+      retry_connect: intOf(f.retry_connect),
+      retry_empty: intOf(f.retry_empty),
+      retry_replay: intOf(f.retry_replay),
+      retry_breaker: intOf(f.retry_breaker),
+      retry_rerun: intOf(f.retry_rerun),
+    });
+    setBusy(false);
+    if (!ok) {
+      toast.error(`保存失败:${body.error || "原因未说明"}`);
+      return;
+    }
+    toast.success("已保存(即时生效)");
+    setDialogOpen(false);
+    setForm(null);
+    await refresh();
+  };
+
+  const activate = async (name) => {
+    setBusy(true);
+    const { ok, body } = await postJSON("/api/models/activate", { primary: name });
+    setBusy(false);
+    if (!ok) {
+      toast.error(`激活失败:${body.error || "原因未说明"}`);
+      return;
+    }
+    toast.success(`已激活 ${name} 为主用`);
+    await refresh();
+  };
+
+  const remove = async (name) => {
+    setBusy(true);
+    const r = await fetch(`/api/models/${encodeURIComponent(name)}`, { method: "DELETE" });
+    setBusy(false);
+    if (!r.ok) {
+      toast.error(`删除失败:${name}`);
+      return;
+    }
+    toast.success(`已删除 ${name}`);
+    await refresh();
+  };
+
+  const recover = async (name) => {
+    setBusy(true);
+    const r = await fetch(`/api/models/${encodeURIComponent(name)}/recover`, { method: "POST" });
+    setBusy(false);
+    if (!r.ok) {
+      toast.error(`恢复失败:${name}`);
+      return;
+    }
+    toast.success(`已恢复 ${name}`);
+    await refresh();
+  };
+
+  const library = data?.library || [];
+  const memberOf = new Map((data?.members || []).map((m) => [m.name, m]));
+  const loading = !data && !error; // 首载骨架屏(8.9 #6:加载不用转圈)
+
+  return (
+    <div className="flex flex-col gap-6">
+      <PageHeader
+        title="LLM配置"
+        subtitle="模型卡片墙 · 主用始终第 1,备按优先级接替 · key 只存服务端,打码呈现"
+      >
+        <Button variant="outline" size="sm" onClick={() => setDrawerOpen(true)}>
+          主备轮询
+        </Button>
+        <Button size="sm" onClick={openNew}>新增模型</Button>
+      </PageHeader>
+
+      {error && (
+        <div className="rounded-md bg-status-danger-soft px-3 py-2 text-sm text-status-danger">
+          读取失败:{error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="grid gap-4 lg:grid-cols-2">
+          {[0, 1].map((i) => (
+            <Card key={i}>
+              <CardContent className="flex flex-col gap-3 p-6">
+                <div className="skeleton h-5 w-36" />
+                <div className="skeleton h-4 w-48" />
+                <div className="skeleton h-3 max-w-72 w-full" />
+                <div className="skeleton h-3 w-56" />
+                <div className="skeleton mt-2 h-8 w-64" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      ) : library.length === 0 && !error ? (
+        <EmptyState
+          icon="cpu"
+          title="库内暂无模型配置"
+          hint="新增模型并激活主用后,主宰循环才能运行"
+          action={{ label: "新增模型", onClick: openNew }}
+        />
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-2">
+          {library.map((c, i) => (
+            <div key={c.name} className="animate-rise" style={{ animationDelay: `${Math.min(i, 6) * 40}ms` }}>
+              <ModelCard
+                cfg={c}
+                active={data?.active?.primary === c.name}
+                member={memberOf.get(c.name)}
+                busy={busy}
+                revealedKey={revealed[c.name]}
+                revealBusy={revealBusy}
+                onReveal={() => revealKey(c.name)}
+                onEdit={() => openEdit(c)}
+                onActivate={() => activate(c.name)}
+                onRemove={() => remove(c.name)}
+                onRecover={() => recover(c.name)}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+
+      <EnvCard env={data?.env} chainReady={data?.chain_ready} activePrimary={data?.active?.primary} />
+
+      <ModelDialog
+        open={dialogOpen}
+        form={form}
+        busy={busy}
+        presets={data?.presets}
+        platforms={data?.platforms}
+        onForm={setForm}
+        onSave={save}
+        onClose={() => { setDialogOpen(false); setForm(null); }}
+      />
+
+      <PollingDrawer
+        open={drawerOpen}
+        onOpenChange={setDrawerOpen}
+        members={data?.members || []}
+        busy={busy}
+        onRecover={recover}
+      />
+    </div>
+  );
+}
+
+// ModelCard 卡片墙单元:名称与角色一行、模型一行、端点与元信息两行,
+// 状态只在异常时出现,操作沉底;hover 微投影(8.4 卡片 hover)。已存
+// key 可查看(P3-05c ②:受控端点 + 服务端审计,显隐切换)。
+function ModelCard({ cfg, active, member, busy, revealedKey, revealBusy, onReveal, onEdit, onActivate, onRemove, onRecover }) {
+  const state = member?.state || "closed";
+  const meta = [
+    cfg.context_window > 0 ? fmtCtx(cfg.context_window) : "",
+    cfg.proxy_mask ? `代理 ${cfg.proxy_mask}` : "",
+    cfg.rate_per_second > 0 || cfg.rate_per_minute > 0
+      ? `限速 ${cfg.rate_per_second > 0 ? `${cfg.rate_per_second}/秒` : ""}${
+          cfg.rate_per_second > 0 && cfg.rate_per_minute > 0 ? " " : ""
+        }${cfg.rate_per_minute > 0 ? `${cfg.rate_per_minute}/分` : ""}`
+      : "",
+  ].filter(Boolean);
+
+  return (
+    <Card className="h-full transition-shadow duration-150 hover:shadow-card">
+      <CardContent className="flex h-full flex-col gap-3 p-6">
+        <div className="flex items-center gap-3">
+          <span className="text-[15px] font-semibold leading-none">{cfg.name}</span>
+          {active ? (
+            <Badge variant="success">主用</Badge>
+          ) : cfg.poll_disabled ? (
+            <Badge variant="outline">不参与</Badge>
+          ) : (
+            <Badge variant="info">备 {cfg.poll_priority || 1}</Badge>
+          )}
+          <span className="ml-auto font-mono text-xs text-muted-foreground">{cfg.format}</span>
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <div className="font-mono text-[13px]">{cfg.model}</div>
+          <div className="truncate font-mono text-xs text-muted-foreground" title={cfg.base_url}>{cfg.base_url}</div>
+          <div className={cn("flex min-w-0 items-center gap-1 text-xs", !cfg.has_key ? "text-status-warning" : "text-muted-foreground")}>
+            {cfg.has_key ? (
+              <>
+                <span className="min-w-0 truncate font-mono">
+                  {revealedKey !== undefined ? revealedKey || "—" : `key ${cfg.api_key_mask || "—"}`}
+                </span>
+                {revealedKey !== undefined && <span className="shrink-0 text-status-warning">明文</span>}
+                {meta.length > 0 && <span className="min-w-0 truncate">{` · ${meta.join(" · ")}`}</span>}
+                <button
+                  className="ml-auto shrink-0 cursor-pointer text-muted-foreground transition-colors hover:text-foreground"
+                  title={revealedKey !== undefined ? "隐藏明文(打码呈现)" : "查看已存 key(服务端记审计)"}
+                  disabled={revealBusy}
+                  onClick={onReveal}
+                >
+                  {React.createElement(iconOf(revealedKey !== undefined ? "eyeOff" : "eye"), { className: "size-3.5" })}
+                </button>
+              </>
+            ) : (
+              <span className="truncate">{`未填 key${meta.length ? " · " + meta.join(" · ") : ""}`}</span>
+            )}
+          </div>
+        </div>
+
+        {member && state === "open" && (
+          <div className="flex flex-col gap-1 rounded-md bg-status-danger-soft px-3 py-2">
+            <div className="flex items-center gap-2 text-xs text-status-danger">
+              <Badge variant="danger">熔断冷却中</Badge>
+              <span>至 {shortClock(member.open_until)}</span>
+              {member.opens > 0 && <span className="text-muted-foreground">第 {member.opens} 档</span>}
+            </div>
+            {member.reason && <div className="text-xs text-status-danger/80">{member.reason}</div>}
+          </div>
+        )}
+        {member && state === "probing" && <Badge variant="warning">冷却期满探测</Badge>}
+
+        <div className="mt-auto flex items-center gap-2 border-t pt-4">
+          {!active && (
+            <Button variant="outline" size="sm" disabled={busy} onClick={onActivate}>
+              激活主用
+            </Button>
+          )}
+          {state === "open" && (
+            <Button variant="outline" size="sm" disabled={busy} onClick={onRecover}>
+              {React.createElement(iconOf("rotateCcw"), { className: "size-3.5" })}
+              立即恢复
+            </Button>
+          )}
+          <span className="ml-auto flex items-center gap-1">
+            <Button variant="ghost" size="sm" disabled={busy} onClick={onEdit}>
+              编辑
+            </Button>
+            <Button variant="ghost" size="sm" disabled={busy} onClick={onRemove}>
+              删除
+            </Button>
+          </span>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// EnvCard 环境变量备用:模型库未激活主用时进程从环境变量取模型。
+function EnvCard({ env, chainReady, activePrimary }) {
+  return (
+    <Card>
+      <CardContent className="flex flex-wrap items-center gap-x-6 gap-y-1 p-4 text-sm">
+        <span className="text-[13px] font-medium">环境变量备用</span>
+        <Badge variant={chainReady ? "success" : "warning"}>
+          {chainReady ? "可用" : "未配置"}
+        </Badge>
+        {env?.configured ? (
+          <span className="font-mono text-xs text-muted-foreground">
+            {env.model} · {env.format}
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground">未设置环境变量</span>
+        )}
+        {!activePrimary && !chainReady && (
+          <span className="text-xs text-status-warning">
+            未激活主用,主宰不运行;激活库内模型或设置环境变量后即自动装配。
+          </span>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ---- 配置弹窗:必填在前,其余收进「高级选项」 ----
+
+const RETRY_FIELDS = [
+  ["retry_connect", "建连重试", "连接建立失败的重试"],
+  ["retry_empty", "空响应重试", "请求成功但零输出的重发"],
+  ["retry_replay", "零交付重放", "未交付内容即失败的整请求重放"],
+  ["retry_breaker", "熔断阈值", "连续失败几次后开冷却"],
+  ["retry_rerun", "意图级重跑", "步骤受阻前的退避重跑"],
+];
+
+// ModelDialog 弹窗:平台与格式选定后端点预填(可改,改后不再跟动);
+// 模型与拉取合并,选模型按三段式带上上下文窗口(端点值 / 对照表近似 /
+// 保守默认);测试连通;代理/限速/轮询/输出与思考/重试覆盖在「高级
+// 选项」折叠内。
+function ModelDialog({ open, form, busy, presets, platforms, onForm, onSave, onClose }) {
+  const [fetched, setFetched] = React.useState(null); // [{id, context_window}]
+  const [fetching, setFetching] = React.useState(false);
+  const [advanced, setAdvanced] = React.useState(false);
+  const [testing, setTesting] = React.useState(false);
+  const [testResult, setTestResult] = React.useState(null);
+  const [keyVisible, setKeyVisible] = React.useState(false); // 输入框自查(明文/圆点);
+
+  React.useEffect(() => {
+    if (!open) {
+      setFetched(null);
+      setTestResult(null);
+      setAdvanced(false);
+      setKeyVisible(false);
+    }
+  }, [open]);
+
+  if (!form) return null;
+  const f = form;
+
+  const draftBody = () => ({
+    name: f.name,
+    config: {
+      name: f.name, format: f.format || "openai",
+      base_url: f.base_url, api_key: f.api_key || "", model: f.model,
+      proxy: f.proxy || "",
+    },
+  });
+
+  const fetchList = async () => {
+    if (!f.base_url?.trim()) {
+      toast.error("先填端点再拉取");
+      return;
+    }
+    setFetching(true);
+    const { ok, body } = await postJSON("/api/models/fetch-list", draftBody());
+    setFetching(false);
+    if (!ok) {
+      toast.error(`拉取失败:${body.error || "原因未说明"}`);
+      return;
+    }
+    setFetched(body.models || []);
+    toast.success(`拉到 ${body.count} 个模型,下拉选择`);
+  };
+
+  // 选模型:上下文窗口按三段式跟选择走——端点提供取端点值(最准);
+  // 不提供查内置对照表(近似值,标注请核对);都匹配不上保守默认
+  // 200K(请核对)。仅替换上一模型自动填的值,手填值保留。
+  const pickModel = (id) => {
+    const next = { ...f, model: id };
+    const hit = (fetched || []).find((m) => m.id === id);
+    if (hit && hit.context_window > 0) {
+      next.context_window = hit.context_window;
+      next._ctx_auto = true;
+      next._ctx_src = hit.window_source || "endpoint";
+    } else if (f._ctx_auto) {
+      next.context_window = 200000;
+      next._ctx_auto = false;
+      next._ctx_src = "";
+    }
+    delete next._ctx_text;
+    onForm(next);
+  };
+
+  // 上下文窗口提示:按所选模型的窗口来源如实变化。
+  const picked = (fetched || []).find((m) => m.id === f.model);
+  const ctxHint = picked
+    ? picked.window_source === "table"
+      ? "自动填,请核对"
+      : picked.window_source === "default"
+        ? "保守默认 200K,请核对"
+        : "已随模型填入"
+    : "选模型自动填入";
+
+  // 平台/格式选定后的端点预填:仅当当前端点为空或仍是某个预设值时
+  // 跟动(用户改过的地址不覆盖);非预设组合无预填,走纯手动。
+  const presetValues = new Set(Object.values(presets || {}).flatMap((m) => Object.values(m)));
+  const applyPreset = (patch) => {
+    const platform = patch.platform !== undefined ? patch.platform : f.platform || "";
+    const format = patch.format !== undefined ? patch.format : f.format || "openai";
+    const url = presets?.[platform]?.[format] || "";
+    const base_url = url && (!f.base_url || presetValues.has(f.base_url)) ? url : f.base_url;
+    onForm({ ...f, ...patch, platform, format, base_url });
+  };
+
+  const test = async () => {
+    if (!f.model?.trim() || !f.base_url?.trim()) {
+      toast.error("先填端点与模型再测试");
+      return;
+    }
+    setTesting(true);
+    setTestResult(null);
+    const { ok, body } = await postJSON("/api/models/test", draftBody());
+    setTesting(false);
+    setTestResult({ ok, body });
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
+      <DialogContent className="max-h-[88vh] w-[min(620px,94vw)] max-w-none gap-4 overflow-y-auto p-6">
+        <DialogHeader>
+          <DialogTitle className="text-base">{f.has_key ? `编辑:${f.name}` : "新增模型"}</DialogTitle>
+          <DialogDescription>填端点与 key,拉取选模型;其余收在高级选项。</DialogDescription>
+        </DialogHeader>
+
+        <div className="flex flex-col gap-4">
+          <Field label="名称">
+            <Input className={INPUT} value={f.name || ""} disabled={f.has_key}
+              onChange={(e) => onForm({ ...f, name: e.target.value })} />
+          </Field>
+          <Field label="平台">
+            <Select value={f.platform || ""} onValueChange={(v) => applyPreset({ platform: v })}>
+              <SelectTrigger className={cn(INPUT, "flex-1")}><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {(platforms && platforms.length ? platforms : [{ value: "", label: "自定义" }]).map((p) => (
+                  <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <span className="text-xs text-muted-foreground">选平台自动填默认端点,可改</span>
+          </Field>
+          <Field label="端点格式">
+            <Select value={f.format || "openai"} onValueChange={(v) => applyPreset({ format: v })}>
+              <SelectTrigger className={cn(INPUT, "flex-1")}><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="openai">openai</SelectItem>
+                <SelectItem value="anthropic">anthropic</SelectItem>
+                <SelectItem value="openai-responses">openai-responses</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="Base URL">
+            <Input className={cn(INPUT, "font-mono text-xs")} value={f.base_url || ""}
+              placeholder="https://api.example.com/v1"
+              onChange={(e) => onForm({ ...f, base_url: e.target.value })} />
+          </Field>
+          <Field label="key">
+            <div className="relative min-w-0 flex-1">
+              <Input
+                className={cn(INPUT, "font-mono text-xs pr-9")}
+                type={keyVisible ? "text" : "password"}
+                value={f.api_key || ""}
+                placeholder={f.has_key ? "留空保留原 key" : ""}
+                onChange={(e) => onForm({ ...f, api_key: e.target.value })}
+              />
+              <button
+                type="button"
+                className="absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer text-muted-foreground transition-colors hover:text-foreground"
+                title={keyVisible ? "隐藏为圆点" : "明文自查所填 key"}
+                onClick={() => setKeyVisible((v) => !v)}
+              >
+                {React.createElement(iconOf(keyVisible ? "eyeOff" : "eye"), { className: "size-3.5" })}
+              </button>
+            </div>
+          </Field>
+          <Field label="模型">
+            <div className="flex min-w-0 flex-1 items-center gap-2">
+              {fetched ? (
+                <Select value={f.model || ""} onValueChange={pickModel}>
+                  <SelectTrigger className={cn(INPUT, "min-w-0 flex-1 font-mono text-xs")}>
+                    <SelectValue placeholder="选择模型" />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-64">
+                    {(fetched || []).map((m) => (
+                      <SelectItem key={m.id} value={m.id}>
+                        <span className="font-mono">{m.id}</span>
+                        {m.context_window > 0 && (
+                          <span className="ml-2 text-xs text-muted-foreground tnum">
+                            {m.window_source === "endpoint" ? "" : "≈"}
+                            {fmtCtx(m.context_window)}
+                          </span>
+                        )}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
+                <Input className={cn(INPUT, "min-w-0 flex-1 font-mono text-xs")} value={f.model || ""}
+                  placeholder="拉取后下拉选择;或直接输入"
+                  onChange={(e) => onForm({ ...f, model: e.target.value })} />
+              )}
+              <Button variant="outline" size="sm" className="h-9 shrink-0" disabled={fetching} onClick={fetchList}>
+                {fetching ? "拉取中…" : "拉取"}
+              </Button>
+            </div>
+          </Field>
+          <Field label="上下文窗口">
+            <Input className={cn(NUM, "tnum")} type="text" inputMode="decimal"
+              value={
+                f._ctx_text !== undefined
+                  ? f._ctx_text
+                  : f.context_window > 0
+                    ? String(+(f.context_window / 1e6).toFixed(2))
+                    : "1"
+              }
+              onChange={(e) => {
+                const n = e.target.value;
+                onForm({
+                  ...f,
+                  _ctx_text: n,
+                  context_window: n === "" ? 0 : Math.max(0, Math.round((Number(n) || 0) * 1e6)),
+                });
+              }} />
+            <span className="text-xs text-muted-foreground">M</span>
+            <span className="text-xs text-muted-foreground tnum">{ctxHint}</span>
+          </Field>
+
+          {/* 高级选项折叠:横线 — 箭头 — 文字 — 横线 */}
+          <Fold open={advanced} onToggle={() => setAdvanced((v) => !v)}>
+            高级选项
+          </Fold>
+
+          {advanced && (
+            <div className="flex animate-rise flex-col gap-4">
+              <Field label="代理">
+                <Input className={cn(INPUT, "font-mono text-xs")} value={f.proxy || ""}
+                  placeholder="http:// · https:// · socks5://"
+                  onChange={(e) => onForm({ ...f, proxy: e.target.value })} />
+                <span className="text-xs text-muted-foreground">只走模型出站</span>
+              </Field>
+              <Field label="限速">
+                <Input className={NUM} type="number" min="0"
+                  value={f.rate_per_second || ""} placeholder="不限"
+                  onChange={(e) =>
+                    onForm({ ...f, rate_per_second: e.target.value === "" ? 0 : Math.max(0, Number(e.target.value) || 0) })
+                  } />
+                <span className="text-xs text-muted-foreground">次/秒</span>
+                <Input className={NUM} type="number" min="0"
+                  value={f.rate_per_minute || ""} placeholder="不限"
+                  onChange={(e) =>
+                    onForm({ ...f, rate_per_minute: e.target.value === "" ? 0 : Math.max(0, Number(e.target.value) || 0) })
+                  } />
+                <span className="text-xs text-muted-foreground">次/分</span>
+              </Field>
+              <Field label="轮询">
+                <Select
+                  value={f.poll_disabled ? "off" : "on"}
+                  onValueChange={(v) => onForm({ ...f, poll_disabled: v === "off" })}
+                >
+                  <SelectTrigger className={cn(INPUT, "w-24")}><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="on">参与</SelectItem>
+                    <SelectItem value="off">不参与</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Input className={cn(NUM, "w-16")} type="number" min="1" max="100"
+                  value={f.poll_priority || 1}
+                  onChange={(e) => onForm({ ...f, poll_priority: Math.max(0, Number(e.target.value) || 0) })} />
+                <span className="text-xs text-muted-foreground">优先级(1~100,小者先)</span>
+              </Field>
+              <Field label="流式">
+                <Select
+                  value={f.stream_disabled ? "off" : "on"}
+                  onValueChange={(v) => onForm({ ...f, stream_disabled: v === "off" })}
+                >
+                  <SelectTrigger className={cn(INPUT, "w-24")}><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="on">流式</SelectItem>
+                    <SelectItem value="off">非流式</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="输出上限">
+                <Input className={NUM} type="number" min="0"
+                  value={f.max_tokens || ""} placeholder="不设"
+                  onChange={(e) =>
+                    onForm({ ...f, max_tokens: e.target.value === "" ? 0 : Math.max(0, Number(e.target.value) || 0) })
+                  } />
+                <span className="text-xs text-muted-foreground">token</span>
+                <Select
+                  value={f.max_tokens_field || "max_tokens"}
+                  onValueChange={(v) => onForm({ ...f, max_tokens_field: v })}
+                >
+                  <SelectTrigger className={cn(INPUT, "w-52 font-mono text-xs")}><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="max_tokens">max_tokens</SelectItem>
+                    <SelectItem value="max_completion_tokens">max_completion_tokens</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="思考">
+                <Select value={f.thinking || "default"} onValueChange={(v) => onForm({ ...f, thinking: v === "default" ? "" : v })}>
+                  <SelectTrigger className={cn(INPUT, "w-24")}><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="default">随端点</SelectItem>
+                    <SelectItem value="enabled">开</SelectItem>
+                    <SelectItem value="disabled">关</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Select
+                  value={f.thinking_effort || "unset"}
+                  onValueChange={(v) => onForm({ ...f, thinking_effort: v === "unset" ? "" : v })}
+                >
+                  <SelectTrigger className={cn(INPUT, "w-28")}><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="unset">不设</SelectItem>
+                    <SelectItem value="low">low</SelectItem>
+                    <SelectItem value="medium">medium</SelectItem>
+                    <SelectItem value="high">high</SelectItem>
+                    <SelectItem value="max">max</SelectItem>
+                  </SelectContent>
+                </Select>
+                <span className="text-xs text-muted-foreground">强度</span>
+              </Field>
+              {RETRY_FIELDS.map(([key, label, hint]) => (
+                <Field key={key} label={label}>
+                  <Input className={cn(NUM, "w-20")} type="number" min="-1"
+                    value={f[key] ?? 0}
+                    onChange={(e) => onForm({ ...f, [key]: intOf(e.target.value) })} />
+                  <span className="text-xs text-muted-foreground">{hint}</span>
+                </Field>
+              ))}
+              <div className="pl-[80px] text-xs text-muted-foreground">
+                重试覆盖:0 = 全局默认 · -1 = 关闭 · 填正数 = 按值生效
+              </div>
+            </div>
+          )}
+
+          {/* 测试连通 */}
+          <div className="flex items-center gap-3 border-t pt-4">
+            <Button variant="outline" size="sm" disabled={testing} onClick={test}>
+              {testing ? "测试中…" : "测试连通"}
+            </Button>
+            {testResult && (
+              testResult.ok ? (
+                <span className="text-xs text-status-success">
+                  连通 · {testResult.body.latency_ms} ms ·
+                  <span className="font-mono"> {testResult.body.model}</span>
+                </span>
+              ) : (
+                <span className="truncate text-xs text-status-danger">
+                  {testResult.body.error || "未连通"}
+                </span>
+              )
+            )}
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>取消</Button>
+          <Button disabled={busy} onClick={onSave}>保存</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---- 主备轮询抽屉 ----
+
+// 固定说明文案(设计定稿):备链规则一段话。
+const CHAIN_RULE_TEXT =
+  "主用始终第 1;备按优先级从小到大接替,同优先级轮流;上下文装不下的自动跳过;任务显式绑定模型时失败不换、如实报错;熔断冷却 60 秒→5 分钟→30 分钟逐次加长,冷却期满自动探测,恢复即归零。";
+
+function PollingDrawer({ open, onOpenChange, members, busy, onRecover }) {
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className="flex w-[480px] flex-col gap-4 overflow-y-auto p-6 sm:max-w-[480px]">
+        <SheetHeader className="pb-0">
+          <SheetTitle className="text-base">主备轮询</SheetTitle>
+          <SheetDescription>{CHAIN_RULE_TEXT}</SheetDescription>
+        </SheetHeader>
+        {members.length === 0 ? (
+          <div className="rounded-lg border bg-card px-3 py-6 text-center text-[13px] text-muted-foreground">
+            链上暂无成员。
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            {members.map((m, i) => (
+              <div
+                key={m.name}
+                className="flex animate-rise flex-col gap-2 rounded-xl border bg-card p-4"
+                style={{ animationDelay: `${Math.min(i, 6) * 40}ms` }}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="w-4 shrink-0 text-right font-mono text-xs text-muted-foreground tnum">{i + 1}</span>
+                  <span className="text-[13px] font-medium leading-none">{m.name}</span>
+                  {m.priority === 0 ? (
+                    <Badge variant="success">主用</Badge>
+                  ) : (
+                    <Badge variant="info">优先级 {m.priority}</Badge>
+                  )}
+                  <span className="ml-auto flex items-center gap-2">
+                    <MemberStateBadge m={m} />
+                    {m.state === "open" && (
+                      <Button variant="outline" size="sm" disabled={busy} onClick={() => onRecover(m.name)}>
+                        立即恢复
+                      </Button>
+                    )}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 pl-6 text-xs text-muted-foreground">
+                  <span className="font-mono">{m.model}</span>
+                  {m.state === "open" && <span className="tnum">冷却至 {shortClock(m.open_until)} · 第 {m.opens} 档</span>}
+                </div>
+                {m.state === "open" && m.reason && (
+                  <div className="pl-6 text-xs text-status-warning">{m.reason}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function MemberStateBadge({ m }) {
+  switch (m.state) {
+    case "open":
+      return <Badge variant="danger">熔断冷却中</Badge>;
+    case "probing":
+      return <Badge variant="warning">冷却期满探测</Badge>;
+    default:
+      return <Badge variant="success">正常</Badge>;
+  }
+}
+
+// ---- 小件 ----
+
+// intOf 重试覆盖输入解析:空/非数 = 0;-1 与正数原样。
+function intOf(v) {
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n)) return 0;
+  return n < -1 ? -1 : n;
+}
+
+// shortClock "2026-09-22 15:04:05" → "15:04:05"。
+function shortClock(s) {
+  if (!s) return "—";
+  const t = s.split(" ");
+  return t[t.length - 1];
+}

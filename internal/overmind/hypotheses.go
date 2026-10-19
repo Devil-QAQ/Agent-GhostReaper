@@ -1,0 +1,498 @@
+package overmind
+
+// 假设收割(P2-03,第四章 §5 虫群直觉回流:Hypothesis 节点)。主宰收割
+// 时评估,三种去向:值得跟 → 生成验证类 Step 派发(由动态虫群单位领取,
+// 不得派回原发现者,R12);存疑 → 留在图上待唤醒(低排序 ≠ 拒绝);
+// 不成立 → 标记废弃 + 记录理由(不删除,R10)。全程类型化边留痕:
+// produces(发现 Step→假设)/ about(假设→资产)/ verifies(验证 Step→
+// 假设);评估裁决与验证结论入 hypothesis.record 审计流。
+//
+// 收割两段:
+//   - 确定性结论收割(零 LLM):testing 假设的最新验证 Step 到终态后,
+//     按验证单位经 submit_hypothesis_result 写回的结构化结论迁移状态
+//     (supported→成立 / refuted→已废弃 / inconclusive→回候选再评估;
+//     步骤终态而无结论 → 如实回候选重估,不悬空);
+//   - 主宰评估(LLM):candidate/held 假设逐条裁决三去向。挂账假设每次
+//     唤醒重估(待唤醒语义);已挂账且裁决仍为挂账时不重复记账(零新
+//     信息,防记录噪音)。评估裁决非机器终审(区别于仲裁者对 Goal/
+//     TestClaim 的纯函数求值):主宰的判断全程留痕可反驳,hypothesis.
+//     record 的理由即"为何跟/为何不跟"的审计面。
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"github.com/Autumn-27/norma/agentcore"
+	"github.com/Autumn-27/norma/harness"
+	"github.com/Autumn-27/norma/permission"
+	"github.com/Autumn-27/norma/tool"
+	"github.com/Autumn-27/norma/transcript"
+
+	"ghostreaper/internal/rings"
+	"ghostreaper/internal/swarm"
+)
+
+// StepDetailKindVerify 验证类 Step 的 detail.kind 值(与 falsify 同惯例:
+// 验证 = 普通意图 Step,由不同虫群单位领取)。
+const StepDetailKindVerify = "verify"
+
+// hypoEvalSystemPrompt 假设收割评估的系统提示词(P2-03):只做"候选假设
+// → 三去向裁决"的映射,输出受限 JSON。P3-11a 追加常驻文风条款:
+// 裁决理由与验证意图是上面板的研判叙述,按人话写;JSON 结构照契约。
+const hypoEvalSystemPrompt = `你是渗透测试任务的主宰(Overmind),负责收割评估虫群单位提交的候选假设(直觉/线索/疑似问题,尚未取得直接证据)。
+对态势快照中列出的每条待评估假设,裁决三种去向之一:
+- verify(值得跟):生成本Step派发给不同虫群单位验证——须给出具体、可执行、可观察的验证意图与意图分级(验证不得派回原发现者);
+- hold(存疑):依据尚不足以判断价值,留在图上待唤醒——低排序不等于拒绝,不得借 hold 丢弃;
+- discard(不成立):已有可信反证或假设本身无验证价值——标记废弃并记录理由;直觉有账、废案有理由。
+裁决只依据态势快照中的真实信息;已挂账的假设若态势无新变化,维持 hold 即可,不必改判、不必换措辞重写理由。
+只输出 JSON:{"verdicts":[{"hypothesis_id":"h-…","decision":"verify|hold|discard","reason":"一句话理由","verify_intent":"验证意图(verify 必填)","action_level":"只读探测|主动测试|利用深入|修改与持久化"}]}
+不要输出 JSON 以外的任何内容。
+
+` + swarm.ResidentStyleRules
+
+type hypoEvalPlan struct {
+	HypothesisID string `json:"hypothesis_id"`
+	Decision     string `json:"decision"`
+	Reason       string `json:"reason"`
+	VerifyIntent string `json:"verify_intent"`
+	ActionLevel  string `json:"action_level"`
+}
+
+type hypoEvalReply struct {
+	Verdicts []hypoEvalPlan `json:"verdicts"`
+}
+
+// harvestHypotheses 假设收割(cycle 收割段调用):①确定性结论收割
+// (testing → 终态/回候选)②主宰评估(candidate/held → 三去向)。
+// 返回本轮发生的假设状态迁移数(静默判定依据)。单条评估产物失败
+// (意图分级非法等)不拖垮其余假设,如实留在 LastErr。
+func (l *Loop) harvestHypotheses(ctx context.Context) (int, error) {
+	closed, err := l.closeHypotheses(ctx)
+	if err != nil {
+		return closed, err
+	}
+	evaluated, err := l.evaluateHypotheses(ctx)
+	if err != nil {
+		return closed + evaluated, err
+	}
+	return closed + evaluated, nil
+}
+
+// closeHypotheses 确定性结论收割(零 LLM):testing 假设的最新验证 Step
+// 已到终态(done/exhausted/failed;aborted 属任务熔断收尾,不在此处理)
+// 时,按该 Step 的结构化结论迁移:supported→成立、refuted→已废弃、
+// inconclusive→回候选;步骤终态而无结论(预算耗尽/失败未写回)→ 如实
+// 回候选重估,假设不悬空。每验证步骤只迁一次(迁移后不再 testing)。
+func (l *Loop) closeHypotheses(ctx context.Context) (int, error) {
+	testing, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeHypothesis, rings.HypothesisTesting)
+	if err != nil {
+		return 0, fmt.Errorf("overmind: 假设收割: 查验证中假设: %w", err)
+	}
+	if len(testing) == 0 {
+		return 0, nil
+	}
+	steps, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeStep, "")
+	if err != nil {
+		return 0, fmt.Errorf("overmind: 假设收割: 查验证步骤: %w", err)
+	}
+	latestVerify := map[string]rings.NodeFull{} // 假设 ID → 最新验证 Step
+	for _, s := range steps {
+		if kind, _ := s.Detail["kind"].(string); kind != StepDetailKindVerify {
+			continue
+		}
+		hypID, _ := s.Detail["hypothesis_id"].(string)
+		if hypID == "" {
+			continue
+		}
+		if cur, ok := latestVerify[hypID]; !ok || s.CreatedRev > cur.CreatedRev {
+			latestVerify[hypID] = s
+		}
+	}
+	results := map[string]rings.HypothesisRecord{} // "hypID\x00stepID" → 最新结论
+	evs, err := l.Store.Events(ctx, l.TaskID, 0, 0)
+	if err != nil {
+		return 0, fmt.Errorf("overmind: 假设收割: 读事件流: %w", err)
+	}
+	for _, ev := range evs {
+		if ev.Kind != rings.EventHypothesisRecord {
+			continue
+		}
+		var r rings.HypothesisRecord
+		if err := json.Unmarshal(ev.Payload, &r); err != nil {
+			return 0, fmt.Errorf("overmind: 假设收割: 解码 hypothesis.record: %w", err)
+		}
+		if r.Type == rings.HypothesisRecResult {
+			results[r.HypothesisID+"\x00"+r.StepID] = r
+		}
+	}
+	moved := 0
+	for _, h := range testing {
+		vs, ok := latestVerify[h.ID]
+		if !ok {
+			continue // 无验证步骤(不该发生):留待下轮,不猜
+		}
+		switch vs.Status {
+		case "done", "exhausted", "failed":
+		default:
+			continue // 验证仍在途(dispatched/running)或中止收尾
+		}
+		next := rings.HypothesisCandidate // 无结论如实回候选(重估)
+		if r, ok := results[h.ID+"\x00"+vs.ID]; ok {
+			switch r.Verdict {
+			case rings.HypothesisSupported:
+				next = rings.HypothesisConfirmed
+			case rings.HypothesisRefuted:
+				next = rings.HypothesisDiscarded
+			default: // inconclusive:回候选再评估
+				next = rings.HypothesisCandidate
+			}
+		}
+		if _, err := l.Store.Append(ctx, l.TaskID, rings.Event{
+			Kind: rings.EventNodeStateChanged, Actor: ActorOvermind,
+			Payload: rings.NodeStateChanged{NodeID: h.ID, Status: next},
+		}); err != nil {
+			return moved, fmt.Errorf("overmind: 假设 %s 结论迁移: %w", h.ID, err)
+		}
+		moved++
+	}
+	return moved, nil
+}
+
+// evaluateHypotheses 主宰评估(LLM):candidate/held 假设逐条裁决三去向。
+// 已挂账且裁决仍为 hold 时不记账不迁移(零新信息,防噪音);verify 派发
+// 验证 Step(评估记录 + Step + verifies 边 + testing 迁移同一批事务);
+// hold/discard 落评估记录 + 状态迁移。返回本轮迁移数。
+func (l *Loop) evaluateHypotheses(ctx context.Context) (int, error) {
+	pending := map[string]rings.NodeFull{}
+	for _, st := range []string{rings.HypothesisCandidate, rings.HypothesisHeld} {
+		list, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeHypothesis, st)
+		if err != nil {
+			return 0, fmt.Errorf("overmind: 假设评估: 查待评估假设: %w", err)
+		}
+		for _, h := range list {
+			pending[h.ID] = h
+		}
+	}
+	if len(pending) == 0 {
+		return 0, nil
+	}
+	plans, err := l.evalHypothesesCall(ctx)
+	if err != nil {
+		return 0, err
+	}
+	moved := 0
+	for _, p := range plans {
+		h, ok := pending[p.HypothesisID]
+		if !ok {
+			continue // 未知/已不在待评估集:忽略,不猜
+		}
+		reason := strings.TrimSpace(p.Reason)
+		switch p.Decision {
+		case rings.HypothesisVerify:
+			if reason == "" || strings.TrimSpace(p.VerifyIntent) == "" {
+				l.setErr(fmt.Errorf("overmind: 假设 %s 转 verify 缺理由或验证意图,保持待评估", p.HypothesisID))
+				continue
+			}
+			if swarm.ActionLevelRank(rings.ActionLevel(p.ActionLevel)) == 0 {
+				l.setErr(fmt.Errorf("overmind: 假设 %s 转 verify 意图分级 %q 缺失或非法,保持待评估", p.HypothesisID, p.ActionLevel))
+				continue
+			}
+			if err := l.dispatchVerifyStep(ctx, h, p.VerifyIntent, p.ActionLevel, reason); err != nil {
+				return moved, err
+			}
+			moved++
+		case rings.HypothesisHold:
+			if reason == "" {
+				l.setErr(fmt.Errorf("overmind: 假设 %s 挂账缺理由,保持待评估", p.HypothesisID))
+				continue
+			}
+			if h.Status == rings.HypothesisHeld {
+				continue // 维持挂账:零新信息,不重复记账
+			}
+			if _, err := l.Store.Append(ctx, l.TaskID,
+				rings.Event{Kind: rings.EventHypothesisRecord, Actor: ActorOvermind,
+					Payload: rings.HypothesisRecord{HypothesisID: h.ID, Type: rings.HypothesisRecEvaluation,
+						Decision: rings.HypothesisHold, Reason: reason}},
+				rings.Event{Kind: rings.EventNodeStateChanged, Actor: ActorOvermind,
+					Payload: rings.NodeStateChanged{NodeID: h.ID, Status: rings.HypothesisHeld}},
+			); err != nil {
+				return moved, fmt.Errorf("overmind: 假设 %s 挂账: %w", h.ID, err)
+			}
+			moved++
+		case rings.HypothesisDiscard:
+			if reason == "" {
+				l.setErr(fmt.Errorf("overmind: 假设 %s 废弃缺理由(R10 废案有理由),保持待评估", p.HypothesisID))
+				continue
+			}
+			if _, err := l.Store.Append(ctx, l.TaskID,
+				rings.Event{Kind: rings.EventHypothesisRecord, Actor: ActorOvermind,
+					Payload: rings.HypothesisRecord{HypothesisID: h.ID, Type: rings.HypothesisRecEvaluation,
+						Decision: rings.HypothesisDiscard, Reason: reason}},
+				rings.Event{Kind: rings.EventNodeStateChanged, Actor: ActorOvermind,
+					Payload: rings.NodeStateChanged{NodeID: h.ID, Status: rings.HypothesisDiscarded}},
+			); err != nil {
+				return moved, fmt.Errorf("overmind: 假设 %s 废弃: %w", h.ID, err)
+			}
+			moved++
+		default:
+			l.setErr(fmt.Errorf("overmind: 假设 %s 评估去向 %q 不在词表,保持待评估", p.HypothesisID, p.Decision))
+		}
+	}
+	return moved, nil
+}
+
+// dispatchVerifyStep 转验证派发:评估记录(verify + 理由 + 验证意图)+
+// 验证 Step(detail.kind=verify,绑定假设)+ verifies 边(验证 Step→假设,
+// 回流轨迹)+ 假设迁移 testing,同一批事务落账(不出现"步骤在跑而假设
+// 不在验证中"的中间态)。验证 Step covers 假设锚定的资产,归当前目标。
+func (l *Loop) dispatchVerifyStep(ctx context.Context, h rings.NodeFull, intent, level, reason string) error {
+	abouts, err := l.Store.Edges(ctx, l.TaskID, rings.EdgeAbout)
+	if err != nil {
+		return fmt.Errorf("overmind: 转验证 %s: 查资产锚点: %w", h.ID, err)
+	}
+	var assets []string
+	for _, e := range abouts {
+		if e.From == h.ID {
+			assets = append(assets, e.To)
+		}
+	}
+	stepID, err := nextStepID(ctx, l.Store, l.TaskID)
+	if err != nil {
+		return fmt.Errorf("overmind: 转验证 %s: %w", h.ID, err)
+	}
+	events := []rings.Event{{
+		Kind: rings.EventHypothesisRecord, Actor: ActorOvermind,
+		Payload: rings.HypothesisRecord{
+			HypothesisID: h.ID, StepID: stepID, Type: rings.HypothesisRecEvaluation,
+			Decision: rings.HypothesisVerify, Reason: reason, VerifyIntent: strings.TrimSpace(intent),
+		},
+	}}
+	stepEvs, err := stepEvents(ctx, l.Store, l.TaskID, stepID, "验证假设: "+h.Title, DispatchOptions{
+		GoalID:              l.currentGoalID(ctx),
+		ExpectedObservation: "经 submit_hypothesis_result 写回结构化结论(supported|refuted|inconclusive)",
+		ActionLevel:         level,
+		CoversAssets:        assets,
+		Detail: map[string]any{
+			"kind": StepDetailKindVerify, "hypothesis_id": h.ID,
+			"verify_intent": strings.TrimSpace(intent),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("overmind: 转验证 %s: %w", h.ID, err)
+	}
+	events = append(events, stepEvs...)
+	events = append(events,
+		rings.Event{Kind: rings.EventEdgeAdded, Actor: ActorOvermind,
+			Payload: rings.EdgeAdded{EdgeType: rings.EdgeVerifies, FromNode: stepID, ToNode: h.ID}},
+		rings.Event{Kind: rings.EventNodeStateChanged, Actor: ActorOvermind,
+			Payload: rings.NodeStateChanged{NodeID: h.ID, Status: rings.HypothesisTesting}},
+	)
+	if _, err := l.Store.Append(ctx, l.TaskID, events...); err != nil {
+		return fmt.Errorf("overmind: 转验证 %s 入账: %w", h.ID, err)
+	}
+	return nil
+}
+
+// evalHypothesesCall 一次 LLM 评估:假设态势快照 → 三去向裁决列表。
+// 无工具单轮会话,引擎链路全真(与拆解会话同构);转录 JSONL 落盘
+// (RootDir 已设时)、逐次用量入 token 独立表(P2-04 四类记录分工)。
+func (l *Loop) evalHypothesesCall(ctx context.Context) ([]hypoEvalPlan, error) {
+	snapshot, err := l.hypoEvalSnapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sid := l.nextSessionID("h")
+	opts := agentcore.Options{
+		Provider:               l.Provider,
+		SystemPrompt:           []string{hypoEvalSystemPrompt},
+		Tools:                  []tool.CoreTool{}, // 显式空表:评估会话无工具
+		PermissionMode:         permission.ModeDefault,
+		MaxTurns:               2,
+		MaxTokens:              4096,
+		SessionID:              sid,
+		DisableBackgroundTasks: true,
+	}
+	if l.RootDir != "" {
+		opts.Transcript = transcript.NewStore(filepath.Join(l.RootDir, l.TaskID, "transcripts"))
+	}
+	sess := agentcore.NewSession(opts)
+	defer sess.Close()
+	usage := &swarm.UsageTracker{
+		Store: l.Store, TaskID: l.TaskID, Agent: ActorOvermind,
+		Model: l.Model, Transcript: sid,
+	}
+	var text string
+	for ev, err := range sess.Prompt(ctx, snapshot) {
+		if err != nil {
+			return nil, fmt.Errorf("overmind: 假设评估会话: %w", err)
+		}
+		if ev.Kind == harness.KindUsage && ev.Usage != nil {
+			if uerr := usage.OnUsage(*ev.Usage); uerr != nil {
+				l.setErr(uerr)
+			}
+		}
+		if ev.Kind == harness.KindResult && ev.Terminal != nil {
+			if ev.Terminal.Err != nil {
+				return nil, fmt.Errorf("overmind: 假设评估终止: %w", ev.Terminal.Err)
+			}
+			text = ev.Terminal.Text
+		}
+	}
+	return parseHypoVerdicts(text)
+}
+
+// parseHypoVerdicts 解析评估回复:容忍围栏与前后杂文,取首尾大括号间的
+// JSON 主体;未知条目过滤(裁决词表在落账侧再核一遍)。
+func parseHypoVerdicts(text string) ([]hypoEvalPlan, error) {
+	body := strings.TrimSpace(text)
+	if m := jsonFenceRe.FindStringSubmatch(body); m != nil {
+		body = strings.TrimSpace(m[1])
+	}
+	if i := strings.Index(body, "{"); i >= 0 {
+		if j := strings.LastIndex(body, "}"); j > i {
+			body = body[i : j+1]
+		}
+	}
+	if body == "" {
+		return nil, fmt.Errorf("overmind: 假设评估回复为空")
+	}
+	var r hypoEvalReply
+	if err := json.Unmarshal([]byte(body), &r); err != nil {
+		return nil, fmt.Errorf("overmind: 假设评估回复不是合法 JSON: %w", err)
+	}
+	var out []hypoEvalPlan
+	for _, p := range r.Verdicts {
+		if strings.TrimSpace(p.HypothesisID) == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// hypoEvalSnapshot 假设评估态势快照(评估会话的用户提示):资产 + 已确认
+// 事实 + 步骤概况 + 待评估假设逐条(陈述/依据/资产/评估与验证历史——
+// 主宰的判断只来自图,不持有私有记忆;历史让"维持挂账"有据)。
+func (l *Loop) hypoEvalSnapshot(ctx context.Context) (string, error) {
+	abouts, err := l.Store.Edges(ctx, l.TaskID, rings.EdgeAbout)
+	if err != nil {
+		return "", fmt.Errorf("overmind: 假设快照: 查资产锚点: %w", err)
+	}
+	assetsOf := func(id string) []string {
+		var out []string
+		for _, e := range abouts {
+			if e.From == id {
+				out = append(out, e.To)
+			}
+		}
+		return out
+	}
+	hyps, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeHypothesis, "")
+	if err != nil {
+		return "", fmt.Errorf("overmind: 假设快照: 查假设: %w", err)
+	}
+	steps, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeStep, "")
+	if err != nil {
+		return "", fmt.Errorf("overmind: 假设快照: 查步骤: %w", err)
+	}
+	facts, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeFact, "confirmed")
+	if err != nil {
+		return "", fmt.Errorf("overmind: 假设快照: 查事实: %w", err)
+	}
+	assets, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeAsset, "")
+	if err != nil {
+		return "", fmt.Errorf("overmind: 假设快照: 查资产: %w", err)
+	}
+	// 评估与验证历史(hypothesis.record 审计流,按假设归档)。
+	evals := map[string][]string{}
+	results := map[string][]string{}
+	evs, err := l.Store.Events(ctx, l.TaskID, 0, 0)
+	if err != nil {
+		return "", fmt.Errorf("overmind: 假设快照: 读事件流: %w", err)
+	}
+	for _, ev := range evs {
+		if ev.Kind != rings.EventHypothesisRecord {
+			continue
+		}
+		var r rings.HypothesisRecord
+		if err := json.Unmarshal(ev.Payload, &r); err != nil {
+			return "", fmt.Errorf("overmind: 假设快照: 解码 hypothesis.record: %w", err)
+		}
+		switch r.Type {
+		case rings.HypothesisRecEvaluation:
+			evals[r.HypothesisID] = append(evals[r.HypothesisID],
+				fmt.Sprintf("%s(%s)", r.Decision, clipEval(r.Reason)))
+		case rings.HypothesisRecResult:
+			results[r.HypothesisID] = append(results[r.HypothesisID],
+				fmt.Sprintf("%s(%s)", r.Verdict, clipEval(r.EvidenceHead)))
+		}
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "【假设评估态势快照】\n任务 %s\n", l.TaskID)
+
+	b.WriteString("\n资产:\n")
+	if len(assets) == 0 {
+		b.WriteString("  (无)\n")
+	}
+	for _, a := range assets {
+		fmt.Fprintf(&b, "  - %s [%s] %s\n", a.ID, a.AssetClass, a.Title)
+	}
+
+	b.WriteString("\n已确认事实:\n")
+	if len(facts) == 0 {
+		b.WriteString("  (无)\n")
+	}
+	for _, f := range facts {
+		fmt.Fprintf(&b, "  - %s: %s\n", f.ID, f.Title)
+	}
+
+	b.WriteString("\n步骤概况:\n")
+	if len(steps) == 0 {
+		b.WriteString("  (无)\n")
+	}
+	for _, s := range steps {
+		fmt.Fprintf(&b, "  - %s [%s] %s\n", s.ID, s.Status, s.Title)
+	}
+
+	b.WriteString("\n待评估假设(逐条裁决):\n")
+	n := 0
+	for _, h := range hyps {
+		if h.Status != rings.HypothesisCandidate && h.Status != rings.HypothesisHeld {
+			continue
+		}
+		n++
+		fmt.Fprintf(&b, "  - %s [%s] %s\n", h.ID, h.Status, h.Title)
+		basis, _ := h.Detail["basis"].(string)
+		fmt.Fprintf(&b, "    依据: %s\n", clipEval(basis))
+		fmt.Fprintf(&b, "    指向资产: %v\n", assetsOf(h.ID))
+		if h := evals[h.ID]; len(h) > 0 {
+			fmt.Fprintf(&b, "    历史评估: %s\n", strings.Join(h, " → "))
+		}
+		if h := results[h.ID]; len(h) > 0 {
+			fmt.Fprintf(&b, "    历史验证结论: %s\n", strings.Join(h, " → "))
+		}
+	}
+	if n == 0 {
+		b.WriteString("  (无)\n")
+	}
+
+	b.WriteString("\n【评估指令】\n对每条待评估假设输出三去向裁决,只输出 JSON;" +
+		"若无待评估输出 {\"verdicts\":[]}。\n")
+	return b.String(), nil
+}
+
+func clipEval(s string) string {
+	s = strings.ReplaceAll(strings.TrimSpace(s), "\n", " ")
+	if len(s) > 160 {
+		return s[:160] + "…"
+	}
+	return s
+}
+
+// hypothesisIDRe 识别假设 ID(h-xxxxxxxx),供测试与脚本模型定位。
+var hypothesisIDRe = regexp.MustCompile(`h-[0-9a-f]+`)

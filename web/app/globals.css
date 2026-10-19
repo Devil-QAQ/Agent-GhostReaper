@@ -1,0 +1,358 @@
+/* 主题 token 唯一定义点(8.4 落地,色板定稿,组件层禁止出现色值)。
+   暗色为默认主题(8.1);P3-10 亮色三态:dark(缺省,无 class)/
+   light(.light)由首帧前 boot script 定 class(防闪烁),跟随系统 =
+   按媒介查询落二者之一。亮色系值同源于 8.4 token 名(表面色阶/
+   品牌蓝/语义色在亮底上取深一档,保证对比度)。
+   P2-08c 质感返工:按 8.4 扩充(表面色阶/柔和大投影/圆角加大/动效两档/
+   间距阶梯/骨架屏),8.9 质感规范的执行地基。 */
+@import "tailwindcss";
+@import "tw-animate-css";
+
+:root,
+.dark {
+  /* 背景多层(表面色阶,质感的地基):页面底 / 面板 / 浮层 / 输入件 */
+  --background: #0b0e14;
+  --card: #111827;
+  --popover: #1a2030;
+  --input-surface: #141b2a;
+
+  /* 悬停提亮 = 所在层 +5% 亮度(叠加层,与底色无关) */
+  --hover-lift: color-mix(in srgb, #ffffff 5%, transparent);
+
+  /* 前景与边界(面板色派生灰阶) */
+  --foreground: #e5e7eb;
+  --muted-foreground: #9ca3af;
+  --border: #1f2937;
+  --input: #243044;
+  --ring: #3b82f6;
+
+  /* 品牌蓝:主操作/链接/当前导航项 */
+  --primary: #3b82f6;
+  --primary-foreground: #ffffff;
+
+  /* 次级表面 */
+  --secondary: #1a2332;
+  --secondary-foreground: #e5e7eb;
+  --muted: #161d2b;
+  --accent: #1e293b;
+  --accent-foreground: #e5e7eb;
+
+  /* 危险(熔断/拒绝) */
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+
+  /* 严重级语义色(8.4):徽标全站统一色映射 */
+  --severity-critical: #ef4444;
+  --severity-high: #f97316;
+  --severity-medium: #eab308;
+  --severity-low: #3b82f6;
+  --severity-info: #6b7280;
+
+  /* 状态色(8.4) */
+  --status-success: #22c55e;
+  --status-warning: #eab308;
+  --status-danger: #ef4444;
+  --status-running: #3b82f6;
+  --status-paused: #6b7280;
+
+  /* 徽标软底(全彩字的胶囊底,token 派生仍定义于此) */
+  --severity-critical-soft: color-mix(in srgb, var(--severity-critical) 16%, transparent);
+  --severity-high-soft: color-mix(in srgb, var(--severity-high) 16%, transparent);
+  --severity-medium-soft: color-mix(in srgb, var(--severity-medium) 16%, transparent);
+  --severity-low-soft: color-mix(in srgb, var(--severity-low) 16%, transparent);
+  --severity-info-soft: color-mix(in srgb, var(--severity-info) 16%, transparent);
+  --status-success-soft: color-mix(in srgb, var(--status-success) 16%, transparent);
+  --status-warning-soft: color-mix(in srgb, var(--status-warning) 16%, transparent);
+  --status-danger-soft: color-mix(in srgb, var(--status-danger) 16%, transparent);
+  --status-running-soft: color-mix(in srgb, var(--status-running) 16%, transparent);
+  --status-paused-soft: color-mix(in srgb, var(--status-paused) 16%, transparent);
+
+  /* 字体:界面 sans / ID·命令·URL·fact# 引用 mono */
+  --font-sans: system-ui, -apple-system, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+
+  /* 圆角加大(8.4):按钮与输入 md≈8px,卡片 xl≈12px */
+  --radius: 0.625rem;
+
+  /* 动效 token(8.4):两档时长 + 平滑曲线,无弹跳 */
+  --motion-fast: 150ms;
+  --motion-page: 250ms;
+  --ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* 阴影 token(8.4):浮层柔和大投影 + 卡片 hover 微投影 */
+  --shadow-float: 0 8px 32px rgba(0, 0, 0, 0.45);
+  --shadow-card: 0 4px 16px rgba(0, 0, 0, 0.25);
+
+  /* 原生控件(滚动条/输入)配色随主题,防暗色滚动条混进亮色页面 */
+  color-scheme: dark;
+}
+
+/* 亮色主题(P3-10,8.4 增亮色系值):同名 token 整组覆盖,表面色阶
+   改白系分层;品牌蓝与语义色取深一档(蓝 600/红 600/橙 600/黄 600),
+   白底对比度成立;悬停提亮改为黑 4%;投影淡化为墨色低透明。 */
+.light {
+  --background: #f8fafc;
+  --card: #ffffff;
+  --popover: #ffffff;
+  --input-surface: #f1f5f9;
+
+  --hover-lift: color-mix(in srgb, #0f172a 4%, transparent);
+
+  --foreground: #0f172a;
+  --muted-foreground: #64748b;
+  --border: #e2e8f0;
+  --input: #cbd5e1;
+  --ring: #2563eb;
+
+  --primary: #2563eb;
+  --primary-foreground: #ffffff;
+
+  --secondary: #f1f5f9;
+  --secondary-foreground: #0f172a;
+  --muted: #f1f5f9;
+  --accent: #e2e8f0;
+  --accent-foreground: #0f172a;
+
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+
+  --severity-critical: #dc2626;
+  --severity-high: #ea580c;
+  --severity-medium: #ca8a04;
+  --severity-low: #2563eb;
+  --severity-info: #64748b;
+
+  --status-success: #16a34a;
+  --status-warning: #ca8a04;
+  --status-danger: #dc2626;
+  --status-running: #2563eb;
+  --status-paused: #64748b;
+
+  --shadow-float: 0 8px 32px rgba(15, 23, 42, 0.14);
+  --shadow-card: 0 4px 16px rgba(15, 23, 42, 0.08);
+
+  color-scheme: light;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-severity-critical: var(--severity-critical);
+  --color-severity-high: var(--severity-high);
+  --color-severity-medium: var(--severity-medium);
+  --color-severity-low: var(--severity-low);
+  --color-severity-info: var(--severity-info);
+  --color-severity-critical-soft: var(--severity-critical-soft);
+  --color-severity-high-soft: var(--severity-high-soft);
+  --color-severity-medium-soft: var(--severity-medium-soft);
+  --color-severity-low-soft: var(--severity-low-soft);
+  --color-severity-info-soft: var(--severity-info-soft);
+
+  --color-status-success: var(--status-success);
+  --color-status-warning: var(--status-warning);
+  --color-status-danger: var(--status-danger);
+  --color-status-running: var(--status-running);
+  --color-status-paused: var(--status-paused);
+  --color-status-success-soft: var(--status-success-soft);
+  --color-status-warning-soft: var(--status-warning-soft);
+  --color-status-danger-soft: var(--status-danger-soft);
+  --color-status-running-soft: var(--status-running-soft);
+  --color-status-paused-soft: var(--status-paused-soft);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 2px);
+
+  --color-input-surface: var(--input-surface);
+  --color-hover-lift: var(--hover-lift);
+  --shadow-float: var(--shadow-float);
+  --shadow-card: var(--shadow-card);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+}
+
+* {
+  border-color: var(--border);
+}
+
+/* ---- 8.9 质感规范工具(全站) ---- */
+
+/* 列表进场:stagger 依次淡入 + 8px 位移(250ms 平滑曲线,无弹跳) */
+@keyframes gr-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-rise {
+  animation: gr-rise var(--motion-page) var(--ease-smooth) both;
+}
+
+/* 骨架屏(加载一律骨架,不用转圈):token 色阶渐变扫过 */
+@keyframes gr-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.skeleton {
+  border-radius: var(--radius-md);
+  background: linear-gradient(
+    90deg,
+    var(--muted) 25%,
+    var(--secondary) 50%,
+    var(--muted) 75%
+  );
+  background-size: 200% 100%;
+  animation: gr-shimmer 1.4s linear infinite;
+}
+
+/* 统计数字等宽不跳动(8.9 #5) */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 进度图节点(P2-09,8.7 进度图视图):六类节点形状徽记——形状+类型色
+   承载节点视觉语言(圆角方/箭头/圆/盾/虚线圆/方块),色值全走 8.4 token。 */
+.gr-shape-goal {
+  clip-path: inset(0 round 4px);
+}
+.gr-shape-step {
+  clip-path: polygon(0 0, calc(100% - 6px) 0, 100% 50%, calc(100% - 6px) 100%, 0 100%);
+}
+.gr-shape-fact {
+  clip-path: inset(0 round 50%);
+}
+.gr-shape-claim {
+  clip-path: polygon(0 0, 100% 0, 100% 55%, 50% 100%, 0 55%);
+}
+.gr-shape-hypo {
+  clip-path: inset(0 round 50%);
+}
+.gr-shape-asset {
+  clip-path: inset(0 round 2px);
+}
+
+/* 新节点长出动画(8.7 生长可见):250ms 淡入+位移 + 主色描边渐隐 */
+@keyframes gr-node-grow {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.gr-node-newborn {
+  animation: gr-node-grow var(--motion-page) var(--ease-smooth) both;
+}
+
+/* 年轮图(P2-11,8.7 全图视图)——Cytoscape 小地图:cytoscape-navigator
+   自带样式表为 fixed 400px 亮色,不自带的规则在此收敛为画布内暗色小窗
+   (面板/视口/覆盖层三类内部元素)。 */
+.gr-cy-nav {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 16;
+  width: 176px;
+  height: 118px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+  box-shadow: var(--shadow-float, 0 8px 32px rgb(0 0 0 / 0.45));
+}
+
+.gr-cy-nav img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0.9;
+}
+
+.gr-cy-nav .cytoscape-navigatorView {
+  position: absolute;
+  border: 1px solid var(--primary);
+  background: color-mix(in srgb, var(--primary) 30%, transparent);
+}
+
+.gr-cy-nav .cytoscape-navigatorOverlay {
+  position: absolute;
+  inset: 0;
+  cursor: move;
+}
+
+/* 年轮图 Cytoscape HTML 卡片标签(cytoscape-node-html-label 注入的
+   浮层):不参与指针事件,点击落回画布节点命中区。 */
+.gr-cy-card {
+  pointer-events: none;
+}
+
+/* ReactFlow 缩放控件(进度图/年轮图·血缘与攻击链透镜,P2-14b④):
+   库默认亮色白底,收敛为 8.4 token 暗色——按钮浮层色、描边细线、
+   悬停提亮一档。 */
+.react-flow__controls {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+  box-shadow: var(--shadow-float);
+}
+
+.react-flow__controls-button {
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+  color: var(--muted-foreground);
+}
+
+.react-flow__controls-button:last-child {
+  border-bottom: none;
+}
+
+.react-flow__controls-button:hover {
+  background: var(--popover);
+}
+
+.react-flow__controls-button svg {
+  fill: currentColor;
+}

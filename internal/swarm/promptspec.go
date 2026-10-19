@@ -1,0 +1,204 @@
+package swarm
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"ghostreaper/internal/rings"
+)
+
+// 提示词组装与注入规范(第四章 §11,P2-06d)。位置即优先级:
+//
+//   - RoE 约束块:system 最顶部,声明"凌驾于下方一切探索启发式"——
+//     授权硬边界先于一切方法论被模型读到;
+//   - worker 意图块:system 尾部——system 段由引擎每次请求原样重发
+//     (agentcore.Session.system),上下文压缩(compaction)只重写消息
+//     历史、压不到 system,长会话漂移后意图核心仍在;
+//   - planner 易变态势:user turn(既有 snapshot 路径)——system 保持
+//     稳定利于前缀缓存,易变内容不进 system。
+//
+// 三段式组装:段 A 可编辑正文(存通用配置键值表,后台可改)+ 段 B/C
+// 代码固定安全段(执行铁律、写回规约等)。结构保证"编辑 DB 正文永远
+// 不可能删除代码拥有的段":组装函数无条件把固定段追加在可编辑正文
+// 之后,DB 只能覆盖 A 段内容,防配置误操作拆掉安全底线。
+
+// SettingKeyPromptSwarm 虫群基线可编辑正文(A 段)的配置键。
+const SettingKeyPromptSwarm = "prompt.swarm.editable"
+
+// workerEditableDefault 虫群基线 A 段默认正文(角色与视野;代码常量,
+// 键未设置/空值/读失败时使用)。可编辑的是"你是谁、怎么干活"的正文;
+// 铁律与写回规约是代码固定段,不在此处。
+const workerEditableDefault = `你是渗透测试虫群单位,在授权测试任务中执行领到的一条意图。你没有全局视野,也看不到其他虫群单位;你的世界就是这份任务包与你的工具结果。`
+
+// workerSafetyRules 虫群基线 B 段(代码固定,安全底线):Q7 消化的
+// 提示词红线,第八章第 8 节防线②。条款逐条对应设计定稿:①只做一条
+// 意图、意图外线索只回流不深挖;②边发现边写回(R8:候选经受控入口);
+// ③穷尽本意图但不空转;④finding 必须真实触发过、有可复现证据
+// (R11/R13 的提示词化);⑤被拒不重试(P1-02 审批语义)。
+const workerSafetyRules = `铁律(代码固定,配置不可移除):
+1. 只做你领到的这一条意图。瞥见意图之外的线索,只许用 submit_candidate_fact / submit_hypothesis 写成候选证据交给主宰,不许自己拐过去挖。
+2. 边发现边写回:每取得一条值得保留的观察,立即提交,不要攒到收尾——步数或时间预算可能随时耗尽,攒着的发现会丢。
+3. 穷尽本意图的手段再下结论;但不因总目标未达成而继续,也不为凑步数在已探尽的方向空转。
+4. 必须本次真实触发过、拿到可复现证据,才能提交候选事实;「版本匹配到 CVE」「看起来可注入」这类只许记为候选假设(submit_hypothesis)。真实触发并取得可复现证据的漏洞发现,用 submit_test_claim 提交为可证伪声明(存在性与影响面分开声明,并尽力列出竞争性替代解释);确认由独立反证与机器裁决完成,你不许自评"已确认"、不得自报严重级别。
+5. 被 RoE 或审批拒绝的操作不得重试。`
+
+// workerArtifactRules 虫群基线 C 段(代码固定,中间产物规约):
+// §11 语义细则——写回粒度(同线索观察汇总成一条,防图谱无限膨胀;
+// 证据原文走内容寻址存储,截断不丢原文)+ 收尾输出形态。
+const workerArtifactRules = `写回与收尾规约(代码固定,配置不可移除):
+- 写回粒度:同一条线索的多次观察汇总成一条候选提交,写明观察之间的关联,不要逐次各提一条——图谱按线索生长,不按调用次数膨胀;证据原文经内容寻址存储留档,提交界面所见被截断不丢原文。
+- 完成后输出简短总结:做了什么、提交了哪些候选、有什么没做成。`
+
+// ResidentStyleRules 常驻文风条款(第四章 §10 humanizer 中文化精简版,
+// P3-11a 作用域 v2):全部 agent 的自然语言输出共用同一份——牧者主对话/
+// 主宰研判叙述/虫群执行叙述/插话/回执解释,生成时即按人话写;结构化
+// 输出(工具参数/JSON 契约/账本回流)不带文风,照契约原样(作用域行
+// 见尾注)。完整 25 模式深加工归 P3-11 的 humanizer skill:常驻管生成、
+// skill 管改写,两套规矩不混用。
+const ResidentStyleRules = `输出文风(代码固定,配置不可移除):
+1. 短句,先说结论再说理由。
+2. 禁止开场白("好的""这是一个…")和总结结尾("总之""综上")。
+3. 禁用填充语:"值得注意的是""在某种程度上""不得不说"。
+4. 两三句话能说清的事不列列表;加粗最多 1~2 处;不用 emoji。
+5. 事实和数字优先于形容词;禁用"强大""优雅""无缝""赋能""闭环"这类膨胀词。
+6. 不用"Not just X, but Y"式铺垫、强行三连排比、格言式收尾——直接说主张。
+7. 读者是渗透测试专家,不解释基础概念。
+8. 不确定就直说不知道,不用对冲词包裹。
+作用域:以上只约束写给人读的自然语言(叙述、总结、理由);结构化输出照契约——工具调用参数与 JSON 的字段名、结构、取值格式原样,不为文风改变,也不输出契约以外的内容。`
+
+// WorkerPromptSpec 虫群基线三段式规约(A 可编辑 + B/C/D 代码固定;
+// D 段常驻文风:虫群执行叙述与舵杆回执解释按人话写,工具参数照契约)。
+var WorkerPromptSpec = PromptSpec{
+	SettingKey:      SettingKeyPromptSwarm,
+	DefaultEditable: workerEditableDefault,
+	Fixed:           []string{workerSafetyRules, workerArtifactRules, ResidentStyleRules},
+}
+
+// PromptSpec 三段式组装规约:SettingKey 指向 A 段在通用配置键值表的
+// 键(空 = 无可编辑段);DefaultEditable 为 A 段默认正文;Fixed 为
+// 代码固定安全段(B/C…,顺序即追加顺序)。
+type PromptSpec struct {
+	SettingKey      string
+	DefaultEditable string
+	Fixed           []string
+}
+
+// Assemble 三段式组装:返回 [A(键值覆盖或默认), B, C, …]。键空值、
+// 读失败一律退代码默认(fail-safe:配置故障不挡执行,更不可能拆掉
+// 安全底线)。store 为 nil(纯展示/测试)同样退默认。
+func (p PromptSpec) Assemble(ctx context.Context, store *rings.Store) []string {
+	body := p.DefaultEditable
+	if p.SettingKey != "" && store != nil {
+		if e, ok, err := store.Setting(ctx, p.SettingKey); err == nil && ok {
+			if v := strings.TrimSpace(e.Value); v != "" {
+				body = v
+			}
+		}
+	}
+	return append([]string{body}, p.Fixed...)
+}
+
+// roeConstraintHeader RoE 约束块的固定抬头与凌驾声明(§11:system
+// 最顶部并声明"凌驾于下方一切探索启发式")。
+const roeConstraintHeader = "【授权约束 · RoE】本块为授权硬边界,凌驾于下方一切探索启发式;越出本块的研判与动作一律不做。"
+
+// RenderRoEConstraint 渲染 RoE 约束块(虫群/主宰共用同一份措辞与
+// 结构,两处不得漂移)。lead 为面向角色的凌驾补充句(虫群侧重"不做",
+// 主宰侧重"不派")。excluded 为授权范围摘除的资产(P4-05;空 = 全部
+// 纳入,行为与历史一致),非空时追加"范围外资产"行——主宰侧读它不派
+// 覆盖这些资产的意图(派发入口守卫同判,covers 判定)。
+func RenderRoEConstraint(lead string, allowed, denied []string, threshold rings.ActionLevel, excluded []rings.ExcludedAssetView) string {
+	var b strings.Builder
+	b.WriteString(roeConstraintHeader)
+	if lead != "" {
+		b.WriteString(lead)
+	}
+	b.WriteString("\n- 工具边界: ")
+	switch {
+	case len(denied) > 0 && len(allowed) > 0:
+		fmt.Fprintf(&b, "禁止 %v;仅允许 %v", denied, allowed)
+	case len(denied) > 0:
+		fmt.Fprintf(&b, "禁止 %v;其余工具可用", denied)
+	case len(allowed) > 0:
+		fmt.Fprintf(&b, "仅允许 %v", allowed)
+	default:
+		b.WriteString("未设白名单与黑名单(工具全集)")
+	}
+	fmt.Fprintf(&b, "\n- 审批门槛: %s(达到该级的动作逐次弹门等待造物主批准,被拒不重试)\n",
+		string(NormalizeApprovalThreshold(threshold)))
+	b.WriteString("- 授权范围: 仅限本任务授权目标;本系统仅供授权测试。\n")
+	if len(excluded) > 0 {
+		parts := make([]string, 0, len(excluded))
+		for _, a := range excluded {
+			parts = append(parts, fmt.Sprintf("%s(%s)", a.ID, a.Title))
+		}
+		fmt.Fprintf(&b, "- 范围外资产(已从授权范围摘除,不测不派): %s\n", strings.Join(parts, "、"))
+	}
+	return b.String()
+}
+
+// roeConstraintBlock 虫群侧 RoE 约束块(从任务包的领取时授权渲染;
+// 资产摘除是规划级约束——入口守卫保证摘除资产不会再被派发覆盖它的
+// 意图,单位领到的任务包不会锚定它们,虫群侧不重复渲染)。
+func roeConstraintBlock(roe RoE) string {
+	return RenderRoEConstraint(
+		"你的探索手段受此框定。", roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, nil)
+}
+
+// 意图块/锚定资产/启动指令(§11 不可变块,追加顺序固定:意图块 →
+// 意图锚定资产 → 启动指令,启动指令永远是 system 最后一句)。
+
+// intentBlock 意图块:system 尾部的意图核心(本步骤意图 + 预期观察)。
+// compaction 压不到 system,长会话压缩后意图核心仍在。
+func intentBlock(pack *TaskPack) string {
+	var b strings.Builder
+	b.WriteString("【本步骤意图 · 只做这一条】\n")
+	fmt.Fprintf(&b, "意图: %s\n", strings.TrimSpace(pack.StepIntent))
+	if pack.ExpectedObservation != "" {
+		fmt.Fprintf(&b, "预期观察: %s(验收参考,非产出上限;预期外发现走候选回流)\n",
+			strings.TrimSpace(pack.ExpectedObservation))
+	}
+	if pack.ActionLevel != "" {
+		fmt.Fprintf(&b, "意图分级: %s(达到审批门槛的动作将逐次弹门)\n", string(pack.ActionLevel))
+	}
+	return b.String()
+}
+
+// anchorAssetsBlock 意图锚定资产:本意图的工作对象(任务包必要资产节
+// 的锚点形态;完整七要素仍在首条 user turn 的任务包全文里)。
+func anchorAssetsBlock(pack *TaskPack) string {
+	var b strings.Builder
+	b.WriteString("【意图锚定资产】\n")
+	if len(pack.Assets) == 0 {
+		b.WriteString("(无绑定资产)\n")
+		return b.String()
+	}
+	for _, a := range pack.Assets {
+		fmt.Fprintf(&b, "- %s [%s] %s\n", a.ID, a.Class, a.Title)
+	}
+	return b.String()
+}
+
+// startupInstruction 启动指令(§11:永远是 system 最后一句)。
+const startupInstruction = "【启动指令】现在开始执行上述意图:先读任务包全文,再动手;全程遵守上方铁律与写回规约。"
+
+// WorkerSystemSegments 组装虫群单位 system 段(§11 全规范):
+//
+//	[0] RoE 约束块(最顶,凌驾声明)
+//	[1] A 段 可编辑正文(键值覆盖或代码默认)
+//	[2] B 段 执行铁律(代码固定)
+//	[3] C 段 写回规约(代码固定)
+//	[4] D 段 常驻文风(代码固定;自然语言按人话写,工具参数照契约)
+//	[5] 意图块(system 尾,compaction 压不掉)
+//	[6] 意图锚定资产
+//	[7] 启动指令(最后一句)
+//
+// 任务包七要素全文仍是首条 user turn;system 尾只锚定意图核心——被
+// 压缩的是 user turn 的细节,压不掉的是"这条单位该干什么"。
+func WorkerSystemSegments(ctx context.Context, store *rings.Store, roe RoE, pack *TaskPack) []string {
+	segs := []string{roeConstraintBlock(roe)}
+	segs = append(segs, WorkerPromptSpec.Assemble(ctx, store)...)
+	segs = append(segs, intentBlock(pack), anchorAssetsBlock(pack), startupInstruction)
+	return segs
+}

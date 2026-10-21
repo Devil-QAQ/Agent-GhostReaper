@@ -90,7 +90,10 @@ func PlatformOptions() []PlatformOption {
 }
 
 // platformPresets 平台 × 格式 → 默认端点。glm / deepseek 双格式经真实
-// 端点验证(2026-10);opencode 按公开文档预设(无 key 未实测,地址可改)。
+// 端点验证(2026-10);opencode 为接入方式的默认形态(Go 订阅,实测全链
+// 2026-10,问题清单 #22),另一形态见 opencodeModePresets。注意 anthropic
+// 格式的 BaseURL 不带 /v1(Norma 请求时追加 /v1/messages;go 网关实测
+// .../anthropic/v1/messages 200,双 /v1 404)。
 var platformPresets = map[string]map[string]string{
 	PlatformGLM: {
 		"anthropic": "https://open.bigmodel.cn/api/anthropic",
@@ -101,9 +104,62 @@ var platformPresets = map[string]map[string]string{
 		"openai":    "https://api.deepseek.com",
 	},
 	PlatformOpenCode: {
+		"anthropic": "https://opencode.ai/inference/go/anthropic",
+		"openai":    "https://opencode.ai/inference/go/openai/v1",
+	},
+}
+
+// ---- opencode 接入方式双形态(P4-10 ①,问题清单 #22) ----
+//
+// Go 订阅(默认):走 inference/go 网关,请求自动注入稳定会话头与自报
+// User-Agent(见 opencode.go),拉模型列表走网关根 /v1/models;API 按
+// 量:走 zen 端点,不注入头。面板"接入方式"下拉切换预填,端点地址是
+// 行为载体(见 isOpenCodeGoURL)。
+
+// 接入方式词表(opencode)。
+const (
+	OpenCodeModeGo  = "go"  // Go 订阅(默认)
+	OpenCodeModeAPI = "api" // API 按量
+)
+
+// opencodeModePresets opencode 接入方式 × 格式 → 默认端点(Go 订阅与
+// platformPresets 主表现同;zen 按量实测 402 属未充 API 额度,非端点
+// 错误)。anthropic 两形态均不带 /v1(Norma anthropic 追加 /v1/messages;
+// go 网关实测 .../anthropic/v1/messages 200——子计划预填串 .../anthropic/v1
+// 会拼出双 /v1 404,按 #22 实测 URL 勘误为 .../anthropic)。
+var opencodeModePresets = map[string]map[string]string{
+	OpenCodeModeGo: {
+		"anthropic": "https://opencode.ai/inference/go/anthropic",
+		"openai":    "https://opencode.ai/inference/go/openai/v1",
+	},
+	OpenCodeModeAPI: {
 		"anthropic": "https://opencode.ai/zen",
 		"openai":    "https://opencode.ai/zen/v1",
 	},
+}
+
+// OpenCodeModeURL opencode 接入方式 × 格式的默认端点;非法方式或格式
+// 返回空串。
+func OpenCodeModeURL(mode, format string) string {
+	m, ok := opencodeModePresets[strings.TrimSpace(strings.ToLower(mode))]
+	if !ok {
+		return ""
+	}
+	return m[NormalizeFormat(format)]
+}
+
+// OpenCodeModePresetURLs 接入方式双形态快照(随 /api/models 下发,建
+// 模型弹窗"接入方式"预填数据源)。
+func OpenCodeModePresetURLs() map[string]map[string]string {
+	out := make(map[string]map[string]string, len(opencodeModePresets))
+	for mode, m := range opencodeModePresets {
+		cm := make(map[string]string, len(m))
+		for f, u := range m {
+			cm[f] = u
+		}
+		out[mode] = cm
+	}
+	return out
 }
 
 // PlatformDefaultURL 平台 × 格式的默认端点;非预设组合(含自定义平台、

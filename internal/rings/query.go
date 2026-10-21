@@ -509,13 +509,18 @@ const EdgeFalsify EdgeType = "falsify"
 // GraphNode 统一图投影节点(P2-09):六类节点全量。Covered/FactCount/
 // HypothesisCount 仅对 asset 节点有值(派生计数,与 AssetGraph 同源:
 // Covered=有 covers 边入;两计数=about 边按来源节点类型),非资产为零值;
-// Source 同理仅资产有值(来源三态,P4-05)。
+// Source 同理仅资产有值(来源三态,P4-05);Birth* 为发现型资产的出生
+// 血缘(P4-12:收割入图时冻结进 detail,此处只透传——出生步骤/单位/
+// 发现事实,非发现资产为零值)。
 type GraphNode struct {
 	NodeView
 	Covered         bool
 	FactCount       int
 	HypothesisCount int
 	Source          string
+	BirthStep       string
+	BirthUnit       string
+	BirthFact       string
 }
 
 // GraphView 统一图投影(P2-09,8.7 三视图共用):资产树 / 进度图 / 年轮图
@@ -589,6 +594,8 @@ func (s *Store) Graph(ctx context.Context, taskID string) (*GraphView, error) {
 	}
 
 	// 资产来源三态(P4-05):读 asset.detail 的 source(归一,缺省种子)。
+	// 同一扫描兼收出生血缘(P4-12:发现型资产的 step_id/unit_id/
+	// discovered_fact,收割入图时冻结进 detail)。
 	arows, err := tx.QueryContext(ctx, `
 		SELECT node_id, detail FROM nodes
 		WHERE task_id = ? AND node_type = 'asset'`, taskID)
@@ -597,19 +604,33 @@ func (s *Store) Graph(ctx context.Context, taskID string) (*GraphView, error) {
 	}
 	defer arows.Close()
 	assetSource := make(map[string]string, 32)
+	type assetBirth struct{ step, unit, fact string }
+	assetBirthOf := make(map[string]assetBirth, 32)
 	for arows.Next() {
 		var id, detail string
 		if err := arows.Scan(&id, &detail); err != nil {
 			return nil, fmt.Errorf("rings: 扫描任务 %s 资产来源: %w", taskID, err)
 		}
 		assetSource[id] = detailSource(detail)
+		var d struct {
+			StepID        string `json:"step_id"`
+			UnitID        string `json:"unit_id"`
+			DiscoveredFac string `json:"discovered_fact"`
+		}
+		if json.Unmarshal([]byte(detail), &d) == nil {
+			assetBirthOf[id] = assetBirth{step: d.StepID, unit: d.UnitID, fact: d.DiscoveredFac}
+		}
 	}
 	if err := arows.Err(); err != nil {
 		return nil, fmt.Errorf("rings: 遍历任务 %s 资产来源: %w", taskID, err)
 	}
 	for i := range view.Nodes {
-		if view.Nodes[i].Type == NodeAsset {
-			view.Nodes[i].Source = assetSource[view.Nodes[i].ID]
+		if view.Nodes[i].Type != NodeAsset {
+			continue
+		}
+		view.Nodes[i].Source = assetSource[view.Nodes[i].ID]
+		if b, ok := assetBirthOf[view.Nodes[i].ID]; ok {
+			view.Nodes[i].BirthStep, view.Nodes[i].BirthUnit, view.Nodes[i].BirthFact = b.step, b.unit, b.fact
 		}
 	}
 

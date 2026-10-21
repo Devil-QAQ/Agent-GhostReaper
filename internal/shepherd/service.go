@@ -34,6 +34,22 @@ const ActorShepherd = "shepherd"
 // 原会话续(每次应答经 Resume 恢复上下文,对话不因消息间隔重置)。
 func SessionID(taskID string) string { return "shepherd-" + taskID }
 
+// ClaimQASID 一轮成果追问会话的转录锚(P4-14):shepherdqa-<claimID>-r<N>。
+// 每轮独立会话(续接不新建;"新开一轮"才换锚)——token 行按此与牧者
+// 主对话分开对账(信息条独立计),原会话续经 Resume 跨消息保持上下文。
+func ClaimQASID(claimID string, round int) string {
+	return fmt.Sprintf("shepherdqa-%s-r%d", claimID, round)
+}
+
+// qaLinePrefix 成果追问工作线键前缀(同成果的追问串行应答;轮是会话
+// 边界,不是工作线边界)。
+const qaLinePrefix = "qa:"
+
+func qaLine(claimID string) string { return qaLinePrefix + claimID }
+
+// convKey 工作线在 convs 表的键(进程内)。
+func convKey(taskID, line string) string { return taskID + "\x00" + line }
+
 // Service 牧者会话服务(P2-07):每个任务一条串行会话工作线——
 // 面板消息入账(user_message,已排队)即返回,后台工作器逐条应答
 // (送达 → 工具调用留痕 → 回复入账);对话历史全走账本事件流,
@@ -165,8 +181,86 @@ func (s *Service) Enqueue(ctx context.Context, taskID, text string) (string, err
 	}); err != nil {
 		return "", fmt.Errorf("shepherd: 消息入账: %w", err)
 	}
-	s.kickTask(taskID)
+	s.kickLine(taskID, "")
 	return id, nil
+}
+
+// EnqueueClaim 成果追问发言入账(P4-14,问题清单 #24):一成果一线、
+// 每轮一会话——newRound=false 续接当前轮(无轮则开第 1 轮),newRound=
+// true 开新轮(旧轮留档,问答历史零删)。prelude 仅在该轮首条发言时由
+// 调用方装配传入(服务端确定性成果链路上下文包),随 user_message 落账
+// ——应答时注入模型会话、不上面板消息流;重启收养凭事件流照常携带。
+// 返回(消息 ID, 轮次)。
+func (s *Service) EnqueueClaim(ctx context.Context, taskID, claimID, text string, newRound bool, prelude string) (string, int, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "", 0, errors.New("shepherd: 追问不能为空")
+	}
+	if taskID == "" || claimID == "" {
+		return "", 0, errors.New("shepherd: 任务或成果 ID 不能为空")
+	}
+	if s.hibernating(taskID) {
+		return "", 0, ErrHibernated
+	}
+	round := 1
+	if cur := s.CurrentRound(ctx, taskID, claimID); cur > 0 {
+		if newRound {
+			round = cur + 1
+		} else {
+			round = cur
+		}
+	}
+	// 预载只随该轮首问携带:续问轮上误传的 prelude 不注入(防重复上下文)。
+	if s.roundHasMessage(ctx, taskID, claimID, round) {
+		prelude = ""
+	}
+	id := shortID("sm")
+	if _, err := s.Store.Append(ctx, taskID, rings.Event{
+		Kind: rings.EventShepherdRecord, Actor: "creator",
+		Payload: rings.ShepherdRecord{
+			MessageID: id, Type: rings.ShepherdRecUserMessage, Text: text,
+			ClaimID: claimID, Round: round, Prelude: prelude,
+		},
+	}); err != nil {
+		return "", 0, fmt.Errorf("shepherd: 追问入账: %w", err)
+	}
+	s.kickLine(taskID, qaLine(claimID))
+	return id, round, nil
+}
+
+// CurrentRound 成果当前追问轮次(0 = 尚未追问;多轮取最大)。
+func (s *Service) CurrentRound(ctx context.Context, taskID, claimID string) int {
+	sessions, err := s.claimQASessions(ctx, taskID)
+	if err != nil {
+		return 0
+	}
+	max := 0
+	for _, x := range sessions {
+		if x.ClaimID == claimID && x.Round > max {
+			max = x.Round
+		}
+	}
+	return max
+}
+
+// roundHasMessage 该轮是否已有发言(预载只随首问)。
+func (s *Service) roundHasMessage(ctx context.Context, taskID, claimID string, round int) bool {
+	evs, err := s.Store.Events(ctx, taskID, 0, 0)
+	if err != nil {
+		return false
+	}
+	for _, ev := range evs {
+		if ev.Kind != rings.EventShepherdRecord {
+			continue
+		}
+		var rec rings.ShepherdRecord
+		if json.Unmarshal(ev.Payload, &rec) == nil &&
+			rec.ClaimID == claimID && rec.Round == round &&
+			rec.Type == rings.ShepherdRecUserMessage {
+			return true
+		}
+	}
+	return false
 }
 
 // OnTerminal 任务终态收尾提示(P2-08f,Manager 终态记账点经装配层注入):
@@ -192,76 +286,87 @@ func (s *Service) OnTerminal(taskID, status string) {
 	}); err != nil {
 		return
 	}
-	s.kickTask(taskID)
+	s.kickLine(taskID, "")
 }
 
 // Start 服务启动的重启收养(P2-06f 同纪律):账本里已排队未送达的
 // 消息继续应答;已送达未回复的(进程中断残留)如实落失败态——原会话
 // 转录里已有该消息与部分应答,重发会重复注入,按中断结案,操作者可
-// 追问。每任务踢一脚工作器(无待办即空转退出)。
+// 追问。牧者主对话与各成果追问线(P4-14)同纪律逐线收养。每条有待办
+// 的线踢一脚工作器(无待办即空转退出)。
 func (s *Service) Start(ctx context.Context) error {
 	rows, err := s.Store.Tasks(ctx)
 	if err != nil {
 		return fmt.Errorf("shepherd: 收养扫描: %w", err)
 	}
 	for _, r := range rows {
-		pending, broken, aerr := s.adoptionScan(ctx, r.ID)
+		lines, aerr := s.adoptionScan(ctx, r.ID)
 		if aerr != nil {
 			return aerr
 		}
-		for _, msgID := range broken {
-			if _, err := s.Store.Append(ctx, r.ID, rings.Event{
-				Kind: rings.EventShepherdRecord, Actor: ActorShepherd,
-				Payload: rings.ShepherdRecord{
-					MessageID: msgID, Type: rings.ShepherdRecMessageState,
-					State: rings.ShepherdMsgFailed, Note: "进程重启,应答中断(原会话已保留该消息,可追问继续)",
-				},
-			}); err != nil {
-				return fmt.Errorf("shepherd: 中断消息结案: %w", err)
+		for line, broken := range lines {
+			for _, msg := range broken {
+				if _, err := s.Store.Append(ctx, r.ID, rings.Event{
+					Kind: rings.EventShepherdRecord, Actor: ActorShepherd,
+					Payload: rings.ShepherdRecord{
+						MessageID: msg.id, Type: rings.ShepherdRecMessageState,
+						ClaimID: msg.claimID, Round: msg.round,
+						State: rings.ShepherdMsgFailed, Note: "进程重启,应答中断(原会话已保留该消息,可追问继续)",
+					},
+				}); err != nil {
+					return fmt.Errorf("shepherd: 中断消息结案: %w", err)
+				}
 			}
-		}
-		if pending || len(broken) > 0 {
-			s.kickTask(r.ID)
+			s.kickLine(r.ID, line)
 		}
 	}
 	return nil
 }
 
-// adoptionScan 收养扫描:返回仍在排队的消息数与"已送达未回复"的消息 ID
-// (进程中断的精确签名——送达事件在、回复事件不在)。
-func (s *Service) adoptionScan(ctx context.Context, taskID string) (bool, []string, error) {
-	st, err := s.conversationState(ctx, taskID)
+// adoptionScan 收养扫描:返回全部有待办的会话线(牧者主对话 = "" 线;
+// 成果追问线 = "qa:<claimID>")及各自"已送达未回复"的消息(进程中断的
+// 精确签名——送达事件在、回复事件不在)。
+func (s *Service) adoptionScan(ctx context.Context, taskID string) (map[string][]*convMessage, error) {
+	st, err := s.linesState(ctx, taskID)
 	if err != nil {
-		return false, nil, err
+		return nil, err
 	}
-	pending, broken := false, []string{}
-	for _, m := range st.messages {
-		switch {
-		case m.state == "queued" && !m.replied:
-			pending = true
-		case m.state == rings.ShepherdMsgDelivered && !m.replied:
-			// 已送达未回复且进程已重启 = 应答中断的精确签名;已回复的
-			// 消息送达态就此终态,不再被收养误标。
-			broken = append(broken, m.id)
+	out := map[string][]*convMessage{}
+	for line, cs := range st {
+		pending, broken := false, []*convMessage{}
+		for _, m := range cs.messages {
+			switch {
+			case m.state == "queued" && !m.replied:
+				pending = true
+			case m.state == rings.ShepherdMsgDelivered && !m.replied:
+				// 已送达未回复且进程已重启 = 应答中断的精确签名;已回复的
+				// 消息送达态就此终态,不再被收养误标。
+				broken = append(broken, m)
+			}
+		}
+		if pending || len(broken) > 0 {
+			out[line] = broken
 		}
 	}
-	return pending, broken, nil
+	return out, nil
 }
 
-// kickTask 唤起任务会话工作线(串行:busy 时只补 kick,消息排队依次答)。
-func (s *Service) kickTask(taskID string) {
+// kickLine 唤起会话工作线(串行:busy 时只补 kick,消息排队依次答)。
+// line 空 = 牧者主对话;"qa:<claimID>" = 成果追问线。
+func (s *Service) kickLine(taskID, line string) {
 	s.mu.Lock()
 	if s.convs == nil {
 		s.convs = map[string]*conversation{}
 	}
-	c, ok := s.convs[taskID]
+	key := convKey(taskID, line)
+	c, ok := s.convs[key]
 	if !ok {
 		c = &conversation{kick: make(chan struct{}, 1)}
-		s.convs[taskID] = c
+		s.convs[key] = c
 	}
 	if !c.busy {
 		c.busy = true
-		go s.worker(context.Background(), taskID, c)
+		go s.worker(context.Background(), taskID, line, c)
 	}
 	s.mu.Unlock()
 	select {
@@ -273,19 +378,19 @@ func (s *Service) kickTask(taskID string) {
 // worker 逐条应答队列中的消息(队列即账本:每轮从事件流取最旧的
 // 未应答消息),空则退出;退出前复查防"入账与退出"缝隙丢消息。
 // P2-08:任务冬眠中挂起在门上(会话冻结,已排队消息唤醒后续答)。
-func (s *Service) worker(ctx context.Context, taskID string, c *conversation) {
+func (s *Service) worker(ctx context.Context, taskID, line string, c *conversation) {
 	defer func() {
 		s.mu.Lock()
 		c.busy = false
 		s.mu.Unlock()
 		// 复查:消息恰落在"取不到 → 退出"与"入账完成"之间时,由这里
 		// 兜住(等价于对自己补一脚;无待办则空转即退,不空转循环)。
-		if st, err := s.conversationState(ctx, taskID); err == nil && st.queuedCount() > 0 {
-			s.kickTask(taskID)
+		if st, err := s.lineState(ctx, taskID, line); err == nil && st.queuedCount() > 0 {
+			s.kickLine(taskID, line)
 		}
 	}()
 	for {
-		st, err := s.conversationState(ctx, taskID)
+		st, err := s.lineState(ctx, taskID, line)
 		if err != nil {
 			return
 		}
@@ -306,19 +411,22 @@ func (s *Service) worker(ctx context.Context, taskID string, c *conversation) {
 			// 系统提示原样注入(正文已含核对账本与一句总结的指令)。
 			text = "(系统提示)" + msg.text
 		}
-		s.answer(ctx, taskID, msg.id, text)
+		s.answer(ctx, taskID, msg, text)
 	}
 }
 
 // answer 应答一条消息:原会话续(Resume)→ 注入消息 → 流式消费
 // (首个事件即送达)→ 工具调用/思考/回复逐笔入账。失败如实落
-// message_state failed(原因可见,可重发)。
-func (s *Service) answer(ctx context.Context, taskID, messageID, text string) {
+// message_state failed(原因可见,可重发)。msg.claimID 非空时为成果
+// 追问会话(P4-14):转录锚与 token 记账换到该轮的独立会话,首问的
+// 预载成果上下文包一并在注入文本前置(面板消息流不呈现预载)。
+func (s *Service) answer(ctx context.Context, taskID string, msg *convMessage, text string) {
 	fail := func(note string) {
 		_, _ = s.Store.Append(context.Background(), taskID, rings.Event{
 			Kind: rings.EventShepherdRecord, Actor: ActorShepherd,
 			Payload: rings.ShepherdRecord{
-				MessageID: messageID, Type: rings.ShepherdRecMessageState,
+				MessageID: msg.id, Type: rings.ShepherdRecMessageState,
+				ClaimID: msg.claimID, Round: msg.round,
 				State: rings.ShepherdMsgFailed, Note: note,
 			},
 		})
@@ -329,10 +437,16 @@ func (s *Service) answer(ctx context.Context, taskID, messageID, text string) {
 	}
 
 	sid := SessionID(taskID)
+	if msg.claimID != "" {
+		sid = ClaimQASID(msg.claimID, msg.round)
+		if msg.prelude != "" {
+			text = "(成果追问预载)\n" + msg.prelude + "\n\n【造物主的追问】" + text
+		}
+	}
 	opts := agentcore.Options{
 		Provider:     s.Provider,
 		SystemPrompt: shepherdSystemSegments(ctx, s.Store),
-		Tools:        s.toolset(taskID, messageID),
+		Tools:        s.toolset(taskID, msg.id),
 		// 文风 skill 按需层(P3-11):非 nil 时 SDK 自动追加 Skill 工具,
 		// 与看/说/答工具并列;nil 安全(不挂)。
 		Skills: s.Skills,
@@ -376,6 +490,7 @@ func (s *Service) answer(ctx context.Context, taskID, messageID, text string) {
 		Model: s.Model, ModelOf: s.ModelOf, Transcript: sid,
 	}
 	appendRec := func(p rings.ShepherdRecord) {
+		p.ClaimID, p.Round = msg.claimID, msg.round
 		_, _ = s.Store.Append(context.Background(), taskID, rings.Event{
 			Kind: rings.EventShepherdRecord, Actor: ActorShepherd, Payload: p,
 		})
@@ -394,7 +509,7 @@ func (s *Service) answer(ctx context.Context, taskID, messageID, text string) {
 		if !delivered {
 			delivered = true
 			appendRec(rings.ShepherdRecord{
-				MessageID: messageID, Type: rings.ShepherdRecMessageState,
+				MessageID: msg.id, Type: rings.ShepherdRecMessageState,
 				State: rings.ShepherdMsgDelivered,
 			})
 		}
@@ -416,7 +531,7 @@ func (s *Service) answer(ctx context.Context, taskID, messageID, text string) {
 			}
 			head := flattenBlocks(ev.ToolResult.Content)
 			appendRec(rings.ShepherdRecord{
-				MessageID: messageID, Type: rings.ShepherdRecToolCall,
+				MessageID: msg.id, Type: rings.ShepherdRecToolCall,
 				ToolName: toolNames[ev.ToolResult.ToolUseID], ToolArgs: toolArgs[ev.ToolResult.ToolUseID],
 				IsError: ev.ToolResult.IsError, ResultHead: clipHead(head, 1024),
 			})
@@ -436,7 +551,7 @@ func (s *Service) answer(ctx context.Context, taskID, messageID, text string) {
 	}
 	if t := strings.TrimSpace(think.String()); t != "" {
 		appendRec(rings.ShepherdRecord{
-			MessageID: messageID, Type: rings.ShepherdRecThinking, Text: clipHead(t, 1200),
+			MessageID: msg.id, Type: rings.ShepherdRecThinking, Text: clipHead(t, 1200),
 		})
 	}
 	if replyText == "" {
@@ -444,7 +559,7 @@ func (s *Service) answer(ctx context.Context, taskID, messageID, text string) {
 		return
 	}
 	appendRec(rings.ShepherdRecord{
-		MessageID: messageID, Type: rings.ShepherdRecReply, Text: clipTail(replyText, 16000),
+		MessageID: msg.id, Type: rings.ShepherdRecReply, Text: clipTail(replyText, 16000),
 	})
 }
 
@@ -485,19 +600,26 @@ type AdviceView struct {
 }
 
 // View 会话读视图(面板对话页的数据面;信息条的 token/模型数据由
-// server 层从 token 独立表与 failover 链补齐)。
+// server 层从 token 独立表与 failover 链补齐)。Round/Rounds/Questions
+// 为成果追问会话的轮次信息(P4-14;主对话为零值)。
 type View struct {
 	Messages   []MessageView `json:"messages"`
 	Advices    []AdviceView  `json:"advices"`
 	Busy       bool          `json:"busy"`
 	StartedAt  string        `json:"started_at,omitempty"` // 会话首事件时刻(信息条时长锚点)
 	ProviderOn bool          `json:"provider_on"`          // 模型是否已装配
+	Round      int           `json:"round,omitempty"`      // 追问:本视图轮次
+	Rounds     int           `json:"rounds,omitempty"`     // 追问:该成果全部轮数
+	Questions  int           `json:"questions,omitempty"`  // 追问:本视图轮内问数
 }
 
 type convMessage struct {
 	id, text, state, note string
-	replied               bool // reply 事件已落(送达态的终态判定)
-	system                bool // system_note(任务终态收尾提示,P2-08f):不受冬眠冻结
+	replied               bool   // reply 事件已落(送达态的终态判定)
+	system                bool   // system_note(任务终态收尾提示,P2-08f):不受冬眠冻结
+	claimID               string // 成果追问锚(空 = 牧者主对话)
+	round                 int    // 追问轮次(claimID 非空时有效)
+	prelude               string // 该轮首问的预载上下文包(注入模型会话,不上面板)
 }
 
 type convState struct {
@@ -524,14 +646,40 @@ func (st *convState) oldestQueued() *convMessage {
 	return nil
 }
 
-// conversationState 从事件流重建会话状态(消息送达态与建议裁决态都
-// 是"最新事件覆盖"读法;重启后零内存依赖)。
-func (s *Service) conversationState(ctx context.Context, taskID string) (*convState, error) {
+// lineOf 记录归属的会话线(主对话 "" / 成果追问 "qa:<claimID>")。
+func lineOf(rec rings.ShepherdRecord) string {
+	if rec.ClaimID == "" {
+		return ""
+	}
+	return qaLine(rec.ClaimID)
+}
+
+// lineKeyOf 视图归属的会话线键(主对话 claimID 为空)。
+func lineKeyOf(claimID string) string {
+	if claimID == "" {
+		return ""
+	}
+	return qaLine(claimID)
+}
+
+// linesState 从事件流重建全部会话线的状态(P4-14 起主对话与各成果追问
+// 线同表分键;消息送达态与建议裁决态都是"最新事件覆盖"读法,重启后
+// 零内存依赖)。追问线的消息跨轮聚合(轮是会话边界,应答时按消息自身
+// 的 round 换会话)。
+func (s *Service) linesState(ctx context.Context, taskID string) (map[string]*convState, error) {
 	evs, err := s.Store.Events(ctx, taskID, 0, 0)
 	if err != nil {
 		return nil, err
 	}
-	st := &convState{byID: map[string]*convMessage{}}
+	out := map[string]*convState{}
+	stateOf := func(line string) *convState {
+		st, ok := out[line]
+		if !ok {
+			st = &convState{byID: map[string]*convMessage{}}
+			out[line] = st
+		}
+		return st
+	}
 	for _, ev := range evs {
 		if ev.Kind != rings.EventShepherdRecord {
 			continue
@@ -540,10 +688,12 @@ func (s *Service) conversationState(ctx context.Context, taskID string) (*convSt
 		if json.Unmarshal(ev.Payload, &rec) != nil {
 			continue
 		}
+		st := stateOf(lineOf(rec))
 		switch rec.Type {
 		case rings.ShepherdRecUserMessage, rings.ShepherdRecSystemNote:
 			m := &convMessage{id: rec.MessageID, text: rec.Text, state: "queued",
-				system: rec.Type == rings.ShepherdRecSystemNote}
+				system:  rec.Type == rings.ShepherdRecSystemNote,
+				claimID: rec.ClaimID, round: rec.Round, prelude: rec.Prelude}
 			st.messages = append(st.messages, m)
 			st.byID[m.id] = m
 		case rings.ShepherdRecMessageState:
@@ -556,11 +706,66 @@ func (s *Service) conversationState(ctx context.Context, taskID string) (*convSt
 			}
 		}
 	}
-	return st, nil
+	return out, nil
 }
 
-// View 会话视图(消息聚合 + 建议状态 + 运行态)。
+// lineState 单条会话线的状态(空 = 主对话)。
+func (s *Service) lineState(ctx context.Context, taskID, line string) (*convState, error) {
+	lines, err := s.linesState(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	return lines[line], nil
+}
+
+// View 牧者主对话视图(消息聚合 + 建议状态 + 运行态;成果追问记录
+// 不混入——独立留存,互不污染)。
 func (s *Service) View(ctx context.Context, taskID string) (*View, error) {
+	return s.viewOf(ctx, taskID, func(rec rings.ShepherdRecord) bool {
+		return rec.ClaimID == ""
+	}, "")
+}
+
+// ViewClaim 成果追问会话视图(P4-14):claimID 的 round 轮会话
+// (round=0 取最新轮)。轮次与问数随视图携带(入口按钮与会话页的
+// 数据面)。
+func (s *Service) ViewClaim(ctx context.Context, taskID, claimID string, round int) (*View, error) {
+	sessions, err := s.claimQASessions(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	rounds, latest := 0, 0
+	for _, x := range sessions {
+		if x.ClaimID != claimID {
+			continue
+		}
+		rounds++
+		if x.Round > latest {
+			latest = x.Round
+		}
+	}
+	if round <= 0 {
+		round = latest
+	}
+	finalRound := round
+	v, err := s.viewOf(ctx, taskID, func(rec rings.ShepherdRecord) bool {
+		return rec.ClaimID == claimID && rec.Round == finalRound
+	}, claimID)
+	if err != nil {
+		return nil, err
+	}
+	v.Round, v.Rounds = round, rounds
+	for _, m := range v.Messages {
+		if !m.System {
+			v.Questions++
+		}
+	}
+	return v, nil
+}
+
+// viewOf 事件流一遍扫描的视图装配(match 命中的记录进本视图;claimID
+// 空 = 主对话——运行态 busy 按对应工作线读)。
+func (s *Service) viewOf(ctx context.Context, taskID string, match func(rings.ShepherdRecord) bool, claimID string) (*View, error) {
 	evs, err := s.Store.Events(ctx, taskID, 0, 0)
 	if err != nil {
 		return nil, err
@@ -573,7 +778,7 @@ func (s *Service) View(ctx context.Context, taskID string) (*View, error) {
 			continue
 		}
 		var rec rings.ShepherdRecord
-		if json.Unmarshal(ev.Payload, &rec) != nil {
+		if json.Unmarshal(ev.Payload, &rec) != nil || !match(rec) {
 			continue
 		}
 		at := ev.OccurredAt.Local().Format("2006-01-02 15:04:05")
@@ -637,7 +842,7 @@ func (s *Service) View(ctx context.Context, taskID string) (*View, error) {
 		}
 	}
 	s.mu.Lock()
-	if c, ok := s.convs[taskID]; ok && c.busy {
+	if c, ok := s.convs[convKey(taskID, lineKeyOf(claimID))]; ok && c.busy {
 		v.Busy = true
 	}
 	s.mu.Unlock()
@@ -645,6 +850,73 @@ func (s *Service) View(ctx context.Context, taskID string) (*View, error) {
 }
 
 // ---- 小件 ----
+
+// ClaimQASession 一轮成果追问会话的摘要(P4-14;发现详情入口按钮与
+// 会话页牧者组列表的数据面,标题由 server 层从声明节点补)。
+type ClaimQASession struct {
+	ClaimID   string `json:"claim_id"`
+	Round     int    `json:"round"`
+	Questions int    `json:"questions"`
+	StartedAt string `json:"started_at,omitempty"`
+	LastAt    string `json:"last_at,omitempty"`
+}
+
+// claimQASessions 全部成果追问会话(每 (成果 × 轮) 一条,按轮次升序;
+// 事件流一遍扫描,重启后零内存依赖)。
+func (s *Service) claimQASessions(ctx context.Context, taskID string) ([]ClaimQASession, error) {
+	evs, err := s.Store.Events(ctx, taskID, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	type qaAgg struct {
+		questions int
+		startedAt string
+		lastAt    string
+	}
+	idx := map[[2]string]*ClaimQASession{}
+	agg := map[[2]string]*qaAgg{}
+	order := [][2]string{}
+	get := func(claimID string, round int) (*ClaimQASession, *qaAgg) {
+		k := [2]string{claimID, fmt.Sprintf("%d", round)}
+		if _, ok := idx[k]; !ok {
+			idx[k] = &ClaimQASession{ClaimID: claimID, Round: round}
+			agg[k] = &qaAgg{}
+			order = append(order, k)
+		}
+		return idx[k], agg[k]
+	}
+	for _, ev := range evs {
+		if ev.Kind != rings.EventShepherdRecord {
+			continue
+		}
+		var rec rings.ShepherdRecord
+		if json.Unmarshal(ev.Payload, &rec) != nil || rec.ClaimID == "" || rec.Round <= 0 {
+			continue
+		}
+		if rec.Type != rings.ShepherdRecUserMessage {
+			continue
+		}
+		_, a := get(rec.ClaimID, rec.Round)
+		at := ev.OccurredAt.Local().Format("2006-01-02 15:04:05")
+		a.questions++
+		if a.startedAt == "" {
+			a.startedAt = at
+		}
+		a.lastAt = at
+	}
+	out := make([]ClaimQASession, 0, len(order))
+	for _, k := range order {
+		x, a := idx[k], agg[k]
+		x.Questions, x.StartedAt, x.LastAt = a.questions, a.startedAt, a.lastAt
+		out = append(out, *x)
+	}
+	return out, nil
+}
+
+// ClaimQASessions 全部成果追问会话(server 层的列表数据面)。
+func (s *Service) ClaimQASessions(ctx context.Context, taskID string) ([]ClaimQASession, error) {
+	return s.claimQASessions(ctx, taskID)
+}
 
 func flattenBlocks(bs []llm.ContentBlock) string {
 	var b strings.Builder

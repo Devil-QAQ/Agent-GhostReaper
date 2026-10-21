@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/Autumn-27/norma/transcript"
 
 	"ghostreaper/internal/failover"
+	"ghostreaper/internal/overmind"
 	"ghostreaper/internal/rings"
 )
 
@@ -176,27 +178,132 @@ type RoundNode struct {
 	Status string `json:"status"`
 }
 
-// OvermindRound 一轮研判:五问结论 + 派发决策 + 本轮收割。收割与派发
-// 从"本轮研判所读版本 → 下一轮研判所读版本"窗口内的账本变化派生
-// (末轮开到当前):该窗口正是本轮研判之后、下一轮研判之前的全部
-// 落账——新增步骤(意图 / 反证 / 验证)、候选事实转正、声明仲裁
-// 裁决、假设收割裁决。
+// PanoramaAsset 在途全景行的目标归属资产(covers 边的资产端)。
+type PanoramaAsset struct {
+	ID    string `json:"id"`
+	Title string `json:"title,omitempty"`
+}
+
+// PanoramaRow 研判轮在途全景行(P4-11 ②,问题清单 #19):按该轮研判
+// 所读账本版本回放的图状态确定性派生,零 LLM——该时刻全部在跑与排队
+// 步骤,等前置如实标注,排序与领取次序同源(overmind.StepLaunchLess,
+// P4-08 同一比较器口径)。研判叙述仍由模型自由写——表是机器的、叙述
+// 是模型的,互补不重替。
+type PanoramaRow struct {
+	ID      string          `json:"id"`
+	Title   string          `json:"title,omitempty"`   // 意图摘要(步骤标题)
+	Status  string          `json:"status"`            // running | dispatched
+	Waiting bool            `json:"waiting,omitempty"` // 等前置(排队且前置未全完成,与依赖闸同口径)
+	Assets  []PanoramaAsset `json:"assets,omitempty"`  // 目标归属(covers 资产)
+}
+
+// panoramaReplay 在途全景的账本回放器(P4-11 ②):按事件序增量维护
+// 步骤/资产标题/覆盖边/依赖边,在任意研判版本处定格快照(版本号快照,
+// 不读当前投影)。
+type panoramaReplay struct {
+	steps      map[string]rings.NodeFull
+	assetTitle map[string]string
+	covers     map[string][]string // stepID → covers 资产
+	deps       map[string][]string // stepID → 前置步骤
+}
+
+func newPanoramaReplay() *panoramaReplay {
+	return &panoramaReplay{
+		steps: map[string]rings.NodeFull{}, assetTitle: map[string]string{},
+		covers: map[string][]string{}, deps: map[string][]string{},
+	}
+}
+
+// apply 喂入一条账本事件(只认节点/边三类,其余研判流事件与全景无关)。
+func (rep *panoramaReplay) apply(ev rings.RawEvent) {
+	switch ev.Kind {
+	case rings.EventNodeAdded:
+		var p rings.NodeAdded
+		if json.Unmarshal(ev.Payload, &p) != nil {
+			return
+		}
+		switch p.NodeType {
+		case rings.NodeStep:
+			rep.steps[p.NodeID] = rings.NodeFull{
+				NodeView: rings.NodeView{ID: p.NodeID, Type: p.NodeType, Title: p.Title,
+					Status: p.Status, CreatedRev: ev.Revision},
+				Detail: p.Detail,
+			}
+		case rings.NodeAsset:
+			rep.assetTitle[p.NodeID] = p.Title
+		}
+	case rings.EventNodeStateChanged:
+		var p rings.NodeStateChanged
+		if json.Unmarshal(ev.Payload, &p) != nil {
+			return
+		}
+		if st, ok := rep.steps[p.NodeID]; ok {
+			st.Status = p.Status
+			rep.steps[p.NodeID] = st
+		}
+	case rings.EventEdgeAdded:
+		var p rings.EdgeAdded
+		if json.Unmarshal(ev.Payload, &p) != nil {
+			return
+		}
+		switch p.EdgeType {
+		case rings.EdgeCovers:
+			rep.covers[p.FromNode] = append(rep.covers[p.FromNode], p.ToNode)
+		case rings.EdgeDependsOn:
+			rep.deps[p.FromNode] = append(rep.deps[p.FromNode], p.ToNode)
+		}
+	}
+}
+
+// snapshot 定格当前回放状态的在途全景:在跑+排队步骤按领取次序排
+// (调度器同一比较器,面板次序即可核对领取次序)。
+func (rep *panoramaReplay) snapshot() []PanoramaRow {
+	var flight []rings.NodeFull
+	for _, st := range rep.steps {
+		if st.Status == "running" || st.Status == "dispatched" {
+			flight = append(flight, st)
+		}
+	}
+	sort.Slice(flight, func(i, j int) bool { return overmind.StepLaunchLess(flight[i], flight[j]) })
+	rows := make([]PanoramaRow, 0, len(flight))
+	for _, st := range flight {
+		row := PanoramaRow{ID: st.ID, Title: st.Title, Status: st.Status}
+		for _, dep := range rep.deps[st.ID] {
+			if d, ok := rep.steps[dep]; !ok || d.Status != "done" { // 前置未完成/不存在:一律等待(依赖闸同口径)
+				row.Waiting = true
+				break
+			}
+		}
+		for _, a := range rep.covers[st.ID] {
+			row.Assets = append(row.Assets, PanoramaAsset{ID: a, Title: rep.assetTitle[a]})
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// OvermindRound 一轮研判:五问结论 + 派发决策 + 本轮收割 + 在途全景。
+// 收割与派发从"本轮研判所读版本 → 下一轮研判所读版本"窗口内的账本
+// 变化派生(末轮开到当前):该窗口正是本轮研判之后、下一轮研判之前
+// 的全部落账——新增步骤(意图 / 反证 / 验证)、候选事实转正、声明仲裁
+// 裁决、假设收割裁决。全景(P4-11 ②)按本轮研判所读版本回放定格。
 type OvermindRound struct {
-	At             string      `json:"at"`
-	SessionID      string      `json:"session_id,omitempty"`
-	EvaluatedRev   int64       `json:"evaluated_rev,omitempty"`
-	QAccess        string      `json:"q_access,omitempty"`
-	QPrivilege     string      `json:"q_privilege,omitempty"`
-	QCombination   string      `json:"q_combination,omitempty"`
-	QUnlock        string      `json:"q_unlock,omitempty"`
-	QOverturn      string      `json:"q_overturn,omitempty"`
-	Note           string      `json:"note,omitempty"`
-	Dispatched     int         `json:"dispatched,omitempty"`
-	Combined       []string    `json:"combined,omitempty"`
-	Steps          []RoundNode `json:"steps,omitempty"`
-	FactsConfirmed []string    `json:"facts_confirmed,omitempty"`
-	ClaimsJudged   []RoundNode `json:"claims_judged,omitempty"`
-	Hypotheses     []RoundNode `json:"hypotheses,omitempty"`
+	At             string        `json:"at"`
+	SessionID      string        `json:"session_id,omitempty"`
+	EvaluatedRev   int64         `json:"evaluated_rev,omitempty"`
+	QAccess        string        `json:"q_access,omitempty"`
+	QPrivilege     string        `json:"q_privilege,omitempty"`
+	QCombination   string        `json:"q_combination,omitempty"`
+	QUnlock        string        `json:"q_unlock,omitempty"`
+	QOverturn      string        `json:"q_overturn,omitempty"`
+	Note           string        `json:"note,omitempty"`
+	Dispatched     int           `json:"dispatched,omitempty"`
+	Combined       []string      `json:"combined,omitempty"`
+	Steps          []RoundNode   `json:"steps,omitempty"`
+	FactsConfirmed []string      `json:"facts_confirmed,omitempty"`
+	ClaimsJudged   []RoundNode   `json:"claims_judged,omitempty"`
+	Hypotheses     []RoundNode   `json:"hypotheses,omitempty"`
+	Panorama       []PanoramaRow `json:"panorama"`
 }
 
 // overmindRounds 主宰研判轨迹:按账本顺序取全部 overmind.record
@@ -244,11 +351,22 @@ func (s *Server) overmindRounds(r *http.Request, taskID string) ([]OvermindRound
 	if len(rounds) == 0 {
 		return []OvermindRound{}, nil
 	}
-	// 第二遍:窗口派生(派发的新增步骤 + 收割的状态迁移)。窗口 =
-	// (本轮研判版本, 下一轮研判版本];连续两轮读同一版本时窗口为空,
-	// 推进逻辑按"事件版本越过窗口上界即进下一轮"处理。
+	// 第二遍:窗口派生(派发的新增步骤 + 收割的状态迁移)+ 在途全景
+	// 快照(P4-11 ②)。窗口 = (本轮研判版本, 下一轮研判版本];连续两轮
+	// 读同一版本时窗口为空,推进逻辑按"事件版本越过窗口上界即进下一轮"
+	// 处理。全景按回放状态在"事件版本越过该轮研判版本"前定格(已应用
+	// 全部 ≤ 该版本的事件,版本号快照零 LLM)。
 	i := 0
+	rep := newPanoramaReplay()
+	snap := make([]bool, len(rounds))
 	for _, ev := range evs {
+		for r := range rounds {
+			if !snap[r] && ev.Revision > rounds[r].EvaluatedRev {
+				rounds[r].Panorama = rep.snapshot()
+				snap[r] = true
+			}
+		}
+		rep.apply(ev)
 		for i < len(rounds)-1 && ev.Revision > rounds[i+1].EvaluatedRev {
 			i++
 		}
@@ -296,6 +414,12 @@ func (s *Server) overmindRounds(r *http.Request, taskID string) ([]OvermindRound
 						RoundNode{ID: p.NodeID, Status: p.Status})
 				}
 			}
+		}
+	}
+	// 尾部:研判版本 ≥ 账本最新版本的轮(末轮常态),用终态回放定格。
+	for r := range rounds {
+		if !snap[r] {
+			rounds[r].Panorama = rep.snapshot()
 		}
 	}
 	return rounds, nil

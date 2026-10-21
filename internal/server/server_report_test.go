@@ -120,6 +120,11 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 	claimIDRe := regexp.MustCompile(`声明 (tc-[0-9a-f]+)`)
 	stmtBackupRe := regexp.MustCompile(`(?m)^\s*存在性声明: .*备份目录`)
 	model := newSModel(func(rr *srecorded) sreply {
+		// P4-13 来龙去脉叙述会话(零工具,系统段带"来龙去脉"):
+		// 回一段叙述 JSON(坏回复路径由 overmind 单测覆盖)。
+		if len(rr.ToolsOffered) == 0 && strings.Contains(rr.System, "来龙去脉") {
+			return sreply{Text: `{"narrative":"单位 u1 执行「审计主站敏感路径」时,在 /old-backup/ 的 200 响应正文里发现备份列举;u3 独立反证 1 轮排除竞争解释,仲裁者判定成立。"}`}
+		}
 		if len(rr.ToolsOffered) == 0 {
 			hasAudit := strings.Contains(rr.LastUser, "审计主站敏感路径")
 			hasActive := strings.Contains(rr.LastUser, "畸形请求")

@@ -40,6 +40,9 @@ type modelsView struct {
 	Members []memberView `json:"members"`
 	// Presets 平台 × 格式默认端点(P4-03 ④:建模型选平台后预填,可改)。
 	Presets map[string]map[string]string `json:"presets"`
+	// OpenCodeModes opencode 接入方式双形态端点(P4-10 ①:Go 订阅默认 /
+	// API 按量;presets 内的 opencode 即默认形态 Go 订阅)。
+	OpenCodeModes map[string]map[string]string `json:"opencode_modes"`
 	// Platforms 平台下拉清单(含"自定义")。
 	Platforms []failover.PlatformOption `json:"platforms"`
 	// Breaker 主用腿单熔断口径(06e 兼容)。
@@ -87,7 +90,8 @@ func (s *Server) maskedLibrary(ctx context.Context) ([]failover.MaskedConfig, er
 // 备链成员状态 + 环境变量兜底(持久化键值表,面板可见)。
 func (s *Server) handleModelsGet(w http.ResponseWriter, r *http.Request) {
 	v := modelsView{ChainReady: s.Chain != nil && s.Chain.Ready(),
-		Presets: failover.PlatformPresetURLs(), Platforms: failover.PlatformOptions()}
+		Presets: failover.PlatformPresetURLs(), Platforms: failover.PlatformOptions(),
+		OpenCodeModes: failover.OpenCodeModePresetURLs()}
 	lib, err := s.maskedLibrary(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)

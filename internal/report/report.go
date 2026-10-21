@@ -449,6 +449,15 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 	if prefix == "C" {
 		b.WriteString("- 裁决:仲裁者机器判定 Confirmed(条件求值全部通过)\n")
 	}
+	// 来龙去脉(P4-13):定稿冻结的模型叙述,读定稿零 LLM(R17);旧定稿
+	// 无叙述如实标注,不编造。
+	if cs != nil && cs.Repro != nil {
+		if cs.Repro.Narrative != "" {
+			fmt.Fprintf(b, "- 来龙去脉:%s\n", cs.Repro.Narrative)
+		} else {
+			b.WriteString("- 来龙去脉:定稿时未生成叙述\n")
+		}
+	}
 	// 反证记录:完整时间线(面板发现详情同源同一装配)。
 	if cs != nil && len(cs.Timeline) > 0 {
 		b.WriteString("- 反证记录(年轮版本刻度):\n")
@@ -470,11 +479,16 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 		}
 		fmt.Fprintf(b, "- 竞争性替代解释(创建时冻结):%s\n", strings.Join(alts, ";"))
 	}
-	// 复现步骤(收割定稿):操作方法 + Burp 可验证原文(与面板同口径)。
+	// 复现步骤(收割定稿):指令式描述 + Burp 可验证原文(与面板同口径)。
+	// P4-08 ⑤:操作方法(op 行)撤下报告正文,收进证据包;③:同型变体
+	// 计数如实标注(全量在证据包)。
 	if cs != nil && cs.Repro != nil {
 		fmt.Fprintf(b, "- 复现步骤(收割定稿 · 版本 %d", cs.Repro.Rev)
 		if cs.Repro.Severity != "" {
 			fmt.Fprintf(b, " · 级别 %s", cs.Repro.Severity)
+		}
+		if n := len(cs.Repro.Variants); n > 0 {
+			fmt.Fprintf(b, " · 去同型后 %d 步(变体 %d 条见证据包)", len(cs.Repro.Steps), n)
 		}
 		fmt.Fprintf(b, "):\n")
 		if len(cs.Repro.Steps) == 0 {
@@ -491,8 +505,8 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 				fmt.Fprintf(b, ":%s %s → %d", st.Method, st.URL, st.Status)
 			}
 			b.WriteString("\n")
-			if st.Op != "" {
-				fmt.Fprintf(b, "    操作方法:`%s`\n", st.Op)
+			if st.TLSWord != "" {
+				fmt.Fprintf(b, "    目标证书:%s(包外信息行,校验事实在原始数据)\n", st.TLSWord)
 			}
 			if st.Raw != "" {
 				fmt.Fprintf(b, "    HTTP 原文(Burp 可验证%s):\n", map[bool]string{true: ",面板同口径截断,全文在证据包", false: ""}[st.RawClip])

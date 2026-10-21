@@ -61,6 +61,7 @@ func seedRepro(t *testing.T, store *rings.Store, blobs *swarm.BlobStore, task st
 	if _, err := store.Append(context.Background(), task,
 		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "overmind", Payload: rings.TestClaimRecord{
 			ClaimID: "tc-1", Type: rings.TestClaimRecRepro, Severity: "high",
+			Narrative: "单位 u1 执行「审计主站敏感路径」时,在 /old-backup/ 的 200 响应正文里发现备份列举;u2 独立反证 1 轮排除缓存污染与归属错误,仲裁者判定成立。",
 			Steps: []rings.ReproStep{{
 				Seq: 1, Round: 1, StepID: "s2", UnitID: "u2",
 				Op:     "bash curl -sS -m 5 http://10.10.0.5:8080/old-backup/",
@@ -193,6 +194,30 @@ func seedReportScenario(t *testing.T, store *rings.Store, task string) {
 	)
 }
 
+// TestRenderNarrativeFallback P4-13:旧定稿(P4-13 前的 repro 记录无
+// Narrative 字段)如实标注不编造;无定稿的声明(待确认)不来龙去脉行。
+func TestRenderNarrativeFallback(t *testing.T) {
+	store := openStore(t)
+	blobs := openBlobs(t)
+	const task = "rep-nar"
+	seedReportScenario(t, store, task)
+	if _, err := store.Append(context.Background(), task, rings.Event{
+		Kind: rings.EventTestClaimRecord, Actor: "overmind", Payload: rings.TestClaimRecord{
+			ClaimID: "tc-1", Type: rings.TestClaimRecRepro, Severity: "high"}}); err != nil {
+		t.Fatalf("铺旧定稿失败: %v", err)
+	}
+	md, err := Render(context.Background(), store, blobs, task, nil)
+	if err != nil {
+		t.Fatalf("渲染报告失败: %v", err)
+	}
+	if !strings.Contains(md, "来龙去脉:定稿时未生成叙述") {
+		t.Fatalf("旧定稿应如实标注未生成叙述:\n%s", md)
+	}
+	if n := strings.Count(md, "来龙去脉:"); n != 1 {
+		t.Fatalf("无定稿的声明(待确认)不得有来龙去脉行(共 %d 行):\n%s", n, md)
+	}
+}
+
 func TestRenderTaskReport(t *testing.T) {
 	store := openStore(t)
 	blobs := openBlobs(t)
@@ -245,7 +270,8 @@ func TestRenderTaskReport(t *testing.T) {
 		}
 	}
 
-	// Confirmed 条目:声明、影响面、锚点(带标题)、发现/验证单位 R12。
+	// Confirmed 条目:声明、影响面、锚点(带标题)、发现/验证单位 R12、
+	// 来龙去脉(P4-13:定稿冻结的模型叙述,读定稿零 LLM)。
 	for _, want := range []string{
 		"### C-1 `tc-1` · 信息暴露 · 级别 high",
 		"存在性声明:/old-backup/ 备份目录可公开匿名列举",
@@ -253,14 +279,16 @@ func TestRenderTaskReport(t *testing.T) {
 		"资产锚点:`web1`(http://10.10.0.5:8080)",
 		"发现单位 `u1` · 发现步骤 `s1`;验证单位 `u2`(验证者 ≠ 发现者)",
 		"仲裁者机器判定 Confirmed",
+		"来龙去脉:单位 u1 执行「审计主站敏感路径」时,在 /old-backup/ 的 200 响应正文里发现备份列举",
 	} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("报告缺 Confirmed 片段 %q:\n%s", want, md)
 		}
 	}
 
-	// P2-13 完整报告:级别分布 + 反证时间线 + 复现步骤(操作方法 +
-	// Burp 可验证原文,与面板同源装配)。
+	// P2-13 完整报告:级别分布 + 反证时间线 + 复现步骤(Burp 可验证
+	// 原文,与面板同源装配)。P4-08 ⑤:操作方法撤下报告正文(证据包
+	// 收);⑥:请求行 origin-form(Host 头承载)。
 	for _, want := range []string{
 		"级别分布(Confirmed,跟影响面证据走):high 1",
 		"反证记录(年轮版本刻度):",
@@ -269,9 +297,9 @@ func TestRenderTaskReport(t *testing.T) {
 		"机器裁决 confirm(Satisfied=true)",
 		"竞争性替代解释(创建时冻结):",
 		"复现步骤(收割定稿 · 版本",
-		"操作方法:`bash curl -sS -m 5 http://10.10.0.5:8080/old-backup/`",
 		"HTTP 原文(Burp 可验证):",
-		"GET http://10.10.0.5:8080/old-backup/ HTTP/1.1",
+		"GET /old-backup/ HTTP/1.1",
+		"Host: 10.10.0.5:8080",
 		"HTTP/1.1 200 OK",
 		"mock backup archive listing: db-2026-09-01.sql.gz config.bak",
 		"原始数据 `sha256:",
@@ -279,6 +307,12 @@ func TestRenderTaskReport(t *testing.T) {
 		if !strings.Contains(md, want) {
 			t.Fatalf("报告缺 P2-13 片段 %q:\n%s", want, md)
 		}
+	}
+	if strings.Contains(md, "操作方法") {
+		t.Fatalf("P4-08 ⑤:操作方法(op 行)不得进报告正文(证据包收):\n%s", md)
+	}
+	if strings.Contains(md, "GET http://10.10.0.5:8080/ HTTP/1.1") {
+		t.Fatalf("P4-08 ⑥:请求行须 origin-form(绝对 URI 不得出现):\n%s", md)
 	}
 
 	// 待确认条目:搁置理由直陈(R4)。
@@ -445,8 +479,10 @@ func TestRenderCountsMirrorRecords(t *testing.T) {
 	}
 }
 
-// TestRenderHTTPSExchangeTLSLabel https 交换渲染(P3-01):首行如实标注
-// 目标证书校验结论;http 交换不带该行;原文逐字(Burp 可核对)。
+// TestRenderHTTPSExchangeTLSLabel https 交换渲染(P3-01 起;P4-08 ⑥ 新
+// 口径):请求行 origin-form(Host 头承载,复制即贴 Burp Repeater 可发),
+// 目标证书结论不进包文(包外信息行,审计事实在 blob);http 交换同形;
+// 原文逐字(Burp 可核对)。
 func TestRenderHTTPSExchangeTLSLabel(t *testing.T) {
 	ex := mirror.Exchange{
 		ID: "ms-hs", Type: rings.MirrorRecHTTPS, TaskID: "t", StepID: "s", UnitID: "u",
@@ -469,8 +505,8 @@ func TestRenderHTTPSExchangeTLSLabel(t *testing.T) {
 	}
 	raw, _ := renderExchangeRaw(&ex)
 	for _, want := range []string{
-		"[目标证书: 自签]",
-		"POST https://10.10.0.5:8443/login HTTP/1.1",
+		"POST /login HTTP/1.1",
+		"Host: 10.10.0.5:8443",
 		"user=admin&pass=cracked",
 		"HTTP/1.1 200 OK",
 		"<html>admin</html>",
@@ -479,8 +515,14 @@ func TestRenderHTTPSExchangeTLSLabel(t *testing.T) {
 			t.Fatalf("https 交换渲染缺 %q:\n%s", want, raw)
 		}
 	}
-	// 逐字保真的反面:校验结论 token 不进原文(http 无标注,https 的
-	// 标注只在首行且为操作者语言,非实现细节词)。
+	// 逐字保真的反面:证书结论不进包文(P4-08 ⑥:结论是包外信息行),
+	// 绝对 URI 不出现在请求行(origin-form)。
+	if strings.Contains(raw, "目标证书") {
+		t.Fatalf("证书结论不得进包文:\n%s", raw)
+	}
+	if strings.Contains(raw, "https://10.10.0.5:8443/login HTTP") {
+		t.Fatalf("请求行须 origin-form:\n%s", raw)
+	}
 	ex.Type = rings.MirrorRecHTTP
 	ex.TLS = nil
 	rawHTTP, _ := renderExchangeRaw(&ex)
@@ -490,9 +532,10 @@ func TestRenderHTTPSExchangeTLSLabel(t *testing.T) {
 }
 
 // TestExchangeRawSide 单侧原文装配(P3-02 审核迭代:请求包/返回包分开
-// 展示):请求侧含证书标注与请求行、不含状态行;响应侧含状态行与响应体、
-// 不含请求行与证书标注;无响应仅异常时响应侧只剩注记;单侧拼接 == 全量
-// (同一分块装配,报告/证据包渲染不受影响)。
+// 展示):请求侧 Burp 就绪(P4-08 ⑥:origin-form 请求行 + Host 头,
+// 证书结论不进包文)、不含状态行;响应侧含状态行与响应体、不含请求行;
+// 无响应仅异常时响应侧只剩注记;单侧拼接 == 全量(同一分块装配,报告/
+// 证据包渲染不受影响)。
 func TestExchangeRawSide(t *testing.T) {
 	ex := mirror.Exchange{
 		ID: "ms-x.1", Type: rings.MirrorRecHTTPS, StepID: "s1", UnitID: "u1",
@@ -510,10 +553,13 @@ func TestExchangeRawSide(t *testing.T) {
 	}
 	req := ExchangeRawSide(&ex, "req")
 	resp := ExchangeRawSide(&ex, "resp")
-	for _, want := range []string{"[目标证书: 自签]", "POST https://mock/login HTTP/1.1", "Host: mock", "user=admin"} {
+	for _, want := range []string{"POST /login HTTP/1.1", "Host: mock", "user=admin"} {
 		if !strings.Contains(req, want) {
 			t.Fatalf("请求侧缺 %q:\n%s", want, req)
 		}
+	}
+	if strings.Contains(req, "目标证书") || strings.Contains(req, "https://mock") {
+		t.Fatalf("请求侧须 Burp 就绪(无证书行、无绝对 URI):\n%s", req)
 	}
 	if strings.Contains(req, "HTTP/1.1 200 OK") || strings.Contains(req, "<html>") {
 		t.Fatalf("请求侧不应含响应内容:\n%s", req)
@@ -523,22 +569,23 @@ func TestExchangeRawSide(t *testing.T) {
 			t.Fatalf("响应侧缺 %q:\n%s", want, resp)
 		}
 	}
-	if strings.Contains(resp, "POST https") || strings.Contains(resp, "目标证书") {
+	if strings.Contains(resp, "POST /login") || strings.Contains(resp, "目标证书") {
 		t.Fatalf("响应侧不应含请求内容/证书标注:\n%s", resp)
 	}
-	// 单侧拼接 == 全量(请求侧 + 空行分隔 + 响应侧)。
+	// 单侧拼接 == 全量(请求侧 + CRLF 分隔 + 响应侧,线上行尾)。
 	full := renderExchangeFull(&ex)
-	if full != req+"\n"+resp {
-		t.Fatalf("单侧拼接须与全量逐字一致:\nfull=%q\nreq+resp=%q", full, req+"\n"+resp)
+	if full != req+"\r\n"+resp {
+		t.Fatalf("单侧拼接须与全量逐字一致:\nfull=%q\nreq+resp=%q", full, req+"\r\n"+resp)
 	}
 
-	// 无响应仅异常:响应侧只剩注记(无前导空行),全量为请求+空行+注记。
+	// 无响应仅异常:响应侧只剩注记(无前导空行),全量为请求+注记
+	//(注记自带前导 \r\n 兼作分隔)。
 	ex.Response, ex.Error = nil, "转发失败: connection refused"
 	resp = ExchangeRawSide(&ex, "resp")
-	if resp != "[镜留痕异常: 转发失败: connection refused]\n" {
+	if resp != "[镜留痕异常: 转发失败: connection refused]\r\n" {
 		t.Fatalf("异常侧原文形态错误:%q", resp)
 	}
-	if full = renderExchangeFull(&ex); full != ExchangeRawSide(&ex, "req")+"\n"+resp {
+	if full = renderExchangeFull(&ex); full != ExchangeRawSide(&ex, "req")+"\r\n"+resp {
 		t.Fatalf("无响应形态的单侧拼接与全量不一致:%q", full)
 	}
 }

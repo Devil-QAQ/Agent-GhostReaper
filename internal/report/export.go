@@ -250,30 +250,45 @@ func taskZipInto(zw *zip.Writer, ctx context.Context, store *rings.Store, blobs 
 	return nil
 }
 
-// zipEvidence 证据包:单声明全部复现步骤的镜留痕原文全文(字节级
-// 保真,Burp 可验证);文件头注明步骤与 blob 引用。
+// zipEvidence 证据包(P4-08 ③⑤⑥:维持全量,审计不丢):单声明去同型
+// 后的复现步骤 + 去重收起的变体交换,全部镜留痕原文全文(字节级保真,
+// Burp 可验证);文件头注明步骤、操作方法(工具调用,面板/报告正文不
+// 显、证据包收)、目标证书结论(包外信息)与 blob 引用。
 func zipEvidence(zw *zip.Writer, blobs *swarm.BlobStore, cs *ClaimCase, dir string, at time.Time) error {
 	if cs == nil || cs.Repro == nil {
 		return nil
 	}
-	for _, st := range cs.Repro.Steps {
+	writeOne := func(st rings.ReproStep, label, name string) error {
 		if st.BlobRef == "" || blobs == nil {
-			continue
+			return nil
 		}
 		doc, err := blobs.Read(st.BlobRef)
 		if err != nil {
-			continue // 引用悬空如实跳过(报告 md 已带引用,审计可下钻)
+			return nil // 引用悬空如实跳过(报告 md 已带引用,审计可下钻)
 		}
 		var ex mirror.Exchange
 		if err := json.Unmarshal(doc, &ex); err != nil {
-			continue
+			return nil
 		}
 		var b strings.Builder
-		fmt.Fprintf(&b, "# 证据 · 步骤 %d · %s %s → %d\n# 原始数据 %s(内容寻址,字节级保真)\n\n",
-			st.Seq, st.Method, st.URL, st.Status, st.BlobRef)
+		fmt.Fprintf(&b, "# 证据 · %s · %s %s → %d\n", label, st.Method, st.URL, st.Status)
+		if st.Op != "" {
+			fmt.Fprintf(&b, "# 操作 %s\n", st.Op)
+		}
+		if ex.Type == rings.MirrorRecHTTPS && ex.TLS != nil {
+			fmt.Fprintf(&b, "# 目标证书: %s\n", mirror.TLSLabel(ex.TLS.Validity))
+		}
+		fmt.Fprintf(&b, "# 原始数据 %s(内容寻址,字节级保真)\n\n", st.BlobRef)
 		b.WriteString(renderExchangeFull(&ex))
-		name := path.Join(dir, cs.ClaimID, fmt.Sprintf("step-%d.txt", st.Seq))
-		if err := zipAdd(zw, name, []byte(b.String()), at); err != nil {
+		return zipAdd(zw, name, []byte(b.String()), at)
+	}
+	for _, st := range cs.Repro.Steps {
+		if err := writeOne(st.ReproStep, fmt.Sprintf("步骤 %d", st.Seq), path.Join(dir, cs.ClaimID, fmt.Sprintf("step-%d.txt", st.Seq))); err != nil {
+			return err
+		}
+	}
+	for i, st := range cs.Repro.Variants {
+		if err := writeOne(st, fmt.Sprintf("变体 %d", i+1), path.Join(dir, cs.ClaimID, fmt.Sprintf("variant-%d.txt", i+1))); err != nil {
 			return err
 		}
 	}

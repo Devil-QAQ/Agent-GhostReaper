@@ -465,7 +465,7 @@ function ClaimRow({ tid, claim, checked, onToggle, onOpen }) {
               {detailError ? (
                 <span className="text-xs text-status-danger">读取失败:{detailError}</span>
               ) : steps ? (
-                <ReproStepsList tid={tid} steps={steps} />
+                <ReproStepsList tid={tid} steps={steps} variants={(detail?.repro?.variants || []).length} />
               ) : (
                 <span className="text-xs text-muted-foreground">读取复现步骤…</span>
               )}

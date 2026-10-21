@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"ghostreaper/internal/overmind"
 	"ghostreaper/internal/report"
@@ -105,6 +106,85 @@ func (s *Server) claimOriginOf(ctx context.Context, taskID, claimID string) clai
 	return view
 }
 
+// claimTimingView 确认耗时拆解(P4-08 ②,问题清单 #17):发现落地 →
+// 终态的排队/执行/轮次——账本时间戳直读,零新增采集。落地 = 候选声明
+// 入账;终态 = 最近一次 Confirmed/待确认 迁移(进行中为空,如实不造);
+// 排队/执行/轮次只算当前战役的反证步骤(重开前的旧战役不混计,口径与
+// 复现步骤归因同源 overmind.ClaimFalsifySteps)。
+type claimTimingView struct {
+	LandedAt   string  `json:"landed_at"`             // 落地时刻(候选声明入账)
+	TerminalAt string  `json:"terminal_at,omitempty"` // 终态时刻(Confirmed/待确认;进行中缺省)
+	QueueSec   float64 `json:"queue_seconds"`         // 排队合计(反证步骤 dispatched→running 段合计)
+	ExecSec    float64 `json:"exec_seconds"`          // 执行合计(running→下一状态段合计,含收场)
+	Rounds     int     `json:"rounds"`                // 反证轮次(当前战役反证步骤数)
+}
+
+// claimTimingOf 耗时拆解装配:事件流一次扫描(声明入账/终态 + 战役反证
+// 步骤的状态段迁移)。失败如实返回零值视图(详情其余区不受影响)。
+func (s *Server) claimTimingOf(ctx context.Context, taskID, claimID string) claimTimingView {
+	var v claimTimingView
+	steps, err := overmind.ClaimFalsifySteps(ctx, s.Store, taskID, claimID)
+	if err != nil {
+		return v
+	}
+	inCampaign := map[string]bool{}
+	for _, st := range steps {
+		inCampaign[st.ID] = true
+	}
+	evs, err := s.Store.Events(ctx, taskID, 0, 0)
+	if err != nil {
+		return v
+	}
+	v.Rounds = len(steps)
+	// 战役步骤的状态段游标(逐事件推进):dispatched→running 计排队,
+	// running→其余计执行(R14 重领的来回段如实累加)。
+	lastState := map[string]string{}
+	lastAt := map[string]time.Time{}
+	acc := func(from, to string, d time.Duration) {
+		switch {
+		case from == "dispatched" && to == "running":
+			v.QueueSec += d.Seconds()
+		case from == "running" && to != "running":
+			v.ExecSec += d.Seconds()
+		}
+	}
+	for _, ev := range evs {
+		switch ev.Kind {
+		case rings.EventNodeAdded:
+			var p rings.NodeAdded
+			if json.Unmarshal(ev.Payload, &p) != nil {
+				continue
+			}
+			if p.NodeType == rings.NodeTestClaim && p.NodeID == claimID {
+				v.LandedAt = ev.OccurredAt.Local().Format("2006-01-02 15:04:05")
+				continue
+			}
+			if p.NodeType == rings.NodeStep && inCampaign[p.NodeID] {
+				lastState[p.NodeID], lastAt[p.NodeID] = "dispatched", ev.OccurredAt
+			}
+		case rings.EventNodeStateChanged:
+			var p rings.NodeStateChanged
+			if json.Unmarshal(ev.Payload, &p) != nil {
+				continue
+			}
+			if p.NodeID == claimID {
+				if p.Status == rings.TestClaimConfirmed || p.Status == rings.TestClaimPending {
+					v.TerminalAt = ev.OccurredAt.Local().Format("2006-01-02 15:04:05")
+				}
+				continue
+			}
+			if !inCampaign[p.NodeID] {
+				continue
+			}
+			if prev, ok := lastState[p.NodeID]; ok {
+				acc(prev, p.Status, ev.OccurredAt.Sub(lastAt[p.NodeID]))
+			}
+			lastState[p.NodeID], lastAt[p.NodeID] = p.Status, ev.OccurredAt
+		}
+	}
+	return v
+}
+
 // claimDetailView 发现详情:节点 + 两维声明 + 冻结解释(存活状态)+
 // 完整反证时间线 + 收割定稿(复现步骤与严重级别)+ 修复建议(8.8 修复
 // 建议区:report.Remediation 确定性查表,与报告导出同源同一张表)+
@@ -122,6 +202,18 @@ type claimDetailView struct {
 	Retests         []retestView        `json:"retests"`          // 复测历史(第 1 轮起,最新在尾;P3-06)
 	Replays         []replayView        `json:"replays"`          // 重放校验历史(第 1 轮起,最新在尾;P3-07)
 	Origin          claimOriginView     `json:"origin"`           // 成果溯源:发现单位与反证单位(P3-13b ①)
+	Timing          claimTimingView     `json:"timing"`           // 确认耗时拆解(P4-08 ②:落地→终态 排队/执行/轮次)
+	Followup        claimFollowupView   `json:"followup"`         // 成果追问会话摘要(P4-14:入口按钮"已 N 问"的数据面)
+}
+
+// claimFollowupView 成果追问摘要(P4-14):当前轮次(0 = 尚未追问)、
+// 最新轮问数与最近活动时刻——发现详情"向牧者追问 / 继续追问(已 N 问)"
+// 按钮的数据面;轮次与会话页牧者组同源(shepherd 事件流派生)。
+type claimFollowupView struct {
+	Round     int    `json:"round"` // 最新轮(0 = 尚未追问)
+	Rounds    int    `json:"rounds"`
+	Questions int    `json:"questions"` // 最新轮问数
+	LastAt    string `json:"last_at,omitempty"`
 }
 
 // retestView 一轮复测(详情抽屉的历史条目,P3-06)。SessionID 即会话
@@ -215,6 +307,7 @@ func (s *Server) handleClaimDetail(w http.ResponseWriter, r *http.Request) {
 		ID: node.ID, Status: node.Status, Statement: node.Title, CreatedRev: node.CreatedRev,
 	}, Retests: []retestView{}, Replays: []replayView{}}
 	v.Origin = s.claimOriginOf(ctx, taskID, claimID)
+	v.Timing = s.claimTimingOf(ctx, taskID, claimID)
 	v.Claim.Impact, _ = node.Detail["impact"].(string)
 	v.Claim.Vulnclass, _ = node.Detail["vulnclass"].(string)
 	v.Claim.Discoverer, _ = node.Detail["unit_id"].(string)
@@ -260,6 +353,20 @@ func (s *Server) handleClaimDetail(w http.ResponseWriter, r *http.Request) {
 	v.Claim.Replayable = len(v.Evidence) > 0
 	if exec := s.swarmExec(); exec != nil {
 		v.Claim.ReplayRunning = exec.ReplayRunning(taskID, claimID)
+	}
+	// 成果追问摘要(P4-14):入口按钮数据面,与追问会话同源。
+	if s.Shepherd != nil {
+		if sessions, serr := s.Shepherd.ClaimQASessions(ctx, taskID); serr == nil {
+			for _, x := range sessions {
+				if x.ClaimID != claimID {
+					continue
+				}
+				v.Followup.Rounds++
+				if x.Round > v.Followup.Round {
+					v.Followup.Round, v.Followup.Questions, v.Followup.LastAt = x.Round, x.Questions, x.LastAt
+				}
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, v)
 }

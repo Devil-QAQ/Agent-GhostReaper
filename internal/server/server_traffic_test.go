@@ -248,7 +248,7 @@ func TestTrafficRawSegmentsBytewise(t *testing.T) {
 	}
 	got := full.String()
 	for _, wantLine := range []string{
-		"GET http://mock.test/old-backup/?page=1 HTTP/1.1",
+		"GET /old-backup/?page=1 HTTP/1.1",
 		"Host: mock.test",
 		"User-Agent: probe/1",
 		"HTTP/1.1 200 OK",
@@ -413,14 +413,17 @@ func TestTrafficRawSide(t *testing.T) {
 	}
 	req, reqTotal := fetchAll("side=req")
 	resp, respTotal := fetchAll("side=resp")
-	if !strings.Contains(req, "GET http://mock.test/old-backup/?page=1 HTTP/1.1") || strings.Contains(req, "HTTP/1.1 200 OK") {
+	if !strings.Contains(req, "GET /old-backup/?page=1 HTTP/1.1") || strings.Contains(req, "HTTP/1.1 200 OK") {
 		t.Fatalf("请求侧内容错误:\n%s", req)
 	}
-	if !strings.Contains(resp, "HTTP/1.1 200 OK") || strings.Contains(resp, "GET http://") {
+	if strings.Contains(req, "http://mock.test/") {
+		t.Fatalf("P4-08 ⑥:请求行须 origin-form(绝对 URI 不得出现):\n%s", req)
+	}
+	if !strings.Contains(resp, "HTTP/1.1 200 OK") || strings.Contains(resp, "GET /old-backup") {
 		t.Fatalf("响应侧内容错误:\n%s", resp)
 	}
 	full, fullTotal := fetchAll("")
-	if full != req+"\n"+resp || fullTotal != reqTotal+respTotal+1 {
+	if full != req+"\r\n"+resp || fullTotal != reqTotal+respTotal+2 {
 		t.Fatalf("单侧拼接须与全量逐字一致(%d/%d/%d)", fullTotal, reqTotal, respTotal)
 	}
 	// 非法 side。

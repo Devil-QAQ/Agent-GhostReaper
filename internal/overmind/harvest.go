@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 
 	"ghostreaper/internal/arbiter"
@@ -199,6 +200,11 @@ type HarvestResult struct {
 // detail.evidence_ref)者转正 confirmed;正式化 = 追加 node.state_changed
 // 事件(候选节点同一 ID,血缘与审计轨迹保留)。无证据候选跳过并记录原因。
 // 证据真伪的核验升级(影响面、反证)归仲裁者 P1-06/P1-08。
+// P4-12(问题清单 #21):带 new_asset 声明的候选转正时收割入图——发现型
+// 对象点亮 source=discovered,出生血缘(发现步骤 produces→资产、发现
+// 事实 about→资产)与发现单位/步骤/事实冻结进 detail,链路从成果一路
+// 走通到"谁发现的它"。同标识资产查重:重复发现不重复入图,发现事实
+// 锚定到既有对象(不编造第二次出生)。
 func Harvest(ctx context.Context, store *rings.Store, taskID string) (*HarvestResult, error) {
 	candidates, err := store.NodesByType(ctx, taskID, rings.NodeFact, "candidate")
 	if err != nil {
@@ -217,15 +223,109 @@ func Harvest(ctx context.Context, store *rings.Store, taskID string) (*HarvestRe
 			res.Skipped = append(res.Skipped, Skipped{FactID: c.ID, Reason: "候选无证据引用,不转正"})
 			continue
 		}
-		if _, err := store.Append(ctx, taskID, rings.Event{
+		events := []rings.Event{{
 			Kind: rings.EventNodeStateChanged, Actor: ActorOvermind,
 			Payload: rings.NodeStateChanged{NodeID: c.ID, Status: "confirmed"},
-		}); err != nil {
+		}}
+		if decl := factNewAsset(c.Detail); decl != nil {
+			assetEvents, err := discoveredAssetEvents(ctx, store, taskID, c, decl)
+			if err != nil {
+				return res, fmt.Errorf("overmind: 收割候选 %s 入图新对象: %w", c.ID, err)
+			}
+			events = append(events, assetEvents...)
+		}
+		if _, err := store.Append(ctx, taskID, events...); err != nil {
 			return res, fmt.Errorf("overmind: 收割候选 %s: %w", c.ID, err)
 		}
 		res.Confirmed = append(res.Confirmed, c.ID)
 	}
 	return res, nil
+}
+
+// factNewAsset 候选事实 detail 里的 new_asset 声明(P4-12);无声明或
+// 声明缺标识返回 nil(入口已校验过词表,这里只取形状不重复校验)。
+func factNewAsset(detail map[string]any) *swarm.NewAssetDecl {
+	raw, ok := detail["new_asset"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	decl := &swarm.NewAssetDecl{}
+	decl.Class, _ = raw["class"].(string)
+	decl.Title, _ = raw["title"].(string)
+	decl.Parent, _ = raw["parent"].(string)
+	if strings.TrimSpace(decl.Title) == "" {
+		return nil
+	}
+	return decl
+}
+
+// discoveredAssetEvents 收割入图的事件批(P4-12,与事实转正同批一事务):
+//   - 同标识资产已存在 → 只补 about 边(发现事实锚定既有对象,断链不编造);
+//   - 新对象 → 资产节点(source=discovered,出生血缘冻结进 detail)+
+//     produces 边(发现步骤 → 资产,对象出生边)+ about 边(发现事实 →
+//     资产)+ 可选 sub_of 边(声明带父资产时挂层级)。
+func discoveredAssetEvents(ctx context.Context, store *rings.Store, taskID string, fact rings.NodeFull, decl *swarm.NewAssetDecl) ([]rings.Event, error) {
+	title := strings.TrimSpace(decl.Title)
+	assets, err := store.NodesByType(ctx, taskID, rings.NodeAsset, "")
+	if err != nil {
+		return nil, fmt.Errorf("查资产查重: %w", err)
+	}
+	for _, a := range assets {
+		if strings.TrimSpace(a.Title) == title {
+			return []rings.Event{{Kind: rings.EventEdgeAdded, Actor: ActorOvermind,
+				Payload: rings.EdgeAdded{EdgeType: rings.EdgeAbout, FromNode: fact.ID, ToNode: a.ID}}}, nil
+		}
+	}
+	// 出生步骤 = 事实的 produces 边来源(虫群提交时同批落的血缘)。
+	stepID := ""
+	produces, err := store.Edges(ctx, taskID, rings.EdgeProduces)
+	if err != nil {
+		return nil, fmt.Errorf("查事实血缘: %w", err)
+	}
+	for _, e := range produces {
+		if e.To == fact.ID {
+			stepID = e.From
+			break
+		}
+	}
+	unitID, _ := fact.Detail["unit_id"].(string)
+	transcript, _ := fact.Detail["transcript_id"].(string)
+	detail := map[string]any{
+		"source":          rings.AssetSourceDiscovered,
+		"unit_id":         unitID,
+		"discovered_fact": fact.ID,
+	}
+	if stepID != "" {
+		detail["step_id"] = stepID
+	}
+	if transcript != "" {
+		detail["transcript_id"] = transcript
+	}
+	id := "a-" + shortIDSuffix()
+	events := []rings.Event{
+		{Kind: rings.EventNodeAdded, Actor: ActorOvermind, Payload: rings.NodeAdded{
+			NodeID: id, NodeType: rings.NodeAsset, Title: title, Status: "active",
+			AssetClass: rings.AssetClass(strings.TrimSpace(decl.Class)), Detail: detail,
+		}},
+		{Kind: rings.EventEdgeAdded, Actor: ActorOvermind, Payload: rings.EdgeAdded{
+			EdgeType: rings.EdgeAbout, FromNode: fact.ID, ToNode: id,
+		}},
+	}
+	if stepID != "" {
+		events = append(events, rings.Event{
+			Kind: rings.EventEdgeAdded, Actor: ActorOvermind,
+			Payload: rings.EdgeAdded{EdgeType: rings.EdgeProduces, FromNode: stepID, ToNode: id},
+		})
+	}
+	if p := strings.TrimSpace(decl.Parent); p != "" {
+		if _, err := store.Node(ctx, taskID, p); err == nil {
+			events = append(events, rings.Event{
+				Kind: rings.EventEdgeAdded, Actor: ActorOvermind,
+				Payload: rings.EdgeAdded{EdgeType: rings.EdgeSubOf, FromNode: id, ToNode: p},
+			})
+		}
+	}
+	return events, nil
 }
 
 // HarvestClaimsResult 一次声明收割(反证派发)的结果。
@@ -401,7 +501,9 @@ func HarvestClaims(ctx context.Context, store *rings.Store, taskID string) (*Har
 // 原子,不出现"步骤在跑而声明不在反证中"的中间态)。反证 Step 继承
 // 发现步骤的意图分级与目标归属;组合声明(P2-06)无发现步骤——血缘
 // 挂在环节 Fact 上,意图分级取只读探测(重放组合效果的默认授权姿态,
-// 需更强动作时由反证单位按 RoE/审批门逐次过门)。
+// 需更强动作时由反证单位按 RoE/审批门逐次过门)。P4-08 ①:优先级定
+// high(反证少数有界、1~2 轮收敛;发现 → Confirmed 周期卡 R13 燃料,
+// 探索稍让位是预期取舍,名额保障与解释限量不碰)。
 func dispatchFalsifyRound(ctx context.Context, store *rings.Store, taskID string, c rings.NodeFull,
 	round int, rawAlts []any, discoverStep *rings.NodeFull, assets []string, intent string) error {
 	level := rings.ActionReadOnly
@@ -429,6 +531,7 @@ func dispatchFalsifyRound(ctx context.Context, store *rings.Store, taskID string
 		ExpectedObservation: "经 submit_falsify_result 写回结构化反证结论(逐条竞争解释按 ID 给 refuted)",
 		ActionLevel:         string(level),
 		HarmClass:           harm,
+		Priority:            PriorityHigh,
 		CoversAssets:        assets,
 		Detail:              detail,
 	})
@@ -476,9 +579,11 @@ func maxFalsifyRound(steps []rings.NodeFull, claimID string) int {
 	return max
 }
 
-// claimFalsifySteps 声明当前战役内的反证步骤(收割定稿组装复现步骤的
+// ClaimFalsifySteps 声明当前战役内的反证步骤(收割定稿组装复现步骤的
 // 归因范围):绑定声明且创建于最近 reopen 之后的 Step,按轮次排序。
-func claimFalsifySteps(ctx context.Context, store *rings.Store, taskID, claimID string) ([]rings.NodeFull, error) {
+// P4-08 ② 起服务端发现详情的耗时拆解共用本口径(排队/执行/轮次只算
+// 当前战役,重开前的旧战役不混计)。
+func ClaimFalsifySteps(ctx context.Context, store *rings.Store, taskID, claimID string) ([]rings.NodeFull, error) {
 	campaignRev := int64(0)
 	evs, err := store.Events(ctx, taskID, 0, 0)
 	if err != nil {
@@ -525,16 +630,23 @@ func claimFalsifySteps(ctx context.Context, store *rings.Store, taskID, claimID 
 //   - 复现步骤 = 当前战役反证 Step 的镜留痕 HTTP(S)交换(P3-01 起
 //     https 解密留痕同收;独立验证单位的真实重放,天然可复现),每步
 //     携带操作方法(该 Step 的工具调用:工具名+参数,受控回流入口
-//     不计)、一句话描述(P3-05b ②:这步在干什么,从交换事实确定性
-//     生成)与交换原文的 blob 引用(Burp 可验证数据包,完整原文经
-//     内容寻址回放,R18);
+//     不计;证据包收,面板/报告正文不显,P4-08 ⑤)、一句话描述(P4-08
+//     ④:组装时先落确定性描述,定稿落账前由 Loop 用模型改写为指令式
+//     人话并冻结;失败回退确定性描述)与交换原文的 blob 引用(Burp
+//     可验证数据包,完整原文经内容寻址回放,R18);
 //   - P3-05b ①:交换按目标流量过滤——请求 host 在任务授权范围
 //     (种子资产标识)内才收,外网查证流量(web_fetch 等)不进步骤;
-//     流量页不受影响(审计链全量保留)。
+//     流量页不受影响(审计链全量保留);
+//   - P4-08 ③ 组装侧去同型:同方法+同路径+同状态的重复交换只保留
+//     构成复现流程的一条(确定性保留规则 = 该型首条;非成功状态自成
+//     一型不合并,401→绕过→200 式流程叙事保留),其余进 Variants——
+//     反证变体流量(换 UA / 防缓存参数 / 近似 body)不进复现步骤;
+//     不同 URL / 步骤的多步流程不受影响;证据包 zip 维持全量(审计
+//     不丢)。
 //
 // 只读账本,不写;由主宰循环与确认裁决同批落账。
 func AssembleRepro(ctx context.Context, store *rings.Store, taskID, claimID, severity string) (*rings.TestClaimRecord, error) {
-	falsifySteps, err := claimFalsifySteps(ctx, store, taskID, claimID)
+	falsifySteps, err := ClaimFalsifySteps(ctx, store, taskID, claimID)
 	if err != nil {
 		return nil, err
 	}
@@ -576,10 +688,8 @@ func AssembleRepro(ctx context.Context, store *rings.Store, taskID, claimID, sev
 		op := r.ToolName + " " + clipArgs(string(r.ToolArgs), 200)
 		ops[r.StepID] = append(ops[r.StepID], op)
 	}
-	rec := &rings.TestClaimRecord{
-		ClaimID: claimID, Type: rings.TestClaimRecRepro, Severity: severity,
-	}
-	seq := 0
+	// 账次序收全部范围内交换(去同型前全量)。
+	var all []rings.ReproStep
 	for _, ev := range evs {
 		if ev.Kind != rings.EventMirrorRecord {
 			continue
@@ -595,10 +705,9 @@ func AssembleRepro(ctx context.Context, store *rings.Store, taskID, claimID, sev
 		if !scope.allows(m.URL) {
 			continue // 非目标流量(外网查证等)不进复现步骤;流量页全量保留
 		}
-		seq++
 		round, _ := s.Detail["round"].(float64)
 		step := rings.ReproStep{
-			Seq: seq, Round: int(round), StepID: m.StepID, UnitID: m.UnitID,
+			Round: int(round), StepID: m.StepID, UnitID: m.UnitID,
 			Desc:   reproStepDesc(m),
 			Method: m.Method, URL: m.URL, Status: m.Status, BlobRef: m.BlobRef,
 			ExchangeID: m.ExchangeID,
@@ -609,9 +718,44 @@ func AssembleRepro(ctx context.Context, store *rings.Store, taskID, claimID, sev
 		if list := ops[m.StepID]; len(list) > 0 {
 			step.Op = strings.Join(list, "; ")
 		}
-		rec.Steps = append(rec.Steps, step)
+		all = append(all, step)
+	}
+	// 去同型(P4-08 ③):型 = 方法+host+路径(不含查询串)+状态,
+	// 保留规则 = 该型首条(型内同状态,"首条成功交换"退化为首条——
+	// 非成功状态自成一型不合并,如 401→绕过→200 的流程叙事保留);
+	// 查询串值差异(防缓存参数等)不另立型,不同路径的多步流程原样保留。
+	seen := map[string]bool{}
+	rec := &rings.TestClaimRecord{
+		ClaimID: claimID, Type: rings.TestClaimRecRepro, Severity: severity,
+	}
+	for _, st := range all {
+		key := reproShapeKey(st.Method, st.URL, st.Status)
+		if seen[key] {
+			st.Desc = "" // 变体不进复现步骤,无呈现即无描述
+			rec.Variants = append(rec.Variants, st)
+			continue
+		}
+		seen[key] = true
+		rec.Steps = append(rec.Steps, st)
+	}
+	for i := range rec.Steps {
+		rec.Steps[i].Seq = i + 1
 	}
 	return rec, nil
+}
+
+// reproShapeKey 交换的"型"(去同型分组键):方法 + host + 路径(不含
+// 查询串)+ 状态。host 小写归一(DNS 语义);路径保持原样(大小写
+// 敏感,不归一)。URL 解析失败按原串整体入键(如实不合并)。
+func reproShapeKey(method, rawURL string, status int) string {
+	host, path := rawURL, "/"
+	if u, err := url.Parse(rawURL); err == nil && u.Host != "" {
+		host, path = strings.ToLower(u.Host), u.Path
+		if path == "" {
+			path = "/"
+		}
+	}
+	return method + " " + host + " " + path + " " + strconv.Itoa(status)
 }
 
 // targetScope 任务授权的目标源集合(P3-05b ①)。种子资产标识两种形态:
@@ -841,6 +985,7 @@ func ReopenClaim(ctx context.Context, store *rings.Store, taskID, claimID, trigg
 		ExpectedObservation: "经 submit_falsify_result 写回结构化反证结论(重开轮:全部竞争解释重新检验)",
 		ActionLevel:         string(level),
 		HarmClass:           harm,
+		Priority:            PriorityHigh,
 		CoversAssets:        assets,
 		Detail: map[string]any{"kind": "falsify", "testclaim_id": claimID, "round": next,
 			"alternatives": claimAlternatives(*claim)},

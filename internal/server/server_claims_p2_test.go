@@ -169,6 +169,7 @@ func TestServerClaimDetail(t *testing.T) {
 			Method: "GET", URL: ex.Request.URL, Status: 200, BlobRef: ref}},
 		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "overmind", Payload: rings.TestClaimRecord{
 			ClaimID: "tc-f", Type: rings.TestClaimRecRepro, Severity: "high",
+			Narrative: "单位 u1 执行「审计主站敏感路径」时,在 /old-backup/ 的 200 响应正文里发现备份列举;u3 独立反证 2 轮排除竞争解释,仲裁者判定成立。",
 			Steps: []rings.ReproStep{{
 				Seq: 1, Round: 2, StepID: "sf2", UnitID: "u3",
 				Op:     `bash {"command":"curl -sS -m 5 http://mock/old-backup/?nocache=880011"}`,
@@ -236,10 +237,14 @@ func TestServerClaimDetail(t *testing.T) {
 		t.Fatalf("第 2 轮评估应为 confirm: %+v", v2)
 	}
 
-	// 复现步骤:操作方法 + Burp 风格原文(请求行/响应头/响应体可核对)。
+	// 复现步骤:操作方法 + Burp 风格原文(请求行/响应头/响应体可核对);
+	// 来龙去脉(P4-13):定稿冻结的叙述随 repro 视图下发(面板零 LLM)。
 	repro := d["repro"].(map[string]any)
 	if repro["severity"] != "high" {
 		t.Fatalf("定稿严重级别不符: %+v", repro)
+	}
+	if !strings.Contains(repro["narrative"].(string), "/old-backup/ 的 200 响应正文") {
+		t.Fatalf("来龙去脉叙述应随定稿视图下发: %+v", repro)
 	}
 	steps, _ := repro["steps"].([]any)
 	if len(steps) != 1 {
@@ -251,7 +256,8 @@ func TestServerClaimDetail(t *testing.T) {
 	}
 	raw := st["raw"].(string)
 	for _, want := range []string{
-		"GET http://mock/old-backup/?nocache=880011 HTTP/1.1",
+		"GET /old-backup/?nocache=880011 HTTP/1.1",
+		"Host: mock",
 		"User-Agent: curl/8",
 		"HTTP/1.1 200 OK",
 		"Server: gr-mock-main/2.4.1",

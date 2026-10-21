@@ -12,6 +12,7 @@ import (
 
 	"github.com/Autumn-27/norma/llm"
 
+	"ghostreaper/internal/failover"
 	"ghostreaper/internal/hiber"
 	"ghostreaper/internal/rings"
 	"ghostreaper/internal/swarm"
@@ -325,7 +326,11 @@ func (s *Service) answer(ctx context.Context, taskID, key, messageID, question s
 	sem := s.askSem()
 	sem <- struct{}{} // 进程并发上限(排队等待;每目标工作线已串行)
 	defer func() { <-sem }()
-	cctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.turnSeconds())*time.Second)
+	// 插话线程的会话标记(P4-10 ①:非 agentcore 直连调用,挂进 ctx 供
+	// opencode go 网关传输层派生稳定会话头;线程内多问同头)。
+	cctx, cancel := context.WithTimeout(
+		failover.WithLLMSession(context.Background(), "interject-"+sessionID),
+		time.Duration(s.turnSeconds())*time.Second)
 	defer cancel()
 
 	usage := &swarm.UsageTracker{

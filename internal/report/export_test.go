@@ -30,7 +30,7 @@ func TestTaskExportMatrix(t *testing.T) {
 	if out.Filename != "report-"+task+".md" || !strings.Contains(out.MimeType, "text/markdown") {
 		t.Fatalf("md 文件名/类型不符: %+v", out)
 	}
-	for _, want := range []string{"反证记录(年轮版本刻度):", "复现步骤(收割定稿", "GET http://10.10.0.5:8080/old-backup/ HTTP/1.1"} {
+	for _, want := range []string{"反证记录(年轮版本刻度):", "复现步骤(收割定稿", "GET /old-backup/ HTTP/1.1", "Host: 10.10.0.5:8080"} {
 		if !strings.Contains(string(out.Body), want) {
 			t.Fatalf("md 缺 %q", want)
 		}
@@ -196,10 +196,13 @@ func TestClaimExport(t *testing.T) {
 	if md.Filename != "finding-tc-1.md" {
 		t.Fatalf("文件名规约不符: %s", md.Filename)
 	}
-	for _, want := range []string{"# 漏洞报告 · `tc-1`", "反证记录(年轮版本刻度):", "复现步骤(收割定稿", "操作方法:`bash curl"} {
+	for _, want := range []string{"# 漏洞报告 · `tc-1`", "反证记录(年轮版本刻度):", "来龙去脉:单位 u1 执行「审计主站敏感路径」", "复现步骤(收割定稿", "GET /old-backup/ HTTP/1.1"} {
 		if !strings.Contains(string(md.Body), want) {
 			t.Fatalf("漏洞级 md 缺 %q:\n%s", want, md.Body)
 		}
+	}
+	if strings.Contains(string(md.Body), "操作方法") {
+		t.Fatalf("P4-08 ⑤:操作方法(op 行)不得进报告正文:\n%s", md.Body)
 	}
 
 	zout, err := ClaimExport(ctx, store, blobs, task, "tc-1", FormatZip)
@@ -211,11 +214,25 @@ func TestClaimExport(t *testing.T) {
 		t.Fatalf("开 zip 失败: %v", err)
 	}
 	got := map[string]bool{}
+	stepBody := ""
 	for _, f := range zr.File {
 		got[f.Name] = true
+		if f.Name == "evidence/tc-1/step-1.txt" {
+			rc, err := f.Open()
+			if err != nil {
+				t.Fatalf("读证据条目失败: %v", err)
+			}
+			b, _ := io.ReadAll(rc)
+			rc.Close()
+			stepBody = string(b)
+		}
 	}
 	if !got["finding-tc-1.md"] || !got["evidence/tc-1/step-1.txt"] {
 		t.Fatalf("漏洞级 zip 条目不符: %v", got)
+	}
+	// P4-08 ⑤:op 行收进证据包(文件头"操作"行)。
+	if !strings.Contains(stepBody, "# 操作 bash curl -sS -m 5 http://10.10.0.5:8080/old-backup/") {
+		t.Fatalf("证据包文件头应含操作行:\n%s", stepBody)
 	}
 
 	// csv/json 不在漏洞级格式白名单;不存在发现报错。

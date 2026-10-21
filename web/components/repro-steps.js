@@ -5,13 +5,16 @@ import * as React from "react";
 import { ExchangeRaw, statusVariant } from "@/components/exchange-raw";
 import { Badge } from "@/components/ui/badge";
 
-// 复现步骤列表(P2-13 建;P3-02 审核迭代升级):收割定稿步骤的统一渲染
-// ——发现列表折叠展开与成果卡「复现数据包」二层共用(同一 API 数据、
-// 同一组件,面板所见即报告所印)。每步 = 一句话描述(P3-05b,旧记录
-// 缺省不显)+ 操作方法 + 数据包:有镜交换 ID 的步骤按 请求包/返回包
-// 分侧回放(分段读、各自复制,与流量页同一组件);旧记录无交换 ID
-// 退回预渲染原文(面板同口径截断,全文在原始数据/证据包)。
-export function ReproStepsList({ tid, steps }) {
+// 复现步骤列表(P2-13 建;P3-02 审核迭代升级;P4-08 改口径):收割定稿
+// 步骤的统一渲染——发现列表折叠展开与成果卡「复现数据包」二层共用
+//(同一 API 数据、同一组件,面板所见即报告所印)。每步 = 一句指令式
+// 描述(P4-08 ④:定稿时模型生成并冻结;旧记录为确定性描述或缺省)+
+// 数据包:有镜交换 ID 的步骤按 请求包/返回包 分侧回放(分段读、各自
+// 复制,与流量页同一组件;请求包 origin-form,复制即贴 Burp Repeater
+// 可发——P4-08 ⑥);旧记录无交换 ID 退回预渲染原文(面板同口径截断,
+// 全文在原始数据/证据包)。工具调用 op 行撤下面板(P4-08 ⑤:证据包
+// 收);同型变体只报计数(P4-08 ③:全量在证据包)。
+export function ReproStepsList({ tid, steps, variants = 0 }) {
   if (!steps || steps.length === 0) {
     return (
       <span className="text-xs text-muted-foreground">
@@ -29,11 +32,6 @@ export function ReproStepsList({ tid, steps }) {
             {st.status ? <Badge variant={statusVariant(st.status)}>{st.status}</Badge> : null}
           </div>
           {st.desc && <div className="text-[13px] leading-relaxed">{st.desc}</div>}
-          {st.op && (
-            <div className="truncate font-mono text-xs text-muted-foreground" title={st.op}>
-              {st.op}
-            </div>
-          )}
           {st.note && <div className="text-xs text-status-warning">{st.note}</div>}
           {st.exchange_id && tid ? (
             <ExchangeRaw tid={tid} exID={st.exchange_id} bare />
@@ -45,6 +43,9 @@ export function ReproStepsList({ tid, steps }) {
                   <span className="text-status-warning">(面板截断,全文在原始数据)</span>
                 )}
               </div>
+              {st.tls_word && (
+                <div className="text-xs text-muted-foreground">目标证书:{st.tls_word}</div>
+              )}
               <pre className="max-h-72 overflow-auto rounded-md bg-muted/50 p-2 font-mono text-xs leading-relaxed whitespace-pre-wrap break-all">
                 {st.raw}
               </pre>
@@ -56,6 +57,11 @@ export function ReproStepsList({ tid, steps }) {
           ) : null}
         </li>
       ))}
+      {variants > 0 && (
+        <li className="text-xs text-muted-foreground">
+          同型重复包 {variants} 条已去重,全量在证据包
+        </li>
+      )}
     </ol>
   );
 }

@@ -43,6 +43,7 @@ import { postJSON, usePolling } from "@/lib/api";
 const EMPTY_FORM = {
   name: "",
   platform: "",
+  oc_mode: "go", // OpenCode 接入方式(go=Go 订阅默认 / api=API 按量)
   format: "openai",
   base_url: "",
   api_key: "",
@@ -267,6 +268,7 @@ export function LLMPage() {
         busy={busy}
         presets={data?.presets}
         platforms={data?.platforms}
+        ocModes={data?.opencode_modes}
         onForm={setForm}
         onSave={save}
         onClose={() => { setDialogOpen(false); setForm(null); }}
@@ -417,7 +419,7 @@ const RETRY_FIELDS = [
 // 模型与拉取合并,选模型按三段式带上上下文窗口(端点值 / 对照表近似 /
 // 保守默认);测试连通;代理/限速/轮询/输出与思考/重试覆盖在「高级
 // 选项」折叠内。
-function ModelDialog({ open, form, busy, presets, platforms, onForm, onSave, onClose }) {
+function ModelDialog({ open, form, busy, presets, platforms, ocModes, onForm, onSave, onClose }) {
   const [fetched, setFetched] = React.useState(null); // [{id, context_window}]
   const [fetching, setFetching] = React.useState(false);
   const [advanced, setAdvanced] = React.useState(false);
@@ -491,15 +493,24 @@ function ModelDialog({ open, form, busy, presets, platforms, onForm, onSave, onC
         : "已随模型填入"
     : "选模型自动填入";
 
-  // 平台/格式选定后的端点预填:仅当当前端点为空或仍是某个预设值时
-  // 跟动(用户改过的地址不覆盖);非预设组合无预填,走纯手动。
-  const presetValues = new Set(Object.values(presets || {}).flatMap((m) => Object.values(m)));
+  // 平台/格式/接入方式选定后的端点预填:仅当当前端点为空或仍是某个预设
+  // 值时跟动(用户改过的地址不覆盖);非预设组合无预填,走纯手动。opencode
+  // 双形态(P4-10):接入方式切换 go/api 换默认端点(Go 订阅走专用网关,
+  // API 按量走 zen)。
+  const presetValues = new Set([
+    ...Object.values(presets || {}).flatMap((m) => Object.values(m)),
+    ...Object.values(ocModes || {}).flatMap((m) => Object.values(m)),
+  ]);
   const applyPreset = (patch) => {
     const platform = patch.platform !== undefined ? patch.platform : f.platform || "";
     const format = patch.format !== undefined ? patch.format : f.format || "openai";
-    const url = presets?.[platform]?.[format] || "";
+    const ocMode = patch.oc_mode !== undefined ? patch.oc_mode : f.oc_mode || "go";
+    let url = presets?.[platform]?.[format] || "";
+    if (platform === "opencode") {
+      url = ocModes?.[ocMode]?.[format] || url;
+    }
     const base_url = url && (!f.base_url || presetValues.has(f.base_url)) ? url : f.base_url;
-    onForm({ ...f, ...patch, platform, format, base_url });
+    onForm({ ...f, ...patch, platform, format, oc_mode: ocMode, base_url });
   };
 
   const test = async () => {
@@ -538,6 +549,18 @@ function ModelDialog({ open, form, busy, presets, platforms, onForm, onSave, onC
             </Select>
             <span className="text-xs text-muted-foreground">选平台自动填默认端点,可改</span>
           </Field>
+          {f.platform === "opencode" && (
+            <Field label="接入方式">
+              <Select value={f.oc_mode || "go"} onValueChange={(v) => applyPreset({ oc_mode: v })}>
+                <SelectTrigger className={cn(INPUT, "flex-1")}><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="go">Go 订阅</SelectItem>
+                  <SelectItem value="api">API 按量</SelectItem>
+                </SelectContent>
+              </Select>
+              <span className="text-xs text-muted-foreground">切换自动换默认端点</span>
+            </Field>
+          )}
           <Field label="端点格式">
             <Select value={f.format || "openai"} onValueChange={(v) => applyPreset({ format: v })}>
               <SelectTrigger className={cn(INPUT, "flex-1")}><SelectValue /></SelectTrigger>
@@ -742,12 +765,21 @@ function ModelDialog({ open, form, busy, presets, platforms, onForm, onSave, onC
             </Button>
             {testResult && (
               testResult.ok ? (
-                <span className="text-xs text-status-success">
-                  连通 · {testResult.body.latency_ms} ms ·
-                  <span className="font-mono"> {testResult.body.model}</span>
-                </span>
+                <div className="flex min-w-0 flex-1 flex-col gap-1">
+                  <span className="text-xs text-status-success">
+                    连通 · {testResult.body.latency_ms} ms ·
+                    <span className="font-mono"> {testResult.body.model}</span>
+                  </span>
+                  {/* 回复原文(看得见模型说话才算通);与错误展示同款折行限高。 */}
+                  {testResult.body.text && (
+                    <span className="max-h-24 min-w-0 overflow-y-auto break-all font-mono text-xs text-muted-foreground">
+                      {testResult.body.text}
+                    </span>
+                  )}
+                </div>
               ) : (
-                <span className="truncate text-xs text-status-danger">
+                // 长报错折行限高滚动(P4-10 ②):长 JSON 报错不再撑乱布局。
+                <span className="max-h-24 min-w-0 flex-1 overflow-y-auto break-all text-xs text-status-danger">
                   {testResult.body.error || "未连通"}
                 </span>
               )

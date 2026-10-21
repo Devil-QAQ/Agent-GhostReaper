@@ -42,6 +42,10 @@ import { cn } from "@/lib/utils";
 // 与聚焦),右列执行流(虫群紧凑视图,一行一单位【状态图标+意图摘要】,
 // 点击跳该单位完整会话页——复用 P2-08b 会话页)与发现(Confirmed
 // 战果,点击开详情抽屉)。
+// P4-09:概要卡尾部三条并排细进度条(目标达成 n/m · 步骤 完成/在跑/
+// 排队 · 资产覆盖 范围内已测/未测)——图载荷派生,资产入图/步骤迁移/
+// 目标达成都落 node 事件,经 tasks 实时主题事件驱动刷新,零新增采集;
+// 三条各自陈述,不做加权综合百分比。
 
 // 单位状态 → 图标键(与虫群会话页状态词同源;无专属图标的终因用圆点)。
 const UNIT_ICON = {
@@ -151,8 +155,19 @@ export function WorkbenchPage({ currentTask, focus }) {
 
   // 关键数据(KPI 即导航):目标进度 / 资产覆盖 / 运行单位 / 战果。
   const assetNodes = nodes.filter((n) => n.type === "asset");
-  const covered = assetNodes.filter((a) => a.covered).length;
+  // 覆盖口径(P4-05,与资产页一致):范围外资产不占分母。
+  const assetsInScope = assetNodes.filter((a) => !a.excluded);
+  const assetsExcluded = assetNodes.length - assetsInScope.length;
+  const coveredInScope = assetsInScope.filter((a) => a.covered).length;
   const goalsActive = goals.filter((g) => GOAL_STATUS[g.status]?.variant === "running").length;
+  const goalsAchieved = goals.filter((g) => g.status === "achieved").length;
+  // 步骤三段(P4-09 ②):完成 / 在跑 / 排队;其余终态不占段,条上轨道
+  // 留空如实呈现(失败/受阻等在各详情页可见)。
+  const stepNodes = nodes.filter((n) => n.type === "step");
+  const stepsDone = stepNodes.filter((s) => s.status === "done").length;
+  const stepsRunning = stepNodes.filter((s) => s.status === "running").length;
+  const stepsQueued = stepNodes.filter((s) => s.status === "dispatched").length;
+  const stepsOther = stepNodes.length - stepsDone - stepsRunning - stepsQueued;
   const unitsRunning = units.filter((u) => u.status === "running" && !u.paused).length;
   const st = TASK_STATUS[currentTask.status] || { variant: "info", label: currentTask.status };
 
@@ -206,6 +221,39 @@ export function WorkbenchPage({ currentTask, focus }) {
               ))}
             </div>
           )}
+
+          {/* 三条并排细进度条(P4-09):悬停见口径数字;条宽即各段占比 */}
+          <div className="grid grid-cols-1 gap-4 pt-2 sm:grid-cols-3">
+            <MiniBar
+              label="目标达成"
+              value={`${goalsAchieved}/${goals.length}`}
+              title={`已达成 ${goalsAchieved} · 进行中 ${goalsActive}`}
+              segments={[{ cls: "bg-primary", w: pctOf(goalsAchieved, goals.length) }]}
+            />
+            <MiniBar
+              label="步骤"
+              value={`${stepsDone}/${stepNodes.length}`}
+              title={
+                `已完成 ${stepsDone} · 执行中 ${stepsRunning} · 排队中 ${stepsQueued}` +
+                (stepsOther > 0 ? ` · 其余 ${stepsOther}` : "") +
+                ` · 共 ${stepNodes.length} 步`
+              }
+              segments={[
+                { cls: "bg-status-success", w: pctOf(stepsDone, stepNodes.length) },
+                { cls: "bg-status-running", w: pctOf(stepsRunning, stepNodes.length) },
+                { cls: "bg-status-paused", w: pctOf(stepsQueued, stepNodes.length) },
+              ]}
+            />
+            <MiniBar
+              label={assetsExcluded > 0 ? "资产覆盖(范围内)" : "资产覆盖"}
+              value={`${coveredInScope}/${assetsInScope.length}`}
+              title={
+                `范围内已测 ${coveredInScope} · 未测 ${assetsInScope.length - coveredInScope}` +
+                (assetsExcluded > 0 ? ` · 范围外 ${assetsExcluded}` : "")
+              }
+              segments={[{ cls: "bg-primary", w: pctOf(coveredInScope, assetsInScope.length) }]}
+            />
+          </div>
         </CardContent>
       </Card>
 
@@ -219,7 +267,11 @@ export function WorkbenchPage({ currentTask, focus }) {
         <KpiCard
           label="资产"
           value={assetNodes.length}
-          hint={`覆盖 ${covered}/${assetNodes.length}`}
+          hint={
+            assetsExcluded > 0
+              ? `范围内 ${assetsInScope.length} · 范围外 ${assetsExcluded}`
+              : `覆盖 ${coveredInScope}/${assetsInScope.length}`
+          }
           href={`/task/${tid}/assets`}
         />
         <KpiCard
@@ -421,4 +473,31 @@ function WorkbenchPlainHeader() {
 // unitWord 单位终因 → 状态词(与虫群会话页 STEP_STATUS 词汇同源)。
 function unitWord(status) {
   return STEP_STATUS[status] || status;
+}
+
+// MiniBar 工作台细进度条(P4-09):标签 + n/m + 分段细条(步骤条三段:
+// 已完成绿 / 执行中蓝 / 排队中灰),宽度即占比;悬停 title 见口径数字。
+function MiniBar({ label, value, title, segments }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5" title={title}>
+      <div className="flex items-baseline justify-between gap-2 text-xs">
+        <span className="min-w-0 truncate text-muted-foreground">{label}</span>
+        <span className="shrink-0 font-mono tabular-nums">{value}</span>
+      </div>
+      <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-muted">
+        {segments.map((s, i) => (
+          <div
+            key={i}
+            className={cn("h-full transition-[width]", s.cls)}
+            style={{ width: `${s.w}%` }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// pctOf 段宽百分比(分母为零时空条)。
+function pctOf(n, total) {
+  return total > 0 ? (n / total) * 100 : 0;
 }

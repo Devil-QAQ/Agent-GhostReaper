@@ -22,8 +22,13 @@ type graphNodeJSON struct {
 	HypothesisCount int    `json:"hypothesis_count,omitempty"`
 	Source          string `json:"source,omitempty"`   // 资产来源三态(P4-05)
 	Excluded        bool   `json:"excluded,omitempty"` // 资产已从授权范围摘除(P4-05)
-	CreatedRev      int64  `json:"created_rev"`
-	UpdatedRev      int64  `json:"updated_rev"`
+	// 发现型资产的出生血缘(P4-12:发现步骤/单位/发现事实,收割入图时冻结
+	// 进 detail;非发现资产零值)。链路 UI 据此呈现"谁发现的它"。
+	BirthStep  string `json:"birth_step,omitempty"`
+	BirthUnit  string `json:"birth_unit,omitempty"`
+	BirthFact  string `json:"birth_fact,omitempty"`
+	CreatedRev int64  `json:"created_rev"`
+	UpdatedRev int64  `json:"updated_rev"`
 }
 
 type graphEdgeJSON struct {
@@ -60,6 +65,7 @@ func (s *Server) handleTaskGraph(w http.ResponseWriter, r *http.Request) {
 			AssetClass: string(n.AssetClass), Covered: n.Covered,
 			FactCount: n.FactCount, HypothesisCount: n.HypothesisCount,
 			Source: n.Source, Excluded: excluded[n.ID],
+			BirthStep: n.BirthStep, BirthUnit: n.BirthUnit, BirthFact: n.BirthFact,
 			CreatedRev: n.CreatedRev, UpdatedRev: n.UpdatedRev,
 		})
 	}

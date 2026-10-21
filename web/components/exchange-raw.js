@@ -129,9 +129,13 @@ export function ExchangeRaw({ tid, exID, bare = false }) {
         </>
       )}
 
-      {/* 分侧原文(隧道无原文,如实说明) */}
+      {/* 分侧原文(隧道无原文,如实说明)。bare 模式的证书结论为包外
+          信息行(P4-08 ⑥:结论不进包文,复制请求包即贴 Burp 可发) */}
       {meta.raw_total > 0 && meta.request ? (
         <>
+          {bare && tlsWord && (
+            <div className="text-xs text-muted-foreground">目标证书:{tlsWord}</div>
+          )}
           <RawSide tid={tid} exID={exID} side="req" label="请求包" />
           {(meta.response || meta.error) && (
             <RawSide tid={tid} exID={exID} side="resp" label="返回包" />

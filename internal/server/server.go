@@ -346,6 +346,10 @@ func (s *Server) Handler() *http.ServeMux {
 	// 信息条四项)。节点详情端点为 fact# 等引用的点击核对面。 ----
 	mux.HandleFunc("GET /api/tasks/{id}/shepherd", s.handleShepherdGet)
 	mux.HandleFunc("POST /api/tasks/{id}/shepherd/messages", s.handleShepherdPost)
+	// 成果追问会话(P4-14,问题清单 #24):发现详情"追问"区的数据面,
+	// 牧者答题、独立留存;问答不进报告(导出零影响)。
+	mux.HandleFunc("GET /api/tasks/{id}/shepherd/claim/{cid}", s.handleShepherdClaimGet)
+	mux.HandleFunc("POST /api/tasks/{id}/shepherd/claim/{cid}/messages", s.handleShepherdClaimPost)
 	mux.HandleFunc("GET /api/tasks/{id}/nodes/{nid}", s.handleNodeDetail)
 
 	// ---- 人机通道(P2-08,第四章 §7 v1.8:插话 + 三级控制) ----
@@ -808,6 +812,12 @@ func (s *Server) handleTaskStop(w http.ResponseWriter, r *http.Request) {
 
 // ---- 资产树(P1-09,读投影) ----
 
+// detailStr 节点 detail 的字符串字段直读(缺省空;出生血缘等短字段用)。
+func detailStr(detail map[string]any, key string) string {
+	s, _ := detail[key].(string)
+	return s
+}
+
 // assetTreeView 资产图最小投影的读模型:节点(覆盖标志 + 事实/假设
 // 计数)与 sub_of 层级边(from=子、to=父),前端据此渲染树。
 type assetTreeView struct {
@@ -826,6 +836,11 @@ type assetNodeJSON struct {
 	Source          string `json:"source"`   // 来源三态:seed/manual/discovered(P4-05)
 	Excluded        bool   `json:"excluded"` // 已从授权范围摘除(P4-05;范围外)
 	CreatedRev      int64  `json:"created_rev"`
+	// 发现型资产的出生血缘(P4-12):发现单位/发现步骤/发现事实(收割入图时
+	// 冻结进 detail;非发现资产零值,如实断链)。
+	BirthUnit string `json:"birth_unit,omitempty"`
+	BirthStep string `json:"birth_step,omitempty"`
+	BirthFact string `json:"birth_fact,omitempty"`
 }
 
 type edgeJSON struct {
@@ -1066,6 +1081,9 @@ func (s *Server) handleAssetDetail(w http.ResponseWriter, r *http.Request) {
 			ID: n.ID, Title: n.Title, Class: string(n.AssetClass), Status: n.Status,
 			Source:     rings.AssetSourceOf(n.Detail),
 			CreatedRev: n.CreatedRev,
+			BirthUnit:  detailStr(n.Detail, "unit_id"),
+			BirthStep:  detailStr(n.Detail, "step_id"),
+			BirthFact:  detailStr(n.Detail, "discovered_fact"),
 		},
 		Facts:      pick(rings.NodeFact),
 		Hypotheses: pick(rings.NodeHypothesis),

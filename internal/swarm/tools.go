@@ -536,7 +536,7 @@ const (
 	toolDescBash                   = "在授权范围内执行 shell 命令(单条或管道),返回合并输出。单条命令默认限时 120 秒,可用 timeout_ms 自行调整(上限 600 秒);超时未完成的命令自动转入后台继续运行(输出落文件可稍后读取,sleep 类等待命令除外),也可用 run_in_background 直接后台跑。大输出会被存档并截断,需要全文时按存档引用查阅。"
 	toolDescPortProbe              = "只读探测:检测 host:port 的 TCP 开放状态并尝试读取服务 banner。banner 只取前 256 字节且可能静默——勿据此认为已测完;需要更多服务特征时改用 http_probe 或 bash 通道。"
 	toolDescHTTPProbe              = "只读 HTTP 探测:对指定 URL 发起 HTTP 请求(GET 或 HEAD),返回状态码、关键响应头(Server/Content-Type/Content-Length)与响应体开头内容。响应体只返回前 1536 字节——勿据此认为已读全,需要完整响应时改用 bash(curl)并注意该意图的审批分级。"
-	toolDescSubmitCandidateFact    = "提交一条候选事实(你本次真实观察到的结论)。须经主宰收割后才成为正式事实。陈述须有本次执行取得的证据。"
+	toolDescSubmitCandidateFact    = "提交一条候选事实(你本次真实观察到的结论)。须经主宰收割后才成为正式事实。陈述须有本次执行取得的证据。观察到图上没有的对象(新域名/主机/服务/接口/泄漏信息等)时,随本条事实一并声明 new_asset(12 类选型+标识)——收割时对象入图,后续工作可锚定它;已知对象用 asset_id 锚定,两者不得同时给。"
 	toolDescSubmitHypothesis       = "提交一条候选假设(直觉/线索/疑似问题,尚未取得直接证据)。必须指向具体资产并写明依据;每个任务包最多附带 3 条。"
 	toolDescSubmitHypothesisResult = "假设验证任务专用:写回你独立验证的结构化结论。verdict=supported(成立)|refuted(不成立)|inconclusive(未能定论);须附本轮真实取得的证据;note 文本不构成结论。验证中取得的可保留观察仍走 submit_candidate_fact / submit_test_claim 正常回流。"
 	toolDescSubmitTestClaim        = "提交一条可证伪的漏洞声明(你本次真实触发并取得可复现证据的发现)。提交前先用 list_claims 查已报清单:同一资产上已报过的漏洞不得重复报(入口会拒收)。存在性与影响面必须分开声明;须尽力列出竞争性替代解释(否则系统兜底四条基线:缓存污染/不可复现/影响高估/归属错误)。声明将交由独立单位多轮反证、仲裁者机器裁决,不得自评已确认、不得自报严重级别。"
@@ -585,7 +585,17 @@ func (env *unitEnv) submitCandidateFactTool() tool.CoreTool {
 			"properties": map[string]any{
 				"statement": map[string]any{"type": "string", "description": "候选事实陈述:一句话可复核命题,写明资产与端口/路径等定位要素,使他人可独立重验"},
 				"evidence":  map[string]any{"type": "string", "description": "支撑证据:须含可独立复核的关键原文(请求/响应片段、命令与其输出);只写结论不附原文的证据过不了收割"},
-				"asset_id":  map[string]any{"type": "string", "description": "关联资产节点 ID(可选)"},
+				"asset_id":  map[string]any{"type": "string", "description": "关联资产节点 ID(可选;已知对象锚定用,与 new_asset 互斥)"},
+				"new_asset": map[string]any{
+					"type":        "object",
+					"description": "新对象声明(可选;本次观察到图上没有的对象时随事实声明,收割时入图;与 asset_id 互斥)",
+					"properties": map[string]any{
+						"class":  map[string]any{"type": "string", "enum": []string{"domain", "subdomain", "host", "service", "api", "organization", "miniprogram", "app", "wechat_account", "person", "leak_info", "other"}, "description": "对象类别(12 类选型)"},
+						"title":  map[string]any{"type": "string", "description": "对象标识(域名/主机:端口/URL/接口路径等,与图上既有资产不同名)"},
+						"parent": map[string]any{"type": "string", "description": "父资产节点 ID(可选;层级挂靠,如发现的子域挂所属域名)"},
+					},
+					"required": []string{"class", "title"},
+				},
 			},
 			"required": []string{"statement", "evidence"},
 		},
@@ -593,14 +603,22 @@ func (env *unitEnv) submitCandidateFactTool() tool.CoreTool {
 		Permissions: allowReadOnly,
 		Run: func(ctx context.Context, in json.RawMessage, _ *tool.ToolContext) (tool.Result, error) {
 			var args struct {
-				Statement string `json:"statement"`
-				Evidence  string `json:"evidence"`
-				AssetID   string `json:"asset_id"`
+				Statement string          `json:"statement"`
+				Evidence  string          `json:"evidence"`
+				AssetID   string          `json:"asset_id"`
+				NewAsset  json.RawMessage `json:"new_asset"`
 			}
 			if err := json.Unmarshal(in, &args); err != nil {
 				return tool.Errorf("bad input: " + err.Error()), nil
 			}
-			id, err := env.SubmitCandidateFact(ctx, args.Statement, args.Evidence, args.AssetID)
+			var decl *NewAssetDecl
+			if len(args.NewAsset) > 0 && string(args.NewAsset) != "null" {
+				decl = &NewAssetDecl{}
+				if err := json.Unmarshal(args.NewAsset, decl); err != nil {
+					return tool.Errorf("new_asset 声明格式不对: " + err.Error()), nil
+				}
+			}
+			id, err := env.SubmitCandidateFact(ctx, args.Statement, args.Evidence, args.AssetID, decl)
 			if err != nil {
 				return tool.Errorf("提交候选失败: " + err.Error()), nil
 			}
@@ -609,12 +627,42 @@ func (env *unitEnv) submitCandidateFactTool() tool.CoreTool {
 	})
 }
 
+// NewAssetDecl 新对象声明(P4-12,问题清单 #21):虫群观察到图上没有的
+// 对象时随候选事实一并声明,主宰收割时入图(source=discovered,出生
+// 血缘挂发现步骤与单位)。归 swarm 定义、overmind 收割侧消费,形状
+// 单一不漂移。
+type NewAssetDecl struct {
+	Class  string `json:"class"`            // 12 类之一(入口校验)
+	Title  string `json:"title"`            // 对象标识(与图上既有资产查重)
+	Parent string `json:"parent,omitempty"` // 父资产节点 ID(可选)
+}
+
 // SubmitCandidateFact 受控入口:候选 Fact 节点 + produces 血缘边
 // (Step→Fact)+ 可选 about 边(Fact→Asset)。程序化调用与工具调用
 // 走同一条路(R8:子代理再多也不会绕过账本)。
-func (env *unitEnv) SubmitCandidateFact(ctx context.Context, statement, evidence, assetID string) (string, error) {
+// P4-12:new_asset 声明(图上没有的新对象)随事实入 detail,与 asset_id
+// 互斥——锚定已知对象或声明新对象,二者择一;对象本身由主宰收割时
+// 入图(虫群无写权,收割通道点亮 source=discovered)。
+func (env *unitEnv) SubmitCandidateFact(ctx context.Context, statement, evidence, assetID string, newAsset *NewAssetDecl) (string, error) {
 	if strings.TrimSpace(statement) == "" || strings.TrimSpace(evidence) == "" {
 		return "", fmt.Errorf("swarm: 候选事实须同时具备陈述与证据")
+	}
+	if newAsset != nil {
+		if strings.TrimSpace(assetID) != "" {
+			return "", fmt.Errorf("swarm: asset_id 与 new_asset 不得同时给(锚定已知对象或声明新对象,二者择一)")
+		}
+		newAsset.Title = strings.TrimSpace(newAsset.Title)
+		if newAsset.Title == "" {
+			return "", fmt.Errorf("swarm: 新对象声明缺标识(title)")
+		}
+		if !rings.IsValidAssetClass(rings.AssetClass(strings.TrimSpace(newAsset.Class))) {
+			return "", fmt.Errorf("swarm: 新对象 %q 的类 %q 不在 12 类词汇表内", newAsset.Title, newAsset.Class)
+		}
+		if p := strings.TrimSpace(newAsset.Parent); p != "" {
+			if _, err := env.Executor.Store.Node(ctx, env.TaskID, p); err != nil {
+				return "", fmt.Errorf("swarm: 新对象 %q 的父资产 %s: %w", newAsset.Title, p, err)
+			}
+		}
 	}
 	id := shortID("f")
 	detail := map[string]any{
@@ -625,6 +673,13 @@ func (env *unitEnv) SubmitCandidateFact(ctx context.Context, statement, evidence
 		detail["evidence_ref"], detail["evidence_head"] = ref, head
 	} else {
 		detail["evidence"] = evidence
+	}
+	if newAsset != nil {
+		detail["new_asset"] = map[string]any{
+			"class":  strings.TrimSpace(newAsset.Class),
+			"title":  newAsset.Title,
+			"parent": strings.TrimSpace(newAsset.Parent),
+		}
 	}
 	events := []rings.Event{
 		{Kind: rings.EventNodeAdded, Actor: "swarm:" + env.UnitID, Payload: rings.NodeAdded{
@@ -1034,8 +1089,8 @@ func (env *unitEnv) submitTestClaimTool() tool.CoreTool {
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"statement":    map[string]any{"type": "string", "description": "存在性声明:一句话可证伪命题(什么可被观察到),写明定位要素使反证单位可独立重放"},
-				"impact":       map[string]any{"type": "string", "description": "影响面声明(该存在性实际造成什么影响,与存在性分开)"},
+				"statement":    map[string]any{"type": "string", "description": "存在性声明:一句话可证伪命题(什么可被观察到),写明定位要素使反证单位可独立重放。" + StructuredFieldStyle},
+				"impact":       map[string]any{"type": "string", "description": "影响面声明(该存在性实际造成什么影响,与存在性分开)。一句话写明资产与定位要素," + StructuredFieldStyle},
 				"evidence":     map[string]any{"type": "string", "description": "本次执行取得的支撑证据:须含可独立复核的关键原文(请求/响应片段、命令与其输出);只写结论不算证据"},
 				"asset_id":     map[string]any{"type": "string", "description": "资产锚点:指向的资产节点 ID(必填)"},
 				"vulnclass":    map[string]any{"type": "string", "description": "漏洞类型(可选,如 信息暴露/弱口令/注入)"},

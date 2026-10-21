@@ -118,3 +118,19 @@ func TestToolErrorsTeachRoutes(t *testing.T) {
 		t.Fatalf("http_probe 坏方法报错须指路(带载荷走 bash): %q", msg)
 	}
 }
+
+// TestClaimFieldStyleClause P4-11 ①:声明一句话摘要同款收口——
+// submit_test_claim 的 statement/impact 参数描述引用共用文风句
+// (swarm.StructuredFieldStyle,与主宰拆解契约同一份,防两处漂移)。
+func TestClaimFieldStyleClause(t *testing.T) {
+	env := toolrulesEnv(t)
+	s := schemaText(t, "submit_test_claim", env.submitTestClaimTool())
+	if n := strings.Count(s, StructuredFieldStyle); n != 2 {
+		t.Fatalf("statement 与 impact 两个参数描述应各带一次共用文风句(实际 %d 次): %s", n, s)
+	}
+	for _, want := range []string{"存在性声明", "影响面声明"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("声明参数描述缺 %q", want)
+		}
+	}
+}

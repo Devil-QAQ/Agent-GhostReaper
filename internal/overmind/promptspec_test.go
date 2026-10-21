@@ -65,6 +65,39 @@ func TestOvermindPromptSpecClauses(t *testing.T) {
 	}
 }
 
+// TestOvermindIntentStyleClause P4-11 ①:拆解契约带 intent 文风收口与
+// 正反样例,声明一句话摘要(combined_claims 的 statement/impact)同款
+// 收口——共用句与虫群声明提交同一份(swarm.StructuredFieldStyle,防两
+// 处漂移);只管新生成不改写已有数据在文;文风块不碰 assessment 叙述
+// 字段(研判叙述自由度不收窄)。
+func TestOvermindIntentStyleClause(t *testing.T) {
+	for _, want := range []string{
+		"字段文风",
+		"只管新写,不改写图上已有步骤",
+		"资产+手法+目标的点式短句",
+		swarm.StructuredFieldStyle,
+		"写不下就收窄定位——点一个代表路径加\"等 N 个\",不铺枚举清单",
+		"正例:对 10.0.0.5:8080 做目录枚举,找未授权入口",
+		"正例(长定位收窄):对 4330 根目录直取 20 个常见文件名(README.md 等),确认根外文件是否暴露",
+		"反例:",
+		"反例(铺清单):",
+		"无定位、无数字、长而空",
+		"statement / impact",
+	} {
+		if !strings.Contains(overmindOutputContract, want) {
+			t.Fatalf("拆解契约缺 P4-11 ① 文风条款: %q", want)
+		}
+	}
+	// 文风块只收口 intent 与声明字段:不带 assessment 五问的措辞约束
+	// (研判叙述仍由模型自由写,ResidentStyleRules 管人话不管长度)。
+	style := overmindOutputContract[strings.Index(overmindOutputContract, "字段文风"):]
+	for _, banned := range []string{"q_access", "assessment 叙述", "note 文风"} {
+		if strings.Contains(style, banned) {
+			t.Fatalf("文风块不应约束 assessment 叙述字段: %q", banned)
+		}
+	}
+}
+
 // TestOvermindSystemSegmentsRoETop 主宰拆解 system 段位置规范:RoE
 // 约束块置顶(凌驾声明)→ A 可编辑正文 → B 纪律 → C 输出契约;DB
 // 覆盖 A 段后固定段逐字仍在(删不掉)。

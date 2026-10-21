@@ -4,7 +4,9 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { ClaimChainGraph } from "@/components/claim-chain-graph";
+import { ClaimFollowupDialog } from "@/components/claim-followup-dialog";
 import { CopyIDButton } from "@/components/copy-id-button";
+import { NodeRefButton } from "@/components/node-ref-button";
 import { iconOf } from "@/components/icons";
 import { ExchangeRaw, statusVariant } from "@/components/exchange-raw";
 import { ReproStepsList } from "@/components/repro-steps";
@@ -111,23 +113,6 @@ function Muted({ children }) {
   return <span className="text-xs text-muted-foreground">{children}</span>;
 }
 
-// NodeRefButton 节点引用按钮(fact#/tc#/资产锚点等引用的可点击形态):
-// 点击换抽屉下钻(不离开上下文);无宿主时退化为纯文本。
-function NodeRefButton({ meta, label, onSelectNode, children }) {
-  if (!onSelectNode || !meta?.id) {
-    return <span className="font-mono text-xs text-muted-foreground">{label ?? meta?.id}</span>;
-  }
-  return (
-    <button
-      className="rounded border border-border bg-card px-2 py-0.5 font-mono text-xs text-muted-foreground transition-colors duration-150 hover:bg-hover-lift hover:text-foreground cursor-pointer"
-      title={`查看${meta.typeLabel ?? ""} ${meta.id}`}
-      onClick={() => onSelectNode(meta)}
-    >
-      {children ?? (meta.typeLabel ? `${meta.typeLabel} ` : "") + meta.id}
-    </button>
-  );
-}
-
 // ---- 通用节点抽屉(goal / step / fact)----
 
 // detail 自由字段的操作者语言(表外词按 8.5 术语门槛翻译;未收录键
@@ -150,6 +135,7 @@ const DETAIL_KEYS = {
   predicate: "完成谓词",
   kind: "类型",
   testclaim_id: "声明",
+  new_asset: "新对象声明",
   reason: "理由",
   note: "备注",
 };
@@ -352,6 +338,32 @@ export function AssetDetailSheet({ tid, nodeID, onClose, onSelectNode }) {
                 </Badge>
               </div>
 
+              {/* 对象出生(P4-12):资产怎么入图的——发现型带发现单位与出生
+                  引用(步骤/事实,可下钻),种子/手动如实陈述;词与攻击链条
+                  卡的对象出生区同一份。 */}
+              <DetailSection title="对象出生">
+                {a.source === "discovered" ? (
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border bg-card px-3 py-2 text-xs">
+                    <span>发现入图</span>
+                    {a.birth_unit ? (
+                      <span className="text-muted-foreground">
+                        单位 <span className="font-mono">{a.birth_unit}</span>
+                      </span>
+                    ) : null}
+                    {a.birth_step && (
+                      <NodeRefButton meta={{ id: a.birth_step, type: "step", typeLabel: "步骤" }} onSelectNode={onSelectNode} />
+                    )}
+                    {a.birth_fact && (
+                      <NodeRefButton meta={{ id: a.birth_fact, type: "fact", typeLabel: "事实" }} onSelectNode={onSelectNode} />
+                    )}
+                  </div>
+                ) : a.source === "manual" ? (
+                  <div className="rounded-md border bg-card px-3 py-2 text-xs">手动补入(面板新增)</div>
+                ) : (
+                  <div className="rounded-md border bg-card px-3 py-2 text-xs">建任务种子入图</div>
+                )}
+              </DetailSection>
+
               <DetailSection title="事实(fact#)">
                 {(data.facts || []).length === 0 ? (
                   <Muted>暂无</Muted>
@@ -456,6 +468,9 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
   // 第二层卡片:null = 未开;"repro" 复现数据包 | "chain" 攻击链条 | "reopen" 重开。
   // 状态入 claimLayerMemory:下钻换卡卸载本卡,返回时恢复到离开时的层。
   const [layer, setLayer] = React.useState(null);
+  // 成果追问大窗(P4-14):与描述 / 修复建议 / 数据与链路并列的追问区
+  // 入口,一成果一会话、续接不新建。
+  const [followup, setFollowup] = React.useState(false);
   React.useEffect(() => {
     setLayer(claimLayerMemory.get(claimID) || null);
   }, [claimID]);
@@ -549,6 +564,22 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
               </div>
             </section>
 
+            {/* 耗时拆解(P4-08 ②):落地 → 终态的排队/执行/轮次,账本
+                时间戳直读;进行中无终态段,如实不造 */}
+            {data.timing && data.timing.landed_at && (
+              <section className="flex flex-col gap-1">
+                <div className="text-xs font-medium tracking-wide text-muted-foreground">耗时拆解</div>
+                <div className="rounded-md border bg-card px-3 py-2 font-mono text-xs text-muted-foreground">
+                  落地 {data.timing.landed_at?.slice(5)}
+                  {data.timing.terminal_at
+                    ? ` → 终态 ${data.timing.terminal_at.slice(5)}`
+                    : ""}
+                  {" · "}排队 {fmtDur(data.timing.queue_seconds)} · 执行{" "}
+                  {fmtDur(data.timing.exec_seconds)} · 反证 {data.timing.rounds} 轮
+                </div>
+              </section>
+            )}
+
             {/* 修复建议区(8.8:查表生成,与报告同源逐字一致;未命中不编造) */}
             <section className="flex flex-col gap-1">
               <div className="text-xs font-medium tracking-wide text-muted-foreground">修复建议</div>
@@ -564,6 +595,27 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
                     {claim.vulnclass ? "该类型暂无预置建议" : "未声明类型,无预置建议"}
                   </span>
                 )}
+              </div>
+            </section>
+
+            {/* 追问区(P4-14,问题清单 #24):与描述/修复建议/复现步骤/
+                攻击链条并列;一成果一会话,已有会话续接(已 N 问) */}
+            <section className="flex flex-col gap-1">
+              <div className="text-xs font-medium tracking-wide text-muted-foreground">追问</div>
+              <div className="flex flex-wrap items-center gap-2 rounded-md border bg-card px-3 py-2">
+                <Button
+                  variant="outline"
+                  className="h-8 text-xs"
+                  onClick={() => setFollowup(true)}
+                >
+                  {React.createElement(iconOf("messageCircle"), { className: "size-3.5" })}
+                  {data.followup?.round
+                    ? `继续追问(已 ${data.followup.questions} 问)`
+                    : "向牧者追问"}
+                </Button>
+                <span className="text-xs text-muted-foreground">
+                  牧者读账本作答 · 一成果一会话
+                </span>
               </div>
             </section>
 
@@ -693,7 +745,7 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
             </SheetHeader>
             <div className="flex flex-col gap-5 p-4 text-sm">
               {repro ? (
-                <ReproStepsList tid={tid} steps={repro.steps} />
+                <ReproStepsList tid={tid} steps={repro.steps} variants={(repro.variants || []).length} />
               ) : (
                 <span className="text-xs text-muted-foreground">(反证轮未产生可复现的流量记录)</span>
               )}
@@ -713,6 +765,18 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
               </SheetDescription>
             </SheetHeader>
             <div className="flex flex-col gap-3 p-4 text-sm">
+              {/* 来龙去脉(P4-13):定稿冻结的模型叙述,链路图上方先见叙述
+                  再见图;旧定稿无叙述如实标注,不编造 */}
+              {repro && (
+                <section className="flex flex-col gap-1">
+                  <div className="text-xs font-medium tracking-wide text-muted-foreground">来龙去脉</div>
+                  <div className="rounded-md border bg-card px-3 py-2 leading-relaxed">
+                    {repro.narrative || (
+                      <span className="text-xs text-muted-foreground">定稿时未生成叙述</span>
+                    )}
+                  </div>
+                </section>
+              )}
               <ClaimChainGraph tid={tid} claimID={claim.id} onSelectNode={onSelectNode} />
               {claim.combined && (claim.chain || []).length > 0 && (
                 <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -871,6 +935,14 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
           </SheetContent>
         </Sheet>
       )}
+
+      {/* 成果追问大窗(P4-14):居中弹出,窗内节点引用下钻自成抽屉栈 */}
+      <ClaimFollowupDialog
+        tid={tid}
+        claimID={claim.id}
+        open={followup}
+        onClose={() => setFollowup(false)}
+      />
     </>
   );
 }
@@ -1074,9 +1146,16 @@ function ClaimEvidenceSection({ tid, evidence, version }) {
   );
 }
 
+// fmtDur 耗时拆解的时长词(<90 秒精确到 0.1 秒,更长为分秒;与会话页
+// 计费口径同源)。
+function fmtDur(s) {
+  if (!Number.isFinite(s) || s < 90) return `${Math.round((s || 0) * 10) / 10} 秒`;
+  const m = Math.floor(s / 60);
+  return `${m} 分 ${Math.round(s - m * 60)} 秒`;
+}
+
 function TimelineEntry({ entry }) {
-  switch (entry.kind) {
-    case "created":
+  switch (entry.kind) {    case "created":
       return (
         <TimelineItem
           rev={entry.rev}

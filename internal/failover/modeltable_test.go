@@ -109,8 +109,8 @@ func TestPlatformPresets(t *testing.T) {
 		{"glm", "openai", "https://open.bigmodel.cn/api/paas/v4"},
 		{"deepseek", "anthropic", "https://api.deepseek.com/anthropic"},
 		{"deepseek", "openai", "https://api.deepseek.com"},
-		{"opencode", "anthropic", "https://opencode.ai/zen"},
-		{"opencode", "openai", "https://opencode.ai/zen/v1"},
+		{"opencode", "anthropic", "https://opencode.ai/inference/go/anthropic"}, // P4-10:默认形态 Go 订阅(不带 /v1)
+		{"opencode", "openai", "https://opencode.ai/inference/go/openai/v1"},
 		{"glm", "openai-responses", ""}, // 非预设组合:纯手动
 		{"", "openai", ""},              // 自定义平台
 		{"unknown", "openai", ""},

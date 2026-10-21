@@ -94,6 +94,10 @@ var assetClasses = map[AssetClass]bool{
 	AssetOther:         true,
 }
 
+// IsValidAssetClass 资产类是否在 12 类词表内(与 HarmClass/IntentAction
+// 等词表同惯例:入口校验方共用,不自拼清单)。
+func IsValidAssetClass(c AssetClass) bool { return assetClasses[c] }
+
 // AssetSource 资产来源三态(P4-05,问题清单 #10):种子(建任务表单)/
 // 手动(面板新增资产,actor=造物主)/ 发现(虫群回流收割入图,随回流
 // 通道点亮)。落在 node.added 的 Detail["source"];写入方各自声明,
@@ -117,7 +121,8 @@ func AssetSourceOf(detail map[string]any) string {
 // 其余依第四章定稿:资产层级关系为类型化边(sub_of,R5)、待办必须绑定在
 // 图上需 Step 依赖边(depends_on)、Hypothesis 须指向具体资产(复用 about);
 // produces 为进度图"意图→事实→漏洞"血缘链补边(Step 产出 Fact;P2-03 起
-// 虫群直觉候选同为 Step 产出物,Step → Hypothesis);
+// 虫群直觉候选同为 Step 产出物,Step → Hypothesis;P4-12 起收割入图的
+// 发现型资产同为 Step 产出物,Step → Asset——对象出生的血缘边);
 // verifies 为假设回流轨迹边(P2-03,第四章 §5):主宰裁决"值得跟"时
 // 派发的验证 Step 指回它验证的假设——回流轨迹全程类型化可查。
 type EdgeType string
@@ -126,7 +131,7 @@ const (
 	EdgeSubOf       EdgeType = "sub_of"       // Asset → Asset(层级)
 	EdgeAbout       EdgeType = "about"        // Fact|Hypothesis|TestClaim → Asset
 	EdgeCovers      EdgeType = "covers"       // Step → Asset(覆盖)
-	EdgeProduces    EdgeType = "produces"     // Step → Fact|Hypothesis(血缘)
+	EdgeProduces    EdgeType = "produces"     // Step → Fact|Hypothesis|Asset(血缘)
 	EdgeDerivedFrom EdgeType = "derived_from" // TestClaim → Step|Fact(血缘)
 	EdgeDependsOn   EdgeType = "depends_on"   // Step → Step(依赖)
 	EdgeVerifies    EdgeType = "verifies"     // Step → Hypothesis(验证步骤 → 被验证假设,P2-03)
@@ -145,7 +150,7 @@ var edgeRules = map[EdgeType]edgeRule{
 	// 具体资产(第五章 §1"资产锚点"),与 Fact/Hypothesis 同一边类型。
 	EdgeAbout:       {nodeTypeSet{NodeFact: true, NodeHypothesis: true, NodeTestClaim: true}, nodeTypeSet{NodeAsset: true}},
 	EdgeCovers:      {nodeTypeSet{NodeStep: true}, nodeTypeSet{NodeAsset: true}},
-	EdgeProduces:    {nodeTypeSet{NodeStep: true}, nodeTypeSet{NodeFact: true, NodeHypothesis: true}},
+	EdgeProduces:    {nodeTypeSet{NodeStep: true}, nodeTypeSet{NodeFact: true, NodeHypothesis: true, NodeAsset: true}},
 	EdgeDerivedFrom: {nodeTypeSet{NodeTestClaim: true}, nodeTypeSet{NodeStep: true, NodeFact: true}},
 	EdgeDependsOn:   {nodeTypeSet{NodeStep: true}, nodeTypeSet{NodeStep: true}},
 	EdgeVerifies:    {nodeTypeSet{NodeStep: true}, nodeTypeSet{NodeHypothesis: true}},
@@ -760,18 +765,22 @@ type AltResult struct {
 }
 
 // ReproStep 收割定稿的单条复现步骤(P2-02,第五章 §1+P2-02 任务书):
-// 操作方法(工具与参数)+ 一句话描述(P3-05b ②)+ HTTP 请求/响应原文的
-// 镜留痕引用(Burp 可验证数据包,完整原文经 blob 回放,R18)。确定性
-// 组装自反证战役的镜留痕,零 LLM(R17 同源纪律);P3-05b ① 起只收目标
-// 流量——请求 host 在任务授权范围(种子资产)内的交换才入步骤,外网
-// 查证流量不进(流量页照常全量可查)。
+// 操作方法(工具与参数)+ 一句话描述 + HTTP 请求/响应原文的镜留痕引用
+// (Burp 可验证数据包,完整原文经 blob 回放,R18)。确定性组装自反证
+// 战役的镜留痕;P3-05b ① 起只收目标流量——请求 host 在任务授权范围
+// (种子资产)内的交换才入步骤,外网查证流量不进(流量页照常全量可查)。
+// P4-08 ③ 起组装侧去同型:同方法+同路径+同状态的重复交换只保留构成
+// 复现流程的一条(该型首条成功交换,无成功则首条),其余进 Variants
+// (变体流量不进复现步骤,证据包 zip 全量收,审计不丢)。P4-08 ④ 起
+// Desc 为定稿时模型生成的指令式人话(冻结入账本;生成失败回退确定性
+// 描述),报告导出与面板渲染零 LLM(R17 不破)。
 type ReproStep struct {
-	Seq     int    `json:"seq"`
+	Seq     int    `json:"seq,omitempty"`
 	Round   int    `json:"round,omitempty"` // 所属反证轮次
 	StepID  string `json:"step_id"`         // 反证 Step(归因)
 	UnitID  string `json:"unit_id"`
-	Op      string `json:"op,omitempty"`     // 操作方法:发起本步的工具与参数
-	Desc    string `json:"desc,omitempty"`   // 一句话描述(P3-05b ②:这步在干什么,收割定稿时确定性生成;旧记录缺省)
+	Op      string `json:"op,omitempty"`     // 操作方法:发起本步的工具与参数(证据包收,面板/报告正文不显)
+	Desc    string `json:"desc,omitempty"`   // 一句话描述(指令式人话,P4-08 ④;旧记录为确定性描述或缺省)
 	Method  string `json:"method,omitempty"` // HTTP 方法
 	URL     string `json:"url,omitempty"`
 	Status  int    `json:"status,omitempty"`
@@ -839,8 +848,19 @@ type TestClaimRecord struct {
 	Reason  string `json:"reason,omitempty"`
 
 	// repro 侧(P2-02,收割定稿)。
-	Severity string      `json:"severity,omitempty"` // critical|high|medium|low(=末轮影响面定级)
-	Steps    []ReproStep `json:"steps,omitempty"`
+	Severity string `json:"severity,omitempty"` // critical|high|medium|low(=末轮影响面定级)
+	// Narrative 来龙去脉叙述(P4-13,问题清单 #23):确认定稿时主宰模型
+	// 基于链上节点与证据原文写的一段自然叙述(在哪发现的来源载体/谁发现
+	// 的/怎么验证/怎么确认),随确认裁决同批冻结入账;报告导出与面板渲染
+	// 零 LLM(R17);生成失败回退确定性拼句(不阻塞机器裁决);重开再确认
+	// 随新定稿重新生成(取代语义同 Steps)。叙述是包装不是证据,与机器
+	// 字段矛盾时以原文为准。旧定稿无本字段,读侧如实标注不编造。
+	Narrative string      `json:"narrative,omitempty"`
+	Steps     []ReproStep `json:"steps,omitempty"`
+	// Variants 去同型时被收起的变体交换(P4-08 ③):同方法+同路径+同
+	// 状态的重复交换不构成复现流程,不进 Steps;账本记录保留(证据包
+	// zip 全量收,审计不丢)。账次序与原交换次序一致,不编 Seq。
+	Variants []ReproStep `json:"variants,omitempty"`
 
 	// evidence 侧(P3-02,绑定/补绑):本次追加绑定的镜交换 ID。绑定与
 	// 补绑是同一操作类型——声明已有证据再绑即补绑,读取侧按事件累计。
@@ -1134,10 +1154,21 @@ const (
 // 建议裁决结果"必须可审计,重启后对话历史从事件流完整重建)。
 // MessageID 把一次问答的 user_message / message_state / tool_call /
 // thinking / reply 锚在一起;advice 独立编号(AdviceID),裁决事件回指。
+//
+// P4-14(问题清单 #24)扩三字段:ClaimID+Round 锚"成果追问"子会话
+// (一成果一会话、每轮独立;"新开一轮"= Round+1 新会话),空 ClaimID
+// = 牧者主对话(既有语义不变,互不混流);Prelude 只随每轮首条
+// user_message 落账——服务端确定性装配的成果链路上下文包,应答时注入
+// 模型会话(面板消息流只呈造物主的问话原文,预载卡由发现详情数据另呈)。
 type ShepherdRecord struct {
 	MessageID string `json:"message_id,omitempty"`
 	Type      string `json:"type"`
 	Text      string `json:"text,omitempty"` // user_message/reply/thinking/advice 的正文
+
+	// 成果追问会话锚(P4-14):ClaimID 空串 = 牧者主对话。
+	ClaimID string `json:"claim_id,omitempty"`
+	Round   int    `json:"round,omitempty"`   // 追问轮次(1 起;每轮独立会话)
+	Prelude string `json:"prelude,omitempty"` // user_message 侧:该轮首问预载的成果链路上下文包
 
 	// message_state 侧。
 	State string `json:"state,omitempty"` // delivered|failed

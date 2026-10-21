@@ -719,25 +719,25 @@ func TestControlledEntries(t *testing.T) {
 	env := &unitEnv{Executor: ex, TaskID: task, StepID: "s1", UnitID: "u1", TranscriptID: "swarm-u1"}
 
 	// 程序化候选提交
-	fid, err := env.SubmitCandidateFact(ctx, "靶标开放 22 端口", "port_probe 实测", "target")
+	fid, err := env.SubmitCandidateFact(ctx, "靶标开放 22 端口", "port_probe 实测", "target", nil)
 	if err != nil {
 		t.Fatalf("程序化候选提交失败: %v", err)
 	}
 	// 空陈述/空证据拒绝
-	if _, err := env.SubmitCandidateFact(ctx, "  ", "e", ""); err == nil {
+	if _, err := env.SubmitCandidateFact(ctx, "  ", "e", "", nil); err == nil {
 		t.Fatalf("空陈述应拒绝")
 	}
-	if _, err := env.SubmitCandidateFact(ctx, "s", "", ""); err == nil {
+	if _, err := env.SubmitCandidateFact(ctx, "s", "", "", nil); err == nil {
 		t.Fatalf("空证据应拒绝")
 	}
 	// 不存在的资产拒绝
-	if _, err := env.SubmitCandidateFact(ctx, "s", "e", "ghost"); err == nil {
+	if _, err := env.SubmitCandidateFact(ctx, "s", "e", "ghost", nil); err == nil {
 		t.Fatalf("幽灵资产应拒绝")
 	}
 
 	// 大证据走 blob 引用(R18)
 	bigEvidence := strings.Repeat("证据原文。", 2000)
-	fid2, err := env.SubmitCandidateFact(ctx, "大证据候选", bigEvidence, "")
+	fid2, err := env.SubmitCandidateFact(ctx, "大证据候选", bigEvidence, "", nil)
 	if err != nil {
 		t.Fatalf("大证据候选失败: %v", err)
 	}

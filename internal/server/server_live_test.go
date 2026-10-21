@@ -246,6 +246,22 @@ func TestLiveTaskDirty(t *testing.T) {
 	c.expectMsg(2*time.Second, map[string]any{"t": "dirty", "k": "tasks"})
 }
 
+// TestLiveRoeDirty RoE 变更也标脏 tasks(P4-09:摘除/纳入改写图载荷的
+// 资产范围口径,工作台覆盖条等 live 订阅方须重拉)。
+func TestLiveRoeDirty(t *testing.T) {
+	srv, ts, _ := newLiveTestServer(t)
+	createLiveTask(t, srv, "t-roe")
+	c := dialWS(t, ts.URL)
+	defer c.close()
+	c.expectMsg(2*time.Second, map[string]any{"t": "ready"})
+
+	commitEvents(t, srv, "t-roe", rings.Event{
+		Kind: rings.EventRoeUpdated, Actor: "creator",
+		Payload: rings.RoeUpdated{ExcludedAssets: []string{"a-1"}},
+	})
+	c.expectMsg(2*time.Second, map[string]any{"t": "dirty", "k": "tasks"})
+}
+
 func TestLiveApprovalPayload(t *testing.T) {
 	srv, ts, gate := newLiveTestServer(t)
 	createLiveTask(t, srv, "t-ap")

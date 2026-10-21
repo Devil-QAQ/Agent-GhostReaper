@@ -98,6 +98,10 @@ func (h *liveHub) onCommit(taskID string, events []rings.Event) {
 		switch ev.Kind {
 		case rings.EventTaskLifecycle, rings.EventTaskMeta:
 			topics = append(topics, liveTopicTasks)
+		case rings.EventRoeUpdated:
+			// RoE 变更改写图载荷的资产范围口径(P4-05 摘除 / P4-09
+			// 覆盖条分母)——tasks 主题订阅方(工作台图 / 任务列表)重拉。
+			topics = append(topics, liveTopicTasks)
 		case rings.EventApprovalRecord:
 			topics = append(topics, liveTopicApproval+taskID)
 		case rings.EventTestClaimRecord:

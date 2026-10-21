@@ -790,11 +790,17 @@ func (l *Loop) judgeClaims(ctx context.Context) (int, error) {
 		if j.Status == rings.TestClaimConfirmed {
 			// 收割定稿(P2-02):复现步骤(镜留痕交换+操作方法)与
 			// 严重级别(末轮影响面定级)随确认同批落库,报告与面板
-			// 只读这份定稿(R17:智能发生在写回时)。
+			// 只读这份定稿(R17:智能发生在写回时)。P4-08 ④:落账前
+			// 用模型把保留步骤的描述改写为指令式人话并冻结(失败回退
+			// 确定性描述,不阻塞裁决);重开再确认随新定稿重新生成。
 			repro, rerr := AssembleRepro(ctx, l.Store, l.TaskID, c.ID, j.Severity)
 			if rerr != nil {
 				l.setErr(fmt.Errorf("overmind: 定稿声明 %s: %w", c.ID, rerr))
 			} else {
+				l.genReproDescs(ctx, c.ID, repro)
+				// P4-13:来龙去脉叙述同批生成冻结(链上事实包 → 模型人话,
+				// 失败回退拼句不阻塞裁决;重开再确认随新定稿重新生成)。
+				l.genClaimNarrative(ctx, c.ID, j, repro)
 				events = append(events, rings.Event{
 					Kind: rings.EventTestClaimRecord, Actor: ActorOvermind, Payload: *repro})
 			}
@@ -917,9 +923,17 @@ const overmindDisciplineRules = `态势研判标准五问(逐问给一句结论,
 14. 待裁决建议(纳谏):快照「待裁决建议」区每条都必须在 advices 里裁决——adopt=true 须在本轮意图中体现或在理由中写明何时体现;adopt=false 的理由必须基于图上事实(不空泛)。牧者的建议是研判输入,不是命令;裁决后规划随之改变,建议状态随之更新。`
 
 // overmindOutputContract 主宰基线 C 段(代码固定,输出规约):JSON
-// 契约是机器解析接口,配置不可移除。
+// 契约是机器解析接口,配置不可移除。P4-11 ①:契约内带 intent 等结构化
+// 展示字段的文风收口与正反样例(只管新生成,不改写图上已有步骤)。
 const overmindOutputContract = `只输出 JSON:{"assessment":{"q_access":"…","q_privilege":"…","q_combination":"…","q_unlock":"…","q_overturn":"…","note":"…"},"new_intents":[{"intent":"一句话意图","expected_observation":"预期观察","action_level":"只读探测|主动测试|利用深入|修改与持久化","harm_class":"data_destruction|denial_of_service(仅危害类意图,普通意图省略)","covers":["资产ID"],"priority":"high|normal|low","depends_on":["StepID"]}],"combined_claims":[{"statement":"存在性声明(攻击链整体效果)","impact":"影响面声明","rationale":"组合理由","chain":[{"fact_id":"f-…","role":"入口"}],"asset_id":"资产ID","vulnclass":"漏洞类型","alternatives":["竞争性替代解释"]}],"advices":[{"id":"av-…","adopt":true,"reason":"裁决理由(不采纳须基于图上事实)"}]}
 (advices 仅在快照存在待裁决建议时输出,无则省略该字段。)
+字段文风(intent 与声明是面板高频展示字段,生成时收口;只管新写,不改写图上已有步骤):
+- intent:资产+手法+目标的点式短句,` + swarm.StructuredFieldStyle + `;写不下就收窄定位——点一个代表路径加"等 N 个",不铺枚举清单;命令与参数留给执行,不进意图。
+  正例:对 10.0.0.5:8080 做目录枚举,找未授权入口
+  正例(长定位收窄):对 4330 根目录直取 20 个常见文件名(README.md 等),确认根外文件是否暴露
+  反例:针对目标 Web 应用开展全面深入的安全测试,利用多种手段验证潜在漏洞的存在性并评估影响范围(无定位、无数字、长而空)
+  反例(铺清单):对 4330 根目录直取 20 个常见顶层文件名(如 README.md、LICENSE、CHANGELOG.md、site.log、key、.tok),确认根外敏感文件是否被静态暴露
+- statement / impact(combined_claims,与虫群声明提交同款):一句话写明资产与端口/路径定位要素,` + swarm.StructuredFieldStyle + `。
 不要输出 JSON 以外的任何内容。`
 
 // OvermindPromptSpec 主宰拆解基线三段式规约(P2-06d,§11):A 可编辑
@@ -1660,10 +1674,12 @@ func (l *Loop) launchUnit(ctx context.Context, stepID string) {
 
 // selectRunnable 派发策略的确定性选步(P2-06):依赖闸——depends_on
 // 前置(全图任意状态)全部 done 才可执行,其余等待;优先级排序——
-// high > normal > low,同级按创建版本先后(先派先执行)。前置未完成
-// 的步骤不是错误,是图上可见的等待态(主宰快照可见"前置 [sN]",
-// 研判可换路重派)。dispatched 为待执行步骤集,all 为全图步骤
-// (依赖闸需查前置的真实状态)。
+// high > normal > low,同级先急活(造物主插急活,权威最高)、再反证
+// (P4-08 ①:high 探索与反证并存时反证先领名额——反证有界收敛、
+// 发现确认周期卡后续规划燃料,探索稍让位是预期取舍)、其余按创建
+// 版本先后(先派先执行)。前置未完成的步骤不是错误,是图上可见的
+// 等待态(主宰快照可见"前置 [sN]",研判可换路重派)。dispatched 为
+// 待执行步骤集,all 为全图步骤(依赖闸需查前置的真实状态)。
 func selectRunnable(dispatched, all []rings.NodeFull, depEdges []rings.EdgeView) []rings.NodeFull {
 	depsOf := map[string][]string{}
 	for _, e := range depEdges {
@@ -1686,14 +1702,38 @@ func selectRunnable(dispatched, all []rings.NodeFull, depEdges []rings.EdgeView)
 			out = append(out, s)
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		pi, pj := stepPriorityRank(out[i]), stepPriorityRank(out[j])
-		if pi != pj {
-			return pi > pj
-		}
-		return out[i].CreatedRev < out[j].CreatedRev
-	})
+	sort.Slice(out, func(i, j int) bool { return StepLaunchLess(out[i], out[j]) })
 	return out
+}
+
+// StepLaunchLess 步骤领取次序的全序比较(调度器与面板排队列表同源,
+// 展示与操作同源纪律):优先级降序 → 同级急活 → 同级反证 → 创建版本
+// 升序 → ID 兜底(全图无同 rev 同 ID,仅为全序确定性)。
+func StepLaunchLess(a, b rings.NodeFull) bool {
+	pa, pb := stepPriorityRank(a), stepPriorityRank(b)
+	if pa != pb {
+		return pa > pb
+	}
+	ca, cb := stepClassRank(a), stepClassRank(b)
+	if ca != cb {
+		return ca < cb
+	}
+	if a.CreatedRev != b.CreatedRev {
+		return a.CreatedRev < b.CreatedRev
+	}
+	return a.ID < b.ID
+}
+
+// stepClassRank 同优先级内的类别权重(P4-08 ①):急活(造物主插急活)
+// 0 < 反证 1 < 其余 2。
+func stepClassRank(s rings.NodeFull) int {
+	if _, ok := s.Detail["urgent"].(bool); ok {
+		return 0
+	}
+	if k, _ := s.Detail["kind"].(string); k == "falsify" {
+		return 1
+	}
+	return 2
 }
 
 // stepPriorityRank 步骤的优先级排序权重(detail.priority;缺省 normal)。

@@ -10,14 +10,18 @@ import {
   ReactFlow,
 } from "@xyflow/react";
 
+import { NodeRefButton } from "@/components/node-ref-button";
 import { iconOf } from "@/components/icons";
-import { EDGE_LABELS, nodeTypeMeta, usePolling } from "@/lib/api";
+import { EDGE_LABELS, assetSourceMeta, nodeTypeMeta, usePolling } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 // 攻击链条节点图(P3-02 审核迭代 3):从统一图投影(/api/tasks/{id}/graph,
 // 与进度图/年轮图同一数据源)抠出声明的血缘邻域——资产/步骤/事实 → 漏洞
 // 的节点连接图,在成果卡「攻击链条」二层内呈现。节点点击走跳转协议
 //(换抽屉下钻),不自建第二套图数据。
+// P4-12:图下补「对象出生」区——链上每个资产的来源与出生血缘(发现型
+// 带发现单位/步骤/事实引用),链路从成果反向走通到对象最初入图;引用
+// 下钻沿用既有节点抽屉。
 
 // 链条图的列序(渲染从左到右):资产 → 步骤 → 事实 → 漏洞。
 const COLUMN_RANK = { asset: 0, goal: 0, step: 1, hypothesis: 2, fact: 2, testclaim: 3 };
@@ -112,8 +116,49 @@ function chainLayout(nodes, claimID) {
   return pos;
 }
 
-// ClaimChainGraph 成果卡「攻击链条」二层的内容:血缘邻域节点图。
-// onSelectNode 缺省时节点不可下钻(纯浏览)。
+// AssetBirthRows 对象出生区(P4-12):链上每个资产一行——资产引用 + 来源
+// 陈述;发现型带发现单位与出生引用(步骤/事实,可下钻),种子/手动如实
+// 陈列入图方式,无出生记录不编造。出生词与资产抽屉同一份。
+function AssetBirthRows({ assets, onSelectNode }) {
+  if (!assets.length) return null;
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="text-xs font-medium tracking-wide text-muted-foreground">对象出生</div>
+      {assets.map((a) => {
+        const src = assetSourceMeta(a.source);
+        return (
+          <div key={a.id} className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border bg-card px-3 py-2 text-xs">
+            <NodeRefButton meta={{ id: a.id, type: "asset", typeLabel: "资产" }} onSelectNode={onSelectNode} />
+            {React.createElement(iconOf(src.icon), { className: "size-3 text-muted-foreground" })}
+            {a.source === "discovered" ? (
+              <>
+                <span>发现入图</span>
+                {a.birth_unit && (
+                  <span className="text-muted-foreground">
+                    单位 <span className="font-mono">{a.birth_unit}</span>
+                  </span>
+                )}
+                {a.birth_step && (
+                  <NodeRefButton meta={{ id: a.birth_step, type: "step", typeLabel: "步骤" }} onSelectNode={onSelectNode} />
+                )}
+                {a.birth_fact && (
+                  <NodeRefButton meta={{ id: a.birth_fact, type: "fact", typeLabel: "事实" }} onSelectNode={onSelectNode} />
+                )}
+              </>
+            ) : a.source === "manual" ? (
+              <span>手动补入(面板新增)</span>
+            ) : (
+              <span>建任务种子入图</span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ClaimChainGraph 成果卡「攻击链条」二层的内容:血缘邻域节点图 + 对象
+// 出生区。onSelectNode 缺省时节点不可下钻(纯浏览)。
 export function ClaimChainGraph({ tid, claimID, onSelectNode }) {
   const { data: graph } = usePolling(
     tid ? `/api/tasks/${tid}/graph` : "/api/healthz",
@@ -123,6 +168,10 @@ export function ClaimChainGraph({ tid, claimID, onSelectNode }) {
   const { nodes: subNodes, edges: subEdges } = React.useMemo(
     () => claimChainSubgraph(graph, claimID),
     [graph, claimID],
+  );
+  const chainAssets = React.useMemo(
+    () => subNodes.filter((n) => n.type === "asset").sort((a, b) => (a.id < b.id ? -1 : 1)),
+    [subNodes],
   );
 
   if (!graph) {
@@ -163,23 +212,26 @@ export function ClaimChainGraph({ tid, claimID, onSelectNode }) {
   });
 
   return (
-    <div className="h-72 overflow-hidden rounded-lg border bg-card">
-      <ReactFlow
-        nodes={rfNodes}
-        edges={rfEdges}
-        nodeTypes={NODE_TYPES}
-        onNodeClick={onSelectNode ? (_, n) => onSelectNode({ id: n.id, type: n.data.node.type }) : undefined}
-        nodesDraggable={false}
-        nodesConnectable={false}
-        elementsSelectable={false}
-        fitView
-        fitViewOptions={{ padding: 0.18, maxZoom: 1.1 }}
-        minZoom={0.2}
-        maxZoom={2}
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background variant={BackgroundVariant.Dots} gap={22} size={1.1} color="var(--border)" />
-      </ReactFlow>
+    <div className="flex flex-col gap-3">
+      <div className="h-72 overflow-hidden rounded-lg border bg-card">
+        <ReactFlow
+          nodes={rfNodes}
+          edges={rfEdges}
+          nodeTypes={NODE_TYPES}
+          onNodeClick={onSelectNode ? (_, n) => onSelectNode({ id: n.id, type: n.data.node.type }) : undefined}
+          nodesDraggable={false}
+          nodesConnectable={false}
+          elementsSelectable={false}
+          fitView
+          fitViewOptions={{ padding: 0.18, maxZoom: 1.1 }}
+          minZoom={0.2}
+          maxZoom={2}
+          proOptions={{ hideAttribution: true }}
+        >
+          <Background variant={BackgroundVariant.Dots} gap={22} size={1.1} color="var(--border)" />
+        </ReactFlow>
+      </div>
+      <AssetBirthRows assets={chainAssets} onSelectNode={onSelectNode} />
     </div>
   );
 }

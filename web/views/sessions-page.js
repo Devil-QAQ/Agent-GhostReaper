@@ -4,6 +4,13 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { iconOf } from "@/components/icons";
+import { ClaimFollowupDialog } from "@/components/claim-followup-dialog";
+import {
+  DELIVERY,
+  InlineAdvice,
+  MessageBlock,
+  nowStamp,
+} from "@/components/chat-blocks";
 import { InterjectBlock, InterjectWindow } from "@/components/interject-window";
 import { LongText } from "@/components/long-text";
 import { SessionInfoBar } from "@/components/session-info-bar";
@@ -73,13 +80,6 @@ const ADOPT_ACTIONS = {
   relaunch: "重新拉起",
   adopt_paused: "收养为已暂停",
   requeue: "重新排队",
-};
-
-const DELIVERY = {
-  queued: { label: "已排队", variant: "paused" },
-  delivered: { label: "已送达", variant: "running" },
-  replied: { label: "已回复", variant: "success" },
-  failed: { label: "失败", variant: "danger" },
 };
 
 export function SessionsPage({ currentTask, unitFocus }) {
@@ -363,6 +363,40 @@ function RoundCard({ round, taskID, onNode }) {
           ))}
         </div>
       )}
+      {/* 在途全景(P4-11 ②):该轮研判时刻的在跑+排队步骤,按领取次序排;
+          账本按版本号回放装配,零 LLM——表是机器的,上面五问叙述是模型的 */}
+      <div className="mt-2 border-t pt-2">
+        <div className="text-[11px] text-muted-foreground" title="该轮研判时刻的在跑与排队步骤">
+          在途全景
+        </div>
+        <div className="mt-1 space-y-1">
+          {(round.panorama || []).map((p) => (
+            <div key={p.id} className="flex items-center gap-2">
+              <Badge variant={p.status === "running" ? "running" : "info"}>{p.status === "running" ? "执行中" : "排队中"}</Badge>
+              {p.waiting && <span className="shrink-0 text-[11px] text-muted-foreground">等前置</span>}
+              <button
+                className="min-w-0 shrink cursor-pointer truncate text-left hover:text-primary"
+                title={`${p.id}${p.title ? " · " + p.title : ""}`}
+                onClick={() => openNode(taskID, p.id, onNode)}
+              >
+                <span className="font-mono text-muted-foreground">{p.id}</span>
+                {p.title && <span className="ml-1">{clip(p.title, 30)}</span>}
+              </button>
+              {(p.assets || []).length > 0 && (
+                <span
+                  className="ml-auto max-w-[40%] shrink-0 truncate text-[11px] text-muted-foreground"
+                  title={(p.assets || []).map((a) => a.title || a.id).join("、")}
+                >
+                  {(p.assets || []).map((a) => a.title || a.id).join("、")}
+                </span>
+              )}
+            </div>
+          ))}
+          {(round.panorama || []).length === 0 && (
+            <div className="text-[11px] text-muted-foreground">该时刻无在跑或排队步骤</div>
+          )}
+        </div>
+      </div>
       {openRaw && round.session_id && (
         <div className="mt-2 border-t pt-2">
           <RawTranscript taskID={taskID} sessionID={round.session_id} />
@@ -380,15 +414,7 @@ function NodeChip({ id, label, status, taskID, onNode }) {
     <button
       className="flex max-w-full items-center gap-1 rounded-md border bg-card px-2 py-0.5 cursor-pointer hover:bg-hover-lift"
       title={`${id}${label ? " · " + label : ""}`}
-      onClick={async () => {
-        const r = await fetch(`/api/tasks/${taskID}/nodes/${id}`);
-        if (!r.ok) {
-          toast.error("节点不在账本中");
-          return;
-        }
-        const n = await r.json();
-        onNode({ type: n.type, id: n.id });
-      }}
+      onClick={() => openNode(taskID, id, onNode)}
     >
       <span className="truncate">
         <span className="font-mono">{id}</span>
@@ -397,6 +423,17 @@ function NodeChip({ id, label, status, taskID, onNode }) {
       <Badge variant={st.variant}>{st.label}</Badge>
     </button>
   );
+}
+
+// openNode 打开节点核对面(研判卡内步骤 chip 与在途全景行同一入口)。
+async function openNode(taskID, id, onNode) {
+  const r = await fetch(`/api/tasks/${taskID}/nodes/${id}`);
+  if (!r.ok) {
+    toast.error("节点不在账本中");
+    return;
+  }
+  const n = await r.json();
+  onNode({ type: n.type, id: n.id });
 }
 
 const CLAIM_STATUS_OF = {
@@ -646,9 +683,6 @@ function SwarmPane({ task, unitFocus, onInterject }) {
     </div>
   );
 }
-
-// nowStamp 本地时间戳(与账本事件侧 at 同格式,本地即显的消息用)。
-const nowStamp = () => new Date().toLocaleString("sv-SE").slice(0, 19);
 
 // ---- 会话标记(P3-13b ②:重命名 + 备注 + 置顶,入账留痕; ----
 // P4-02 ⑤ 入口改「⋯」下拉菜单:重命名…/备注…各弹小窗,置顶菜单项
@@ -1321,6 +1355,10 @@ function ResultCard({ res }) {
 
 // ---- 牧者会话 ----
 
+// ShepherdPane 牧者组容器(P4-14,审核迭代 1):追问列表可侧拉、默认收起
+//——收起时牧者组与原单栏窗口一致;标记行旁"成果追问 N"小按钮展开列表
+//(每 (成果 × 轮) 一条,点击开追问大窗回看),列头收起钮折回。无追问
+// 条目时不占位。
 function ShepherdPane({ task }) {
   const taskID = task?.id;
   const url = taskID ? `/api/tasks/${taskID}/shepherd` : null;
@@ -1331,6 +1369,86 @@ function ShepherdPane({ task }) {
     (d) => (d?.busy ? 700 : 2000),
     { immediate: Boolean(url) }
   );
+  const [openClaim, setOpenClaim] = React.useState(null); // 追问大窗目标({claim_id, round})
+  const [listOpen, setListOpen] = React.useState(false); // 追问列表默认收起(牧者组保持原窗口形态)
+  const followups = (data?.followups || []).slice().reverse(); // 最新活动在前
+
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 gap-2">
+      {listOpen && followups.length > 0 && (
+        <div className="flex w-[200px] shrink-0 flex-col overflow-y-auto rounded-xl border bg-card">
+          <div className="flex flex-col gap-0.5 border-b px-2 py-1.5 text-left text-[12px]">
+            <span className="flex items-center gap-1.5">
+              {React.createElement(iconOf("messageCircle"), { className: "size-3.5 shrink-0 text-primary" })}
+              <span className="font-medium">牧者 · 总对话</span>
+              <span className="flex-1" />
+              <Button
+                size="sm"
+                variant="ghost"
+                className="size-6 shrink-0 p-0"
+                title="收起成果追问列表"
+                onClick={() => setListOpen(false)}
+              >
+                {React.createElement(iconOf("chevronsLeft"), { className: "size-4" })}
+              </Button>
+            </span>
+            <span className="pl-5 text-[11px] text-muted-foreground">问进度 / 纠方向 / 插急活</span>
+          </div>
+          {followups.map((f) => (
+            <button
+              key={`${f.claim_id}-${f.round}`}
+              className="flex flex-col gap-0.5 border-b px-3 py-1 text-left text-[12px] cursor-pointer last:border-b-0 hover:bg-hover-lift"
+              title={`成果追问 · ${f.statement || f.claim_id}`}
+              onClick={() => setOpenClaim({ claim_id: f.claim_id, round: f.round })}
+            >
+              <span className="flex items-center gap-1.5">
+                {React.createElement(iconOf("arrowRight"), { className: "size-3 shrink-0 text-muted-foreground" })}
+                <span className="truncate font-medium">{f.statement || f.claim_id}</span>
+              </span>
+              <span className="pl-[18px] text-[11px] text-muted-foreground">
+                第 {f.round} 轮 · 已 {f.questions} 问
+                {f.last_at ? ` · ${f.last_at?.slice(5, 16)}` : ""}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+      <ShepherdMainPane
+        task={task}
+        data={data}
+        error={error}
+        setData={setData}
+        headerExtra={
+          !listOpen && followups.length > 0 ? (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 shrink-0 px-2 text-xs"
+              title="本任务的成果追问会话"
+              onClick={() => setListOpen(true)}
+            >
+              {React.createElement(iconOf("chevronsRight"), { className: "size-3.5" })}
+              成果追问 {followups.length}
+            </Button>
+          ) : null
+        }
+      />
+      <ClaimFollowupDialog
+        tid={taskID}
+        claimID={openClaim?.claim_id}
+        round={openClaim?.round}
+        open={Boolean(openClaim)}
+        onClose={() => setOpenClaim(null)}
+      />
+    </div>
+  );
+}
+
+// ShepherdMainPane 牧者总对话页:顶部信息条 → 对话流 → 输入框(任务
+// 控制组挂输入框右上)。数据由容器轮询喂入(与追问列表同一响应);
+// headerExtra 挂在标记行尾(追问列表的展开入口)。
+function ShepherdMainPane({ task, data, error, setData, headerExtra }) {
+  const taskID = task?.id;
   const [text, setText] = React.useState("");
   const [sending, setSending] = React.useState(false);
   const [node, setNode] = React.useState(null); // 节点详情抽屉({type,id},fact# 等引用点击下钻)
@@ -1417,12 +1535,16 @@ function ShepherdPane({ task }) {
         deductSeconds={data?.hibernate_seconds}
         frozen={hibernated}
       />
-      <SessionMarkBar
-        taskID={taskID}
-        sessionID={`shepherd-${taskID}`}
-        defaultName="牧者"
-        meta={data?.meta}
-      />
+      <div className="flex items-center gap-2">
+        <SessionMarkBar
+          taskID={taskID}
+          sessionID={`shepherd-${taskID}`}
+          defaultName="牧者"
+          meta={data?.meta}
+          className="min-w-0 flex-1"
+        />
+        {headerExtra}
+      </div>
       {error && (
         <div className="rounded-md border border-status-danger/40 bg-status-danger-soft px-3 py-1 text-xs text-status-danger">
           读取失败:{error}
@@ -1542,215 +1664,9 @@ function ShepherdPane({ task }) {
   );
 }
 
-// MessageBlock 一条问答:造物主消息(带送达状态)→ 思考段 → 工具折叠卡
-// 流 → 牧者回复(引用可点击)。
-function MessageBlock({ msg, taskID, onNode }) {
-  const st = DELIVERY[msg.state] || DELIVERY.queued;
-  // 系统收尾提示(任务终态,P2-08f):非造物主发言,居中窄条呈现;
-  // 牧者的一句话进展总结照常挂在其下。
-  if (msg.system) {
-    return (
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-2 py-0.5">
-          <span className="h-px flex-1 bg-border" />
-          <span className="text-[11px] text-muted-foreground">{msg.text.split("。")[0]}</span>
-          <span className="h-px flex-1 bg-border" />
-        </div>
-        {(msg.thinking || (msg.tool_calls && msg.tool_calls.length) > 0 || msg.reply) && (
-          <div className="flex flex-col items-start gap-2">
-            {msg.thinking && <ThinkingCard text={msg.thinking} />}
-            {(msg.tool_calls || []).map((c, i) => (
-              <ToolCallCard key={i} call={c} />
-            ))}
-            {msg.reply && (
-              <div className="max-w-[90%] rounded-lg border bg-background px-3 py-2 text-[13px] whitespace-pre-wrap [overflow-wrap:anywhere]">
-                <RefText text={msg.reply} taskID={taskID} onNode={onNode} />
-                <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
-                  <Badge variant="outline">进展总结</Badge>
-                  <span className="font-mono">{msg.reply_at?.slice(11)}</span>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  }
-  return (
-    <div className="flex flex-col gap-2">
-      {/* 造物主 */}
-      <div className="flex flex-col items-end gap-0.5">
-        <div className="max-w-[85%] rounded-lg bg-primary/15 px-3 py-2 text-[13px] whitespace-pre-wrap [overflow-wrap:anywhere]">
-          {msg.text}
-        </div>
-        <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-          <span className="font-mono">{msg.at?.slice(11)}</span>
-          <Badge variant={st.variant}>{st.label}</Badge>
-        </div>
-        {msg.state === "failed" && msg.note && (
-          <div className="max-w-[85%] text-[11px] text-status-danger">{msg.note}</div>
-        )}
-      </div>
-      {/* 牧者 */}
-      {(msg.thinking || (msg.tool_calls && msg.tool_calls.length) > 0 || msg.reply) && (
-        <div className="flex flex-col items-start gap-2">
-          {msg.thinking && <ThinkingCard text={msg.thinking} />}
-          {(msg.tool_calls || []).map((c, i) => (
-            <ToolCallCard key={i} call={c} />
-          ))}
-          {(msg.advices || []).map((a) => (
-            <InlineAdvice key={a.id} advice={a} />
-          ))}
-          {msg.reply && (
-            <div className="max-w-[90%] rounded-lg border bg-background px-3 py-2 text-[13px] whitespace-pre-wrap [overflow-wrap:anywhere]">
-              <RefText text={msg.reply} taskID={taskID} onNode={onNode} />
-              <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
-                <Badge variant="outline">回复</Badge>
-                <span className="font-mono">{msg.reply_at?.slice(11)}</span>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ThinkingCard 思考段(消息类型徽标:thinking)。
-function ThinkingCard({ text }) {
-  const [open, setOpen] = React.useState(false);
-  return (
-    <div className="max-w-[85%] rounded-lg border bg-background">
-      <button
-        className="flex w-full items-center gap-2 px-3 py-1 text-[11px] text-muted-foreground cursor-pointer"
-        onClick={() => setOpen((o) => !o)}
-      >
-        <Badge variant="outline">思考</Badge>
-        <span className="truncate">{text.slice(0, 60)}…</span>
-        {React.createElement(iconOf(open ? "chevronDown" : "chevronRight"), {
-          className: "ml-auto size-3.5 shrink-0",
-        })}
-      </button>
-      {open && (
-        <div className="border-t px-3 py-2 text-xs text-muted-foreground whitespace-pre-wrap [overflow-wrap:anywhere]">
-          {text}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ToolCallCard 工具调用折叠卡(8.5:聚合一次回合的工具调用,展开为
-// 步骤卡片流——状态色边 + 工具名;此处一条一卡,参数与结果头部展开)。
-function ToolCallCard({ call }) {
-  const [open, setOpen] = React.useState(false);
-  return (
-    <div
-      className={cn(
-        "max-w-[85%] rounded-lg border bg-background",
-        call.is_error && "border-status-danger/60"
-      )}
-    >
-      <button
-        className="flex w-full items-center gap-2 px-3 py-1 text-[11px] cursor-pointer"
-        onClick={() => setOpen((o) => !o)}
-      >
-        <Badge variant="outline">{call.is_error ? "工具出错" : "工具调用"}</Badge>
-        <span className="truncate font-mono">{call.name}</span>
-        <span className="ml-auto shrink-0 text-muted-foreground">
-          {call.at?.slice(11)}
-        </span>
-        {React.createElement(iconOf(open ? "chevronDown" : "chevronRight"), {
-          className: "size-3.5 shrink-0",
-        })}
-      </button>
-      {open && (
-        <div className="space-y-2 border-t px-3 py-2 text-xs">
-          {call.args && (
-            <div>
-              <div className="mb-0.5 text-muted-foreground">参数</div>
-              <pre className="overflow-x-auto rounded-md bg-input-surface p-2 font-mono whitespace-pre-wrap break-all">
-                {call.args}
-              </pre>
-            </div>
-          )}
-          {call.result_head && (
-            <div>
-              <div className="mb-0.5 text-muted-foreground">结果</div>
-              <pre className="max-h-56 overflow-y-auto rounded-md bg-input-surface p-2 font-mono whitespace-pre-wrap break-all">
-                {call.result_head}
-              </pre>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// InlineAdvice 对主宰的建议(纳谏)内联卡:牧者在某条消息里提交的建议,
-// 卡片落在对话流的原位;裁决状态原地更新(待裁决/已采纳/未采纳+理由)。
-function InlineAdvice({ advice }) {
-  const meta = (st) =>
-    st === "pending"
-      ? { label: "待裁决", variant: "paused" }
-      : st === "adopted"
-        ? { label: "已采纳", variant: "success" }
-        : { label: "未采纳", variant: "danger" };
-  const m = meta(advice.state);
-  return (
-    <div className="w-[85%] rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-[12px]">
-      <div className="flex items-center gap-2">
-        {React.createElement(iconOf("sparkles"), { className: "size-3 shrink-0 text-primary" })}
-        <span className="text-muted-foreground">对主宰的建议</span>
-        <Badge variant={m.variant}>{m.label}</Badge>
-        <span className="font-mono text-[11px] text-muted-foreground">{advice.id}</span>
-      </div>
-      <div className="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere]">{advice.text}</div>
-      {advice.reason && (
-        <div className="mt-1 text-[11px] text-muted-foreground">裁决:{advice.reason}</div>
-      )}
-    </div>
-  );
-}
-
-// ---- fact# 等引用可点击 ----
-
-// 引用词形两种:带前缀编号(fact:f-xx / claim:c-xx / step:s1 / asset:a-xx,
-// 牧者提示词约定)与图上 ID 的列表写法(f-xxxx: / tc-chain-xxxx: /
-// h-xxxx: / a-xxxx: / g-xxxx:,后跟冒号的定义式——模型的常见列表格式)。
-const REF_RE =
-  /(fact|claim|step|asset|goal|hypo)[:#]([A-Za-z0-9_-]+)|\b((?:tc-chain-|f-|h-|a-|g-)[a-z0-9]+)(?=\**:)/g;
-
-function RefText({ text, taskID, onNode }) {
-  const parts = [];
-  let last = 0;
-  for (const m of text.matchAll(REF_RE)) {
-    if (m.index > last) parts.push(text.slice(last, m.index));
-    const nodeID = m[2] || m[3]; // 带前缀形态取编号;列表形态整词即 ID
-    parts.push(
-      <button
-        key={m.index}
-        className="cursor-pointer font-mono text-primary underline decoration-dotted underline-offset-2"
-        title="查看节点"
-        onClick={async () => {
-          const r = await fetch(`/api/tasks/${taskID}/nodes/${nodeID}`);
-          if (!r.ok) {
-            toast.error("节点不在账本中");
-            return;
-          }
-          const n = await r.json();
-          onNode({ type: n.type, id: n.id });
-        }}
-      >
-        {m[0]}
-      </button>
-    );
-    last = m.index + m[0].length;
-  }
-  if (last < text.length) parts.push(text.slice(last));
-  return <>{parts}</>;
-}
+// MessageBlock / ThinkingCard / ToolCallCard / InlineAdvice / RefText 等
+// 牧者侧对话块自本文件抽出为共用组件(P4-14:成果追问大窗同款呈现,
+// 单一实现防平行)——见 web/components/chat-blocks.js。
 
 // ---- 系统事件(黑匣子) ----
 

@@ -161,11 +161,13 @@ func TestModelRecoverEndpoint(t *testing.T) {
 }
 
 // TestModelsGetPresets P4-03 ④:/api/models 随行下发平台 × 格式默认端点
-// 与平台清单(建模型预填数据源)。
+// 与平台清单(建模型预填数据源);P4-10 ①:opencode 默认形态改 Go 订阅
+// 网关,接入方式双形态随行下发。
 func TestModelsGetPresets(t *testing.T) {
 	_, h := newModelsTestServer(t)
 	var res struct {
 		Presets   map[string]map[string]string `json:"presets"`
+		OCModes   map[string]map[string]string `json:"opencode_modes"`
 		Platforms []struct {
 			Value string `json:"value"`
 			Label string `json:"label"`
@@ -174,8 +176,13 @@ func TestModelsGetPresets(t *testing.T) {
 	get(t, h, "/api/models", http.StatusOK, &res)
 	if res.Presets["glm"]["anthropic"] != "https://open.bigmodel.cn/api/anthropic" ||
 		res.Presets["deepseek"]["openai"] != "https://api.deepseek.com" ||
-		res.Presets["opencode"]["openai"] != "https://opencode.ai/zen/v1" {
+		res.Presets["opencode"]["openai"] != "https://opencode.ai/inference/go/openai/v1" {
 		t.Fatalf("平台预设不符: %+v", res.Presets)
+	}
+	if res.OCModes["go"]["anthropic"] != "https://opencode.ai/inference/go/anthropic" ||
+		res.OCModes["api"]["openai"] != "https://opencode.ai/zen/v1" ||
+		res.OCModes["api"]["anthropic"] != "https://opencode.ai/zen" {
+		t.Fatalf("opencode 接入方式双形态不符: %+v", res.OCModes)
 	}
 	if len(res.Platforms) != 4 || res.Platforms[3].Value != "" {
 		t.Fatalf("平台清单不符: %+v", res.Platforms)

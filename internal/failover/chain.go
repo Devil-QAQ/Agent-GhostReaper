@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -184,6 +185,28 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// llmHTTPClient 按配置组装自定义 HTTP client(P4-03 ① + P4-10 ①):
+// anthropic 格式挂用量输入侧补全(GLM 端点 message_start 零用量模式);
+// opencode Go 网关(两种格式)再包会话头/UA 注入——openai 族格式仅注
+// 头。返回 (nil, nil) = 无需自定义(走 llm 包默认 client)。设
+// HTTPClient 后 llm 包忽略 Proxy,代理语义由自定义 client 自带。
+func llmHTTPClient(cfg ModelConfig) (*http.Client, error) {
+	if NormalizeFormat(cfg.Format) == "anthropic" {
+		client, err := newAnthropicUsageClient(cfg.Proxy)
+		if err != nil {
+			return nil, err
+		}
+		if isOpenCodeGoURL(cfg.BaseURL) {
+			client.Transport = newOpenCodeHeaderTransport(client.Transport)
+		}
+		return client, nil
+	}
+	if isOpenCodeGoURL(cfg.BaseURL) {
+		return newOpenCodeGoClient(cfg.Proxy)
+	}
+	return nil, nil
+}
+
 // BuildProvider 由一条库配置构建 Norma Provider(P2-08c 起含 v2 全量
 // 调优:代理/限速/思考/上限字段名/重试覆盖①②/关流式)。server 的测试
 // 连接同用本函数——面板测的就是将要跑的。
@@ -196,14 +219,9 @@ func BuildProvider(cfg ModelConfig, opts func(*llm.Config)) (llm.Provider, error
 		ThinkingType:    cfg.Thinking,
 		ReasoningEffort: cfg.ThinkingEffort,
 	}
-	// anthropic 格式挂用量输入侧补全 client(P4-03 ①:GLM 端点
-	// message_start 零用量模式,传输层合成输入侧事件;设 HTTPClient 后
-	// llm 包忽略 Proxy,代理语义由补全 client 自带)。
-	if NormalizeFormat(cfg.Format) == "anthropic" {
-		client, err := newAnthropicUsageClient(cfg.Proxy)
-		if err != nil {
-			return nil, err
-		}
+	if client, err := llmHTTPClient(cfg); err != nil {
+		return nil, err
+	} else if client != nil {
 		lc.HTTPClient = client
 	}
 	if cfg.RatePerSecond > 0 || cfg.RatePerMinute > 0 {

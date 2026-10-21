@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"ghostreaper/internal/arbiter"
@@ -60,19 +61,28 @@ type AltView struct {
 	Killed bool   `json:"killed"` // 当前战役内经结构化写回排除
 }
 
-// ReproStepView 复现步骤(收割定稿 + 原文回放):操作方法 + HTTP 交换
-// 摘要 + Burp 风格原文(面板与报告同口径截断,全文在 blob/证据包)。
+// ReproStepView 复现步骤(收割定稿 + 原文回放):HTTP 交换摘要 + Burp
+// 风格原文(面板与报告同口径截断,全文在 blob/证据包)。TLSWord 为
+// https 交换的目标证书校验结论(P4-08 ⑥:证书结论是包外信息行,不进
+// 包文)。Op 不上面板/报告正文(P4-08 ⑤:证据包收)。
 type ReproStepView struct {
 	rings.ReproStep
-	Raw     string `json:"raw"`      // 请求/响应原文(Burp 风格,截断)
-	RawClip bool   `json:"raw_clip"` // 原文是否被截断(全文在 blob)
+	Raw     string `json:"raw,omitempty"`      // 请求/响应原文(Burp 风格,截断)
+	RawClip bool   `json:"raw_clip"`           // 原文是否被截断(全文在 blob)
+	TLSWord string `json:"tls_word,omitempty"` // https 交换的目标证书结论(包外信息行)
 }
 
 // ReproFinal 收割定稿:最新 repro 记录(重开再确认后新定稿取代旧定稿)。
+// Steps 为去同型后的复现流程(P4-08 ③);Variants 为去重收起的变体
+// 交换(证据包全量收,面板/报告正文不显);Narrative 为定稿冻结的
+// 来龙去脉叙述(P4-13:模型生成人话,读定稿零 LLM;旧定稿无叙述为空,
+// 读侧如实标注不编造)。
 type ReproFinal struct {
-	Rev      int64           `json:"rev"`
-	Severity string          `json:"severity"`
-	Steps    []ReproStepView `json:"steps"`
+	Rev       int64             `json:"rev"`
+	Severity  string            `json:"severity"`
+	Narrative string            `json:"narrative,omitempty"`
+	Steps     []ReproStepView   `json:"steps"`
+	Variants  []rings.ReproStep `json:"variants,omitempty"`
 }
 
 // RetestFinal 最新复测结论(P3-06):修复状态是锤炼态之上的正交轴,
@@ -158,17 +168,8 @@ func claimCases(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore,
 		for _, a := range frozen {
 			cs.Alternatives = append(cs.Alternatives, AltView{ID: a.ID, Label: a.Label, Killed: !alive[a.ID]})
 		}
-		// 最新 repro(取代语义)→ 定稿视图 + blob 原文回放。
-		for i := len(cs.Timeline) - 1; i >= 0; i-- {
-			if cs.Timeline[i].Kind != "repro" {
-				continue
-			}
-			cs.Repro = &ReproFinal{Rev: cs.Timeline[i].Rev, Severity: cs.Timeline[i].Severity}
-			break
-		}
-		if cs.Repro != nil {
-			cs.Repro.Steps = reproStepsOf(blobs, cs.Repro.Severity, evs, id)
-		}
+		// 最新 repro(取代语义)→ 定稿视图 + blob 原文回放 + 变体清单。
+		cs.Repro = reproStepsOf(blobs, evs, id)
 		// 最新复测结论(P3-06,取代语义同 repro:取最新一轮;时间线不含
 		// retest 记录——修复状态轴与锤炼轨迹分列呈现)。
 		cs.Retest = retestFinalOf(evs, id)
@@ -223,22 +224,26 @@ func caseEntryOf(rev int64, p rings.TestClaimRecord) CaseEntry {
 	return e
 }
 
-// reproStepsOf 定稿步骤装配:最新 repro 记录的步骤 + blob 交换原文回放。
-func reproStepsOf(blobs *swarm.BlobStore, severity string, evs []rings.RawEvent, claimID string) []ReproStepView {
+// reproStepsOf 定稿装配:最新 repro 记录(重开再确认后新记录取代旧
+// 记录)→ 去同型步骤 + blob 原文回放 + 变体清单(证据包用);无定稿
+// 记录返回 nil。
+func reproStepsOf(blobs *swarm.BlobStore, evs []rings.RawEvent, claimID string) *ReproFinal {
 	var latest *rings.TestClaimRecord
+	var rev int64
 	for i := len(evs) - 1; i >= 0; i-- {
 		if evs[i].Kind != rings.EventTestClaimRecord {
 			continue
 		}
 		var p rings.TestClaimRecord
 		if json.Unmarshal(evs[i].Payload, &p) == nil && p.ClaimID == claimID && p.Type == rings.TestClaimRecRepro {
-			latest = &p
+			latest, rev = &p, evs[i].Revision
 			break
 		}
 	}
 	if latest == nil {
 		return nil
 	}
+	out := &ReproFinal{Rev: rev, Severity: latest.Severity, Narrative: latest.Narrative, Variants: latest.Variants}
 	steps := make([]ReproStepView, 0, len(latest.Steps))
 	for _, st := range latest.Steps {
 		sv := ReproStepView{ReproStep: st}
@@ -247,12 +252,16 @@ func reproStepsOf(blobs *swarm.BlobStore, severity string, evs []rings.RawEvent,
 				var ex mirror.Exchange
 				if json.Unmarshal(doc, &ex) == nil {
 					sv.Raw, sv.RawClip = renderExchangeRaw(&ex)
+					if ex.Type == rings.MirrorRecHTTPS && ex.TLS != nil {
+						sv.TLSWord = mirror.TLSLabel(ex.TLS.Validity)
+					}
 				}
 			}
 		}
 		steps = append(steps, sv)
 	}
-	return steps
+	out.Steps = steps
+	return out
 }
 
 // ClaimCaseOf 单条声明卷宗(发现详情 API 入口;任务量级下与全量装配
@@ -287,9 +296,12 @@ func renderExchangeFull(ex *mirror.Exchange) string {
 func ExchangeRaw(ex *mirror.Exchange) string { return renderExchangeFull(ex) }
 
 // renderExchange 统一装配:clipAt>0 时请求/响应正文截断并标记,≤0 全文。
-// https 交换(P3-01 解密留痕)首行标注目标证书校验结论——审计复现时
-// 一眼可辨自签/过期目标的信任事实。请求侧与响应侧分块写入
-// (writeRequestBlock/writeResponseBlock),单侧视图与全量同一装配。
+// 请求行 origin-form(P4-08 ⑥);行尾与消息边界用线上格式(\r\n,
+// 请求头后带空行终止——渲染出的请求包本身即完整可发的 HTTP 报文,
+// 复制即贴 Burp Repeater 可发);目标证书结论不进包文(包外信息行:
+// 面板走元数据条、报告走原文块前置行、zip 走文件头;审计事实在 blob)。
+// 请求侧与响应侧分块写入(writeRequestBlock/writeResponseBlock),单侧
+// 视图与全量同一装配。
 func renderExchange(ex *mirror.Exchange, clipAt int) (string, bool) {
 	var b strings.Builder
 	t1 := writeRequestBlock(&b, ex, clipAt)
@@ -297,7 +309,7 @@ func renderExchange(ex *mirror.Exchange, clipAt int) (string, bool) {
 	t2 := writeResponseBlock(&rb, ex, clipAt)
 	resp := rb.String()
 	if ex.Response != nil {
-		b.WriteString("\n") // 请求与响应间的空行分隔(与原始 Burp 报文形态一致)
+		b.WriteString("\r\n") // 请求与响应块间的分隔行(与原始报文形态一致)
 		b.WriteString(resp)
 	} else if resp != "" {
 		// 无响应仅异常注记:注记自带前导空行,原样衔接。
@@ -306,30 +318,69 @@ func renderExchange(ex *mirror.Exchange, clipAt int) (string, bool) {
 	return b.String(), t1 || t2
 }
 
-// writeRequestBlock 请求侧原文块:目标证书标注(https) + 请求行/头/体。
+// writeRequestBlock 请求侧原文块:请求行/头/体(Burp 就绪,P4-08 ⑥:
+// origin-form 请求行 + Host 头承载 + \r\n 行尾 + 头后空行终止)。
 // 返回正文是否被截断。
 func writeRequestBlock(b *strings.Builder, ex *mirror.Exchange, clipAt int) bool {
-	if ex.Type == rings.MirrorRecHTTPS && ex.TLS != nil {
-		fmt.Fprintf(b, "[目标证书: %s]\n", mirror.TLSLabel(ex.TLS.Validity))
-	}
 	trunc := false
 	if ex.Request != nil {
-		fmt.Fprintf(b, "%s %s %s\n", ex.Request.Method, ex.Request.URL, ex.Request.Proto)
-		if ex.Request.Host != "" {
-			fmt.Fprintf(b, "Host: %s\n", ex.Request.Host)
+		fmt.Fprintf(b, "%s %s %s\r\n", ex.Request.Method, requestTarget(ex.Request.URL), protoOf(ex))
+		if host := requestHost(ex); host != "" {
+			fmt.Fprintf(b, "Host: %s\r\n", host)
 		}
 		for _, h := range ex.Request.Headers {
-			fmt.Fprintf(b, "%s: %s\n", h.Name, h.Value)
+			fmt.Fprintf(b, "%s: %s\r\n", h.Name, h.Value)
 		}
+		b.WriteString("\r\n") // 头终止空行(无体请求至此即完整可发)
 		if len(ex.Request.Body) > 0 {
-			b.WriteString("\n")
 			s, t := clipBody(ex.Request.Body, clipAt)
 			b.WriteString(s)
 			trunc = trunc || t
-			b.WriteString("\n")
+			b.WriteString("\r\n")
 		}
 	}
 	return trunc
+}
+
+// requestTarget 请求行目标(P4-08 ⑥):绝对 URI → origin-form(路径+
+// 查询串,根路径兜底 "/");解析失败或本就无 host 的目标原样保留
+// (如实不改写)。
+func requestTarget(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return rawURL
+	}
+	p := u.EscapedPath()
+	if p == "" {
+		p = "/"
+	}
+	if u.RawQuery != "" {
+		p += "?" + u.RawQuery
+	}
+	return p
+}
+
+// requestHost Host 头取值:留痕的 Host 优先(代理形态下独立携带),
+// 缺省从请求 URL 推(host[:port] 原样)。
+func requestHost(ex *mirror.Exchange) string {
+	if ex.Request == nil {
+		return ""
+	}
+	if ex.Request.Host != "" {
+		return ex.Request.Host
+	}
+	if u, err := url.Parse(ex.Request.URL); err == nil {
+		return u.Host
+	}
+	return ""
+}
+
+// protoOf 请求协议版本(留痕缺省退 HTTP/1.1——请求行必须有协议段)。
+func protoOf(ex *mirror.Exchange) string {
+	if ex.Request != nil && ex.Request.Proto != "" {
+		return ex.Request.Proto
+	}
+	return "HTTP/1.1"
 }
 
 // writeResponseBlock 响应侧原文块:状态行/头/体 + 镜异常注记(无响应时
@@ -338,23 +389,23 @@ func writeResponseBlock(b *strings.Builder, ex *mirror.Exchange, clipAt int) boo
 	trunc := false
 	if ex.Response != nil {
 		if ex.Response.Proto != "" && ex.Response.StatusText != "" {
-			fmt.Fprintf(b, "%s %d %s\n", ex.Response.Proto, ex.Response.Status, ex.Response.StatusText)
+			fmt.Fprintf(b, "%s %d %s\r\n", ex.Response.Proto, ex.Response.Status, ex.Response.StatusText)
 		} else {
-			fmt.Fprintf(b, "HTTP %d\n", ex.Response.Status)
+			fmt.Fprintf(b, "HTTP %d\r\n", ex.Response.Status)
 		}
 		for _, h := range ex.Response.Headers {
-			fmt.Fprintf(b, "%s: %s\n", h.Name, h.Value)
+			fmt.Fprintf(b, "%s: %s\r\n", h.Name, h.Value)
 		}
 		if len(ex.Response.Body) > 0 {
-			b.WriteString("\n")
+			b.WriteString("\r\n")
 			s, t := clipBody(ex.Response.Body, clipAt)
 			b.WriteString(s)
 			trunc = trunc || t
-			b.WriteString("\n")
+			b.WriteString("\r\n")
 		}
 	}
 	if ex.Error != "" {
-		fmt.Fprintf(b, "\n[镜留痕异常: %s]\n", ex.Error)
+		fmt.Fprintf(b, "\r\n[镜留痕异常: %s]\r\n", ex.Error)
 	}
 	return trunc
 }
@@ -368,8 +419,9 @@ func clipBody(body []byte, clipAt int) (string, bool) {
 }
 
 // ExchangeRawSide 交换文档单侧原文(P3-02 审核迭代:请求包/返回包分开
-// 展示):side=req 请求侧(含目标证书标注)、side=resp 响应侧(含镜异常
-// 注记),不截断、字节级保真;与全量装配(报告/证据包)同源同一分块。
+// 展示):side=req 请求侧(Burp 就绪,P4-08 ⑥)、side=resp 响应侧(含镜
+// 异常注记),不截断、字节级保真;与全量装配(报告/证据包)同源同一
+// 分块。
 func ExchangeRawSide(ex *mirror.Exchange, side string) string {
 	var b strings.Builder
 	switch side {
@@ -377,7 +429,7 @@ func ExchangeRawSide(ex *mirror.Exchange, side string) string {
 		writeRequestBlock(&b, ex, 0)
 	case "resp":
 		writeResponseBlock(&b, ex, 0)
-		return strings.TrimPrefix(b.String(), "\n") // 独立视图不带前导空行
+		return strings.TrimPrefix(b.String(), "\r\n") // 独立视图不带前导空行
 	}
 	return b.String()
 }

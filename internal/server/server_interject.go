@@ -18,6 +18,7 @@ import (
 	"ghostreaper/internal/failover"
 	"ghostreaper/internal/interject"
 	"ghostreaper/internal/manager"
+	"ghostreaper/internal/overmind"
 	"ghostreaper/internal/rings"
 )
 
@@ -148,17 +149,18 @@ func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 	}
 	// P4-02 ① 排队中条目:当前 dispatched 的步骤(派发未领取 / 受阻
 	// 重开 / 断点存档回可领取),追加在会话行之后(面板排在列表尾段)。
-	var stepIDs []string
-	for id := range steps {
-		stepIDs = append(stepIDs, id)
-	}
-	sort.Strings(stepIDs)
-	for _, id := range stepIDs {
-		if steps[id].Status != "dispatched" {
-			continue
+	// P4-08 ①:排序与调度器同源(overmind.StepLaunchLess)——面板排队
+	// 次序即领取次序,high 探索与反证并存时反证在前可直接在面板核对。
+	var queued []rings.NodeFull
+	for _, st := range steps {
+		if st.Status == "dispatched" {
+			queued = append(queued, st)
 		}
+	}
+	sort.Slice(queued, func(i, j int) bool { return overmind.StepLaunchLess(queued[i], queued[j]) })
+	for _, st := range queued {
 		out = append(out, UnitRow{
-			StepID: id, StepTitle: steps[id].Title,
+			StepID: st.ID, StepTitle: st.Title,
 			Status: "dispatched", Queued: true,
 		})
 	}

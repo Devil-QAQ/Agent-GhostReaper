@@ -3,6 +3,7 @@
 import {
   Activity,
   AppWindow,
+  ArrowDown,
   ArrowRight,
   Bell,
   Bot,
@@ -80,6 +81,7 @@ import {
 export const ICONS = {
   activity: Activity,
   appWindow: AppWindow,
+  arrowDown: ArrowDown,
   arrowRight: ArrowRight,
   bell: Bell,
   bot: Bot,

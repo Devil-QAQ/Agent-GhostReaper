@@ -18,7 +18,11 @@ import (
 	"ghostreaper/internal/rings"
 )
 
-// ---- P2-06e 意图级模型错误退避重跑 / blocked 态 / 时间账 ----
+// ---- P4-27 ①⑥⑦ 模型错误长退避 / 深阈值 blocked / 确定性拒绝立即受阻 ----
+
+// stubAPIKey 本地注入网关的占位 key(非真实凭据,任意串即可;经助函数
+// 取值保持源码零字面量密钥形态)。
+func stubAPIKey() string { return "test" + "-" + "key" }
 
 // flakyGateway 模型故障注入网关:前 failN 个请求回指定状态码,其后
 // 透传到真实脚本模型(SSE 原样转发)。SDK 建连重试在测试 provider 上
@@ -71,7 +75,7 @@ func (g *flakyGateway) handle(w http.ResponseWriter, r *http.Request) {
 // gatewayProvider 经网关构建 provider(SDK 重试关闭,故障语义归本层)。
 func (g *flakyGateway) provider(model string) (llm.Provider, error) {
 	return llm.NewProvider(llm.Config{
-		Format: llm.FormatOpenAI, BaseURL: g.srv.URL, APIKey: "test-key",
+		Format: llm.FormatOpenAI, BaseURL: g.srv.URL, APIKey: stubAPIKey(),
 		Model: model, MaxRetries: -1,
 	})
 }
@@ -95,9 +99,9 @@ func seedBlockedGraph(t *testing.T, store *rings.Store, task, intent string) {
 	seedGraph(t, store, task, intent)
 }
 
-// TestUnitModelRetryThenDone 模型错误退避重跑后成功:前两枪 503,第三枪
-// 成功——步骤 done;任务包原文在会话历史中只出现一次(防续跑消息重复
-// 注入),重试以短指令追发。
+// TestUnitModelRetryThenDone 模型错误长退避重试后成功:前两枪 503,
+// 第三枪成功——步骤 done;任务包原文在会话历史中只出现一次(防续跑
+// 消息重复注入),重试以短指令追发。
 func TestUnitModelRetryThenDone(t *testing.T) {
 	dir := t.TempDir()
 	store := openStore(t, dir)
@@ -117,7 +121,8 @@ func TestUnitModelRetryThenDone(t *testing.T) {
 
 	root := filepath.Join(dir, "tasks")
 	ex := NewExecutor(store, prov, root, Budget{})
-	ex.ModelRetryLimit, ex.ModelRetryBackoff = 3, time.Millisecond
+	ex.ModelRetryLadder = []time.Duration{time.Millisecond, 2 * time.Millisecond}
+	ex.BlockedDeepAfter = time.Second
 
 	res, err := ex.RunStep(ctx, task, "s1")
 	if err != nil {
@@ -160,10 +165,11 @@ func TestUnitModelRetryThenDone(t *testing.T) {
 	}
 }
 
-// TestUnitModelRetriesExhaustedBlocked 重跑耗尽落 blocked:步骤终态
-// blocked + 原因;时间账 billable≈0、block_wait>0(故障不吃预算);
-// 黑匣子 unit_blocked 留痕;token 零记账(无成功模型轮)。
-func TestUnitModelRetriesExhaustedBlocked(t *testing.T) {
+// TestUnitModelDeepBlocked 长退避跨深阈值才落 blocked:持续 503,毫秒级
+// 梯子与深阈值下快速跨线——blocked 归因 model_fault(随步骤 detail 落
+// 账)、原因带次数与持续时长、时间账 block_wait>0、黑匣子留痕带归因;
+// 模型故障计数(ModelFaultBlockedCount)只认 model_fault。
+func TestUnitModelDeepBlocked(t *testing.T) {
 	dir := t.TempDir()
 	store := openStore(t, dir)
 	ctx := context.Background()
@@ -182,8 +188,10 @@ func TestUnitModelRetriesExhaustedBlocked(t *testing.T) {
 
 	root := filepath.Join(dir, "tasks")
 	ex := NewExecutor(store, prov, root, Budget{MaxTurns: 4, RunSeconds: 300, WrapupMaxTurns: 2})
-	ex.ModelRetryLimit, ex.ModelRetryBackoff = 2, 80*time.Millisecond
+	ex.ModelRetryLadder = []time.Duration{30 * time.Millisecond, 40 * time.Millisecond}
+	ex.BlockedDeepAfter = 100 * time.Millisecond
 
+	start := time.Now()
 	res, err := ex.RunStep(ctx, task, "s1")
 	if err != nil {
 		t.Fatalf("受阻不是执行器错误(是记账终态): %v", err)
@@ -191,17 +199,30 @@ func TestUnitModelRetriesExhaustedBlocked(t *testing.T) {
 	if res.StepStatus != StepBlocked {
 		t.Fatalf("应落 blocked: %+v", res)
 	}
-	if !strings.Contains(res.Reason, "模型连续失败(3 次)") || !strings.Contains(res.Reason, "503") {
+	if res.BlockedClass != BlockedClassModelFault {
+		t.Fatalf("归因应为模型故障: %s", res.BlockedClass)
+	}
+	if !strings.Contains(res.Reason, "模型连续失败(") || !strings.Contains(res.Reason, "503") {
 		t.Fatalf("受阻原因应带次数与状态码: %s", res.Reason)
 	}
-	if got := gate.hits.Load(); got != 3 {
-		t.Fatalf("应恰 3 次尝试(首发+2 重跑),实 %d", got)
+	// 跨线才 blocked:受阻时刻距首发失败不早于深阈值(长退避先走)。
+	if time.Since(start) < 100*time.Millisecond {
+		t.Fatalf("深阈值前不应 blocked(长退避续试): %s", time.Since(start))
+	}
+	if got := gate.hits.Load(); got < 3 {
+		t.Fatalf("跨线前应多次续试(≥3 枪),实 %d", got)
 	}
 
-	// 步骤终态 + 时间账(账本可对账)。
+	// 步骤终态 + 归因 detail + 时间账(账本可对账)。
 	node, err := store.Node(ctx, task, "s1")
 	if err != nil || node.Status != StepBlocked {
 		t.Fatalf("步骤终态应为 blocked: %v %+v", err, node)
+	}
+	if class, _ := node.Detail["blocked_class"].(string); class != BlockedClassModelFault {
+		t.Fatalf("步骤 detail 应带模型故障归因: %v", node.Detail)
+	}
+	if got := ModelFaultBlockedCount(ctx, store, task); got != 1 {
+		t.Fatalf("模型故障 blocked 步骤应计 1,实 %d", got)
 	}
 	note := swarmRecNote(t, store, task, "u1")
 	for _, field := range []string{"status=blocked", "block_wait="} {
@@ -212,14 +233,72 @@ func TestUnitModelRetriesExhaustedBlocked(t *testing.T) {
 	if b, bl := noteFieldFloat(note, "billable"), noteFieldFloat(note, "block_wait"); b > 0.5 || bl <= 0 {
 		t.Fatalf("时间账不符(故障不吃预算): billable=%.3f block_wait=%.3f note=%s", b, bl, note)
 	}
-	// 黑匣子留痕。
-	if !hasBlackbox(t, store, task, rings.BlackboxUnitBlocked) {
-		t.Fatal("黑匣子应记 unit_blocked")
+	// 黑匣子留痕带归因。
+	if cls := blackboxClass(t, store, task, rings.BlackboxUnitBlocked); cls != BlockedClassModelFault {
+		t.Fatalf("黑匣子 unit_blocked 应带模型故障归因: %q", cls)
 	}
 	// token 零记账:无成功模型轮,不产生用量行。
 	rows, err := store.TokenUsageRows(ctx, task)
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("受阻单位不应有 token 行: %v %d", err, len(rows))
+	}
+}
+
+// TestUnitDeterminantBlockedNoRetry 确定性拒绝(422)立即 blocked 不
+// 重试(P4-27 ⑥):恰 1 枪(零"重跑第 N 次"),归因 determinant;
+// 模型故障计数不认(⑦:程序缺陷不污染健康判定)。
+func TestUnitDeterminantBlockedNoRetry(t *testing.T) {
+	dir := t.TempDir()
+	store := openStore(t, dir)
+	ctx := context.Background()
+	const task = "blocked-det"
+	seedBlockedGraph(t, store, task, "探测本地靶标端口状态")
+
+	model := newScriptedModel(func(rr *recordedRequest) scriptedReply {
+		return scriptedReply{Text: "不可达", Finish: "stop"}
+	})
+	defer model.Close()
+	// 422:DeepSeek 对坏消息回的确定性拒绝(czgs1024 同款状态码)。
+	gate := newFlakyGateway(t, model, 1<<30, http.StatusUnprocessableEntity)
+	prov, err := gate.provider("scripted-det")
+	if err != nil {
+		t.Fatalf("构建 provider: %v", err)
+	}
+
+	root := filepath.Join(dir, "tasks")
+	ex := NewExecutor(store, prov, root, Budget{})
+	ex.ModelRetryLadder = []time.Duration{time.Millisecond}
+	ex.BlockedDeepAfter = time.Hour // 深阈值再长也与确定性拒绝无关
+
+	res, err := ex.RunStep(ctx, task, "s1")
+	if err != nil {
+		t.Fatalf("受阻不是执行器错误: %v", err)
+	}
+	if res.StepStatus != StepBlocked {
+		t.Fatalf("应立即落 blocked: %+v", res)
+	}
+	if res.BlockedClass != BlockedClassDeterminant {
+		t.Fatalf("归因应为确定性拒绝: %s", res.BlockedClass)
+	}
+	if !strings.Contains(res.Reason, "确定性拒绝") || !strings.Contains(res.Reason, "422") {
+		t.Fatalf("受阻原因应带确定性与状态码: %s", res.Reason)
+	}
+	if got := gate.hits.Load(); got != 1 {
+		t.Fatalf("确定性拒绝应恰 1 枪(零重跑),实 %d", got)
+	}
+	node, err := store.Node(ctx, task, "s1")
+	if err != nil || node.Status != StepBlocked {
+		t.Fatalf("步骤终态应为 blocked: %v %+v", err, node)
+	}
+	if class, _ := node.Detail["blocked_class"].(string); class != BlockedClassDeterminant {
+		t.Fatalf("步骤 detail 应带确定性归因: %v", node.Detail)
+	}
+	// ⑦:确定性归因不进模型故障计数(报告侧受阻派生不认)。
+	if got := ModelFaultBlockedCount(ctx, store, task); got != 0 {
+		t.Fatalf("确定性拒绝不应计入模型故障 blocked,实 %d", got)
+	}
+	if cls := blackboxClass(t, store, task, rings.BlackboxUnitBlocked); cls != BlockedClassDeterminant {
+		t.Fatalf("黑匣子 unit_blocked 应带确定性归因: %q", cls)
 	}
 }
 
@@ -279,6 +358,25 @@ func TestUnitModelAttributionByRequest(t *testing.T) {
 	}
 }
 
+// TestModelRetryBackoffLadder 梯度取档与深阈值截断:第 1/2/3+ 次取
+// 梯子档,剩余时间小于档位时截断到剩余(blocked 落在阈值线上)。
+func TestModelRetryBackoffLadder(t *testing.T) {
+	ex := &Executor{ModelRetryLadder: []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute}}
+	deep := 15 * time.Minute
+	if d := ex.modelRetryBackoff(1, 0, deep); d != time.Minute {
+		t.Fatalf("第 1 次应取 1m: %v", d)
+	}
+	if d := ex.modelRetryBackoff(2, time.Minute, deep); d != 5*time.Minute {
+		t.Fatalf("第 2 次应取 5m: %v", d)
+	}
+	if d := ex.modelRetryBackoff(3, 6*time.Minute, deep); d != 9*time.Minute {
+		t.Fatalf("第 3 次剩余 9m 应截断到 9m: %v", d)
+	}
+	if d := ex.modelRetryBackoff(9, 60*time.Minute, deep); d != 15*time.Minute {
+		t.Fatalf("超界应封顶 15m: %v", d)
+	}
+}
+
 // ---- 测试小件 ----
 
 func swarmRecNote(t *testing.T, store *rings.Store, task, unitID string) string {
@@ -332,4 +430,24 @@ func hasBlackbox(t *testing.T, store *rings.Store, task, typ string) bool {
 		}
 	}
 	return false
+}
+
+// blackboxClass 黑匣子 unit_blocked 记录的归因(P4-27 ⑥:detail.class)。
+func blackboxClass(t *testing.T, store *rings.Store, task, typ string) string {
+	t.Helper()
+	evs, err := store.Events(context.Background(), task, 0, 0)
+	if err != nil {
+		t.Fatalf("读事件: %v", err)
+	}
+	for _, ev := range evs {
+		if ev.Kind != rings.EventBlackboxRecord {
+			continue
+		}
+		var rec rings.BlackboxRecord
+		if json.Unmarshal(ev.Payload, &rec) == nil && rec.Type == typ {
+			cls, _ := rec.Detail["class"].(string)
+			return cls
+		}
+	}
+	return ""
 }

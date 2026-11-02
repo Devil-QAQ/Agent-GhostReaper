@@ -224,7 +224,7 @@ func (env *unitEnv) webFetchTool() tool.CoreTool {
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"url": map[string]any{"type": "string", "description": "要取原文的 URL(http/https);网页转正文文本返回,非 HTML 源码"},
+				"url": map[string]any{"type": "string", "description": "要取原文的 URL(http/https);网页转为正文文本返回,非 HTML 源码"},
 			},
 			"required": []string{"url"},
 		},

@@ -64,14 +64,14 @@ export function LongText({ text, max = 60, lines = 0, mono = false, variant = "i
         title={title}
         onClick={() => setOpen((o) => (variant === "inline" ? !o : true))}
       >
-        <span className={cn("truncate", mono && "font-mono")}>
+        <span className={cn("truncate", mono && "num")}>
           {s.slice(0, max)}…
         </span>
         {React.createElement(iconOf("maximize2"), { className: "size-3 shrink-0 text-muted-foreground" })}
       </button>
       {variant === "inline" ? (
         open && (
-          <pre className="mt-1 max-h-56 overflow-y-auto rounded-md border bg-input-surface px-2 py-1.5 font-mono text-xs whitespace-pre-wrap break-all">
+          <pre className="mt-1 max-h-56 overflow-y-auto rounded-md border border-border/55 bg-input-surface px-2 py-1.5 num text-xs whitespace-pre-wrap break-all">
             {s}
           </pre>
         )
@@ -79,10 +79,10 @@ export function LongText({ text, max = 60, lines = 0, mono = false, variant = "i
         <Dialog open={open} onOpenChange={setOpen}>
           <DialogContent className="max-w-2xl">
             <DialogHeader>
-              <DialogTitle className="text-base">{label || "原文"}</DialogTitle>
+              <DialogTitle>{label || "原文"}</DialogTitle>
               <DialogDescription>共 {s.length.toLocaleString("en-US")} 字</DialogDescription>
             </DialogHeader>
-            <pre className="max-h-[60vh] overflow-y-auto rounded-md bg-input-surface p-3 font-mono text-xs whitespace-pre-wrap break-all">
+            <pre className="max-h-[60vh] overflow-y-auto rounded-md bg-input-surface p-3 num text-xs whitespace-pre-wrap break-all">
               {s}
             </pre>
           </DialogContent>

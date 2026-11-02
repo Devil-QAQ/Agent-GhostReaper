@@ -29,6 +29,22 @@ func seedHardRulesOrFail(t *testing.T, store *rings.Store) {
 	}
 }
 
+// enableProxyBypassGroup 启用全部代理旁路组规则(P4-21 起该组默认禁用;
+// 涉该组弹门行为的测试先启用,模拟面板一键启用)。
+func enableProxyBypassGroup(t *testing.T, store *rings.Store) {
+	t.Helper()
+	ctx := context.Background()
+	for _, r := range mustListHardRules(t, store) {
+		if r.Group != HardGroupProxyBypass || r.Enabled {
+			continue
+		}
+		r.Enabled = true
+		if _, err := SaveHardRule(ctx, store, r, "creator"); err != nil {
+			t.Fatalf("启用代理旁路规则失败: %v", err)
+		}
+	}
+}
+
 // findHardRule 清单内按 ID 取规则。
 func findHardRule(t *testing.T, rules []HardRule, id string) HardRule {
 	t.Helper()
@@ -41,8 +57,8 @@ func findHardRule(t *testing.T, rules []HardRule, id string) HardRule {
 	return HardRule{}
 }
 
-// TestHardRulesSeedState 播种清单状态:四组启用 + 外泄管道组播种为禁用;
-// 播种幂等;总量与参考清单相当(约 19 条起)。
+// TestHardRulesSeedState 播种清单状态:四组启用,外泄管道与代理旁路组
+// 播种为禁用(P4-21);播种幂等;总量与参考清单相当(约 19 条起)。
 func TestHardRulesSeedState(t *testing.T) {
 	dir := t.TempDir()
 	store := openStore(t, dir)
@@ -58,8 +74,8 @@ func TestHardRulesSeedState(t *testing.T) {
 	}
 	groups := map[string]int{}
 	for _, r := range rules {
-		if !r.Enabled && r.Group != HardGroupExfilPipe {
-			t.Fatalf("非外泄管道组不应播种为禁用: %+v", r)
+		if !r.Enabled && r.Group != HardGroupExfilPipe && r.Group != HardGroupProxyBypass {
+			t.Fatalf("非默认禁用组不应播种为禁用: %+v", r)
 		}
 		groups[r.Group]++
 	}
@@ -274,29 +290,43 @@ func TestHardRuleArgMatching(t *testing.T) {
 }
 
 // TestHardRuleProxyBypassGroup 代理旁路组(P3-05b ④,P3-05 挂账提前收;
-// P4-03 ② 处置改弹门):默认启用、处置 gate;四类旁路模式命中(判定
-// 层),弹门上下文带"流量必须经镜"提示;正常经镜命令不受影响。
+// P4-03 ② 处置弹门;P4-21 默认禁用):默认不命中(旁路命令直接放行,
+// 命令与执行照旧留痕由执行路径承载);面板启用后四类旁路模式命中
+// (判定层),弹门上下文带"流量必须经镜"提示;正常经镜命令不受影响。
 func TestHardRuleProxyBypassGroup(t *testing.T) {
 	dir := t.TempDir()
 	store := openStore(t, dir)
 	seedHardRulesOrFail(t, store)
 	ctx := context.Background()
 
-	// 组内规则全部默认启用、处置弹门,且带"流量必须经镜"提示。
+	// 默认态:组内全部禁用,处置仍为弹门、提示保留(能力不删);
+	// 旁路命令不命中。
 	for _, r := range mustListHardRules(t, store) {
 		if r.Group != HardGroupProxyBypass {
 			continue
 		}
-		if !r.Enabled {
-			t.Fatalf("代理旁路组应默认启用: %+v", r)
+		if r.Enabled {
+			t.Fatalf("代理旁路组应默认禁用(P4-21): %+v", r)
 		}
 		if r.Action != HardActionGate {
-			t.Fatalf("代理旁路组处置应为弹门: %+v", r)
+			t.Fatalf("代理旁路组处置应为弹门(能力保留): %+v", r)
 		}
 		if r.Note != proxyBypassNote {
 			t.Fatalf("代理旁路规则应带提示 Note: %+v", r)
 		}
 	}
+	for _, cmd := range []string{
+		`curl --noproxy '*' http://127.0.0.1:4280/`,
+		`env -i curl -s http://t/x`,
+		`unset http_proxy https_proxy`,
+	} {
+		if _, _, hit := matchHardRule(ctx, store, "bash", json.RawMessage(`{"command":`+mustJSONString(cmd)+`}`)); hit {
+			t.Fatalf("默认禁用时旁路命令不应命中: %q", cmd)
+		}
+	}
+
+	// 启用后回归:四类模式命中、正常命令不误伤。
+	enableProxyBypassGroup(t, store)
 
 	denied := []string{
 		`curl --noproxy '*' http://127.0.0.1:4280/`, // P3-05 实测形态
@@ -395,11 +425,13 @@ func TestSaveHardRuleActionValidation(t *testing.T) {
 // TestProxyBypassGatesForApproval P4-03 ② 主行为:代理旁路命中走弹门
 // (不熔断、挂起等裁决),审批请求带命令原文与命中上下文;批准后重发
 // 同调用按放行配额通过;无门 fail-safe 拒绝;面板拒绝路径熔断由通用
-// 挂起机制承(TestPanelDenyFusesUnit)。
+// 挂起机制承(TestPanelDenyFusesUnit)。P4-21 起该组默认禁用,先启用
+// (面板一键启用的等价操作)再验弹门语义不漂移。
 func TestProxyBypassGatesForApproval(t *testing.T) {
 	dir := t.TempDir()
 	store := openStore(t, dir)
 	seedHardRulesOrFail(t, store)
+	enableProxyBypassGroup(t, store)
 	const task = "proxy-gate"
 	ex := NewExecutor(store, nil, filepath.Join(dir, "tasks"), Budget{})
 	gate := NewLedgerGate(store)
@@ -512,5 +544,79 @@ func TestHardRuleSeedMigratesProxyAction(t *testing.T) {
 	}
 	if r := findHardRule(t, rules, "hr-proxy-custom"); r.Action != "" {
 		t.Fatalf("自建条目不受迁移: %+v", r)
+	}
+}
+
+// TestHardRuleSeedDisablesProxyBypassOnUpgrade P4-21 存量迁移:旧库存量的
+// 内置代理旁路条目(P4-21 之前播种为启用)升级时一并置为不启用——与新
+// 默认行为统一;自建条目、其他组、墓碑不动;迁移一次后面板重新启用不
+// 被重启回改。
+func TestHardRuleSeedDisablesProxyBypassOnUpgrade(t *testing.T) {
+	dir := t.TempDir()
+	store := openStore(t, dir)
+	ctx := context.Background()
+
+	// 存量库:内置清单按 P4-21 之前的形态落库(代理旁路组启用)。
+	for _, r := range builtinHardRules() {
+		if r.Group == HardGroupProxyBypass {
+			r.Enabled = true
+		}
+		raw, err := json.Marshal(r)
+		if err != nil {
+			t.Fatalf("序列化存量规则失败: %v", err)
+		}
+		if err := store.SetSetting(ctx, keyHardRulePrefix+r.ID, string(raw), "system"); err != nil {
+			t.Fatalf("写入存量规则失败: %v", err)
+		}
+	}
+	// 自建同组条目与墓碑条目:不属内置迁移范围。
+	custom := HardRule{ID: "hr-proxy-custom", Group: HardGroupProxyBypass, Name: "自建 旁路面", Pattern: `\bcustom-bypass\b`, Enabled: true}
+	craw, _ := json.Marshal(custom)
+	if err := store.SetSetting(ctx, keyHardRulePrefix+custom.ID, string(craw), "system"); err != nil {
+		t.Fatalf("写入自建规则失败: %v", err)
+	}
+	if err := DeleteHardRule(ctx, store, "hr-proxy-unset-vars"); err != nil {
+		t.Fatalf("删除内置旁路规则失败: %v", err)
+	}
+
+	if err := SeedHardRules(ctx, store); err != nil {
+		t.Fatalf("升级播种失败: %v", err)
+	}
+	rules := mustListHardRules(t, store)
+	for _, r := range rules {
+		if r.ID == "hr-proxy-unset-vars" {
+			t.Fatalf("墓碑条目不应被迁移复活")
+		}
+		if r.Group == HardGroupProxyBypass && r.ID != custom.ID && r.Enabled {
+			t.Fatalf("内置代理旁路条目应一并置为不启用: %+v", r)
+		}
+	}
+	if r := findHardRule(t, rules, custom.ID); !r.Enabled {
+		t.Fatalf("自建条目不受迁移: %+v", r)
+	}
+	if r := findHardRule(t, rules, "hr-rm-root"); !r.Enabled {
+		t.Fatalf("其他组不受迁移: %+v", r)
+	}
+	if r := findHardRule(t, rules, "hr-devtcp"); r.Enabled {
+		t.Fatalf("外泄管道默认禁用不受迁移: %+v", r)
+	}
+
+	// 面板重新启用后重启播种:迁移已一次完成,用户意志不被回改。
+	re := findHardRule(t, mustListHardRules(t, store), "hr-proxy-curl-bypass")
+	re.Enabled = true
+	if _, err := SaveHardRule(ctx, store, re, "creator"); err != nil {
+		t.Fatalf("面板启用失败: %v", err)
+	}
+	if err := SeedHardRules(ctx, store); err != nil {
+		t.Fatalf("重播种失败: %v", err)
+	}
+	if r := findHardRule(t, mustListHardRules(t, store), "hr-proxy-curl-bypass"); !r.Enabled {
+		t.Fatalf("迁移一次后面板启用不应被回改: %+v", r)
+	}
+	// 未迁移过的旧库读标记失败语义由幂等覆盖:再播一次全部条目不变。
+	before := len(mustListHardRules(t, store))
+	seedHardRulesOrFail(t, store)
+	if after := len(mustListHardRules(t, store)); after != before {
+		t.Fatalf("重复播种不应改变清单: %d -> %d", before, after)
 	}
 }

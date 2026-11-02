@@ -39,24 +39,30 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { TASK_STATUS, fetchJSON, postJSON, usePolling, useTaskContext } from "@/lib/api";
+import { fetchJSON, postJSON, taskStatusBadge, usePolling, useTaskContext } from "@/lib/api";
 import { defaultTaskTab } from "@/lib/nav";
 import { cn } from "@/lib/utils";
 import { CategoryDialog } from "@/views/category-dialog";
 import { NewTaskDialog } from "@/views/new-task-dialog";
 
+// 状态筛选(P4-25 审核迭代:状态词 11→7——筛选项按显示词归组,
+// created 并入排队中、paused/checkpointed 并入冬眠中、stopped 统称
+// 已停止;后端枚举不动)。
 const STATUS_FILTERS = [
   ["all", "全部状态"],
+  ["queued", "排队中"],
   ["started", "运行中"],
   ["settling", "收尾中"],
   ["hibernated", "冬眠中"],
-  ["checkpointed", "已存档"],
-  ["queued", "排队中"],
-  ["created", "已创建"],
-  ["paused", "已暂停"],
   ["completed", "已完成"],
-  ["stopped", "已熔断"],
+  ["stopped", "已停止"],
 ];
+
+// 筛选值 → 枚举组(其余筛选项与枚举一一对应)。
+const STATUS_FILTER_SETS = {
+  queued: ["queued", "created"],
+  hibernated: ["hibernated", "paused", "checkpointed"],
+};
 
 // 任务列表页完整版(P2-06h,8.3 一级·任务 / 参考图规格):
 // 工具栏(搜索(名称/描述)/ 状态·分类筛选 / 计数 / 恢复全部)+
@@ -66,7 +72,7 @@ const STATUS_FILTERS = [
 // 无"启动"按钮——恢复语义由唤醒(P2-08)覆盖。
 // P2-06e 沿革:头部「恢复全部」归入工具栏;行内受阻徽标。
 // P2-06g 沿革:点击名称进入任务空间(选定任务,各标签共享上下文)。
-export function TasksPage({ tasks, currentTask }) {
+export function TasksPage({ tasks, currentTask, onReopenClosure }) {
   const { setTaskID, clearIfGone } = useTaskContext();
 
   // 进入任务空间:选定任务并落到首个点亮标签。
@@ -126,15 +132,18 @@ export function TasksPage({ tasks, currentTask }) {
 
   const running = tasks.filter((t) => t.status === "started").length;
   const blockedCount = tasks.filter((t) => t.blocked).length;
-  // 已收尾 = 整体超时收尾落的停止终态(与操作者熔断区分);已完成含
-  // 收尾后判定达成者(达成就是完成,不因走收尾流程而换词)。
-  const fused = tasks.filter((t) => t.status === "stopped" && !t.settled).length;
-  const settled = tasks.filter((t) => t.status === "stopped" && t.settled).length;
+  // 已停止 = 手动终止与有序收尾统称(P4-25 审核迭代状态词合并;已完成
+  // 含收尾后判定达成者——达成就是完成,不因走收尾流程而换词)。
+  const stoppedCount = tasks.filter((t) => t.status === "stopped").length;
   const doneCount = tasks.filter((t) => t.status === "completed").length;
 
-  // 搜索(名称/描述)+ 状态筛选 + 分类筛选;排序沿用服务端(置顶在前)。
+  // 搜索(名称/描述)+ 状态筛选(按显示词归组)+ 分类筛选;排序沿用
+  // 服务端(置顶在前)。
   const filtered = tasks.filter((t) => {
-    if (statusFilter !== "all" && t.status !== statusFilter) return false;
+    if (statusFilter !== "all") {
+      const group = STATUS_FILTER_SETS[statusFilter];
+      if (group ? !group.includes(t.status) : t.status !== statusFilter) return false;
+    }
     if (categoryFilter === "none" && t.category) return false;
     if (categoryFilter !== "all" && categoryFilter !== "none" && t.category !== categoryFilter) return false;
     const q = textFilter.trim().toLowerCase();
@@ -176,7 +185,8 @@ export function TasksPage({ tasks, currentTask }) {
     toast.success(t.pinned ? `已取消置顶:${t.title || t.id}` : `已置顶:${t.title || t.id}`);
   };
 
-  // 复制任务:同种子/同目标的草稿(拉取资产图还原种子行,确认后创建)。
+  // 复制任务:同种子/同目标的草稿(拉取资产图还原种子行与目标清单,
+  // 确认后创建)。
   const copyTask = async (t) => {
     const { ok, body } = await fetchJSON(`/api/tasks/${t.id}/assets`);
     let rows = [];
@@ -186,10 +196,14 @@ export function TasksPage({ tasks, currentTask }) {
       for (const e of body.hierarchy || []) parentOf[e.from] = titleOf[e.to] || "";
       rows = body.assets.map((a) => ({ cls: a.class, title: a.title, parent: parentOf[a.id] || "" }));
     }
+    let goals = [];
+    const g = await fetchJSON(`/api/tasks/${t.id}/goals`);
+    if (g.ok && Array.isArray(g.body)) goals = g.body.map((x) => x.title).filter(Boolean);
     setDraft({
       title: `${t.title || t.id} 副本`,
       description: t.description || "",
       rows,
+      goals,
       category: t.category || "",
     });
     setDialogOpen(true);
@@ -225,7 +239,7 @@ export function TasksPage({ tasks, currentTask }) {
     if (action === "delete") selectedIDs.forEach((id) => clearIfGone(id));
     setSelected(new Set());
     const verb =
-      action === "stop" ? "已熔断" : action === "hibernate" ? "已冬眠" : "已删除";
+      action === "stop" ? "已终止" : action === "hibernate" ? "已冬眠" : "已删除";
     toast.success(
       `${verb} ${body.done} 个任务${fails.length ? `,${fails.length} 个失败` : ""}`
     );
@@ -259,11 +273,11 @@ export function TasksPage({ tasks, currentTask }) {
       </PageHeader>
 
       {/* KPI 行(#40:KPI 即导航,副文案承载健康度) */}
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <KpiCard
           label="任务"
           value={tasks.length}
-          hint={`运行中 ${running} · 已完成 ${doneCount} · 已收尾 ${settled} · 已熔断 ${fused}${blockedCount ? ` · 受阻 ${blockedCount}` : ""}`}
+          hint={`运行中 ${running} · 已完成 ${doneCount} · 已停止 ${stoppedCount}${blockedCount ? ` · 受阻 ${blockedCount}` : ""}`}
         />
         <KpiCard
           label="资产"
@@ -272,16 +286,16 @@ export function TasksPage({ tasks, currentTask }) {
           href={tid ? `/task/${tid}/assets` : "/tasks"}
         />
         <KpiCard
-          label="Confirmed 发现"
+          label="已确认发现"
           value={tid ? (claims ? confirmed : "…") : "—"}
-          hint={tid ? `共 ${claims ? claims.length : "…"} 条声明` : "未选择任务"}
+          hint={tid ? `共 ${claims ? claims.length : "…"} 条判断` : "未选择任务"}
           href={tid ? `/task/${tid}/findings` : "/tasks"}
           tone={confirmed > 0 ? "success" : undefined}
         />
         <KpiCard
           label="待审批"
           value={tid ? (pending ?? "…") : "—"}
-          hint={tid ? "审批弹门待裁决" : "未选择任务"}
+          hint={tid ? "有请求待审批" : "未选择任务"}
           href={tid ? `/task/${tid}/roe` : "/tasks"}
           tone={pending > 0 ? "danger" : undefined}
         />
@@ -339,7 +353,7 @@ export function TasksPage({ tasks, currentTask }) {
                 </SelectContent>
               </Select>
             </div>
-            <Label className="ml-auto text-xs text-muted-foreground tnum">
+            <Label className="ml-auto text-xs text-muted-foreground num">
               {filtered.length}/{tasks.length} 项
             </Label>
             {blockedCount > 0 && (
@@ -351,14 +365,14 @@ export function TasksPage({ tasks, currentTask }) {
 
           {/* 批量操作条(复选后出现;均二次确认) */}
           {selectedIDs.length > 0 && (
-            <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border/55 bg-card px-3 py-2">
               <span className="text-sm">已选 {selectedIDs.length} 项</span>
               <span className="ml-auto flex gap-2">
                 <Button size="sm" variant="outline" onClick={() => setBatch({ action: "hibernate" })}>
                   批量冬眠
                 </Button>
                 <Button size="sm" variant="destructive" onClick={() => setBatch({ action: "stop" })}>
-                  批量熔断
+                  批量终止
                 </Button>
                 <Button size="sm" variant="destructive" onClick={() => setBatch({ action: "delete" })}>
                   批量删除
@@ -370,9 +384,9 @@ export function TasksPage({ tasks, currentTask }) {
             </div>
           )}
 
-          {/* 任务表(行高较高、细分隔线,暗色扁平 8.4 token) */}
-          <div className="rounded-lg border bg-card">
-            <Table>
+          {/* 行卡保留表格语义与横向滚动，操作入口沿用原位置。 */}
+          <div>
+            <Table appearance="cards">
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
                   <TableHead className="w-10">
@@ -396,13 +410,14 @@ export function TasksPage({ tasks, currentTask }) {
                 {filtered.map((t) => {
                   const isCurrent = currentTask?.id === t.id;
                   const terminal = t.status === "stopped" || t.status === "completed";
+                  const st = taskStatusBadge(t);
                   const targets = (t.targets || []).join("、");
                   return (
                     <TableRow
                       key={t.id}
                       className={cn(
                         "group h-16",
-                        isCurrent && "border-l-2 border-l-primary bg-primary/5"
+                        isCurrent && "[&>td]:bg-primary/5"
                       )}
                     >
                       <TableCell>
@@ -414,6 +429,15 @@ export function TasksPage({ tasks, currentTask }) {
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-2">
+                          {/* 收口提醒搁置红点(P4-23):弹窗被直接关闭、未
+                              裁决——处理才消,点红点重开提醒弹窗 */}
+                          {t.closure?.parked && (
+                            <button
+                              className="size-2 shrink-0 cursor-pointer rounded-full bg-status-danger transition-transform duration-150 hover:scale-125"
+                              title="收口提醒待处理"
+                              onClick={() => onReopenClosure?.(t.id)}
+                            />
+                          )}
                           {t.pinned &&
                             React.createElement(iconOf("star"), {
                               className: "size-3.5 shrink-0 text-status-warning",
@@ -439,48 +463,78 @@ export function TasksPage({ tasks, currentTask }) {
                         </span>
                       </TableCell>
                       <TableCell className="max-w-44" title={targets || undefined}>
-                        <span className="block truncate font-mono text-xs text-muted-foreground">
+                        <span className="block truncate num text-xs text-muted-foreground">
                           {targets || "—"}
                         </span>
                       </TableCell>
                       <TableCell>
                         <div className="flex flex-wrap items-center gap-1">
-                          {t.settled && t.status === "stopped" ? (
-                            <Badge variant="paused">已收尾</Badge>
-                          ) : (
-                            <Badge variant={TASK_STATUS[t.status]?.variant || "info"}>
-                              {TASK_STATUS[t.status]?.label || t.status}
-                            </Badge>
+                          <Badge variant={st.variant} title={st.title}>
+                            {st.label}
+                          </Badge>
+                          {/* P4-27 ② 绝对单显:任务状态只此一枚徽标
+                              (受阻/冬眠并排形态已废,取态见
+                              taskStatusBadge 全状态矩阵) */}
+                          {/* 受阻红点计数(P4-27 ④,与待审批同款形态):
+                              blocked 步骤待恢复——处理即消,点击进工作台
+                              (恢复按钮所在);冬眠/终态不带(冻结态不可
+                              操作,悬停已注明受阻数) */}
+                          {t.blocked_steps > 0 && !terminal && !["paused", "hibernated", "checkpointed"].includes(t.status) && (
+                            <button
+                              className="text-xs font-medium text-status-danger underline-offset-4 hover:underline cursor-pointer"
+                              title={`受阻 ${t.blocked_steps} 步，等待恢复`}
+                              onClick={() => {
+                                location.hash = `/task/${t.id}/workbench`;
+                              }}
+                            >
+                              {`受阻 ${t.blocked_steps} 步`}
+                            </button>
                           )}
-                          {t.blocked && (
-                            <span title={t.blocked_reason || ""}>
-                              <Badge variant="danger">受阻</Badge>
-                            </span>
+                          {/* 待审批笔数(P4-23,与 RoE 标签红点同计数、冬眠
+                              提示同款笔数样式):处理即消,点击进裁决面 */}
+                          {t.pending_approvals > 0 && (
+                            <button
+                              className="text-xs font-medium text-status-danger underline-offset-4 hover:underline cursor-pointer"
+                              title={`待审批 ${t.pending_approvals} 笔`}
+                              onClick={() => {
+                                location.hash = `/task/${t.id}/roe`;
+                              }}
+                            >
+                              {`待审批 ${t.pending_approvals} 笔`}
+                            </button>
                           )}
                         </div>
                       </TableCell>
-                      <TableCell className="text-right font-mono text-xs">
+                      <TableCell className="text-right num text-xs">
                         <span title={`目标达成 ${t.goals_achieved ?? 0}/${t.goals_total ?? 0}`}>
                           {t.goals_achieved ?? 0}/{t.goals_total ?? 0}
                         </span>
                       </TableCell>
-                      <TableCell className="text-right font-mono text-xs">
+                      <TableCell className="text-right num text-xs">
                         <span title="运行中虫群单位数">{t.running_units ?? 0}</span>
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center justify-end gap-1">
                           {/* 任务控制组(P2-08):冬眠/唤醒 + 熔断(终止不可恢复);
-                              P3-07:存档断点(运行中可点,收拢后进程可关) */}
+                              P3-07:存档断点(运行中可点,收拢后进程可关)。
+                              唤醒盖三种「冬眠中」底层态(真冬眠/面板暂停/
+                              断点存档,P4-25 审核迭代 2);存档断点只在
+                              运行/收尾态可点(暂停与断点态不可再存) */}
                           {!terminal && (
-                            <HibernateButton taskID={t.id} taskTitle={t.title || t.id} hibernated={t.status === "hibernated"} />
+                            <HibernateButton
+                              taskID={t.id}
+                              taskTitle={t.title || t.id}
+                              wakeable={["hibernated", "paused", "checkpointed"].includes(t.status)}
+                            />
                           )}
-                          {!terminal && t.status !== "checkpointed" && (
+                          {!terminal && (t.status === "started" || t.status === "settling") && (
                             <CheckpointButton taskID={t.id} taskTitle={t.title || t.id} />
                           )}
                           {!terminal && <FuseButton taskID={t.id} taskTitle={t.title || t.id} />}
                           <Button
                             variant="ghost"
                             size="icon"
+                            className="size-8"
                             title="进入任务空间"
                             onClick={() => enterTask(t.id)}
                           >
@@ -489,6 +543,7 @@ export function TasksPage({ tasks, currentTask }) {
                           <Button
                             variant="ghost"
                             size="icon"
+                            className="size-8"
                             title={t.pinned ? "取消置顶" : "置顶"}
                             onClick={() => togglePin(t)}
                           >
@@ -499,6 +554,7 @@ export function TasksPage({ tasks, currentTask }) {
                           <Button
                             variant="ghost"
                             size="icon"
+                            className="size-8"
                             title="复制任务(同种子同目标,草稿确认)"
                             onClick={() => copyTask(t)}
                           >
@@ -507,7 +563,7 @@ export function TasksPage({ tasks, currentTask }) {
                           <Button
                             variant="ghost"
                             size="icon"
-                            className="text-status-danger"
+                            className="size-8 text-status-danger"
                             title="删除(列表移除,账本历史保留)"
                             onClick={() => setDeleteTarget(t)}
                           >
@@ -582,11 +638,11 @@ function ConfirmDeleteDialog({ target, onClose, onConfirm }) {
         <DialogHeader>
           <DialogTitle>删除任务</DialogTitle>
           <DialogDescription>
-            删除后列表不再显示,账本历史全部保留;在跑任务先熔断再删除。
+            删除后列表不再显示,账本历史全部保留;在跑任务先终止再删除。
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-2">
-          <Label htmlFor="del-reason">删除理由(入账本)</Label>
+          <Label htmlFor="del-reason">删除理由(记录在账本)</Label>
           <Input id="del-reason" value={reason} onChange={(e) => setReason(e.target.value)} />
         </div>
         <DialogFooter>
@@ -612,7 +668,7 @@ function ConfirmBatchDialog({ batch, count, titles, onClose, onConfirm }) {
   React.useEffect(() => {
     if (batch)
       setReason(
-        batch.action === "stop" ? "批量熔断" : batch.action === "hibernate" ? "批量冬眠" : "批量删除"
+        batch.action === "stop" ? "批量终止" : batch.action === "hibernate" ? "批量冬眠" : "批量删除"
       );
   }, [batch]);
   const isStop = batch?.action === "stop";
@@ -621,20 +677,20 @@ function ConfirmBatchDialog({ batch, count, titles, onClose, onConfirm }) {
     <Dialog open={Boolean(batch)} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>{isStop ? "批量熔断" : isHiber ? "批量冬眠" : "批量删除"}</DialogTitle>
+          <DialogTitle>{isStop ? "批量终止" : isHiber ? "批量冬眠" : "批量删除"}</DialogTitle>
           <DialogDescription>
             {isStop
-              ? `将对 ${count} 个任务熔断:终止且不可恢复,操作入账本。`
+              ? `将对 ${count} 个任务终止:不可恢复,操作记录在账本。`
               : isHiber
                 ? `将对 ${count} 个任务冬眠:全部暂停,计时停走;唤醒后原地继续。`
-                : `将对 ${count} 个任务删除(列表移除,账本历史保留);在跑任务先熔断再删除。`}
+                : `将对 ${count} 个任务删除(列表移除,账本历史保留);在跑任务先终止再删除。`}
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-2">
           <div className="max-h-24 overflow-y-auto text-xs text-muted-foreground">
             {titles.join("、")}
           </div>
-          <Label htmlFor="batch-reason">理由(入账本)</Label>
+          <Label htmlFor="batch-reason">理由(记录在账本)</Label>
           <Input id="batch-reason" value={reason} onChange={(e) => setReason(e.target.value)} />
         </div>
         <DialogFooter>

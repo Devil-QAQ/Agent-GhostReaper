@@ -9,6 +9,7 @@ import { ExportDialog } from "@/components/export-dialog";
 import { iconOf } from "@/components/icons";
 import { PageHeader } from "@/components/page-header";
 import { ReproStepsList } from "@/components/repro-steps";
+import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -35,21 +36,19 @@ import {
 import { NodeSheetHost } from "@/views/node-sheets";
 import { cn } from "@/lib/utils";
 
-// 事实成果类(红队战果清单,report.LootClass 服务端确定性分类)。
+// 事实成果类(红队战果清单,report.LootClass 服务端确定性分类;hint 为
+// 成果类悬停大白话,P4-28 ⑦——筛选下拉与徽标同文案、同一张表)。
 const LOOT_META = {
-  credential: { label: "凭据", variant: "critical" },
-  data: { label: "数据", variant: "high" },
-  permission: { label: "权限", variant: "medium" },
-  foothold: { label: "立足点", variant: "warning" },
+  credential: { label: "凭据", variant: "critical", hint: "可直接使用的账号密码、密钥、令牌" },
+  data: { label: "数据", variant: "high", hint: "拿到的敏感信息，如用户名单、源码" },
+  permission: { label: "权限", variant: "medium", hint: "取得的访问能力，如某接口无需登录可调用" },
+  foothold: { label: "立足点", variant: "warning", hint: "在目标里的攻击据点，如可控账号、上传的脚本" },
+  plain: { label: "普通观察", variant: "outline", hint: "一般性记录，不属于以上收获" },
 };
 
 const LOOT_FILTERS = [
   ["all", "全部类型"],
-  ["credential", "凭据"],
-  ["data", "数据"],
-  ["permission", "权限"],
-  ["foothold", "立足点"],
-  ["plain", "普通观察"],
+  ...Object.entries(LOOT_META).map(([v, m]) => [v, m.label]),
 ];
 
 const FACT_TIME_FILTERS = [
@@ -82,7 +81,7 @@ export function FindingsPage({ currentTask, focus }) {
       <div className="flex flex-col gap-6">
         <PageHeader
           title="发现"
-          subtitle="成果与过程分列 · 已确认事实一等列出 · 假设回流"
+          subtitle="成果与过程分列 · 已确认事实一等列出 · 猜测回传"
         />
         <EmptyState
           icon="shieldAlert"
@@ -100,13 +99,14 @@ export function FindingsPage({ currentTask, focus }) {
         title="发现"
         subtitle={
           tab === "claims"
-            ? "打开即成果(Confirmed 按级别排) · 切「锤炼中」盯过程态"
+            ? "打开即成果(已确认按级别排) · 切「锤炼中」盯过程"
             : tab === "facts"
               ? "已确认事实一等列出 · 凭据 / 数据 / 权限 / 立足点战果清单"
-              : "虫群直觉 · 主宰评估三去向 · 独立单位验证 · 回流轨迹"
+              : "虫群直觉 · 主宰评估三去向 · 独立单位验证 · 回传轨迹"
         }
       />
-      <div className="flex w-fit rounded-lg border bg-card p-1">
+      <ForgingSummary tid={tid} />
+      <div className="flex w-fit rounded-lg border border-border/55 bg-card p-1">
         {[
           ["claims", "发现"],
           ["facts", "事实"],
@@ -139,6 +139,39 @@ export function FindingsPage({ currentTask, focus }) {
 
 // 锤炼中视图的过程态集合(候选 → 反证 → 待确认;Confirmed 归成果视图)。
 const FORGING_STATUSES = new Set(["candidate", "testing", "awaiting_round", "pending"]);
+
+// ForgingSummary 锤炼积压行(P4-28 ⑤,问题清单 #48):发现页顶部一行
+// 汇总,数字与图对账一致(按显示层合并口径:三类过程态判断合计为
+// "反证中",假设 candidate 为"待验证猜测");悬停说明各段口径。
+// 零积压时不占行(无事实可陈述)。
+function ForgingSummary({ tid }) {
+  const { data: claims } = usePolling(`/api/tasks/${tid}/claims`, 4000, {
+    live: [`claims:${tid}`],
+  });
+  const { data: hypos } = usePolling(`/api/tasks/${tid}/hypotheses`, 4000);
+  const forging = (Array.isArray(claims) ? claims : []).filter((c) =>
+    c.status === "candidate" || c.status === "testing" || c.status === "awaiting_round",
+  ).length;
+  const pending = (Array.isArray(claims) ? claims : []).filter((c) => c.status === "pending").length;
+  const guesses = (Array.isArray(hypos) ? hypos : []).filter((h) => h.status === "candidate").length;
+  if (forging + pending + guesses === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-border/55 bg-card px-4 py-3 text-[13px]">
+      <span className="font-medium">锤炼中：</span>
+      <span className="num" title="正在反证锤炼流程中的判断(含待安排、反证进行中、待下一轮)">
+        反证中 {forging}
+      </span>
+      <span className="text-muted-foreground">·</span>
+      <span className="num" title="暂不成立挂起的判断，有新证据自动重开">
+        待确认 {pending}
+      </span>
+      <span className="text-muted-foreground">·</span>
+      <span className="num" title="虫群已提交、等待主宰评估的猜测">
+        待验证猜测 {guesses}
+      </span>
+    </div>
+  );
+}
 
 // ClaimsSection 发现页签:成果(Confirmed,按级别排)/ 锤炼中(过程态,
 // 待确认必附搁置理由)两视图切换——默认成果,主动切换才盯过程。
@@ -215,12 +248,12 @@ function ClaimsSection({ tid }) {
         <EmptyState
           icon="shieldAlert"
           title="暂无发现"
-          hint={error ? `读取失败:${error}` : "虫群单位提交可证伪声明并经反证后在此呈现"}
+          hint={error ? `读取失败:${error}` : "虫群单位提交待反证的判断并经反证后在此呈现"}
         />
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-2">
-            <div className="flex w-fit rounded-lg border bg-card p-1">
+            <div className="flex w-fit rounded-lg border border-border/55 bg-card p-1">
               {[
                 ["wins", "成果"],
                 ["forging", "锤炼中"],
@@ -245,7 +278,7 @@ function ClaimsSection({ tid }) {
               })}
               <Input
                 className="pl-8"
-                placeholder="按声明/类别/ID 搜索"
+                placeholder="按判断/类别/ID 搜索"
                 value={textFilter}
                 onChange={(e) => setTextFilter(e.target.value)}
               />
@@ -263,7 +296,7 @@ function ClaimsSection({ tid }) {
             </Label>
           </div>
 
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-4">
             {filtered.map((c) => (
               <ClaimRow
                 key={c.id}
@@ -277,7 +310,7 @@ function ClaimsSection({ tid }) {
 
             {filtered.length === 0 && (
               <div className="rounded-lg border border-dashed py-8 text-center text-sm text-muted-foreground">
-                {view === "wins" ? "暂无锤炼完成成果;过程态切「锤炼中」查看" : "无过程态声明"}
+                {view === "wins" ? "暂无锤炼完成成果;过程态切「锤炼中」查看" : "无过程态判断"}
               </div>
             )}
           </div>
@@ -360,24 +393,22 @@ function ClaimRow({ tid, claim, checked, onToggle, onOpen }) {
   const replayVD = claim.replay_verdict ? REPLAY_VERDICT[claim.replay_verdict] : null;
   return (
     <div
-      className="flex flex-col gap-2 rounded-lg border bg-card p-4 text-left transition-shadow hover:shadow-card cursor-pointer"
+      className="flex flex-col gap-2 rounded-xl border border-border/55 bg-card p-4 text-left transition-shadow hover:shadow-card cursor-pointer"
       onClick={onOpen}
     >
       <div className="flex flex-wrap items-center gap-2">
         <span onClick={(e) => e.stopPropagation()}>
           <Checkbox checked={checked} onCheckedChange={onToggle} />
         </span>
-        <Badge variant={CLAIM_STATUS[claim.status]?.variant || "info"}>
-          {CLAIM_STATUS[claim.status]?.label || claim.status}
-        </Badge>
+        <StatusBadge meta={CLAIM_STATUS[claim.status] || { label: claim.status, variant: "info" }} />
         {(() => {
           const sev = severityMeta(claim.severity);
           return sev ? <Badge variant={sev.variant}>{sev.label}</Badge> : null;
         })()}
         {retestVD && (
-          <Badge variant={retestVD.variant}>
+          <StatusBadge meta={retestVD}>
             复测{retestVD.label}
-          </Badge>
+          </StatusBadge>
         )}
         {replayVD && !claim.replay_running && (
           <Badge variant={replayVD.variant}>
@@ -386,15 +417,14 @@ function ClaimRow({ tid, claim, checked, onToggle, onOpen }) {
         )}
         {claim.combined && <Badge variant="outline">攻击链</Badge>}
         {claim.vulnclass && <Badge variant="outline">{claim.vulnclass}</Badge>}
-        {/* P3-11a ③:声明原文为主视觉,tc-ID 弱化为次要可复制小字 */}
-        <span className="font-mono text-xs text-muted-foreground">{claim.id}</span>
-        <CopyIDButton id={claim.id} noun="声明标识" className="size-5" />
-        <span className="ml-auto flex items-center gap-2">
+        {/* P4-19 迭代:判断原文为主视觉,tc-ID 不上正文,悬停与复制回执可取 */}
+        <CopyIDButton id={claim.id} noun="判断标识" className="size-5" />
+        <span className="ml-auto flex items-center gap-2" title={`版本号 ${claim.created_rev}`}>
           {claim.replayable && (
             <Button
               variant="outline"
               size="sm"
-              className="h-7 px-2 text-xs"
+              className="h-8 px-2 text-xs"
               disabled={claim.replay_running}
               onClick={
                 claim.replay_running
@@ -413,7 +443,7 @@ function ClaimRow({ tid, claim, checked, onToggle, onOpen }) {
             <Button
               variant="outline"
               size="sm"
-              className="h-7 px-2 text-xs"
+              className="h-8 px-2 text-xs"
               disabled={claim.retest_running}
               onClick={
                 claim.retest_running
@@ -428,15 +458,18 @@ function ClaimRow({ tid, claim, checked, onToggle, onOpen }) {
               {claim.retest_running ? "复测中" : "复测"}
             </Button>
           )}
-          <span className="font-mono text-xs text-muted-foreground">
-            版本号 {claim.created_rev}
-          </span>
+
         </span>
       </div>
       <div className="text-sm">{claim.statement}</div>
       {claim.status === "pending" && claim.pending_reason && (
         <div className="rounded-md bg-status-warning-soft px-3 py-2 text-xs text-status-warning">
           搁置理由:{claim.pending_reason}
+        </div>
+      )}
+      {claim.report_excluded && (
+        <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
+          不纳入报告:{claim.report_excluded_reason || "信息性观察,无直接危害"}
         </div>
       )}
       {claim.repro_steps > 0 && (
@@ -552,7 +585,7 @@ function FactsSection({ tid, focus }) {
         <EmptyState
           icon="check"
           title="暂无已确认事实"
-          hint={error ? `读取失败:${error}` : "主宰收割转正的事实在此一等列出"}
+          hint={error ? `读取失败:${error}` : "经主宰检查归纳确认的事实在此一等列出"}
         />
       ) : (
         <>
@@ -564,7 +597,7 @@ function FactsSection({ tid, focus }) {
                 </SelectTrigger>
                 <SelectContent>
                   {LOOT_FILTERS.map(([v, label]) => (
-                    <SelectItem key={v} value={v}>
+                    <SelectItem key={v} value={v} title={v === "all" ? undefined : LOOT_META[v].hint}>
                       {label}
                     </SelectItem>
                   ))}
@@ -605,42 +638,41 @@ function FactsSection({ tid, focus }) {
             </Label>
           </div>
 
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-4">
             {filtered.map((f) => {
-              const loot = LOOT_META[f.loot];
+              const loot = LOOT_META[f.loot || "plain"];
               return (
                 <button
                   key={f.id}
                   data-fact-row={f.id}
                   className={cn(
-                    "flex flex-col gap-2 rounded-lg border bg-card p-4 text-left transition-shadow hover:shadow-card cursor-pointer",
+                    "flex flex-col gap-2 rounded-xl border border-border/55 bg-card p-4 text-left transition-shadow hover:shadow-card cursor-pointer",
                     focusPulse === f.id && "border-primary ring-2 ring-primary",
                   )}
                   onClick={() => setSheet({ type: "fact", id: f.id })}
                 >
                   <div className="flex flex-wrap items-center gap-2">
-                    {loot ? (
-                      <Badge variant={loot.variant}>{loot.label}</Badge>
-                    ) : (
-                      <Badge variant="outline">观察</Badge>
-                    )}
+                    <StatusBadge meta={loot} />
                     {(f.assets || []).map((a) => (
                       <span
                         key={a.id}
-                        className="rounded-md border px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
+                        className="rounded-md border px-2 py-0.5 num text-[10px] text-muted-foreground"
                         title={a.title || a.id}
                       >
                         {a.title || a.id}
                       </span>
                     ))}
-                    <span className="font-mono text-xs text-muted-foreground">{f.id}</span>
-                    <span className="ml-auto font-mono text-xs text-muted-foreground">
-                      确认 {f.confirmed_at?.slice(5) || "—"} · 版本号 {f.confirmed_rev}
+                    <span className="num text-xs text-muted-foreground">{f.id}</span>
+                    <span
+                      className="ml-auto num text-xs text-muted-foreground"
+                      title={`版本号 ${f.confirmed_rev}`}
+                    >
+                      确认 {f.confirmed_at?.slice(5) || "—"}
                     </span>
                   </div>
                   <div className="text-sm">{f.statement}</div>
                   {f.evidence_head && (
-                    <div className="truncate font-mono text-xs text-muted-foreground" title={f.evidence_head}>
+                    <div className="truncate num text-xs text-muted-foreground" title={f.evidence_head}>
                       证据:{f.evidence_head}
                     </div>
                   )}
@@ -661,14 +693,17 @@ function FactsSection({ tid, focus }) {
   );
 }
 
+// 假设状态筛选(P4-28 ⑥:candidate/testing 显示层合并"锤炼中",筛选项
+// 同口径合并;held/confirmed/discarded 不在合并范围,词照旧)。
 const HYP_STATUS_FILTERS = [
   ["all", "全部状态"],
-  ["candidate", "候选"],
-  ["testing", "验证中"],
-  ["held", "挂账"],
+  ["forging", "锤炼中"],
+  ["held", "搁置"],
   ["confirmed", "成立"],
   ["discarded", "已废弃"],
 ];
+
+const HYP_FORGING = new Set(["candidate", "testing"]);
 
 // HypothesesSection 假设列表:候选 → 主宰评估三去向(转验证/挂账/废弃)
 // → 验证结论;挂账与废弃必带理由(R10 直觉有账、废案有理由)。
@@ -678,7 +713,11 @@ function HypothesesSection({ tid }) {
   const [sheet, setSheet] = React.useState(null);
 
   const hypos = Array.isArray(data) ? data : [];
-  const filtered = hypos.filter((h) => statusFilter === "all" || h.status === statusFilter);
+  const filtered = hypos.filter((h) => {
+    if (statusFilter === "all") return true;
+    if (statusFilter === "forging") return HYP_FORGING.has(h.status);
+    return h.status === statusFilter;
+  });
 
   return (
     <div className="flex flex-col gap-6">
@@ -686,7 +725,7 @@ function HypothesesSection({ tid }) {
         <EmptyState
           icon="sparkles"
           title="暂无假设"
-          hint={error ? `读取失败:${error}` : "虫群单位提交直觉候选,主宰收割裁决后在此呈现"}
+          hint={error ? `读取失败:${error}` : "虫群单位提交直觉猜测,主宰检查归纳判定后在此呈现"}
         />
       ) : (
         <>
@@ -710,42 +749,38 @@ function HypothesesSection({ tid }) {
             </Label>
           </div>
 
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-4">
             {filtered.map((h) => {
               const st = HYP_STATUS[h.status] || { label: h.status, variant: "info" };
               return (
                 <button
                   key={h.id}
-                  className="flex flex-col gap-2 rounded-lg border bg-card p-4 text-left transition-shadow hover:shadow-card cursor-pointer"
+                  className="flex flex-col gap-2 rounded-xl border border-border/55 bg-card p-4 text-left transition-shadow hover:shadow-card cursor-pointer"
                   onClick={() => setSheet({ type: "hypothesis", id: h.id })}
                 >
                   <div className="flex flex-wrap items-center gap-2">
-                    <Badge variant={st.variant}>{st.label}</Badge>
+                    <StatusBadge meta={st} />
                     {(() => {
                       const vd = HYP_VERDICT[h.verdict];
                       return vd ? (
-                        <Badge variant={vd.tone === "success" ? "success" : vd.tone === "danger" ? "danger" : "warning"}>
-                          验证{vd.label}
-                        </Badge>
+                        <StatusBadge meta={vd}>验证{vd.label}</StatusBadge>
                       ) : null;
                     })()}
                     {(h.asset_ids || []).map((id) => (
                       <span
                         key={id}
-                        className="rounded-md border px-2 py-0.5 font-mono text-[10px] text-muted-foreground"
+                        className="rounded-md border px-2 py-0.5 num text-[10px] text-muted-foreground"
                       >
                         {id}
                       </span>
                     ))}
-                    <span className="font-mono text-xs text-muted-foreground">{h.id}</span>
-                    <span className="ml-auto font-mono text-xs text-muted-foreground">
-                      版本号 {h.created_rev}
-                    </span>
+                    <span className="num text-xs text-muted-foreground">{h.id}</span>
+
                   </div>
                   <div className="text-sm">{h.statement}</div>
                   {h.status === "held" && h.reason && (
                     <div className="rounded-md bg-status-warning-soft px-3 py-2 text-xs text-status-warning">
-                      挂账理由:{h.reason}
+                      搁置理由:{h.reason}
                     </div>
                   )}
                   {h.status === "discarded" && h.reason && (

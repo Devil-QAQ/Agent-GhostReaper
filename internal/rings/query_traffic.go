@@ -210,7 +210,7 @@ func (s *Store) ClaimEvidence(ctx context.Context, taskID, claimID string) (exch
 	}
 	evs, err := s.Events(ctx, taskID, 0, 0)
 	if err != nil {
-		return nil, 0, fmt.Errorf("rings: 声明证据查事件 %s: %w", taskID, err)
+		return nil, 0, fmt.Errorf("rings: 判断证据查事件 %s: %w", taskID, err)
 	}
 	seen := map[string]bool{}
 	for _, ev := range evs {
@@ -219,7 +219,7 @@ func (s *Store) ClaimEvidence(ctx context.Context, taskID, claimID string) (exch
 		}
 		var r TestClaimRecord
 		if err := json.Unmarshal(ev.Payload, &r); err != nil {
-			return nil, 0, fmt.Errorf("rings: 声明证据解码 testclaim.record: %w", err)
+			return nil, 0, fmt.Errorf("rings: 判断证据解码 testclaim.record: %w", err)
 		}
 		if r.ClaimID != claimID || r.Type != TestClaimRecEvidence {
 			continue

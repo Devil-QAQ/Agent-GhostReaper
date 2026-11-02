@@ -4,6 +4,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { iconOf } from "@/components/icons";
+import { ChatStream, tailGrowSig } from "@/components/chat-blocks";
 import { SessionInfoBar } from "@/components/session-info-bar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -41,11 +42,11 @@ const STEER_STATES = {
   delivered: { label: "已送达", variant: "running", hint: "已在调用边界注入单位上下文,等它表态" },
   adopted: { label: "已采纳", variant: "success", hint: "单位明示采纳,已按指令调整方向" },
   rejected: { label: "被拒", variant: "danger", hint: "单位明示不采纳(理由随回执)" },
-  stale: { label: "已过时", variant: "info", hint: "生效前单位已落地,指令失去生效点" },
+  stale: { label: "已过时", variant: "info", hint: "生效前单位已干完,指令失去生效点" },
 };
 
 const ADVICE_STATES = {
-  pending: { label: "待裁决", variant: "paused" },
+  pending: { label: "待判定", variant: "paused" },
   adopted: { label: "已采纳", variant: "success" },
   rejected: { label: "未采纳", variant: "danger" },
 };
@@ -65,15 +66,12 @@ export function InterjectWindow({ open, target, task, onClose }) {
   const [mode, setMode] = React.useState("ask");
   const [sending, setSending] = React.useState(false);
   const [confirmStop, setConfirmStop] = React.useState(false);
-  const bottomRef = React.useRef(null);
 
   const messages = data?.messages || [];
   const steers = data?.steers || [];
   const frozen = Boolean(data?.frozen);
-
-  React.useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [messages.length, messages[messages.length - 1]?.reply]);
+  // 流内容签名(P4-22):对话条数 + 末条回答量,贴底跟滚判据。
+  const sig = `${messages.length}|${tailGrowSig(messages[messages.length - 1])}`;
 
   const steerStateOf = (id) =>
     (steers.find((s) => s.steer_id === id) || {}).state || "queued";
@@ -134,14 +132,14 @@ export function InterjectWindow({ open, target, task, onClose }) {
   const stopUnit = async () => {
     const { ok, body } = await postJSON(
       `/api/tasks/${taskID}/kill-work`,
-      { step_id: target.stepID, reason: "插话窗熔断:操作者终止该单位" }
+      { step_id: target.stepID, reason: "插话窗终止:操作者结束该单位" }
     );
     setConfirmStop(false);
     if (!ok) {
-      toast.error(body?.error || "熔断失败");
+      toast.error(body?.error || "终止失败");
       return;
     }
-    toast.success("单位已熔断");
+    toast.success("单位已终止");
     onClose();
   };
 
@@ -150,13 +148,13 @@ export function InterjectWindow({ open, target, task, onClose }) {
     : "插话 · 主宰";
   const desc = isUnit
     ? `步骤 ${target.stepID}${target.stepTitle ? " · " + target.stepTitle : ""}`
-    : "问(即时答,不改执行)· 改(建议进正式规划,裁决后改)";
+    : "问(即时答,不改执行)· 改(建议进正式规划,判定后改)";
 
   return (
     <Sheet open={open} onOpenChange={(v) => !v && onClose()}>
-      <SheetContent className="flex w-[560px] flex-col gap-2 sm:max-w-[560px]">
-        <SheetHeader className="pb-0">
-          <SheetTitle className="flex items-center gap-2 text-base">
+      <SheetContent className="flex flex-col gap-4 p-5">
+        <SheetHeader className="p-0 pr-12">
+          <SheetTitle className="flex items-center gap-2">
             {React.createElement(iconOf("megaphone"), { className: "size-4 text-primary" })}
             {title}
             {isUnit && target.running && (
@@ -183,8 +181,12 @@ export function InterjectWindow({ open, target, task, onClose }) {
             读取失败:{error}
           </div>
         )}
-        {/* 对话流 */}
-        <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto rounded-xl border bg-card px-3 py-3">
+        {/* 对话流(贴底跟滚,P4-22) */}
+        <ChatStream
+          sig={sig}
+          resetKey={target?.sessionID || target?.kind}
+          className="space-y-3 rounded-xl border border-border/55 bg-card px-3 py-3"
+        >
           {messages.length === 0 && (
             <div className="py-8 text-center text-[13px] text-muted-foreground">
               子会话为空。问相关问题(不改执行,即时答)或改方向(带回执)。
@@ -193,14 +195,13 @@ export function InterjectWindow({ open, target, task, onClose }) {
           {messages.map((m) => (
             <InterjectBlock key={m.id} msg={m} steerStateOf={steerStateOf} />
           ))}
-          <div ref={bottomRef} />
-        </div>
+        </ChatStream>
         {/* 输入区:问/改模式 + 发言 */}
-        <div className="rounded-lg border bg-card p-3">
+        <div className="rounded-lg border border-border/55 bg-card p-3">
           <div className="mb-2 flex items-center gap-1">
             {[
               ["ask", "问", "不改执行,即时答"],
-              ["steer", "改", isUnit ? "舵杆注入,带回执" : "建议进正式规划,裁决后改"],
+              ["steer", "改", isUnit ? "发送纠偏,带回执" : "建议进正式规划,判定后改"],
             ].map(([v, label, hint]) => (
               <button
                 key={v}
@@ -230,7 +231,7 @@ export function InterjectWindow({ open, target, task, onClose }) {
                   </Button>
                 )}
                 <Button size="sm" variant="outline" onClick={() => setConfirmStop(true)}>
-                  熔断
+                  终止
                 </Button>
               </span>
             )}
@@ -243,10 +244,10 @@ export function InterjectWindow({ open, target, task, onClose }) {
                 mode === "ask"
                   ? isUnit
                     ? "问这只单位相关问题(基于其会话历史回答)"
-                    : "问主宰当前研判相关问题"
+                    : "问主宰当前规划相关问题"
                   : isUnit
                     ? "给这只单位改方向(下一次工具调用前生效)"
-                    : "给主宰提方向建议(裁决后改变规划)"
+                    : "给主宰提方向建议(判定后改变规划)"
               }
               className="min-h-[48px] text-[13px] resize-none"
               onChange={(e) => setText(e.target.value)}
@@ -266,11 +267,11 @@ export function InterjectWindow({ open, target, task, onClose }) {
         {confirmStop && (
           <div className="rounded-md border border-status-danger/40 bg-status-danger-soft px-3 py-2 text-xs">
             <div className="text-status-danger">
-              熔断将终止该单位(不可恢复),主宰收割可见原因。确认熔断?
+              终止该单位后不可恢复,主宰会看到原因。确认终止?
             </div>
             <div className="mt-2 flex gap-2">
               <Button size="sm" variant="danger" onClick={stopUnit}>
-                确认熔断
+                确认终止
               </Button>
               <Button size="sm" variant="outline" onClick={() => setConfirmStop(false)}>
                 取消
@@ -295,11 +296,11 @@ export function InterjectBlock({ msg, steerStateOf }) {
     const reason = isAdvice ? msg.advice_reason : STEER_STATES[steerState]?.hint || "";
     return (
       <div className="flex flex-col items-end gap-0.5">
-        <div className="max-w-[85%] rounded-lg bg-primary/15 px-3 py-2 text-[13px] whitespace-pre-wrap [overflow-wrap:anywhere]">
+        <div className="t-body max-w-[85%] rounded-lg bg-primary/15 px-3 py-2 whitespace-pre-wrap [overflow-wrap:anywhere]">
           {msg.text}
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span className="font-mono">{msg.at?.slice(11)}</span>
+          <span className="num">{msg.at?.slice(11)}</span>
           <Badge variant="outline">改向</Badge>
           <Badge variant={st.variant}>{st.label}</Badge>
         </div>
@@ -313,11 +314,11 @@ export function InterjectBlock({ msg, steerStateOf }) {
   return (
     <div className="flex flex-col gap-1">
       <div className="flex flex-col items-end gap-0.5">
-        <div className="max-w-[85%] rounded-lg bg-primary/15 px-3 py-2 text-[13px] whitespace-pre-wrap [overflow-wrap:anywhere]">
+        <div className="t-body max-w-[85%] rounded-lg bg-primary/15 px-3 py-2 whitespace-pre-wrap [overflow-wrap:anywhere]">
           {msg.text}
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span className="font-mono">{msg.at?.slice(11)}</span>
+          <span className="num">{msg.at?.slice(11)}</span>
           <Badge variant={st.variant}>{st.label}</Badge>
         </div>
         {msg.state === "failed" && msg.note && (
@@ -326,12 +327,12 @@ export function InterjectBlock({ msg, steerStateOf }) {
       </div>
       {msg.reply && (
         <div className="flex flex-col items-start gap-0.5">
-          <div className="max-w-[90%] rounded-lg border bg-background px-3 py-2 text-[13px] whitespace-pre-wrap [overflow-wrap:anywhere]">
+          <div className="t-body max-w-[90%] rounded-lg border border-border/55 bg-background px-3 py-2 whitespace-pre-wrap [overflow-wrap:anywhere]">
             {msg.reply}
           </div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Badge variant="outline">回答</Badge>
-            <span className="font-mono">{msg.reply_at?.slice(11)}</span>
+            <span className="num">{msg.reply_at?.slice(11)}</span>
           </div>
         </div>
       )}

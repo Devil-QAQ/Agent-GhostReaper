@@ -267,36 +267,6 @@ func TestRetryBreakerOverride(t *testing.T) {
 	}
 }
 
-// TestRerunLimitOverride 重试覆盖⑤:链按任务将走的腿解析;未覆盖回
-// ok=false。
-func TestRerunLimitOverride(t *testing.T) {
-	store, err := rings.Open(filepath.Join(t.TempDir(), "rr.db"))
-	if err != nil {
-		t.Fatalf("开库: %v", err)
-	}
-	defer store.Close()
-	ctx := context.Background()
-	cfgA := ModelConfig{Name: "a", Format: "openai", BaseURL: "http://127.0.0.1:1", APIKey: "k", Model: "m-a", RetryRerun: 5}
-	cfgB := ModelConfig{Name: "b", Format: "openai", BaseURL: "http://127.0.0.1:2", APIKey: "k", Model: "m-b", RetryRerun: -1}
-	_ = SaveModelConfig(ctx, store, cfgA, "creator")
-	_ = SaveModelConfig(ctx, store, cfgB, "creator")
-	_ = SetActive(ctx, store, RolePrimary, "a", "creator")
-	_ = SetTaskOverride(ctx, store, "tk", RolePrimary, "b", "creator")
-	c := NewChain(store, EnvConfig{})
-	if v, ok := c.RerunLimit(ctx); !ok || v != 5 {
-		t.Fatalf("全局主用覆盖⑤=5: v=%d ok=%v", v, ok)
-	}
-	if v, ok := c.RerunLimit(WithTask(ctx, "tk")); !ok || v != 0 {
-		t.Fatalf("任务绑定 b 覆盖⑤=-1 应 0(关闭): v=%d ok=%v", v, ok)
-	}
-	// 未覆盖:ok=false。
-	c2 := NewChain(store, EnvConfig{})
-	c2.lead.cfg.RetryRerun = 0
-	if _, ok := c2.RerunLimit(ctx); ok {
-		t.Fatal("未覆盖应 ok=false")
-	}
-}
-
 // TestResetBreaker 立即恢复:熔断关闭、梯度归零;未命中名如实报 false。
 func TestResetBreaker(t *testing.T) {
 	c, lead, _, _ := v2Chain(t, mkCfg("a", "m-a"))

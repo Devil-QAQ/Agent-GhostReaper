@@ -104,7 +104,7 @@ export function AssetsPage({ currentTask, focus }) {
         <EmptyState
           icon="network"
           title="暂无资产"
-          hint={error ? `读取失败:${error}` : "虫群探测回流后,资产树将在此生长;也可手动补入"}
+          hint={error ? `读取失败:${error}` : "虫群探测回传后,资产树将在此生长;也可手动补入"}
           action={{ label: "新增资产", onClick: () => setAddOpen(true) }}
         />
         <AssetAddDialog
@@ -214,7 +214,7 @@ const renderNode = (node, depth, visited) => {
             </Badge>
           )}
           <SourceMark node={node} />
-          <span className="ml-auto shrink-0 font-mono text-xs text-muted-foreground">
+          <span className="ml-auto shrink-0 num text-xs text-muted-foreground">
             事实 {node.fact_count} · 假设 {node.hypothesis_count} · {node.id}
           </span>
         </div>
@@ -241,7 +241,7 @@ const renderNode = (node, depth, visited) => {
       </PageHeader>
 
       {/* 覆盖统计 + 进度条 */}
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <KpiCard
           label="资产"
           value={assets.length}
@@ -256,7 +256,7 @@ const renderNode = (node, depth, visited) => {
         <KpiCard
           label="假设合计"
           value={assets.reduce((s, a) => s + a.hypothesis_count, 0)}
-          hint="待验证的候选解释"
+          hint="待排除的其他解释"
         />
       </div>
       <div>
@@ -315,7 +315,7 @@ const renderNode = (node, depth, visited) => {
       </div>
 
       {/* 缩进树 */}
-      <div className="rounded-xl border bg-card px-3 py-2">
+      <div className="rounded-xl border border-border/55 bg-card px-3 py-2">
         {roots.some((r) => !classFilter || subtreeMatch(r.id, new Set())) ? (
           roots
             .filter((r) => !classFilter || subtreeMatch(r.id, new Set()))

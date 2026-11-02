@@ -7,9 +7,11 @@ import { CopyIDButton } from "@/components/copy-id-button";
 import { EmptyState } from "@/components/empty-state";
 import { iconOf } from "@/components/icons";
 import { KpiCard } from "@/components/kpi-card";
+import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -18,16 +20,17 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   CLAIM_STATUS,
   GOAL_STATUS,
   STEP_STATUS,
   SEVERITY,
-  TASK_STATUS,
   denyStatusLabel,
   postJSON,
   severityMeta,
+  taskStatusBadge,
   usePolling,
 } from "@/lib/api";
 import { GraphCanvas } from "@/views/progress-page";
@@ -51,6 +54,7 @@ import { cn } from "@/lib/utils";
 const UNIT_ICON = {
   running: "activity",
   dispatched: "circle",
+  cancelled: "x",
   done: "check",
   exhausted: "timer",
   failed: "x",
@@ -77,6 +81,8 @@ export function WorkbenchPage({ currentTask, focus }) {
   });
   const [sheet, setSheet] = React.useState(null);
   const [recovering, setRecovering] = React.useState(false);
+  // 收口提醒配置入口(审核迭代 1):概要卡右侧按钮 + 小弹窗改任务级配置。
+  const [closureOpen, setClosureOpen] = React.useState(false);
   // 人工标记达成(P3-14b ④):目标无完成条件时由操作者看到证据后手动
   // 收场,依据必填、入账留痕。
   const [achieveGoal, setAchieveGoal] = React.useState(null);
@@ -106,7 +112,7 @@ export function WorkbenchPage({ currentTask, focus }) {
       return;
     }
     closeAchieve();
-    toast.success("已标记达成并入账");
+    toast.success("已标记达成并记录");
   };
 
   // 单任务恢复(P3-05c ⑥ 恢复按钮双入口之一):该任务存在受阻步骤时
@@ -169,7 +175,7 @@ export function WorkbenchPage({ currentTask, focus }) {
   const stepsQueued = stepNodes.filter((s) => s.status === "dispatched").length;
   const stepsOther = stepNodes.length - stepsDone - stepsRunning - stepsQueued;
   const unitsRunning = units.filter((u) => u.status === "running" && !u.paused).length;
-  const st = TASK_STATUS[currentTask.status] || { variant: "info", label: currentTask.status };
+  const st = taskStatusBadge(currentTask);
 
   // 每目标的步骤进度(goal 派生边 Goal→Step)。
   const stepsOf = {};
@@ -183,26 +189,39 @@ export function WorkbenchPage({ currentTask, focus }) {
     <div className="flex flex-col gap-4">
       {/* 概要(P2-14b②):任务名主视觉,状态与目标随行;ID 只留复制入口 */}
       <Card>
-        <CardContent className="flex flex-col gap-3 p-6">
+        <CardContent className="flex flex-col gap-4 p-5">
           <div className="flex flex-wrap items-center gap-3">
-            <h1 className="text-xl font-semibold tracking-tight">{currentTask.title || tid}</h1>
-            {currentTask.settled && currentTask.status === "stopped" ? (
-              <Badge variant="paused">已收尾</Badge>
-            ) : (
-              <Badge variant={st.variant}>{st.label}</Badge>
-            )}
-            {currentTask.blocked && <Badge variant="warning">受阻</Badge>}
+            <h1 className="t-page">{currentTask.title || tid}</h1>
+            <Badge variant={st.variant} title={st.title}>
+              {st.label}
+            </Badge>
+            {/* P4-27 ② 绝对单显:状态只此一枚(受阻/冬眠并排形态已废,
+                取态见 taskStatusBadge 全状态矩阵;受阻步骤数走行内
+                「受阻 N 步」计数与恢复按钮) */}
             <CopyIDButton id={tid} />
             <span className="ml-auto flex items-center gap-2">
-              {currentTask.blocked && (
+              {currentTask.blocked_steps > 0 && (
                 <Button variant="outline" size="sm" disabled={recovering} onClick={recover}
                   title="重开本任务受阻的步骤并恢复执行(模型故障解除后用)">
                   {React.createElement(iconOf("rotateCcw"), { className: "size-3.5" })}
-                  {recovering ? "恢复中…" : "恢复"}
+                  {recovering ? "恢复中…" : `恢复(${currentTask.blocked_steps})`}
+                </Button>
+              )}
+              {currentTask.closure_config && (
+                <Button variant="outline" size="sm" onClick={() => setClosureOpen(true)}
+                  title="任务连续多轮规划没有任何新发现(新事实、新资产、新发现记录)，且距上次新发现超过设定分钟数时，弹窗询问是否收口。两个条件同时满足才提醒；任务照常运行，不会被暂停。">
+                  {React.createElement(iconOf("timer"), { className: "size-3.5" })}
+                  收口提醒
                 </Button>
               )}
             </span>
           </div>
+          {graph?.queue && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground num" title="排队只计可领取步骤，等前置步骤预留容量；反证、假设验证与急活不受派发上限限制。反证优先领取下一个空位，不能保证立即起飞。">
+              <span>执行中 {graph.queue.running}</span><span>排队 {graph.queue.queued}</span><span>等前置 {graph.queue.waiting}</span><span>还可新增 {graph.queue.available}</span><span>派发上限 {graph.queue.limit}</span>
+              {graph.queue.available === 0 && <span>等待单位结果</span>}
+            </div>
+          )}
           {currentTask.description && (
             <p className="text-sm leading-relaxed text-muted-foreground">
               {currentTask.description}
@@ -213,7 +232,7 @@ export function WorkbenchPage({ currentTask, focus }) {
               {currentTask.targets.map((t) => (
                 <span
                   key={t}
-                  className="rounded-full border px-2 py-0.5 font-mono text-xs text-muted-foreground"
+                  className="rounded-full border px-2 py-0.5 num text-xs text-muted-foreground"
                   title={t}
                 >
                   {t}
@@ -258,7 +277,7 @@ export function WorkbenchPage({ currentTask, focus }) {
       </Card>
 
       {/* 关键数据(KPI 即导航,#40 副文案承载健康度) */}
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <KpiCard
           label="目标"
           value={`${currentTask.goals_achieved ?? 0}/${currentTask.goals_total ?? 0}`}
@@ -281,9 +300,9 @@ export function WorkbenchPage({ currentTask, focus }) {
           href={`/task/${tid}/sessions`}
         />
         <KpiCard
-          label="Confirmed 发现"
+          label="已确认发现"
           value={wins.length}
-          hint={`共 ${claimList.length} 条声明`}
+          hint={`共 ${claimList.length} 条判断`}
           href={`/task/${tid}/findings`}
           tone={wins.length > 0 ? "success" : undefined}
         />
@@ -293,7 +312,7 @@ export function WorkbenchPage({ currentTask, focus }) {
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,7fr)_minmax(0,3fr)]">
         {/* 左列(主):目标区 + 内嵌进度图 */}
         <div className="flex min-w-0 flex-col gap-4">
-          <div className="rounded-xl border bg-card px-4 py-3">
+          <div className="rounded-xl border border-border/55 bg-card px-4 py-3">
             <div className="mb-2 text-xs font-medium tracking-wide text-muted-foreground">目标</div>
             {goals.length === 0 ? (
               <div className="py-2 text-sm text-muted-foreground">暂无目标</div>
@@ -309,7 +328,7 @@ export function WorkbenchPage({ currentTask, focus }) {
                       <span className="min-w-0 flex-1 truncate" title={g.title}>
                         {g.title || g.id}
                       </span>
-                      <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                      <span className="shrink-0 num text-xs text-muted-foreground">
                         步骤 {done}/{kids.length}
                       </span>
                       {g.status === "active" && (
@@ -332,7 +351,7 @@ export function WorkbenchPage({ currentTask, focus }) {
           {/* 进度区:内嵌进度图(节点点击抽屉、?focus= 聚焦,全同进度图页;
               抽屉与本页发现区共用同一状态,不叠双层) */}
           {nodes.length === 0 ? (
-            <div className="flex h-64 items-center justify-center rounded-xl border bg-card text-sm text-muted-foreground">
+            <div className="flex h-64 items-center justify-center rounded-xl border border-border/55 bg-card text-sm text-muted-foreground">
               主宰派发步骤后,血缘图在此生长
             </div>
           ) : graph ? (
@@ -350,10 +369,10 @@ export function WorkbenchPage({ currentTask, focus }) {
 
         {/* 右列(辅):执行流 + 发现 */}
         <div className="flex min-w-0 flex-col gap-4">
-          <div className="flex flex-col rounded-xl border bg-card">
+          <div className="flex flex-col rounded-xl border border-border/55 bg-card">
             <div className="flex items-center gap-2 px-4 pt-3 pb-2 text-xs font-medium tracking-wide text-muted-foreground">
               执行流
-              <span className="ml-auto font-mono">{units.length}</span>
+              <span className="ml-auto num">{units.length}</span>
             </div>
             <div className="max-h-[300px] overflow-y-auto px-2 pb-2">
               {units.length === 0 ? (
@@ -384,7 +403,7 @@ export function WorkbenchPage({ currentTask, focus }) {
                           paused && "text-muted-foreground",
                         )}
                       />
-                      <span className="shrink-0 font-mono text-xs">{u.unit_id}</span>
+                      <span className="shrink-0 num text-xs">{u.unit_id}</span>
                       <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
                         {u.step_title || u.step_id}
                       </span>
@@ -398,10 +417,10 @@ export function WorkbenchPage({ currentTask, focus }) {
             </div>
           </div>
 
-          <div className="flex flex-col rounded-xl border bg-card">
+          <div className="flex flex-col rounded-xl border border-border/55 bg-card">
             <div className="flex items-center gap-2 px-4 pt-3 pb-2 text-xs font-medium tracking-wide text-muted-foreground">
               发现
-              <span className="ml-auto font-mono">{wins.length}</span>
+              <span className="ml-auto num">{wins.length}</span>
             </div>
             <div className="max-h-[300px] overflow-y-auto px-2 pb-2">
               {wins.length === 0 ? (
@@ -419,9 +438,7 @@ export function WorkbenchPage({ currentTask, focus }) {
                       {sev ? (
                         <Badge variant={sev.variant}>{sev.label}</Badge>
                       ) : (
-                        <Badge variant={CLAIM_STATUS.confirmed.variant}>
-                          {CLAIM_STATUS.confirmed.label}
-                        </Badge>
+                        <StatusBadge meta={CLAIM_STATUS.confirmed} />
                       )}
                       <span className="min-w-0 flex-1 truncate text-xs">{c.statement}</span>
                     </button>
@@ -433,12 +450,18 @@ export function WorkbenchPage({ currentTask, focus }) {
         </div>
       </div>
       <NodeSheetHost tid={tid} value={sheet} onChange={setSheet} graph={graph} />
+      <ClosureConfigDialog
+        open={closureOpen}
+        onOpenChange={setClosureOpen}
+        taskID={tid}
+        config={currentTask.closure_config}
+      />
       <Dialog open={Boolean(achieveGoal)} onOpenChange={(o) => !o && closeAchieve()}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle className="text-base">标记达成</DialogTitle>
+            <DialogTitle>标记达成</DialogTitle>
             <DialogDescription>
-              目标无完成条件时由人工判定;标记后入账,全部目标达成即任务完成。
+              目标无完成条件时由人工判定;标记后记录,全部目标达成即任务完成。
             </DialogDescription>
           </DialogHeader>
           <Textarea
@@ -465,8 +488,108 @@ export function WorkbenchPage({ currentTask, focus }) {
 function WorkbenchPlainHeader() {
   return (
     <div className="border-b pb-4">
-      <h1 className="text-[28px] leading-tight font-semibold tracking-tight">工作台</h1>
+      <h1 className="t-page">工作台</h1>
     </div>
+  );
+}
+
+// ClosureConfigDialog 收口提醒任务级配置弹窗(审核迭代 1):开关 +
+// 轮数 + 间隔分钟;保存落账本,下一次研判轮生效,在跑任务不中断。
+// 快照式保存:两个数字留空 = 该项用全局默认(会清掉本任务之前的单独
+// 设定,占位符展示当前生效值便于核对)。
+function ClosureConfigDialog({ open, onOpenChange, taskID, config }) {
+  const [enabled, setEnabled] = React.useState(true);
+  const [rounds, setRounds] = React.useState("");
+  const [minutes, setMinutes] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!open || !config) return;
+    setEnabled(config.enabled);
+    setRounds(config.task_rounds > 0 ? String(config.task_rounds) : "");
+    setMinutes(config.task_minutes > 0 ? String(config.task_minutes) : "");
+  }, [open, config]);
+
+  const save = async () => {
+    const r = rounds.trim() === "" ? 0 : parseInt(rounds, 10);
+    const m = minutes.trim() === "" ? 0 : parseInt(minutes, 10);
+    if (!Number.isFinite(r) || r < 0 || r > 100) {
+      toast.error("收口信号轮数须为 1~100 的整数(留空用全局默认)");
+      return;
+    }
+    if (!Number.isFinite(m) || m < 0 || m > 1440) {
+      toast.error("收口信号间隔须为 1~1440 的整数(留空用全局默认)");
+      return;
+    }
+    setBusy(true);
+    const { ok, body } = await postJSON(`/api/tasks/${taskID}/closure/config`, {
+      enabled, rounds: r, minutes: m,
+    });
+    setBusy(false);
+    if (!ok) {
+      toast.error(`保存失败:${body?.error || "原因未说明"}`);
+      return;
+    }
+    onOpenChange(false);
+    toast.success("已保存:下一次规划轮生效");
+  };
+
+  const effRounds = config?.rounds ?? "—";
+  const effMinutes = config?.minutes ?? "—";
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>收口提醒</DialogTitle>
+          <DialogDescription>
+            任务连续多轮规划没有任何新发现(新事实、新资产、新发现记录)，且距上次新发现超过设定分钟数时，弹窗询问是否收口。两个条件同时满足才提醒；任务照常运行，不会被暂停。
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4">
+          <label className="flex items-center gap-2 text-sm" title="关闭后本任务不再弹收口提醒">
+            <Checkbox checked={enabled} onCheckedChange={(v) => setEnabled(Boolean(v))} />
+            开启收口提醒
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="grid gap-1.5">
+              <span className="text-xs text-muted-foreground" title="连续多少轮规划零新发现才算满足条件之一">
+                轮数(轮)
+              </span>
+              <Input
+                inputMode="numeric"
+                disabled={!enabled}
+                placeholder={`留空用默认 ${effRounds}`}
+                value={rounds}
+                onChange={(e) => setRounds(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <span className="text-xs text-muted-foreground" title="距上次新发现超过多少分钟才算满足条件之一">
+                间隔(分钟)
+              </span>
+              <Input
+                inputMode="numeric"
+                disabled={!enabled}
+                placeholder={`留空用默认 ${effMinutes}`}
+                value={minutes}
+                onChange={(e) => setMinutes(e.target.value)}
+              />
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            轮数 = 连续多少轮规划零新发现；间隔 = 距上次新发现多少分钟。留空用全局默认(当前 {effRounds} 轮 / {effMinutes} 分钟，Agent 页可改)。
+          </p>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            取消
+          </Button>
+          <Button onClick={save} disabled={busy}>
+            保存
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -482,7 +605,7 @@ function MiniBar({ label, value, title, segments }) {
     <div className="flex min-w-0 flex-col gap-1.5" title={title}>
       <div className="flex items-baseline justify-between gap-2 text-xs">
         <span className="min-w-0 truncate text-muted-foreground">{label}</span>
-        <span className="shrink-0 font-mono tabular-nums">{value}</span>
+        <span className="shrink-0 num">{value}</span>
       </div>
       <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-muted">
         {segments.map((s, i) => (

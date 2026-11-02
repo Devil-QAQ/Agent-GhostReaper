@@ -276,9 +276,23 @@ func TestLiveApprovalPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Enter: %v", err)
 	}
-	m := c.nextMsg(2 * time.Second)
-	if m["t"] != "approval" || m["task"] != "t-ap" {
-		t.Fatalf("推送 = %v, want approval/t-ap", m)
+	// 审批事件推两主题(P4-23:approval 重事件 + tasks 脏帧——待审批
+	// 计数入任务列表投影,顺序不保证,收齐为准)。
+	var m map[string]any
+	got := map[string]bool{}
+	for len(got) < 2 {
+		c.drainUntil(2*time.Second, func(x map[string]any) bool {
+			if x["t"] == "approval" && x["task"] == "t-ap" {
+				got["approval"] = true
+				m = x
+				return true
+			}
+			if x["t"] == "dirty" && x["k"] == "tasks" {
+				got["tasks"] = true
+				return true
+			}
+			return false
+		})
 	}
 	pending, ok := m["pending"].([]any)
 	if !ok || len(pending) != 1 {
@@ -294,13 +308,25 @@ func TestLiveApprovalPayload(t *testing.T) {
 		}
 	}
 
-	// 裁决后:同主题再推一轮,载荷转空(面板即时撤单)。
+	// 裁决后:同主题再推一轮,载荷转空(面板即时撤单);tasks 脏帧
+	// 同批到达(计数归零)。
 	if err := gate.Decide(t.Context(), "t-ap", ticket.Req.ID, swarm.GateDecision{Approved: true}); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
-	m = c.nextMsg(2 * time.Second)
-	if m["t"] != "approval" || m["task"] != "t-ap" {
-		t.Fatalf("推送 = %v, want approval/t-ap", m)
+	got = map[string]bool{}
+	for len(got) < 2 {
+		c.drainUntil(2*time.Second, func(x map[string]any) bool {
+			if x["t"] == "approval" && x["task"] == "t-ap" {
+				got["approval"] = true
+				m = x
+				return true
+			}
+			if x["t"] == "dirty" && x["k"] == "tasks" {
+				got["tasks"] = true
+				return true
+			}
+			return false
+		})
 	}
 	if pend, ok := m["pending"].([]any); !ok || len(pend) != 0 {
 		t.Fatalf("裁决后 pending = %v, want 空", m["pending"])

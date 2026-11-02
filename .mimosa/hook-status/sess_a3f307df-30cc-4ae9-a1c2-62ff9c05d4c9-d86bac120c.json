@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "mimosa-hook-status/v1",
+  "recordedAt": "2026-10-26T14:54:17.724Z",
+  "sessionId": "sess_a3f307df-30cc-4ae9-a1c2-62ff9c05d4c9",
+  "event": "PostToolUse",
+  "toolName": "Write",
+  "file": "Process/设计会话交接-20261026.md",
+  "outcome": "clear",
+  "coverage": "complete",
+  "findingCount": 0,
+  "durationMs": 3,
+  "hostState": "hook_complete",
+  "reportHint": ".mimosa/reports/"
+}

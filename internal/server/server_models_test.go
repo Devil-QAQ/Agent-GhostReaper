@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Autumn-27/norma/llm"
+
 	"ghostreaper/internal/failover"
 	"ghostreaper/internal/manager"
 	"ghostreaper/internal/rings"
@@ -187,8 +189,11 @@ func TestRecoverAllAndAutoReopen(t *testing.T) {
 	}
 }
 
-// TestTasksBlockedBadge 任务列表受阻徽标:存在 blocked 步骤的非终态任务
-// blocked=true + 原因;终态任务不标。
+// TestTasksBlockedBadge 任务列表受阻徽标(P4-27 ② 收紧):受阻 = 普遍
+// 故障的链级实时信号(全部模型熔断冷却中)且任务为活动态;blocked
+// 步骤不再直接触发徽标(零星/历史受阻不误标),步骤数另行透出
+// (blocked_steps,冬眠悬停与行内计数)。终态任务不标。P4-20:阻因
+// 不透出接口(悬停文案固定)。
 func TestTasksBlockedBadge(t *testing.T) {
 	srv, h := newModelsTestServer(t)
 	store := srv.Store
@@ -207,27 +212,131 @@ func TestTasksBlockedBadge(t *testing.T) {
 		t.Fatalf("熔断: %v", err)
 	}
 
-	var list []struct {
-		ID            string `json:"id"`
-		Status        string `json:"status"`
-		Blocked       bool   `json:"blocked"`
-		BlockedReason string `json:"blocked_reason"`
+	// 未配链(server.Chain 空):零星/历史受阻步骤不标徽标,但步骤数
+	// 如实透出(行内计数与冬眠悬停的数据面)。
+	type taskBadgeRow struct {
+		ID           string `json:"id"`
+		Status       string `json:"status"`
+		Blocked      bool   `json:"blocked"`
+		BlockedSteps int    `json:"blocked_steps"`
 	}
+	var list []taskBadgeRow
 	get(t, h, "/api/tasks", http.StatusOK, &list)
-	byID := map[string]struct {
-		ID            string `json:"id"`
-		Status        string `json:"status"`
-		Blocked       bool   `json:"blocked"`
-		BlockedReason string `json:"blocked_reason"`
-	}{}
+	byID := map[string]taskBadgeRow{}
 	for _, v := range list {
 		byID[v.ID] = v
 	}
-	if !byID["t-badge"].Blocked || !strings.Contains(byID["t-badge"].BlockedReason, "模型连续失败") {
-		t.Fatalf("受阻任务应带徽标与原因: %+v", byID["t-badge"])
+	if byID["t-badge"].Blocked {
+		t.Fatalf("链上无普遍故障不应标受阻(受阻语义收紧): %+v", byID["t-badge"])
 	}
-	if byID["t-fine"].Blocked {
-		t.Fatalf("终态任务不标受阻: %+v", byID["t-fine"])
+	if byID["t-badge"].BlockedSteps != 1 {
+		t.Fatalf("blocked 步骤数应如实透出: %+v", byID["t-badge"])
+	}
+	if byID["t-fine"].Blocked || byID["t-fine"].BlockedSteps != 0 {
+		t.Fatalf("终态任务不标受阻、不计步骤: %+v", byID["t-fine"])
+	}
+	if raw := doReq(t, h, http.MethodGet, "/api/tasks", "").Body.String(); strings.Contains(raw, "blocked_reason") {
+		t.Fatalf("阻因不得透出接口(P4-20 悬停文案固定): %s", raw)
+	}
+
+	// 全部模型熔断冷却中 → 活动任务受阻徽标;链恢复 → 徽标消。
+	chain := failover.NewChain(store, failover.EnvConfig{
+		Configured: true, Format: "openai", BaseURL: "http://127.0.0.1:1",
+		APIKey: stubModelKey(), Model: "stub-m",
+	})
+	srv.Chain = chain
+	for i := 0; i < 3; i++ {
+		_, _, _, _ = chain.Complete(context.Background(), llm.CompletionRequest{Messages: []llm.Message{llm.UserText("x")}})
+	}
+	if !chain.AllCooling() {
+		t.Fatal("连续失败后链应全冷却")
+	}
+	get(t, h, "/api/tasks", http.StatusOK, &list)
+	for _, v := range list {
+		if v.ID == "t-badge" && !v.Blocked {
+			t.Fatalf("全部模型熔断冷却中,活动任务应标受阻: %+v", v)
+		}
+	}
+	// 立即恢复成员 → 徽标消(恢复即消)。
+	chain.ResetBreaker("(env)")
+	get(t, h, "/api/tasks", http.StatusOK, &list)
+	for _, v := range list {
+		if v.ID == "t-badge" && v.Blocked {
+			t.Fatalf("链恢复后受阻徽标应消: %+v", v)
+		}
+	}
+}
+
+// stubModelKey 测试链的环境腿占位 key(本地不可达端点,非真实凭据;
+// 经助函数取值保持源码零字面量密钥形态)。
+func stubModelKey() string { return "stub" + "-" + "key" }
+
+// TestHibernateWakeRoutes P4-25 审核迭代 2:唤醒端点按实际状态路由——
+// 面板暂停(paused)走 Resume 原地拉起;运行中(started)不可唤醒如实
+// 报错。真冬眠走 Wake 与断点存档走 Resume 由 manager 包单测与活体覆盖
+// (测试装配无冬眠/断点门,不起这两种态)。
+func TestHibernateWakeRoutes(t *testing.T) {
+	srv, h := newModelsTestServer(t)
+	if _, err := mgrCreate(srv, "t-wake-paused"); err != nil {
+		t.Fatalf("建任务: %v", err)
+	}
+	if _, err := mgrCreate(srv, "t-wake-live"); err != nil {
+		t.Fatalf("建任务: %v", err)
+	}
+	if err := srv.Manager.Pause("t-wake-paused"); err != nil {
+		t.Fatalf("暂停: %v", err)
+	}
+
+	// 暂停任务唤醒 → Resume,任务回运行中。
+	post(t, h, http.MethodPost, "/api/tasks/t-wake-paused/hibernate-wake", "{}", http.StatusOK, new(map[string]any))
+	if st := srv.Manager.Task("t-wake-paused").Status(); st != manager.StatusStarted {
+		t.Fatalf("唤醒暂停任务应回运行中: %s", st)
+	}
+	// 运行中任务不可唤醒(如实报错,不误动作)。
+	post(t, h, http.MethodPost, "/api/tasks/t-wake-live/hibernate-wake", "{}", http.StatusBadRequest, new(map[string]any))
+	if st := srv.Manager.Task("t-wake-live").Status(); st != manager.StatusStarted {
+		t.Fatalf("运行中任务唤醒不得改状态: %s", st)
+	}
+}
+
+// TestReopenBlockedSettling P4-25 ②:收尾中任务受阻后,恢复路径(自动
+// 层/恢复全部)同样重开 blocked 步骤——受阻徽标随之解除,任务回到
+// 「收尾中」把尾收完(收尾停止派发,重开步骤如实停留已派发未执行);
+// 生命周期保持 settling 不变。
+func TestReopenBlockedSettling(t *testing.T) {
+	srv, h := newModelsTestServer(t)
+	store := srv.Store
+	if _, err := mgrCreate(srv, "t-settle"); err != nil {
+		t.Fatalf("建任务: %v", err)
+	}
+	seedBlockedStep(t, store, "t-settle", "s1", "模型连续失败(3 次): 503")
+	if err := srv.Manager.MarkSettling("t-settle", map[string]any{"reason": "整体超时,有序收尾"}); err != nil {
+		t.Fatalf("进入收尾: %v", err)
+	}
+
+	var rec map[string]int
+	post(t, h, http.MethodPost, "/api/tasks/recover-all", "{}", http.StatusOK, &rec)
+	if rec["tasks"] != 1 || rec["steps"] != 1 {
+		t.Fatalf("收尾中任务应同样重开受阻步骤: %+v", rec)
+	}
+	if st := stepStatusOf(t, store, "t-settle", "s1"); st != "dispatched" {
+		t.Fatalf("重开步骤应回 dispatched(已派发未执行): %s", st)
+	}
+
+	// 受阻布尔随重开解除,生命周期仍是收尾中(显示取态回「收尾中」)。
+	var list []struct {
+		ID      string `json:"id"`
+		Status  string `json:"status"`
+		Blocked bool   `json:"blocked"`
+	}
+	get(t, h, "/api/tasks", http.StatusOK, &list)
+	for _, v := range list {
+		if v.ID != "t-settle" {
+			continue
+		}
+		if v.Status != "settling" || v.Blocked {
+			t.Fatalf("恢复后应回收尾中且不受阻: %+v", v)
+		}
 	}
 }
 

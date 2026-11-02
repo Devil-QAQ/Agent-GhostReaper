@@ -192,7 +192,7 @@ func (p *TaskPack) Render() string {
 		fmt.Fprintf(&b, "  意图分级: %s(中高级别动作将逐次经审批门,被拒不重试)\n", string(p.ActionLevel))
 	}
 	if p.ExpectedObservation != "" {
-		fmt.Fprintf(&b, "  预期观察: %s(验收参考,非产出上限;预期外发现走候选回流)\n", p.ExpectedObservation)
+		fmt.Fprintf(&b, "  预期观察: %s(验收参考,非产出上限;预期外发现按待确认通道回传)\n", p.ExpectedObservation)
 	}
 
 	b.WriteString("\n三、相关可信事实(已确认)\n")
@@ -223,7 +223,7 @@ func (p *TaskPack) Render() string {
 	} else {
 		b.WriteString("未设白名单")
 	}
-	fmt.Fprintf(&b, "; 审批门槛: %s(该级及以上弹门等待批准)\n",
+	fmt.Fprintf(&b, "; 审批门槛: %s(该级及以上需批准,等待批准)\n",
 		string(NormalizeApprovalThreshold(p.Authorization.ApprovalThreshold)))
 	b.WriteString("\n")
 
@@ -278,15 +278,15 @@ func (p *TaskPack) Render() string {
 		} else {
 			b.WriteString("\n八、反证任务(验证类意图;你不是发现者,须独立复核,R12)\n")
 		}
-		fmt.Fprintf(&b, "  声明 %s\n", f.ClaimID)
-		fmt.Fprintf(&b, "  存在性声明: %s\n", f.Statement)
-		fmt.Fprintf(&b, "  影响面声明: %s(与存在性分开反证)\n", f.Impact)
+		fmt.Fprintf(&b, "  判断 %s\n", f.ClaimID)
+		fmt.Fprintf(&b, "  存在性判断: %s\n", f.Statement)
+		fmt.Fprintf(&b, "  影响面判断: %s(与存在性分开反证)\n", f.Impact)
 		if f.Vulnclass != "" {
 			fmt.Fprintf(&b, "  漏洞类型: %s\n", f.Vulnclass)
 		}
 		fmt.Fprintf(&b, "  发现者证据: %s\n", clipLine(f.Evidence, 200))
 		if len(f.Chain) > 0 {
-			b.WriteString("  攻击链环节(组合声明:整条链的组合效果才是存在性,须逐环节独立重放):\n")
+			b.WriteString("  攻击链环节(组合判断:整条链的组合效果才是存在性,须逐环节独立重放):\n")
 			for _, c := range f.Chain {
 				line := "    - " + c.FactID
 				if c.Role != "" {
@@ -299,19 +299,19 @@ func (p *TaskPack) Render() string {
 			}
 		}
 		if len(f.Alternatives) > 0 {
-			b.WriteString("  本轮待检竞争解释(逐条给出 refuted 结论;真实排除才可标 true):\n")
+			b.WriteString("  本轮待检的其他可能原因(逐条给出 refuted 结论;真实排除才可标 true):\n")
 			for _, a := range f.Alternatives {
 				fmt.Fprintf(&b, "    - %s: %s\n", a.ID, clipLine(a.Label, 160))
 			}
 		}
-		b.WriteString("  你的职责: 独立尝试推翻上述声明——重放观察、核查证据、逐条排除竞争性替代解释。\n")
+		b.WriteString("  你的职责: 独立尝试推翻上述判断——重放观察、核查证据、逐条排除其他可能原因。\n")
 		b.WriteString("  完成后必须经 submit_falsify_result 写回结构化结论(existence_refuted / impact_supported")
 		if len(f.Alternatives) > 0 {
 			b.WriteString(" + 逐条 alternatives 按 ID 给 refuted")
 		}
 		b.WriteString(" + 本轮证据);\n")
-		b.WriteString("  影响面成立时须给 impact_level(critical|high|medium|low,报告级别只跟影响面证据走);\n")
-		b.WriteString("  只输出文本结论不算完成,确认裁决由仲裁者机器完成(你的 note 陈述不构成证据)。\n")
+		fmt.Fprintf(&b, "  影响面成立时须给 impact_level(critical|high|medium|low,报告级别只跟影响面证据走;%s);\n", SeverityAnchor)
+		b.WriteString("  只输出文本结论不算完成,确认判定由仲裁者机器完成(你的 note 陈述不构成证据)。\n")
 	}
 
 	// 假设验证任务专用节(仅验证类意图携带;固定标头便于测试断言与模型解析)。
@@ -323,7 +323,7 @@ func (p *TaskPack) Render() string {
 		fmt.Fprintf(&b, "  提出者依据: %s\n", clipLine(h.Basis, 200))
 		b.WriteString("  你的职责: 独立验证这条假设——设计验证手段、真实执行、经 submit_hypothesis_result\n")
 		b.WriteString("  写回结构化结论(verdict: supported=成立|refuted=不成立|inconclusive=未能定论 + 本轮证据);\n")
-		b.WriteString("  验证中取得的可保留观察同时走 submit_candidate_fact / submit_test_claim 正常回流;\n")
+		b.WriteString("  验证中取得的可保留观察同时走 submit_candidate_fact / submit_test_claim 正常回传;\n")
 		b.WriteString("  假设成立不等于漏洞已验证(R11),只代表这条直觉值得跟。\n")
 	}
 	return b.String()

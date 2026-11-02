@@ -9,6 +9,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"ghostreaper/internal/rings"
 )
 
 // P2-13 格式矩阵与漏洞级导出:md / zip(逐发现分文件 + 证据包)/ csv /
@@ -30,7 +32,7 @@ func TestTaskExportMatrix(t *testing.T) {
 	if out.Filename != "report-"+task+".md" || !strings.Contains(out.MimeType, "text/markdown") {
 		t.Fatalf("md 文件名/类型不符: %+v", out)
 	}
-	for _, want := range []string{"反证记录(年轮版本刻度):", "复现步骤(收割定稿", "GET /old-backup/ HTTP/1.1", "Host: 10.10.0.5:8080"} {
+	for _, want := range []string{"反证记录:", "复现步骤(检查归纳定稿", "GET /old-backup/ HTTP/1.1", "Host: 10.10.0.5:8080"} {
 		if !strings.Contains(string(out.Body), want) {
 			t.Fatalf("md 缺 %q", want)
 		}
@@ -85,8 +87,8 @@ func TestTaskExportMatrix(t *testing.T) {
 			t.Fatalf("zip 缺条目 %s;实有条目 %v", name, keysOf(names))
 		}
 	}
-	if !strings.Contains(names["claims/C1-tc-1.md"], "# 漏洞报告 · `tc-1`") ||
-		!strings.Contains(names["claims/C1-tc-1.md"], "复现步骤(收割定稿") {
+	if !strings.Contains(names["claims/C1-tc-1.md"], "# 漏洞报告 · /old-backup/ 备份目录可公开匿名列举") ||
+		!strings.Contains(names["claims/C1-tc-1.md"], "复现步骤(检查归纳定稿") {
 		t.Fatalf("分文件应为单条发现完整报告:\n%s", names["claims/C1-tc-1.md"])
 	}
 	// 证据包为全文(不截断)且带内容寻址引用头。
@@ -196,7 +198,7 @@ func TestClaimExport(t *testing.T) {
 	if md.Filename != "finding-tc-1.md" {
 		t.Fatalf("文件名规约不符: %s", md.Filename)
 	}
-	for _, want := range []string{"# 漏洞报告 · `tc-1`", "反证记录(年轮版本刻度):", "来龙去脉:单位 u1 执行「审计主站敏感路径」", "复现步骤(收割定稿", "GET /old-backup/ HTTP/1.1"} {
+	for _, want := range []string{"# 漏洞报告 · /old-backup/ 备份目录可公开匿名列举", "判断标识:`tc-1`", "反证记录:", "来龙去脉:单位 u1 执行「审计主站敏感路径」", "复现步骤(检查归纳定稿", "GET /old-backup/ HTTP/1.1"} {
 		if !strings.Contains(string(md.Body), want) {
 			t.Fatalf("漏洞级 md 缺 %q:\n%s", want, md.Body)
 		}
@@ -322,6 +324,41 @@ func readCSV(t *testing.T, body []byte) [][]string {
 		t.Fatalf("解析 csv 失败: %v", err)
 	}
 	return rows
+}
+
+// TestClaimExportUnpolishedNote P4-24:文风校验未过的如实标注——叙述
+// 与步骤描述的说明行进报告正文,与面板同句;未标注记录零说明行。
+func TestClaimExportUnpolishedNote(t *testing.T) {
+	store := openStore(t)
+	blobs := openBlobs(t)
+	const task = "exp-unpolished"
+	seedReportScenario(t, store, task)
+	seedRepro(t, store, blobs, task)
+	ctx := context.Background()
+	// 取代语义:追加带标注的新定稿(重开再确认后的新记录)。
+	if _, err := store.Append(ctx, task, rings.Event{
+		Kind: rings.EventTestClaimRecord, Actor: "overmind", Payload: rings.TestClaimRecord{
+			ClaimID: "tc-1", Type: rings.TestClaimRecRepro, Severity: "high",
+			Narrative:           "单位 u1 执行「审计主站敏感路径」时发现备份列举;文字样例 tc-8f2a1b3c",
+			NarrativeUnpolished: true,
+			Steps: []rings.ReproStep{{Seq: 1, Round: 1, StepID: "s2", UnitID: "u2",
+				Desc:   "向 10.10.0.5:8080 发 GET /old-backup/,无需凭据;返回 200 即复现",
+				Method: "GET", URL: "http://10.10.0.5:8080/old-backup/", Status: 200, Unpolished: true}},
+		}}); err != nil {
+		t.Fatalf("铺带标注定稿失败: %v", err)
+	}
+	md, err := ClaimExport(ctx, store, blobs, task, "tc-1", FormatMD)
+	if err != nil {
+		t.Fatalf("漏洞级 md 失败: %v", err)
+	}
+	body := string(md.Body)
+	if !strings.Contains(body, "来龙去脉:单位 u1 执行「审计主站敏感路径」时发现备份列举") ||
+		!strings.Contains(body, "文字未过文风校验,按原文保留") {
+		t.Fatalf("叙述标注说明行应进报告:\n%s", body)
+	}
+	if strings.Count(body, "文字未过文风校验") != 2 {
+		t.Fatalf("叙述与步骤各一行说明(共 2 处):\n%s", body)
+	}
 }
 
 func keysOf(m map[string]string) []string {

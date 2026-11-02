@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "mimosa-hook-status/v1",
+  "recordedAt": "2026-10-25T23:58:23.133Z",
+  "sessionId": "session_d09def15d63abae60cdff7083ca952f7",
+  "event": "PostToolUse",
+  "toolName": "Write",
+  "file": "/tmp/gr-tune5/target.py",
+  "outcome": "inconclusive",
+  "coverage": "partial",
+  "findingCount": 0,
+  "durationMs": 4,
+  "hostState": "hook_complete",
+  "reportHint": ".mimosa/reports/"
+}

@@ -86,13 +86,13 @@ type ModelConfig struct {
 	// 思考强度:""|low|medium|high|max。
 	Thinking       string `json:"thinking,omitempty"`
 	ThinkingEffort string `json:"thinking_effort,omitempty"`
-	// Retry* 重试覆盖五层(第七章「重试分层」①~④ + 意图级重跑⑤),
-	// 三态:0=全局默认 / -1=关闭 / >0=值。
+	// Retry* 重试覆盖四层(第七章「重试分层」①~④;P4-27 ① 起意图级
+	// 重跑改长退避循环,次数上限语义退场,原⑤字段随之移除),三态:
+	// 0=全局默认 / -1=关闭 / >0=值。
 	RetryConnect int `json:"retry_connect,omitempty"` // ①建连重试
 	RetryEmpty   int `json:"retry_empty,omitempty"`   // ②空响应重试
 	RetryReplay  int `json:"retry_replay,omitempty"`  // ③零交付重放
 	RetryBreaker int `json:"retry_breaker,omitempty"` // ④熔断阈值(连续失败开闸次数)
-	RetryRerun   int `json:"retry_rerun,omitempty"`   // ⑤意图级重跑
 }
 
 // MaskedConfig 对外视图:Key 打码、代理去凭据,其余原样(API 永不回显
@@ -122,7 +122,6 @@ type MaskedConfig struct {
 	RetryEmpty     int     `json:"retry_empty,omitempty"`
 	RetryReplay    int     `json:"retry_replay,omitempty"`
 	RetryBreaker   int     `json:"retry_breaker,omitempty"`
-	RetryRerun     int     `json:"retry_rerun,omitempty"`
 	UpdatedBy      string  `json:"updated_by"`
 	UpdatedAt      string  `json:"updated_at"`
 }
@@ -141,8 +140,7 @@ func (c ModelConfig) Masked() MaskedConfig {
 		Thinking:       c.Thinking, ThinkingEffort: c.ThinkingEffort,
 		RetryConnect: c.RetryConnect, RetryEmpty: c.RetryEmpty,
 		RetryReplay: c.RetryReplay, RetryBreaker: c.RetryBreaker,
-		RetryRerun: c.RetryRerun,
-		UpdatedBy:  "", UpdatedAt: "", // 由调用方补审计字段(键值表携带)
+		UpdatedBy: "", UpdatedAt: "", // 由调用方补审计字段(键值表携带)
 	}
 }
 
@@ -260,7 +258,7 @@ func validateV2(cfg ModelConfig) error {
 	}
 	for name, v := range map[string]int{
 		"建连重试": cfg.RetryConnect, "空响应重试": cfg.RetryEmpty,
-		"零交付重放": cfg.RetryReplay, "熔断阈值": cfg.RetryBreaker, "意图级重跑": cfg.RetryRerun,
+		"零交付重放": cfg.RetryReplay, "熔断阈值": cfg.RetryBreaker,
 	} {
 		if v < -1 {
 			return fmt.Errorf("failover: %s覆盖值 %d 非法(0=默认 / -1=关闭 / >0=值)", name, v)

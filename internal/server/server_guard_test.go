@@ -32,10 +32,13 @@ func TestGuardRulesAPI(t *testing.T) {
 	if len(list.Rules) < 19 {
 		t.Fatalf("播种清单应约 19 条以上,得到 %d", len(list.Rules))
 	}
-	exfilOn := 0
+	exfilOn, bypassOn := 0, 0
 	for _, r := range list.Rules {
 		if r.Group == swarm.HardGroupExfilPipe && r.Enabled {
 			exfilOn++
+		}
+		if r.Group == swarm.HardGroupProxyBypass && r.Enabled {
+			bypassOn++
 		}
 		if !strings.HasPrefix(r.Name, swarm.HardRuleBuiltinPrefix) && isBuiltinHardRuleIDForTest(r.ID) {
 			t.Fatalf("内置条目应带内置前缀: %+v", r)
@@ -43,6 +46,9 @@ func TestGuardRulesAPI(t *testing.T) {
 	}
 	if exfilOn != 0 {
 		t.Fatalf("外泄管道组应播种为禁用")
+	}
+	if bypassOn != 0 {
+		t.Fatalf("代理旁路组应播种为禁用(P4-21)")
 	}
 
 	// 编辑内置条目:禁用 HTTP 删除方法请求(同 ID 覆盖)。
@@ -128,7 +134,7 @@ func TestRoEIntentRulesAPI(t *testing.T) {
 	ctx := context.Background()
 
 	// 建任务 + 资产。
-	body := `{"title": "拦截规则任务", "roe": {"allowed_tools": [], "denied_tools": []}, "assets": [{"title": "http://t-a:8080", "class": "service"}]}`
+	body := `{"title": "拦截规则任务", "goals": ["种子目标"], "roe": {"allowed_tools": [], "denied_tools": []}, "assets": [{"title": "http://t-a:8080", "class": "service"}]}`
 	var created struct {
 		ID string `json:"id"`
 	}
@@ -144,7 +150,7 @@ func TestRoEIntentRulesAPI(t *testing.T) {
 	assetID := assets[0].ID
 
 	// 提交任务级规则(快照)。
-	roeBody := `{"allowed_tools": [], "denied_tools": [], "approval_threshold": "",
+	roeBody := `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"allowed_tools": [], "denied_tools": [], "approval_threshold": "",
 		"intent_rules": [
 			{"id": "ir-1", "action": "数据读取", "asset_ids": ["` + assetID + `"], "disposition": "forbid"},
 			{"id": "ir-2", "action": "上传", "asset_ids": ["` + assetID + `"], "disposition": "allow", "quota": 2}
@@ -216,7 +222,7 @@ func TestRoERuleCRUDAPI(t *testing.T) {
 	var created struct {
 		ID string `json:"id"`
 	}
-	post(t, h, "POST", "/api/tasks", `{"title": "逐条规则任务", "assets": [{"title": "http://t-a:8080", "class": "service"}, {"title": "http://t-b:90", "class": "service"}]}`,
+	post(t, h, "POST", "/api/tasks", `{"goals":["种子目标"],"title": "逐条规则任务", "assets": [{"title": "http://t-a:8080", "class": "service"}, {"title": "http://t-b:90", "class": "service"}]}`,
 		http.StatusOK, &created)
 	taskID := created.ID
 	assets, _ := srv.Store.NodesByType(ctx, taskID, rings.NodeAsset, "")
@@ -306,7 +312,7 @@ func TestRoERulePatternsAPI(t *testing.T) {
 	var created struct {
 		ID string `json:"id"`
 	}
-	post(t, h, "POST", "/api/tasks", `{"title": "生成任务", "assets": [{"title": "http://t-a:8080", "class": "service"}]}`,
+	post(t, h, "POST", "/api/tasks", `{"goals":["种子目标"],"title": "生成任务", "assets": [{"title": "http://t-a:8080", "class": "service"}]}`,
 		http.StatusOK, &created)
 	taskID := created.ID
 
@@ -362,7 +368,7 @@ func TestRoERuleNotifyTargeted(t *testing.T) {
 	var created struct {
 		ID string `json:"id"`
 	}
-	post(t, h, "POST", "/api/tasks", `{"title": "定向告知任务", "assets": [{"title": "http://t-a:8080", "class": "service"}, {"title": "http://t-b:90", "class": "service"}]}`,
+	post(t, h, "POST", "/api/tasks", `{"goals":["种子目标"],"title": "定向告知任务", "assets": [{"title": "http://t-a:8080", "class": "service"}, {"title": "http://t-b:90", "class": "service"}]}`,
 		http.StatusOK, &created)
 	taskID := created.ID
 	assets, _ := srv.Store.NodesByType(ctx, taskID, rings.NodeAsset, "")

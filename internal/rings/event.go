@@ -309,6 +309,8 @@ func validateIntentRules(rules []IntentRule) error {
 // 判定留痕与量化额度计数,审计流)。
 // P3-13b 扩入会话元数据(session.meta:会话重命名/备注/置顶的面板
 // 操作记账,列表组织信息流)。
+// P4-18 扩入收口信号记录(closure.record:连续零新发现的收口提醒与
+// 造物主的两键裁决,问题清单 #30)。
 type EventKind string
 
 const (
@@ -333,6 +335,7 @@ const (
 	EventGuardRecord      EventKind = "guard.record"
 	EventReportRecord     EventKind = "report.record"
 	EventSessionMeta      EventKind = "session.meta"
+	EventClosureRecord    EventKind = "closure.record"
 )
 
 // Event 账本事件信封。Payload 按 Kind 对应 NodeAdded/NodeStateChanged/EdgeAdded。
@@ -359,9 +362,10 @@ type NodeAdded struct {
 // NodeStateChanged 是 EventNodeStateChanged 的负载。
 // Status 在地基层为自由文本,具体状态机(Step/TestClaim)由 P1-04+/P1-08 定义。
 type NodeStateChanged struct {
-	NodeID string `json:"node_id"`
-	Status string `json:"status"`
-	Note   string `json:"note,omitempty"` // 迁移依据(人工标记达成的理由等;机器迁移不带,P3-14b ④)
+	Evidence []string `json:"evidence,omitempty"`
+	NodeID   string   `json:"node_id"`
+	Status   string   `json:"status"`
+	Note     string   `json:"note,omitempty"` // 迁移依据(人工标记达成的理由等;机器迁移不带,P3-14b ④)
 }
 
 // EdgeAdded 是 EventEdgeAdded 的负载。
@@ -506,10 +510,12 @@ type ArbiterConditionResult struct {
 
 // 审批记录类型白名单(受控入口)。
 const (
-	ApprovalRecRequested = "requested" // 弹门:审批请求已登记,等待面板裁决
-	ApprovalRecApproved  = "approved"  // 面板批准
-	ApprovalRecDenied    = "denied"    // 拒绝(面板拒绝/拒绝线自动拒绝/等待期间熔断,原因见 Reason 与 DenyLine)
-	ApprovalRecForced    = "forced"    // P2-06b:研判后放行(造物主对拒绝线记录的逐次强制放行)
+	ApprovalRecRequested = "requested"  // 弹门:审批请求已登记,等待面板裁决
+	ApprovalRecApproved  = "approved"   // 面板批准
+	ApprovalRecDenied    = "denied"     // 拒绝(面板拒绝/拒绝线自动拒绝/等待期间熔断,原因见 Reason 与 DenyLine)
+	ApprovalRecForced    = "forced"     // P2-06b:研判后放行(造物主对拒绝线记录的逐次强制放行)
+	ApprovalRecGroupPass = "group_pass" // P4-17:同组放行(代理旁路组批准一次后,该单位同组命令直接执行的逐次留痕)
+	ApprovalRecStepPass  = "step_pass"  // P4-27 ⑧:同步骤放行(审批门槛批准一次后,该单位本步骤后续命令直接执行的逐次留痕)
 )
 
 var approvalRecordTypes = map[string]bool{
@@ -517,6 +523,8 @@ var approvalRecordTypes = map[string]bool{
 	ApprovalRecApproved:  true,
 	ApprovalRecDenied:    true,
 	ApprovalRecForced:    true,
+	ApprovalRecGroupPass: true,
+	ApprovalRecStepPass:  true,
 }
 
 // 拒绝线类别(DenyLine 词表,P2-06b):拒绝的来源分类,面板据此呈现
@@ -657,6 +665,7 @@ const (
 	TestClaimRecEvidence = "evidence"       // P3-02:流量证据绑定/补绑(镜交换 ↔ 声明,面板操作入账)
 	TestClaimRecRetest   = "retest"         // P3-06:复测结论(已修复/未修复,复测会话受限工具写回)
 	TestClaimRecReplay   = "replay"         // P3-07:重放校验结论(绑定证据确定性重放,零 LLM)
+	TestClaimRecReportReview = "report_review" // P4-30:存量复核标记(信息性判断不纳入报告;追加事件,账本不涂改,判断保留可追溯)
 )
 
 var testClaimRecordTypes = map[string]bool{
@@ -667,6 +676,7 @@ var testClaimRecordTypes = map[string]bool{
 	TestClaimRecEvidence: true,
 	TestClaimRecRetest:   true,
 	TestClaimRecReplay:   true,
+	TestClaimRecReportReview: true,
 }
 
 // 复测结论词表(P3-06,第三章 §5 复测语义):fixed=已修复(本轮真实重放
@@ -762,6 +772,9 @@ type Alternative struct {
 type AltResult struct {
 	ID      string `json:"id"`
 	Refuted bool   `json:"refuted"`
+	// Label 展示侧回填的疑点内容:账本写回只带 ID,报告/面板装配时
+	// 按冻结清单补(界面显示内容本身,不显示 alt 编号),不落账。
+	Label string `json:"label,omitempty"`
 }
 
 // ReproStep 收割定稿的单条复现步骤(P2-02,第五章 §1+P2-02 任务书):
@@ -790,6 +803,10 @@ type ReproStep struct {
 	// 预渲染原文)。
 	ExchangeID string `json:"exchange_id,omitempty"`
 	Note       string `json:"note,omitempty"`
+	// Unpolished 该步描述未过文风校验(P4-24 ②,问题清单 #39):模式
+	// 闸门拦截后退回重写一次仍含机器语特征,如实标注原文保留(读侧
+	// 渲染一行说明,不阻塞定稿)。旧记录无本字段。
+	Unpolished bool `json:"unpolished,omitempty"`
 }
 
 // TestClaimRecord 是 EventTestClaimRecord 的负载(P1-08 + P2-02,第三章
@@ -819,6 +836,10 @@ type ReproStep struct {
 //   - replay(P3-07,actor=swarm:rp-*):重放校验结论——对绑定流量证据
 //     做确定性原样重放(经镜新留痕、零 LLM),逐条交换的新旧对照事实
 //     与结论词(reproduced|diverged|unreachable)入账;不迁移状态。
+//   - report_review(P4-30,actor=overmind):存量复核标记——主宰按立判
+//     危害门槛复核图上既有判断,纯信息性的标记"不纳入报告"。只追加
+//     标记记录:账本不涂改、判断保留可追溯(Reason 必填);报告只收
+//     已确认且非信息性,读取侧按最新标记取舍(取代语义)。
 type TestClaimRecord struct {
 	ClaimID string `json:"claim_id"`
 	StepID  string `json:"step_id,omitempty"` // 所属/依据的反证 Step;retest = 本轮复测会话锚(伪步骤 ID,兼转录名)
@@ -843,7 +864,7 @@ type TestClaimRecord struct {
 	Conditions    []ArbiterConditionResult `json:"conditions,omitempty"`     // 逐条件依据(R2 可审计)
 	EvaluatedRev  int64                    `json:"evaluated_rev,omitempty"`
 
-	// reopen 侧(P2-02)。
+	// reopen 侧(P2-02);report_review 侧(P4-30:复核理由,必填)。
 	Trigger string `json:"trigger,omitempty"` // new_evidence|manual|expired
 	Reason  string `json:"reason,omitempty"`
 
@@ -855,8 +876,12 @@ type TestClaimRecord struct {
 	// 零 LLM(R17);生成失败回退确定性拼句(不阻塞机器裁决);重开再确认
 	// 随新定稿重新生成(取代语义同 Steps)。叙述是包装不是证据,与机器
 	// 字段矛盾时以原文为准。旧定稿无本字段,读侧如实标注不编造。
-	Narrative string      `json:"narrative,omitempty"`
-	Steps     []ReproStep `json:"steps,omitempty"`
+	Narrative string `json:"narrative,omitempty"`
+	// NarrativeUnpolished 叙述未过文风校验(P4-24 ②,问题清单 #39):
+	// 定稿校对+模式闸门重写一次后仍含机器语特征,如实标注原文保留
+	// (读侧渲染一行说明,不阻塞定稿)。旧记录无本字段。
+	NarrativeUnpolished bool        `json:"narrative_unpolished,omitempty"`
+	Steps               []ReproStep `json:"steps,omitempty"`
 	// Variants 去同型时被收起的变体交换(P4-08 ③):同方法+同路径+同
 	// 状态的重复交换不构成复现流程,不进 Steps;账本记录保留(证据包
 	// zip 全量收,审计不丢)。账次序与原交换次序一致,不编 Seq。
@@ -1008,6 +1033,7 @@ const (
 	BlackboxTaskBlocked      = "task_blocked"       // P2-06e:任务级 LLM 连续失败超阈值,任务受阻
 	BlackboxTaskResumed      = "task_resumed"       // P2-06e:任务受阻后模型调用恢复
 	BlackboxRestartAdoption  = "restart_adoption"   // P2-06f:进程重启收养(幽灵清理/重拉/重准入的系统级审计锚点)
+	BlackboxEnvObservation   = "env_observation"    // P4-25 ①:本机环回/测试环境自身设施的观察(镜自指排除),拒收原文留痕供排查
 )
 
 var blackboxRecordTypes = map[string]bool{
@@ -1016,7 +1042,7 @@ var blackboxRecordTypes = map[string]bool{
 	BlackboxHeartbeat: true, BlackboxHbStall: true, BlackboxHbRepeat: true, BlackboxHbBurnAnomaly: true,
 	BlackboxUnitApprovalDeny: true,
 	BlackboxUnitBlocked:      true, BlackboxTaskBlocked: true, BlackboxTaskResumed: true,
-	BlackboxRestartAdoption: true,
+	BlackboxRestartAdoption: true, BlackboxEnvObservation: true,
 }
 
 // BlackboxRecord 是 EventBlackboxRecord 的负载(P2-04,第四章 §6):系统级
@@ -1085,8 +1111,9 @@ type SteerRecord struct {
 
 // 主宰研判记录类型白名单(受控入口,P2-06)。
 const OvermindRecAssessment = "assessment" // 态势研判:五问结论 + 派发摘要(每轮拆解会话的研判轨迹)
+const OvermindRecPlanning = "planning"     // 真实规划调用前的触发依据与水位
 
-var overmindRecordTypes = map[string]bool{OvermindRecAssessment: true}
+var overmindRecordTypes = map[string]bool{OvermindRecAssessment: true, OvermindRecPlanning: true}
 
 // OvermindRecord 是 EventOvermindRecord 的负载(P2-06,第四章 §1 主宰
 // 职责"态势研判"的标准五问):每轮拆解会话的研判轨迹审计流,不进
@@ -1097,16 +1124,19 @@ var overmindRecordTypes = map[string]bool{OvermindRecAssessment: true}
 // 的变化"计算锚点(态势快照据此 diff——五问全是"新 X 是否 Y"形式,
 // 没有变化集就没有研判输入)。
 type OvermindRecord struct {
-	Type         string `json:"type"`
-	SessionID    string `json:"session_id,omitempty"`    // 研判会话锚点(转录 JSONL 下钻)
-	EvaluatedRev int64  `json:"evaluated_rev,omitempty"` // 研判所读账本版本
+	TriggerRevisions []int64         `json:"trigger_revisions,omitempty"`
+	Bootstrap        bool            `json:"bootstrap,omitempty"`
+	Queue            *QueueWatermark `json:"queue,omitempty"`
+	Type             string          `json:"type"`
+	SessionID        string          `json:"session_id,omitempty"`    // 研判会话锚点(转录 JSONL 下钻)
+	EvaluatedRev     int64           `json:"evaluated_rev,omitempty"` // 研判所读账本版本
 
 	// assessment 侧:五问结论(空 = 本轮该问无可研判项,如实呈现)。
 	QAccess      string `json:"q_access,omitempty"`      // 新身份能访问哪些已有资产
 	QPrivilege   string `json:"q_privilege,omitempty"`   // 新权限是否改变其他漏洞的影响
 	QCombination string `json:"q_combination,omitempty"` // 两条单独影响有限的线索是否组合成新的边界问题
 	QUnlock      string `json:"q_unlock,omitempty"`      // 新的可达关系是否解锁之前受阻的步骤
-	QOverturn    string `json:"q_overturn,omitempty"`    // 新证据是否推翻旧判断
+	QOverturn    string `json:"q_overturn,omitempty"`    // 新证据是否推翻旧结论
 	Note         string `json:"note,omitempty"`          // 五问之外的研判(启发式起点,不设上限)
 
 	Dispatched int      `json:"dispatched,omitempty"` // 本轮派发意图数
@@ -1265,4 +1295,83 @@ type InterjectRecord struct {
 	// advice / advice_verdict 侧。
 	AdviceID string `json:"advice_id,omitempty"` // av-*
 	Reason   string `json:"reason,omitempty"`    // 裁决理由(verdict 必填)
+}
+
+// ---- P4-18 收口信号(问题清单 #30) ----
+
+// 收口信号记录类型白名单(受控入口,P4-18;审核迭代 1 扩 config)。
+const (
+	ClosureRecPrompt   = "prompt"   // 收口提醒触发(机器判定:连续 N 轮研判零新发现 + 距上次新发现 ≥ 间隔,双条件同时满足)
+	ClosureRecContinue = "continue" // 造物主选「继续」:任务不停,同规则重新计数
+	ClosureRecEnd      = "end"      // 造物主选「结束」:走优雅收尾(收尾时序 + 终版报告)
+	ClosureRecConfig   = "config"   // 任务级配置变更(审核迭代 1:开关 + 轮数 + 间隔,快照式整体覆盖,最新一条即当前)
+	ClosureRecDismiss  = "dismiss"  // 弹窗被直接关闭、未裁决(P4-23:待决保留,任务列表标红点,处理才消)
+)
+
+var closureRecordTypes = map[string]bool{
+	ClosureRecPrompt:   true,
+	ClosureRecContinue: true,
+	ClosureRecEnd:      true,
+	ClosureRecConfig:   true,
+	ClosureRecDismiss:  true,
+}
+
+// 收口计数锚点种类(prompt 快照词表,P4-18):面板据此措辞——finding=
+// 距上次新发现 / continue=距上次选择继续 / created=开跑以来零新发现。
+const (
+	ClosureAnchorFinding  = "finding"
+	ClosureAnchorContinue = "continue"
+	ClosureAnchorCreated  = "created"
+)
+
+var closureAnchorKinds = map[string]bool{
+	ClosureAnchorFinding:  true,
+	ClosureAnchorContinue: true,
+	ClosureAnchorCreated:  true,
+}
+
+// 收尾发起方(终态 detail.settled_by 的词表,P4-18):面板据此区分
+// "整体超时收尾"与"收口提醒结束"——两者都是有序收尾(已收尾徽标),
+// 与操作者熔断不同。
+const (
+	SettleByTaskGate      = "task_gate"      // 任务整体超时到点(P2-04 既有语义)
+	SettleByClosurePrompt = "closure_prompt" // 收口提醒的「结束」键
+)
+
+// ClosureRecord 是 EventClosureRecord 的负载(P4-18,问题清单 #30):
+// 收口信号的审计流——机器触发的提醒(prompt, actor=overmind)与造物主
+// 的两键裁决(continue/end, actor=creator)。不进 nodes/edges 投影
+// (同 overmind.record 分工);读取侧从事件流确定性推导计数与待决态
+// (见 overmind.ClosureOf):锚点 = 上次新发现(事实/资产/声明节点新增)
+// 或上次「继续」,任一新增即清零重计;prompt 待决到被裁决或新发现
+// 出现为止。prompt 侧字段是触发时刻的机器快照(数字精确,面板直读)。
+type ClosureRecord struct {
+	Type string `json:"type"` // prompt|continue|end|config|dismiss
+
+	// prompt 侧(触发时刻快照)。
+	Rounds           int    `json:"rounds,omitempty"`            // 锚点后的研判轮数(overmind.record assessment 计数)
+	Minutes          int    `json:"minutes,omitempty"`           // 触发时距锚点分钟数
+	RoundsThreshold  int    `json:"rounds_threshold,omitempty"`  // 触发时生效的轮数阈值(面板可配)
+	MinutesThreshold int    `json:"minutes_threshold,omitempty"` // 触发时生效的间隔阈值(分钟,面板可配)
+	AnchorAt         string `json:"anchor_at,omitempty"`         // 锚点时刻(RFC3339:上次新发现 / 上次「继续」/ 建任务)
+	AnchorKind       string `json:"anchor_kind,omitempty"`       // 锚点种类(finding|continue|created)
+
+	// config 侧(任务级配置快照,审核迭代 1):Enabled 必带;Rounds/
+	// Minutes 为 0 或缺省 = 该项不单独设定(用全局默认)。建任务表单的
+	// 初始配置随 created detail.closure 落库,运行中变更落本事件,最新
+	// 一条 config(或 created 初始)即当前任务级配置。
+	Enabled *bool `json:"enabled,omitempty"`
+	// Rounds/Minutes 复用 prompt 侧字段(config 型下语义为配置值)。
+
+	// continue / end 侧。
+	Reason string `json:"reason,omitempty"` // 备注(可选)
+}
+
+// QueueWatermark 同时用于规划审计与面板展示，排队只计可领取步骤。
+type QueueWatermark struct {
+	Running   int `json:"running"`
+	Queued    int `json:"queued"`
+	Waiting   int `json:"waiting"`
+	Available int `json:"available"`
+	Limit     int `json:"limit"`
 }

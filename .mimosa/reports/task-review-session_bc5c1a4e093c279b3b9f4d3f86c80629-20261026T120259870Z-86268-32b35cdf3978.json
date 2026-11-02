@@ -1,0 +1,1046 @@
+{
+  "schema_version": "mimosa-task-review/v2",
+  "run_id": "20261026T120259870Z-86268-32b35cdf3978",
+  "run_status": "inconclusive",
+  "errors": [
+    {
+      "stage": "candidate-select",
+      "target": "cmd/_p431seed/main.go",
+      "reason": "changed_file_unreadable: observed changed file no longer exists or cannot be read"
+    },
+    {
+      "stage": "candidate-select",
+      "target": "web/components/command-palette.js",
+      "reason": "candidate_limit_exceeded: 19 changed reviewable file(s) were not scanned because the limit is 20"
+    },
+    {
+      "stage": "baseline",
+      "target": ".",
+      "reason": "baseline_partial: baseline capture had enumeration or snapshot errors"
+    }
+  ],
+  "coverage": {
+    "schema_version": "mimosa-hook-coverage/v1",
+    "status": "partial",
+    "scope": "hook_observed_diff",
+    "baseline": {
+      "complete": false,
+      "captured_files": 353,
+      "candidate_limit": 5000,
+      "truncated": false,
+      "enumeration_error_count": 0,
+      "snapshot_error_count": 2,
+      "compensated_target_count": 39
+    },
+    "change_tracking": {
+      "touched_observed": 1,
+      "touched_retained": 1,
+      "truncated": false,
+      "bash_mutation": true,
+      "bash_discovered": 39,
+      "bash_discovery_limit": 80,
+      "bash_discovery_truncated": false
+    },
+    "candidates": {
+      "eligible_files": 39,
+      "selected_files": 20,
+      "limit": 20,
+      "truncated": true
+    },
+    "scanning": {
+      "required_files": 20,
+      "scanned_files": 20,
+      "skipped_files": 0,
+      "failed_files": 0,
+      "project_checks_required": 0,
+      "project_checks_completed": 0
+    },
+    "notification": {
+      "eligible_findings": 0,
+      "detailed_findings": 0,
+      "detail_limit": 3,
+      "truncated": false
+    },
+    "reason_counts": {
+      "changed_file_unreadable": 1,
+      "candidate_limit_exceeded": 1,
+      "baseline_partial": 1,
+      "project_check_failed": 3
+    },
+    "reasons": [
+      {
+        "code": "changed_file_unreadable",
+        "stage": "candidate-select",
+        "target": "cmd/_p431seed/main.go",
+        "detail": "observed changed file no longer exists or cannot be read",
+        "affects_completion": true
+      },
+      {
+        "code": "candidate_limit_exceeded",
+        "stage": "candidate-select",
+        "target": "web/components/command-palette.js",
+        "detail": "19 changed reviewable file(s) were not scanned because the limit is 20",
+        "affects_completion": true
+      },
+      {
+        "code": "baseline_partial",
+        "stage": "baseline",
+        "target": ".",
+        "detail": "baseline capture had enumeration or snapshot errors",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "candidate-select",
+        "target": "cmd/_p431seed/main.go",
+        "detail": "changed_file_unreadable: observed changed file no longer exists or cannot be read",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "candidate-select",
+        "target": "web/components/command-palette.js",
+        "detail": "candidate_limit_exceeded: 19 changed reviewable file(s) were not scanned because the limit is 20",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline",
+        "target": ".",
+        "detail": "baseline_partial: baseline capture had enumeration or snapshot errors",
+        "affects_completion": true
+      }
+    ],
+    "reasons_truncated": false
+  },
+  "generated_at": "2026-10-26T12:02:59.870Z",
+  "session_id": "session_bc5c1a4e093c279b3b9f4d3f86c80629",
+  "target": ".",
+  "revision": "a83b50a6d377c9ef5644abcb681962c62f6c2133",
+  "rules_version": "unavailable",
+  "diff_hash": "e15e6581b284357484c5f39e143ccdf3065e3c8566524762cfb396d32f519f0a",
+  "diff": {
+    "algorithm": "sha256",
+    "changed_file_count": 20,
+    "changed_files": [
+      {
+        "file": "web/components/chat-blocks.js",
+        "ranges": [
+          {
+            "start": 92,
+            "end": 92
+          },
+          {
+            "start": 123,
+            "end": 123
+          },
+          {
+            "start": 140,
+            "end": 140
+          },
+          {
+            "start": 162,
+            "end": 162
+          },
+          {
+            "start": 180,
+            "end": 180
+          },
+          {
+            "start": 207,
+            "end": 207
+          },
+          {
+            "start": 259,
+            "end": 259
+          }
+        ],
+        "before_hash": "786b11701b00556b471001ad96c49cb4fd763596b320440e8c7b4ee74ac3e0eb",
+        "after_hash": "9c2dd2ef5141f18a60c0d63269825bf2b77eae463b9d0be70fe7fd2a66367fc1"
+      },
+      {
+        "file": "web/components/claim-chain-graph.js",
+        "ranges": [
+          {
+            "start": 39,
+            "end": 39
+          },
+          {
+            "start": 130,
+            "end": 130
+          },
+          {
+            "start": 216,
+            "end": 216
+          }
+        ],
+        "before_hash": "b0c1499e8e4555fb37014b7b78fc685b9413f55b19aaf18432dfb9e010104b1a",
+        "after_hash": "15d2e3f1b98abeeb51400db5358cb0bd62f12f817920bfaece7a15a06588cafd"
+      },
+      {
+        "file": "web/components/claim-followup-dialog.js",
+        "ranges": [
+          {
+            "start": 107,
+            "end": 107
+          },
+          {
+            "start": 110,
+            "end": 110
+          },
+          {
+            "start": 148,
+            "end": 148
+          },
+          {
+            "start": 161,
+            "end": 161
+          },
+          {
+            "start": 248,
+            "end": 248
+          }
+        ],
+        "before_hash": "f7fda803fbbeb8a3b8579f3daefd57ef6fed06abeb4ec295ee33e9eabb4fee91",
+        "after_hash": "fc7f4609441044254db08c32a1923dde402433ff133e64a2c703f9de766d9cab"
+      },
+      {
+        "file": "web/views/agent-page.js",
+        "ranges": [
+          {
+            "start": 148,
+            "end": 148
+          },
+          {
+            "start": 329,
+            "end": 329
+          }
+        ],
+        "before_hash": "d04fe68f547f5847746694a5b936735b290af628b251aa6d35e81e93beeeabbd",
+        "after_hash": "c752e8da4f277b7ab2b27b26cce562efa66c10db4e7bde51e2e724382fb73b9a"
+      },
+      {
+        "file": "web/views/annulus-page.js",
+        "ranges": [
+          {
+            "start": 219,
+            "end": 219
+          },
+          {
+            "start": 226,
+            "end": 226
+          },
+          {
+            "start": 228,
+            "end": 228
+          },
+          {
+            "start": 239,
+            "end": 239
+          },
+          {
+            "start": 265,
+            "end": 265
+          },
+          {
+            "start": 275,
+            "end": 275
+          },
+          {
+            "start": 502,
+            "end": 502
+          },
+          {
+            "start": 517,
+            "end": 517
+          },
+          {
+            "start": 579,
+            "end": 579
+          },
+          {
+            "start": 859,
+            "end": 859
+          },
+          {
+            "start": 880,
+            "end": 880
+          },
+          {
+            "start": 1049,
+            "end": 1049
+          },
+          {
+            "start": 1057,
+            "end": 1057
+          }
+        ],
+        "before_hash": "9dbb005cb69774d13d7b08ae4b49e675516a59abfd7414529df97ec97b7aa5de",
+        "after_hash": "7f3d6c90794e28ab3e40ee27d89de1b4d26c93e898ad017de293a6b91ad1440e"
+      },
+      {
+        "file": "web/views/assets-page.js",
+        "ranges": [
+          {
+            "start": 318,
+            "end": 318
+          }
+        ],
+        "before_hash": "da8a2566a9a383d5dd92e7a94b1a4e5111064f57a024e15f0d6b558bc3c27ded",
+        "after_hash": "90974ef3b30c88e3e083266db8d0f46e98976148f7ac7fbd3db874726fdda5f1"
+      },
+      {
+        "file": "web/views/findings-page.js",
+        "ranges": [
+          {
+            "start": 109,
+            "end": 109
+          },
+          {
+            "start": 159,
+            "end": 159
+          },
+          {
+            "start": 256,
+            "end": 256
+          },
+          {
+            "start": 396,
+            "end": 396
+          },
+          {
+            "start": 427,
+            "end": 427
+          },
+          {
+            "start": 446,
+            "end": 446
+          },
+          {
+            "start": 649,
+            "end": 649
+          },
+          {
+            "start": 758,
+            "end": 758
+          }
+        ],
+        "before_hash": "9ca96b42d13bb9a331046954b16c3de5c5131dcb6e3446eaafc330b82fad51f8",
+        "after_hash": "768914f3194155c2e99751bfc464a7fe1a91ba1d28aca39a9dbc0b8bdf4eef71"
+      },
+      {
+        "file": "web/views/llm-page.js",
+        "ranges": [
+          {
+            "start": 305,
+            "end": 305
+          },
+          {
+            "start": 529,
+            "end": 529
+          },
+          {
+            "start": 579,
+            "end": 579
+          },
+          {
+            "start": 807,
+            "end": 807
+          },
+          {
+            "start": 811,
+            "end": 811
+          },
+          {
+            "start": 819,
+            "end": 819
+          }
+        ],
+        "before_hash": "5b61dfa1328c2c6ed21086f039b55ff898a1fa5aff4aaeb6761af1e5f4512085",
+        "after_hash": "548f8ee58c56503150b6fd50326a6ec78b8187fcb9af30c988e2b19ddb8e038c"
+      },
+      {
+        "file": "web/views/new-task-dialog.js",
+        "ranges": [
+          {
+            "start": 438,
+            "end": 438
+          },
+          {
+            "start": 502,
+            "end": 502
+          },
+          {
+            "start": 539,
+            "end": 539
+          },
+          {
+            "start": 546,
+            "end": 546
+          }
+        ],
+        "before_hash": "f09056bc88fddfaefb053e1fe35d9b405a503b924548356f4d16d3b7c5df44ca",
+        "after_hash": "aa5ceccd650177531e8493b5bbce2eaa1b34640cf25fda16c03cc8b8a2c3b2ba"
+      },
+      {
+        "file": "web/views/node-sheets.js",
+        "ranges": [
+          {
+            "start": 207,
+            "end": 207
+          },
+          {
+            "start": 219,
+            "end": 219
+          },
+          {
+            "start": 232,
+            "end": 232
+          },
+          {
+            "start": 260,
+            "end": 260
+          },
+          {
+            "start": 272,
+            "end": 272
+          },
+          {
+            "start": 315,
+            "end": 315
+          },
+          {
+            "start": 350,
+            "end": 350
+          },
+          {
+            "start": 365,
+            "end": 365
+          },
+          {
+            "start": 367,
+            "end": 367
+          },
+          {
+            "start": 551,
+            "end": 551
+          },
+          {
+            "start": 571,
+            "end": 571
+          },
+          {
+            "start": 589,
+            "end": 589
+          },
+          {
+            "start": 600,
+            "end": 600
+          },
+          {
+            "start": 611,
+            "end": 611
+          },
+          {
+            "start": 630,
+            "end": 630
+          },
+          {
+            "start": 721,
+            "end": 721
+          },
+          {
+            "start": 739,
+            "end": 739
+          },
+          {
+            "start": 758,
+            "end": 758
+          },
+          {
+            "start": 768,
+            "end": 768
+          },
+          {
+            "start": 778,
+            "end": 778
+          },
+          {
+            "start": 795,
+            "end": 795
+          },
+          {
+            "start": 818,
+            "end": 818
+          },
+          {
+            "start": 830,
+            "end": 830
+          },
+          {
+            "start": 861,
+            "end": 861
+          },
+          {
+            "start": 899,
+            "end": 899
+          },
+          {
+            "start": 944,
+            "end": 944
+          },
+          {
+            "start": 989,
+            "end": 989
+          },
+          {
+            "start": 1014,
+            "end": 1014
+          },
+          {
+            "start": 1025,
+            "end": 1025
+          },
+          {
+            "start": 1062,
+            "end": 1062
+          },
+          {
+            "start": 1106,
+            "end": 1106
+          },
+          {
+            "start": 1117,
+            "end": 1117
+          },
+          {
+            "start": 1177,
+            "end": 1177
+          },
+          {
+            "start": 1506,
+            "end": 1506
+          },
+          {
+            "start": 1518,
+            "end": 1518
+          },
+          {
+            "start": 1525,
+            "end": 1525
+          },
+          {
+            "start": 1532,
+            "end": 1532
+          }
+        ],
+        "before_hash": "4b126fd6ebd3bbf8b78568e6bb72c270fb08a25437ed4995308e546a015713ba",
+        "after_hash": "5ceed463860c8d76a2706eedbe80e4515a37d46229c03dbe9148156439a8f526"
+      },
+      {
+        "file": "web/views/observe-page.js",
+        "ranges": [
+          {
+            "start": 418,
+            "end": 418
+          },
+          {
+            "start": 951,
+            "end": 951
+          },
+          {
+            "start": 1074,
+            "end": 1074
+          }
+        ],
+        "before_hash": "5edd6a35c3daf411488307a9efefc3aa8326b9718074e185b161cca436a4cbfa",
+        "after_hash": "60024ab2b7f00d7e8b5425cb2273eeb17528cd9b50835171d96afceccfb5bb31"
+      },
+      {
+        "file": "web/views/progress-page.js",
+        "ranges": [
+          {
+            "start": 164,
+            "end": 164
+          },
+          {
+            "start": 442,
+            "end": 442
+          }
+        ],
+        "before_hash": "145bb279cadb1d9df3f4bae5d95e58cfdde87a8bdc3946159757936b43443a29",
+        "after_hash": "b791299721926194803320d219b21d3d3c74cc46dd23b652710903c37b2af647"
+      },
+      {
+        "file": "web/views/report-page.js",
+        "ranges": [
+          {
+            "start": 91,
+            "end": 91
+          },
+          {
+            "start": 153,
+            "end": 153
+          },
+          {
+            "start": 173,
+            "end": 173
+          },
+          {
+            "start": 229,
+            "end": 229
+          },
+          {
+            "start": 232,
+            "end": 232
+          }
+        ],
+        "before_hash": "532e37b353e55f6ea6acef42c582023254aaf19f6033cae62222883393e1278b",
+        "after_hash": "820c877e537ad45d59edada40e4ae47254f4a82757aae329620de907286c195c"
+      },
+      {
+        "file": "web/views/reports-page.js",
+        "ranges": [
+          {
+            "start": 60,
+            "end": 60
+          },
+          {
+            "start": 90,
+            "end": 90
+          }
+        ],
+        "before_hash": "f17bde1ec9d6422177366b32c9bfb52817ccabb80ae367bcfe254f1324c85b69",
+        "after_hash": "d5a9b8ab048d7ecf92a42de93a492f8aca948e133dc100bf4cdc6b0834d3b983"
+      },
+      {
+        "file": "web/views/roe-page.js",
+        "ranges": [
+          {
+            "start": 72,
+            "end": 72
+          },
+          {
+            "start": 537,
+            "end": 537
+          },
+          {
+            "start": 543,
+            "end": 543
+          },
+          {
+            "start": 577,
+            "end": 577
+          },
+          {
+            "start": 651,
+            "end": 651
+          },
+          {
+            "start": 806,
+            "end": 806
+          },
+          {
+            "start": 890,
+            "end": 890
+          },
+          {
+            "start": 1071,
+            "end": 1071
+          }
+        ],
+        "before_hash": "3abba5e7d247678940f955c297997603ecc8be0efe627ee804342be798e2297b",
+        "after_hash": "e5c6397c7f3a5139a1a2efa71f74cda1c5a1084567902974af427b7ee95a9743"
+      },
+      {
+        "file": "web/views/sessions-page.js",
+        "ranges": [
+          {
+            "start": 109,
+            "end": 109
+          },
+          {
+            "start": 116,
+            "end": 116
+          },
+          {
+            "start": 260,
+            "end": 260
+          },
+          {
+            "start": 262,
+            "end": 262
+          },
+          {
+            "start": 323,
+            "end": 323
+          },
+          {
+            "start": 441,
+            "end": 441
+          },
+          {
+            "start": 619,
+            "end": 619
+          },
+          {
+            "start": 631,
+            "end": 631
+          },
+          {
+            "start": 650,
+            "end": 650
+          },
+          {
+            "start": 698,
+            "end": 698
+          },
+          {
+            "start": 745,
+            "end": 745
+          },
+          {
+            "start": 1004,
+            "end": 1004
+          },
+          {
+            "start": 1007,
+            "end": 1007
+          },
+          {
+            "start": 1127,
+            "end": 1127
+          },
+          {
+            "start": 1261,
+            "end": 1261
+          },
+          {
+            "start": 1267,
+            "end": 1267
+          },
+          {
+            "start": 1299,
+            "end": 1299
+          },
+          {
+            "start": 1328,
+            "end": 1328
+          },
+          {
+            "start": 1354,
+            "end": 1354
+          },
+          {
+            "start": 1400,
+            "end": 1401
+          },
+          {
+            "start": 1421,
+            "end": 1421
+          },
+          {
+            "start": 1447,
+            "end": 1447
+          },
+          {
+            "start": 1577,
+            "end": 1577
+          },
+          {
+            "start": 1579,
+            "end": 1579
+          },
+          {
+            "start": 1591,
+            "end": 1591
+          },
+          {
+            "start": 1698,
+            "end": 1698
+          },
+          {
+            "start": 1706,
+            "end": 1706
+          },
+          {
+            "start": 1708,
+            "end": 1708
+          },
+          {
+            "start": 1715,
+            "end": 1715
+          }
+        ],
+        "before_hash": "e31f6b9a2447203efd8eeda581ce159c8a1b6b1375364c52fd633c2aada350b1",
+        "after_hash": "5559c35dccbf61fdc98ad99d9b455818fc1851b33950140a2d530f03d25139ff"
+      },
+      {
+        "file": "web/views/settings-page.js",
+        "ranges": [
+          {
+            "start": 100,
+            "end": 100
+          },
+          {
+            "start": 212,
+            "end": 212
+          },
+          {
+            "start": 254,
+            "end": 254
+          },
+          {
+            "start": 339,
+            "end": 339
+          },
+          {
+            "start": 345,
+            "end": 345
+          },
+          {
+            "start": 418,
+            "end": 418
+          },
+          {
+            "start": 685,
+            "end": 685
+          },
+          {
+            "start": 819,
+            "end": 819
+          },
+          {
+            "start": 904,
+            "end": 904
+          },
+          {
+            "start": 951,
+            "end": 951
+          },
+          {
+            "start": 962,
+            "end": 962
+          },
+          {
+            "start": 1031,
+            "end": 1031
+          },
+          {
+            "start": 1181,
+            "end": 1181
+          },
+          {
+            "start": 1342,
+            "end": 1342
+          }
+        ],
+        "before_hash": "ba3ed08c6241b53d96efb38247ad8a4a13b7030dd129058ef8de36848b15b686",
+        "after_hash": "126fbf0dd0fbaeb9bf4d556d431c63ca08e55b65e68234cf80ef938f60a56b5c"
+      },
+      {
+        "file": "web/views/tasks-page.js",
+        "ranges": [
+          {
+            "start": 368,
+            "end": 368
+          },
+          {
+            "start": 388,
+            "end": 388
+          }
+        ],
+        "before_hash": "45b3ae5a631636bcc5b2bc7346b5aeefc0d2845480817f27b072c4f17feda1be",
+        "after_hash": "8b7afd838aa9a269b8da4834df4cf9245f553413b9ab340659d8babbca070c05"
+      },
+      {
+        "file": "web/views/traffic-page.js",
+        "ranges": [
+          {
+            "start": 184,
+            "end": 184
+          },
+          {
+            "start": 191,
+            "end": 191
+          },
+          {
+            "start": 205,
+            "end": 205
+          },
+          {
+            "start": 332,
+            "end": 332
+          },
+          {
+            "start": 355,
+            "end": 355
+          }
+        ],
+        "before_hash": "d0fe630e059c6bfdc0c540d51407d6aac9ad9c03685d703f8b625ec7825da23a",
+        "after_hash": "b7855b64b25e550c0345f920c6266e01e68c04c6aeca23220b08e1fa69081fab"
+      },
+      {
+        "file": "web/views/workbench-page.js",
+        "ranges": [
+          {
+            "start": 194,
+            "end": 194
+          },
+          {
+            "start": 315,
+            "end": 315
+          },
+          {
+            "start": 354,
+            "end": 354
+          },
+          {
+            "start": 372,
+            "end": 372
+          },
+          {
+            "start": 420,
+            "end": 420
+          },
+          {
+            "start": 462,
+            "end": 462
+          },
+          {
+            "start": 491,
+            "end": 491
+          },
+          {
+            "start": 543,
+            "end": 543
+          }
+        ],
+        "before_hash": "79136fad967f19ffb7a726dc03e9bceda25adeac8d0734b9ade21e99b7fd91e4",
+        "after_hash": "79b3717999adda60f8bac1104d7c525ff892e73032eda6d21f894b0f43e4e652"
+      }
+    ]
+  },
+  "timing": {
+    "started_at": "2026-10-26T12:02:58.541Z",
+    "completed_at": "2026-10-26T12:02:59.870Z",
+    "duration_ms": 1329,
+    "measurement": "hook_wall_clock"
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "model_calls": 0,
+    "measurement": "known-zero"
+  },
+  "telemetry": {
+    "schemaVersion": "mimosa-gate-telemetry/v1",
+    "profile": "gate",
+    "operation": "Stop",
+    "outcome": "partial/INCONCLUSIVE",
+    "latencyMs": 1329,
+    "peakMemoryBytes": 233406464,
+    "memoryMeasurement": "max-observed-process-rss",
+    "scannedFiles": 20,
+    "cache": {
+      "hits": 0,
+      "misses": 0,
+      "measurement": "not-applicable"
+    },
+    "denyCount": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "total": 0,
+      "modelCalls": 0,
+      "measurement": "known-zero"
+    }
+  },
+  "finding_count": 0,
+  "rewake_finding_count": 0,
+  "evidence_boundary": {
+    "scan": "candidate",
+    "static_fix_verification": "observed_static_only",
+    "runtime_verification": "not_performed"
+  },
+  "finding_events": [
+    {
+      "finding_id": "mimosa-4e7bb3d7910c9c8f0d2b709a",
+      "file": "",
+      "line": 15,
+      "rule_id": "security",
+      "severity": "high",
+      "category": "硬编码凭据",
+      "status": "blocked",
+      "decision": "deny",
+      "at": "2026-10-26T11:34:35.640Z",
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "source": "semgrep",
+        "evidence_hash": "f78f9faa5ffd9ecec3771c4d7dd2b0da6ef4559257c13c76694e6df216c7ff3f",
+        "runtime_oracle": false
+      }
+    },
+    {
+      "finding_id": "mimosa-4e7bb3d7910c9c8f0d2b709a",
+      "file": "",
+      "line": 15,
+      "rule_id": "security",
+      "severity": "high",
+      "category": "硬编码凭据",
+      "status": "fixed_candidate",
+      "decision": "repair_observed",
+      "at": "2026-10-26T11:34:47.251Z",
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "source": "semgrep",
+        "evidence_hash": "f78f9faa5ffd9ecec3771c4d7dd2b0da6ef4559257c13c76694e6df216c7ff3f",
+        "candidate_before_evidence_hash": "f78f9faa5ffd9ecec3771c4d7dd2b0da6ef4559257c13c76694e6df216c7ff3f",
+        "post_change_evidence_hash_at_previous_location": "b7bc1acb4d033c79c4e2ecb8612da569ffcf3b9538da467f431c4b5cc35b697f",
+        "runtime_oracle": false,
+        "verification": {
+          "method": "mimosa-posttool-static-rescan",
+          "finding_absent": true,
+          "runtime_oracle": false
+        }
+      }
+    },
+    {
+      "finding_id": "mimosa-4e7bb3d7910c9c8f0d2b709a",
+      "file": "",
+      "line": 15,
+      "rule_id": "security",
+      "severity": "high",
+      "category": "硬编码凭据",
+      "status": "static_verified",
+      "decision": "static_rescan_passed",
+      "at": "2026-10-26T11:34:47.251Z",
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "observed",
+        "producer": "deterministic",
+        "source": "semgrep",
+        "evidence_hash": "f78f9faa5ffd9ecec3771c4d7dd2b0da6ef4559257c13c76694e6df216c7ff3f",
+        "candidate_before_evidence_hash": "f78f9faa5ffd9ecec3771c4d7dd2b0da6ef4559257c13c76694e6df216c7ff3f",
+        "post_change_evidence_hash_at_previous_location": "b7bc1acb4d033c79c4e2ecb8612da569ffcf3b9538da467f431c4b5cc35b697f",
+        "runtime_oracle": false,
+        "verification": {
+          "method": "mimosa-posttool-static-rescan",
+          "finding_absent": true,
+          "runtime_oracle": false
+        }
+      }
+    }
+  ],
+  "findings": [],
+  "artifacts": {
+    "immutable_report": ".mimosa/reports/task-review-session_bc5c1a4e093c279b3b9f4d3f86c80629-20261026T120259870Z-86268-32b35cdf3978.json",
+    "latest_report": ".mimosa/reports/task-review-session_bc5c1a4e093c279b3b9f4d3f86c80629.json",
+    "history_summary": ".mimosa/history/run-20261026T120259870Z-86268-32b35cdf3978.json"
+  }
+}

@@ -11,6 +11,7 @@ import { iconOf } from "@/components/icons";
 import { ExchangeRaw, statusVariant } from "@/components/exchange-raw";
 import { ReproStepsList } from "@/components/repro-steps";
 import { downloadExport } from "@/components/export-dialog";
+import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -118,6 +119,7 @@ function Muted({ children }) {
 // detail 自由字段的操作者语言(表外词按 8.5 术语门槛翻译;未收录键
 // 原样呈现——字段名即数据事实,不编造解释)。
 const DETAIL_KEYS = {
+  cancellation_reason: "取消理由",
   goal_id: "归属目标",
   action_level: "意图分级",
   intent: "意图",
@@ -134,8 +136,8 @@ const DETAIL_KEYS = {
   standard: "判定标准",
   predicate: "完成谓词",
   kind: "类型",
-  testclaim_id: "声明",
-  new_asset: "新对象声明",
+  testclaim_id: "判断",
+  new_asset: "新对象申报",
   reason: "理由",
   note: "备注",
 };
@@ -164,7 +166,8 @@ export function GenericNodeSheet({ tid, nodeID, nodeType, graph, onClose, onSele
       return g ? <Badge variant={g.variant}>{g.label}</Badge> : null;
     }
     if (t === "fact") {
-      return <Badge variant={status === "confirmed" ? "success" : "info"}>{FACT_STATUS[status] || status}</Badge>;
+      const f = FACT_STATUS[status];
+      return f ? <StatusBadge meta={f} /> : null;
     }
     if (t === "step") {
       return <Badge variant={status === "done" ? "success" : status === "running" ? "running" : "paused"}>{STEP_STATUS[status] || status}</Badge>;
@@ -195,25 +198,25 @@ export function GenericNodeSheet({ tid, nodeID, nodeType, graph, onClose, onSele
     <Sheet open={Boolean(nodeID)} onOpenChange={(o) => !o && onClose()}>
       <SheetContent className="overflow-y-auto">
         {!n ? (
-          <div className="p-4 text-sm text-muted-foreground">
+          <div className="p-5 text-sm text-muted-foreground">
             {error ? `读取失败:${error}` : "读取中…"}
           </div>
         ) : (
           <>
             <SheetHeader>
-              <SheetTitle className="flex flex-wrap items-center gap-2 pr-16">
+              <SheetTitle className="flex flex-wrap items-center gap-2">
                 <NodeTypeBadge type={type} />
                 {statusBadge(type, n.status)}
                 <ViewInGraphButton tid={tid} nodeID={n.id} type={type} onClose={onClose} />
                 {type === "fact" && <ViewInFactsButton tid={tid} nodeID={n.id} onClose={onClose} />}
               </SheetTitle>
               <SheetDescription>
-                <span className="font-mono">{n.id}</span> · 版本号 {n.created_rev}
+                <span className="num" title={`版本号 ${n.created_rev}`}>{n.id}</span>
               </SheetDescription>
             </SheetHeader>
-            <div className="flex flex-col gap-4 p-4 text-sm">
+            <div className="flex flex-col gap-5 p-5 text-sm">
               <DetailSection title="标题">
-                <div className="rounded-md border bg-card px-3 py-2 break-words">
+                <div className="rounded-md border border-border/55 bg-card px-3 py-2 break-words">
                   {n.title || "(无标题)"}
                 </div>
               </DetailSection>
@@ -226,7 +229,7 @@ export function GenericNodeSheet({ tid, nodeID, nodeType, graph, onClose, onSele
                       const long = text.length > 96 || typeof v === "object";
                       const goalRef = k === "goal_id" && typeof v === "string";
                       return (
-                        <div key={k} className="flex flex-col gap-0.5 rounded-md border bg-card px-3 py-2">
+                        <div key={k} className="flex flex-col gap-0.5 rounded-md border border-border/55 bg-card px-3 py-2">
                           <div className="text-xs text-muted-foreground">{DETAIL_KEYS[k] || k}</div>
                           {goalRef ? (
                             <NodeRefButton
@@ -234,7 +237,7 @@ export function GenericNodeSheet({ tid, nodeID, nodeType, graph, onClose, onSele
                               onSelectNode={onSelectNode}
                             />
                           ) : long ? (
-                            <pre className="overflow-auto rounded-md bg-input-surface p-2 font-mono text-xs leading-relaxed whitespace-pre-wrap break-all">
+                            <pre className="overflow-auto rounded-md bg-input-surface p-2 num text-xs leading-relaxed whitespace-pre-wrap break-all">
                               {text}
                             </pre>
                           ) : (
@@ -251,10 +254,10 @@ export function GenericNodeSheet({ tid, nodeID, nodeType, graph, onClose, onSele
                 <DetailSection title="血缘(引用可下钻)">
                   <div className="flex flex-col gap-1">
                     {/* 上游行:引用在前、标签在后,读作「<引用> ─标签→ 本节点」
-                        (如 声明 tc-1 派生自 本事实);下行行:标签在前,读作
-                        「本节点 ─标签→ <引用>」(如 产出 事实 f-2)。 */}
+                        (如 判断派生自本事实);下行行:标签在前,读作
+                        「本节点 ─标签→ <引用>」(如 产出某事实)。 */}
                     {lineage.up.map((r) => (
-                      <div key={`u-${r.id}-${r.edge}`} className="flex flex-wrap items-center gap-2 rounded-md border bg-card px-3 py-2">
+                      <div key={`u-${r.id}-${r.edge}`} className="flex flex-wrap items-center gap-2 rounded-md border border-border/55 bg-card px-3 py-2">
                         <NodeRefButton
                           meta={{ id: r.id, type: r.node.type, typeLabel: nodeTypeMeta(r.node.type).label }}
                           onSelectNode={onSelectNode}
@@ -266,7 +269,7 @@ export function GenericNodeSheet({ tid, nodeID, nodeType, graph, onClose, onSele
                       </div>
                     ))}
                     {lineage.down.map((r) => (
-                      <div key={`d-${r.id}-${r.edge}`} className="flex flex-wrap items-center gap-2 rounded-md border bg-card px-3 py-2">
+                      <div key={`d-${r.id}-${r.edge}`} className="flex flex-wrap items-center gap-2 rounded-md border border-border/55 bg-card px-3 py-2">
                         <Badge variant="outline">{r.edge}</Badge>
                         <NodeRefButton
                           meta={{ id: r.id, type: r.node.type, typeLabel: nodeTypeMeta(r.node.type).label }}
@@ -303,22 +306,23 @@ export function AssetDetailSheet({ tid, nodeID, onClose, onSelectNode }) {
     <Sheet open={Boolean(nodeID)} onOpenChange={(o) => !o && onClose()}>
       <SheetContent className="overflow-y-auto">
         {!a ? (
-          <div className="p-4 text-sm text-muted-foreground">
+          <div className="p-5 text-sm text-muted-foreground">
             {error ? `读取失败:${error}` : "读取中…"}
           </div>
         ) : (
           <>
             <SheetHeader>
-              <SheetTitle className="flex items-center gap-2 pr-16">
+              <SheetTitle className="flex items-center gap-2">
                 {React.createElement(iconOf(meta.icon), { className: "size-4 text-muted-foreground" })}
                 {a.title || a.id}
                 <ViewInGraphButton tid={tid} nodeID={a.id} type="asset" onClose={onClose} />
               </SheetTitle>
               <SheetDescription>
-                {meta.label} · <span className="font-mono">{a.id}</span> · 版本号 {a.created_rev}
+                {meta.label} ·{" "}
+                <span className="num" title={`版本号 ${a.created_rev}`}>{a.id}</span>
               </SheetDescription>
             </SheetHeader>
-            <div className="flex flex-col gap-4 p-4 text-sm">
+            <div className="flex flex-col gap-5 p-5 text-sm">
               <div className="flex flex-wrap items-center gap-2">
                 {a.excluded ? (
                   <Badge variant="outline" className="text-muted-foreground">
@@ -343,11 +347,11 @@ export function AssetDetailSheet({ tid, nodeID, onClose, onSelectNode }) {
                   卡的对象出生区同一份。 */}
               <DetailSection title="对象出生">
                 {a.source === "discovered" ? (
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border bg-card px-3 py-2 text-xs">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-border/55 bg-card px-3 py-2 text-xs">
                     <span>发现入图</span>
                     {a.birth_unit ? (
                       <span className="text-muted-foreground">
-                        单位 <span className="font-mono">{a.birth_unit}</span>
+                        单位 <span className="num">{a.birth_unit}</span>
                       </span>
                     ) : null}
                     {a.birth_step && (
@@ -358,9 +362,9 @@ export function AssetDetailSheet({ tid, nodeID, onClose, onSelectNode }) {
                     )}
                   </div>
                 ) : a.source === "manual" ? (
-                  <div className="rounded-md border bg-card px-3 py-2 text-xs">手动补入(面板新增)</div>
+                  <div className="rounded-md border border-border/55 bg-card px-3 py-2 text-xs">手动补入(面板新增)</div>
                 ) : (
-                  <div className="rounded-md border bg-card px-3 py-2 text-xs">建任务种子入图</div>
+                  <div className="rounded-md border border-border/55 bg-card px-3 py-2 text-xs">建任务种子入图</div>
                 )}
               </DetailSection>
 
@@ -372,9 +376,7 @@ export function AssetDetailSheet({ tid, nodeID, onClose, onSelectNode }) {
                     <div key={f.id} className="flex items-center gap-2">
                       <NodeRefButton meta={{ id: f.id, type: "fact", typeLabel: "事实" }} onSelectNode={onSelectNode} />
                       <span className="min-w-0 flex-1 truncate" title={f.title}>{f.title}</span>
-                      <Badge variant={f.status === "confirmed" ? "success" : "info"}>
-                        {FACT_STATUS[f.status] || f.status}
-                      </Badge>
+                      <StatusBadge meta={FACT_STATUS[f.status] || { label: f.status, variant: "info" }} />
                     </div>
                   ))
                 )}
@@ -399,10 +401,8 @@ export function AssetDetailSheet({ tid, nodeID, onClose, onSelectNode }) {
                 ) : (
                   (data.claims || []).map((c) => (
                     <div key={c.id} className="flex items-center gap-2">
-                      <NodeRefButton meta={{ id: c.id, type: "testclaim", typeLabel: "声明" }} onSelectNode={onSelectNode} />
-                      <Badge variant={CLAIM_STATUS[c.status]?.variant || "info"}>
-                        {CLAIM_STATUS[c.status]?.label || c.status}
-                      </Badge>
+                      <NodeRefButton meta={{ id: c.id, type: "testclaim", typeLabel: "判断" }} onSelectNode={onSelectNode} />
+                      <StatusBadge meta={CLAIM_STATUS[c.status] || { label: c.status, variant: "info" }} />
                       <span className="min-w-0 flex-1 truncate" title={c.title}>{c.title}</span>
                     </div>
                   ))
@@ -423,6 +423,16 @@ const DECISION_META = {
   pending: { label: "终审待确认", tone: "warning" },
   advance_round: { label: "再反证", tone: "running" },
 };
+// 时间线"状态 →"行的显示词(P4-28 ⑥ 合并口径,与 CLAIM_STATUS 同词;
+// 时间线单独成表是刻度叙事行,不套徽标)。
+const STATE_LABELS = {
+  candidate: "锤炼中",
+  testing: "锤炼中",
+  awaiting_round: "锤炼中",
+  confirmed: "已确认",
+  pending: "待确认",
+  fixed: "已修复",
+};
 
 const REOPEN_TRIGGERS = [
   ["new_evidence", "新反证"],
@@ -433,7 +443,7 @@ const REOPEN_TRIGGERS = [
 const COND_LABELS = {
   falsify_completed: "反证完成",
   existence_not_refuted: "存在性未推翻",
-  alternatives_killed: "竞争解释全排除",
+  alternatives_killed: "其他可能原因全排除",
   impact_supported: "影响面有证据",
   verifier_independent: "验证者独立",
   fact_confirmed: "事实已确认",
@@ -443,15 +453,6 @@ const COND_LABELS = {
 function condLabel(kind) {
   return COND_LABELS[kind] || kind;
 }
-
-const STATE_LABELS = {
-  candidate: "候选",
-  testing: "反证中",
-  awaiting_round: "待下轮反证",
-  confirmed: "Confirmed",
-  pending: "待确认",
-  fixed: "已修复",
-};
 
 // ClaimDetailSheet 发现详情(8.8 完整版):头部(状态/类别/级别)+ 两维
 // 声明分开 + 竞争解释 + 反证时间线 + 复现步骤 + 重开;资产锚点与攻击链
@@ -471,6 +472,8 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
   // 成果追问大窗(P4-14):与描述 / 修复建议 / 数据与链路并列的追问区
   // 入口,一成果一会话、续接不新建。
   const [followup, setFollowup] = React.useState(false);
+  // 反证时间线展开态(P4-28 ④:默认折叠,点击展开)。
+  const [tlOpen, setTlOpen] = React.useState(false);
   React.useEffect(() => {
     setLayer(claimLayerMemory.get(claimID) || null);
   }, [claimID]);
@@ -515,7 +518,7 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
       <Sheet open onOpenChange={(o) => !o && onClose()}>
         <SheetContent className="overflow-y-auto">
           <SheetHeader>
-            <SheetTitle className="font-mono text-sm">{claimID}</SheetTitle>
+            <SheetTitle className="num">{claimID}</SheetTitle>
             <SheetDescription>
               {error ? `读取失败:${error}` : "读取发现详情…"}
             </SheetDescription>
@@ -528,54 +531,76 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
   const st = CLAIM_STATUS[claim.status] || { label: claim.status, variant: "info" };
   const sev = severityMeta(claim.severity || data.repro?.severity);
   const repro = data.repro || null;
+  const timeline = data.timeline || [];
+  // 当前结论一句话(P4-28 ③):终态直陈结果,不让人读搁置理由原文猜;
+  // 过程态(锤炼中)尚未出结论,不呈现本行。
+  const conclusion =
+    claim.status === "confirmed"
+      ? "当前结论：成立，已确认"
+      : claim.status === "fixed"
+        ? "当前结论：成立，已确认（复测已修复）"
+        : claim.status === "pending"
+          ? "当前结论：暂不成立（可被新证据推翻重审）"
+          : "";
 
   return (
     <>
       <Sheet open onOpenChange={(o) => !o && onClose()}>
         <SheetContent className="overflow-y-auto">
           <SheetHeader>
-            <SheetTitle className="flex flex-wrap items-center gap-2 pr-16">
-              <Badge variant={st.variant}>{st.label}</Badge>
+            <SheetTitle className="flex flex-wrap items-center gap-2">
+              <StatusBadge meta={st} />
               {sev && <Badge variant={sev.variant}>{sev.label}</Badge>}
               {claim.vulnclass && <Badge variant="outline">{claim.vulnclass}</Badge>}
-              {/* P3-11a ③:声明原文为标题主视觉,tc-ID 次要可复制小字 */}
-              <span className="font-mono text-sm font-normal text-muted-foreground">
-                {claim.id}
-              </span>
-              <CopyIDButton id={claim.id} noun="声明标识" className="size-5" />
+              {/* P4-19 迭代:判断原文为标题主视觉,tc-ID 不上标题,悬停与复制可取 */}
+              <CopyIDButton id={claim.id} noun="判断标识" className="size-5" />
               <ViewInGraphButton tid={tid} nodeID={claim.id} type="testclaim" onClose={onClose} />
             </SheetTitle>
-            {/* 漏洞名称即存在性声明原文 */}
+            {/* 漏洞名称即存在性判断原文 */}
             <SheetDescription className="text-sm text-foreground">
               {claim.statement}
             </SheetDescription>
           </SheetHeader>
-          <div className="flex flex-col gap-5 p-4 text-sm">
+          <div className="flex flex-col gap-5 p-5 text-sm">
+            {/* 结论区置顶(P4-28 ④):状态徽标(头部)+ 当前结论 + 严重级
+                (头部徽标)+ 一句话声明(头部描述)先行,证据/反证时间线/
+                血缘等过程信息折叠其下。 */}
+            {conclusion && (
+              <section className="flex flex-col gap-1">
+                <div className="text-xs font-medium tracking-wide text-muted-foreground">当前结论</div>
+                <div className="rounded-md border border-border/55 bg-card px-3 py-2 text-sm font-medium">
+                  {conclusion}
+                </div>
+              </section>
+            )}
             {claim.status === "pending" && claim.pending_reason && (
               <div className="rounded-md bg-status-warning-soft px-3 py-2 text-xs text-status-warning">
                 搁置理由:{claim.pending_reason}
               </div>
             )}
+            {claim.report_excluded && (
+              <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
+                不纳入报告:{claim.report_excluded_reason || "信息性观察,无直接危害"}
+              </div>
+            )}
 
             <section className="flex flex-col gap-1">
               <div className="text-xs font-medium tracking-wide text-muted-foreground">漏洞描述</div>
-              <div className="rounded-md border bg-card px-3 py-2 leading-relaxed">
-                {claim.impact || "(未声明影响面)"}
+              <div className="rounded-md border border-border/55 bg-card px-3 py-2 leading-relaxed">
+                {claim.impact || "(未申报影响面)"}
               </div>
             </section>
 
-            {/* 耗时拆解(P4-08 ②):落地 → 终态的排队/执行/轮次,账本
-                时间戳直读;进行中无终态段,如实不造 */}
+            {/* 耗时拆解(P4-08 ②;P4-19 迭代整行改写):从开始到
+                结束的排队/干活/验证轮次,账本时间戳直读;进行中无结束
+                段,如实不造。 */}
             {data.timing && data.timing.landed_at && (
               <section className="flex flex-col gap-1">
                 <div className="text-xs font-medium tracking-wide text-muted-foreground">耗时拆解</div>
-                <div className="rounded-md border bg-card px-3 py-2 font-mono text-xs text-muted-foreground">
-                  落地 {data.timing.landed_at?.slice(5)}
-                  {data.timing.terminal_at
-                    ? ` → 终态 ${data.timing.terminal_at.slice(5)}`
-                    : ""}
-                  {" · "}排队 {fmtDur(data.timing.queue_seconds)} · 执行{" "}
-                  {fmtDur(data.timing.exec_seconds)} · 反证 {data.timing.rounds} 轮
+                <div className="rounded-md border border-border/55 bg-card px-3 py-2 num text-xs text-muted-foreground">
+                  {fmtTimingSpan(data.timing.landed_at, data.timing.terminal_at)}
+                  {" · "}排队 {fmtDur(data.timing.queue_seconds)} · 干活{" "}
+                  {fmtDur(data.timing.exec_seconds)} · 验证 {data.timing.rounds} 轮
                 </div>
               </section>
             )}
@@ -583,7 +608,7 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
             {/* 修复建议区(8.8:查表生成,与报告同源逐字一致;未命中不编造) */}
             <section className="flex flex-col gap-1">
               <div className="text-xs font-medium tracking-wide text-muted-foreground">修复建议</div>
-              <div className="rounded-md border bg-card px-3 py-2 leading-relaxed">
+              <div className="rounded-md border border-border/55 bg-card px-3 py-2 leading-relaxed">
                 {(data.remediation || []).length > 0 ? (
                   <div className="flex flex-col gap-1 text-sm">
                     {data.remediation.map((item, i) => (
@@ -592,7 +617,7 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
                   </div>
                 ) : (
                   <span className="text-xs text-muted-foreground">
-                    {claim.vulnclass ? "该类型暂无预置建议" : "未声明类型,无预置建议"}
+                    {claim.vulnclass ? "该类型暂无预置建议" : "未申报类型,无预置建议"}
                   </span>
                 )}
               </div>
@@ -602,7 +627,7 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
                 攻击链条并列;一成果一会话,已有会话续接(已 N 问) */}
             <section className="flex flex-col gap-1">
               <div className="text-xs font-medium tracking-wide text-muted-foreground">追问</div>
-              <div className="flex flex-wrap items-center gap-2 rounded-md border bg-card px-3 py-2">
+              <div className="flex flex-wrap items-center gap-2 rounded-md border border-border/55 bg-card px-3 py-2">
                 <Button
                   variant="outline"
                   className="h-8 text-xs"
@@ -618,6 +643,37 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
                 </span>
               </div>
             </section>
+
+            {/* 反证时间线(P4-28 ④:过程信息折叠其下,默认收起;数据与
+                报告导出同源同一装配)。 */}
+            {timeline.length > 0 && (
+              <section className="flex flex-col gap-1">
+                <div className="text-xs font-medium tracking-wide text-muted-foreground">反证时间线</div>
+                <div>
+                  <button
+                    className={
+                      "flex w-fit items-center gap-2 rounded-md border px-3 py-1 text-xs transition-colors cursor-pointer " +
+                      (tlOpen
+                        ? "border-primary/50 text-foreground"
+                        : "text-muted-foreground hover:text-foreground")
+                    }
+                    onClick={() => setTlOpen(!tlOpen)}
+                  >
+                    {React.createElement(iconOf(tlOpen ? "chevronDown" : "chevronRight"), {
+                      className: "size-3.5",
+                    })}
+                    完整轨迹 {timeline.length} 条(提出 → 反证 → 判定)
+                  </button>
+                  {tlOpen && (
+                    <ol className="relative mt-2 flex flex-col gap-3 border-l pl-4">
+                      {timeline.map((e, i) => (
+                        <TimelineEntry key={`${e.rev}-${e.kind}-${i}`} entry={e} />
+                      ))}
+                    </ol>
+                  )}
+                </div>
+              </section>
+            )}
 
             {/* 数据与链路入口:细节入第二层卡片,关闭即回本层 */}
             <section className="flex flex-col gap-1">
@@ -662,7 +718,7 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
               <span className="text-xs text-muted-foreground">导出本条</span>
               <Button
                 variant="outline"
-                className="h-7 px-2 text-xs"
+                className="h-8 px-2 text-xs"
                 onClick={async () => {
                   try {
                     const name = await downloadExport(
@@ -680,7 +736,7 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
               </Button>
               <Button
                 variant="outline"
-                className="h-7 px-2 text-xs"
+                className="h-8 px-2 text-xs"
                 onClick={async () => {
                   try {
                     const name = await downloadExport(
@@ -699,7 +755,7 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
               {data.reopenable && (
                 <Button
                   variant="outline"
-                  className="h-7 px-2 text-xs"
+                  className="h-8 px-2 text-xs"
                   onClick={() => openLayer("reopen")}
                 >
                   {React.createElement(iconOf("rotateCcw"), { className: "size-3.5" })}
@@ -709,7 +765,7 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
               {(claim.retestable || (data.retests || []).length > 0 || claim.retest_running) && (
                 <Button
                   variant="outline"
-                  className="h-7 px-2 text-xs"
+                  className="h-8 px-2 text-xs"
                   onClick={() => openLayer("retest")}
                 >
                   {React.createElement(iconOf("rotateCcw"), { className: "size-3.5" })}
@@ -719,7 +775,7 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
               {(claim.replayable || (data.replays || []).length > 0 || claim.replay_running) && (
                 <Button
                   variant="outline"
-                  className="h-7 px-2 text-xs"
+                  className="h-8 px-2 text-xs"
                   onClick={() => openLayer("replay")}
                 >
                   {React.createElement(iconOf("rotateCcw"), { className: "size-3.5" })}
@@ -733,17 +789,17 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
 
       {/* ---- 第二层卡片(叠层 Sheet,关闭回第一层) ---- */}
       {layer === "repro" && (
-        <Sheet open onOpenChange={(o) => !o && openLayer(null)}>
+        <Sheet nested open onOpenChange={(o) => !o && openLayer(null)}>
           <SheetContent className="overflow-y-auto">
             <SheetHeader>
-              <SheetTitle className="text-base">复现数据包</SheetTitle>
-              <SheetDescription>
+              <SheetTitle>复现数据包</SheetTitle>
+              <SheetDescription title={repro ? `版本号 ${repro.rev}` : undefined}>
                 {repro
-                  ? `收割定稿 · 版本号 ${repro.rev}${repro.severity ? ` · 级别 ${severityMeta(repro.severity)?.label || repro.severity}` : ""}`
+                  ? `检查归纳定稿${repro.severity ? ` · 级别 ${severityMeta(repro.severity)?.label || repro.severity}` : ""}`
                   : "尚无定稿复现步骤"}
               </SheetDescription>
             </SheetHeader>
-            <div className="flex flex-col gap-5 p-4 text-sm">
+            <div className="flex flex-col gap-5 p-5 text-sm">
               {repro ? (
                 <ReproStepsList tid={tid} steps={repro.steps} variants={(repro.variants || []).length} />
               ) : (
@@ -756,23 +812,27 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
       )}
 
       {layer === "chain" && (
-        <Sheet open onOpenChange={(o) => !o && openLayer(null)}>
+        <Sheet nested open onOpenChange={(o) => !o && openLayer(null)}>
           <SheetContent className="overflow-y-auto">
             <SheetHeader>
-              <SheetTitle className="text-base">攻击链条</SheetTitle>
+              <SheetTitle>攻击链条</SheetTitle>
               <SheetDescription>
                 血缘邻域(资产 → 步骤 → 事实 → 漏洞)· 节点可点击下钻
               </SheetDescription>
             </SheetHeader>
-            <div className="flex flex-col gap-3 p-4 text-sm">
+            <div className="flex flex-col gap-5 p-5 text-sm">
               {/* 来龙去脉(P4-13):定稿冻结的模型叙述,链路图上方先见叙述
-                  再见图;旧定稿无叙述如实标注,不编造 */}
+                  再见图;旧定稿无叙述如实标注,不编造;文风校验未过的
+                  叙述带说明行(P4-24) */}
               {repro && (
                 <section className="flex flex-col gap-1">
                   <div className="text-xs font-medium tracking-wide text-muted-foreground">来龙去脉</div>
-                  <div className="rounded-md border bg-card px-3 py-2 leading-relaxed">
+                  <div className="rounded-md border border-border/55 bg-card px-3 py-2 leading-relaxed">
                     {repro.narrative || (
                       <span className="text-xs text-muted-foreground">定稿时未生成叙述</span>
+                    )}
+                    {repro.narrative_unpolished && (
+                      <div className="mt-1 text-xs text-muted-foreground">文字未过文风校验，按原文保留</div>
                     )}
                   </div>
                 </section>
@@ -795,15 +855,15 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
       )}
 
       {layer === "origin" && (
-        <Sheet open onOpenChange={(o) => !o && openLayer(null)}>
+        <Sheet nested open onOpenChange={(o) => !o && openLayer(null)}>
           <SheetContent className="overflow-y-auto">
             <SheetHeader>
-              <SheetTitle className="text-base">溯源</SheetTitle>
+              <SheetTitle>溯源</SheetTitle>
               <SheetDescription>
                 发现单位与反证单位 · 点击直达对应虫群会话页追问
               </SheetDescription>
             </SheetHeader>
-            <div className="flex flex-col gap-5 p-4 text-sm">
+            <div className="flex flex-col gap-5 p-5 text-sm">
               <section className="flex flex-col gap-1">
                 <div className="text-xs font-medium tracking-wide text-muted-foreground">发现单位</div>
                 {data.origin?.discoverer ? (
@@ -833,15 +893,15 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
       )}
 
       {layer === "retest" && (
-        <Sheet open onOpenChange={(o) => !o && openLayer(null)}>
+        <Sheet nested open onOpenChange={(o) => !o && openLayer(null)}>
           <SheetContent className="overflow-y-auto">
             <SheetHeader>
-              <SheetTitle className="text-base">复测</SheetTitle>
+              <SheetTitle>复测</SheetTitle>
               <SheetDescription>
                 按复现步骤重放,判定当前是否已修复 · 结论自动更新发现状态 · 流量经镜留痕
               </SheetDescription>
             </SheetHeader>
-            <div className="flex flex-col gap-4 p-4 text-sm">
+            <div className="flex flex-col gap-5 p-5 text-sm">
               <div className="flex flex-wrap items-center gap-2">
                 {claim.retest_running ? (
                   <Badge variant="running">复测中</Badge>
@@ -878,15 +938,15 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
       )}
 
       {layer === "replay" && (
-        <Sheet open onOpenChange={(o) => !o && openLayer(null)}>
+        <Sheet nested open onOpenChange={(o) => !o && openLayer(null)}>
           <SheetContent className="overflow-y-auto">
             <SheetHeader>
-              <SheetTitle className="text-base">重放校验</SheetTitle>
+              <SheetTitle>重放校验</SheetTitle>
               <SheetDescription>
                 绑定的流量证据原样重发,比对原响应 · 只陈述一致与否,是否已修复归复测
               </SheetDescription>
             </SheetHeader>
-            <div className="flex flex-col gap-4 p-4 text-sm">
+            <div className="flex flex-col gap-5 p-5 text-sm">
               <div className="flex flex-wrap items-center gap-2">
                 {claim.replay_running ? (
                   <Badge variant="running">重放中</Badge>
@@ -923,11 +983,11 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
       )}
 
       {layer === "reopen" && (
-        <Sheet open onOpenChange={(o) => !o && openLayer(null)}>
+        <Sheet nested open onOpenChange={(o) => !o && openLayer(null)}>
           <SheetContent className="overflow-y-auto">
             <SheetHeader>
-              <SheetTitle className="text-base">重开</SheetTitle>
-              <SheetDescription>结论可反驳;重开后竞争解释全部复活,重新反证</SheetDescription>
+              <SheetTitle>重开</SheetTitle>
+              <SheetDescription>结论可反驳;重开后其他可能原因全部复活,重新反证</SheetDescription>
             </SheetHeader>
             <div className="p-4">
               <ReopenPanel tid={tid} claimID={claim.id} />
@@ -951,8 +1011,8 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
 // 直达会话页(P3-13b ① 跳转协议:?unit=<会话ID> 与工作台同源)。
 function OriginRow({ tid, o, onClose, onSelectNode }) {
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-md border bg-card px-3 py-2">
-      <span className="font-mono text-xs">{o.unit_id}</span>
+    <div className="flex flex-wrap items-center gap-2 rounded-md border border-border/55 bg-card px-3 py-2">
+      <span className="num text-xs">{o.unit_id}</span>
       {o.step_id && (
         <NodeRefButton meta={{ id: o.step_id, type: "step", typeLabel: "步骤" }} onSelectNode={onSelectNode} />
       )}
@@ -962,7 +1022,7 @@ function OriginRow({ tid, o, onClose, onSelectNode }) {
         <Button
           variant="outline"
           size="sm"
-          className="h-7 px-2 text-xs"
+          className="h-8 px-2 text-xs"
           title={`跳到 ${o.unit_id} 的会话页`}
           onClick={() => {
             onClose?.();
@@ -999,16 +1059,16 @@ function RetestRoundCard({ tid, rt }) {
   };
   const vd = RETEST_VERDICT[rt.verdict] || { label: rt.verdict, variant: "info" };
   return (
-    <div className="flex flex-col gap-2 rounded-lg border bg-card p-3">
+    <div className="flex flex-col gap-2 rounded-lg border border-border/55 bg-card p-3">
       <div className="flex flex-wrap items-center gap-2">
-        <Badge variant={vd.variant}>复测{vd.label}</Badge>
+        <StatusBadge meta={vd}>复测{vd.label}</StatusBadge>
         <span className="text-xs text-muted-foreground">第 {rt.round} 轮</span>
-        <span className="font-mono text-[10px] text-muted-foreground">{rt.session_id}</span>
-        <span className="ml-auto font-mono text-[11px] text-muted-foreground">{rt.at}</span>
+        <span className="num text-[10px] text-muted-foreground">{rt.session_id}</span>
+        <span className="ml-auto num text-[11px] text-muted-foreground">{rt.at}</span>
       </div>
       {rt.note && <div className="text-xs text-muted-foreground">{rt.note}</div>}
       {rt.evidence_head && (
-        <div className="break-all rounded-md bg-muted/30 p-2 font-mono text-[11px]">
+        <div className="break-all rounded-md bg-muted/30 p-2 num text-[11px]">
           {rt.evidence_head}
         </div>
       )}
@@ -1043,18 +1103,18 @@ function RetestRoundCard({ tid, rt }) {
 function ReplayRoundCard({ rp }) {
   const vd = REPLAY_VERDICT[rp.verdict] || { label: rp.verdict, variant: "info" };
   return (
-    <div className="flex flex-col gap-2 rounded-lg border bg-card p-3">
+    <div className="flex flex-col gap-2 rounded-lg border border-border/55 bg-card p-3">
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant={vd.variant}>{vd.label}</Badge>
         <span className="text-xs text-muted-foreground">第 {rp.round} 轮</span>
-        <span className="font-mono text-[10px] text-muted-foreground">{rp.anchor}</span>
-        <span className="ml-auto font-mono text-[11px] text-muted-foreground">{rp.at}</span>
+        <span className="num text-[10px] text-muted-foreground">{rp.anchor}</span>
+        <span className="ml-auto num text-[11px] text-muted-foreground">{rp.at}</span>
       </div>
       <div className="flex flex-col gap-1.5">
         {(rp.items || []).map((it, i) => (
           <div
             key={it.exchange_id + String(i)}
-            className="flex flex-col gap-0.5 rounded-md bg-muted/30 px-2.5 py-1.5 text-xs"
+            className="flex flex-col gap-0.5 rounded-md bg-muted/30 px-3 py-1.5 text-xs"
           >
             <div className="flex flex-wrap items-center gap-2">
               {it.error ? (
@@ -1064,7 +1124,7 @@ function ReplayRoundCard({ rp }) {
               ) : (
                 <Badge variant="warning">响应有变化</Badge>
               )}
-              <span className="font-mono">
+              <span className="num">
                 {it.method} {it.url}
               </span>
             </div>
@@ -1076,12 +1136,12 @@ function ReplayRoundCard({ rp }) {
                 字节 {it.old_bytes} → {it.new_bytes}
               </span>
               {it.new_exchange_id && (
-                <span className="font-mono text-[10px]">
+                <span className="num text-[10px]">
                   新流量记录 {it.new_exchange_id}
                 </span>
               )}
             </div>
-            {it.error && <div className="text-status-danger">{it.error}</div>}
+            {it.error && <div className="text-status-danger" title={it.error}>该请求未完成</div>}
           </div>
         ))}
       </div>
@@ -1097,7 +1157,7 @@ function ClaimEvidenceSection({ tid, evidence, version }) {
     return (
       <section className="flex flex-col gap-1">
         <div className="text-xs font-medium tracking-wide text-muted-foreground">
-          流量证据(声明证据版本 {version})
+          流量证据(判断证据版本 {version})
         </div>
         <span className="text-xs text-muted-foreground">
           (未绑定;在流量页选一条流量可绑定为证据,支持补绑)
@@ -1108,13 +1168,13 @@ function ClaimEvidenceSection({ tid, evidence, version }) {
   return (
     <section className="flex flex-col gap-2">
       <div className="text-xs font-medium tracking-wide text-muted-foreground">
-        流量证据({evidence.length} 条 · 声明证据版本 {version})
+        流量证据({evidence.length} 条 · 判断证据版本 {version})
       </div>
       <ul className="flex flex-col gap-2">
         {evidence.map((ev) => {
           const open = openID === ev.exchange_id;
           return (
-            <li key={ev.exchange_id} className="flex flex-col gap-1 rounded-md border bg-card p-3">
+            <li key={ev.exchange_id} className="flex flex-col gap-1 rounded-md border border-border/55 bg-card p-3">
               <div className="flex flex-wrap items-center gap-2 text-xs">
                 <button
                   className="flex flex-wrap items-center gap-2 cursor-pointer"
@@ -1123,8 +1183,8 @@ function ClaimEvidenceSection({ tid, evidence, version }) {
                   {React.createElement(iconOf(open ? "chevronDown" : "chevronRight"), {
                     className: "size-3.5 text-muted-foreground",
                   })}
-                  <span className="font-mono font-medium">{ev.method || ev.type}</span>
-                  <span className="max-w-72 truncate font-mono text-muted-foreground" title={ev.url}>
+                  <span className="num font-medium">{ev.method || ev.type}</span>
+                  <span className="max-w-72 truncate num text-muted-foreground" title={ev.url}>
                     {ev.url}
                   </span>
                   {ev.status ? (
@@ -1132,8 +1192,11 @@ function ClaimEvidenceSection({ tid, evidence, version }) {
                   ) : (
                     <Badge variant="paused">无响应</Badge>
                   )}
-                  <span className="font-mono text-[10px] text-muted-foreground">
-                    绑定于版本号 {ev.bound_rev}
+                  <span
+                    className="text-[10px] text-muted-foreground"
+                    title={`绑定于版本号 ${ev.bound_rev}`}
+                  >
+                    已绑定
                   </span>
                 </button>
               </div>
@@ -1144,6 +1207,16 @@ function ClaimEvidenceSection({ tid, evidence, version }) {
       </ul>
     </section>
   );
+}
+
+// fmtTimingSpan 耗时拆解的时间跨度:锚例「10-23 19:48 到 19:54」;
+// 进行中只给起点(「10-23 19:48 起」);跨日时终点带日期。
+function fmtTimingSpan(landed, terminal) {
+  const start = (landed || "").slice(5, 16);
+  if (!terminal) return `${start} 起`;
+  const end = terminal.slice(5, 16);
+  if (end.slice(0, 6) === start.slice(0, 6)) return `${start} 到 ${end.slice(6)}`;
+  return `${start} 到 ${end}`;
 }
 
 // fmtDur 耗时拆解的时长词(<90 秒精确到 0.1 秒,更长为分秒;与会话页
@@ -1159,11 +1232,11 @@ function TimelineEntry({ entry }) {
       return (
         <TimelineItem
           rev={entry.rev}
-          title="候选声明入账"
+          title="判断已记录，等待安排反证"
           tone="running"
           detail={
             <>
-              发现单位 <span className="font-mono text-xs">{entry.unit_id || "—"}</span>
+              发现单位 <span className="num text-xs">{entry.unit_id || "—"}</span>
             </>
           }
         />
@@ -1176,11 +1249,11 @@ function TimelineEntry({ entry }) {
           tone="running"
           detail={
             <>
-              验证单位 <span className="font-mono text-xs">{entry.unit_id || "—"}</span>
+              验证单位 <span className="num text-xs">{entry.unit_id || "—"}</span>
               {entry.step_id && (
                 <>
                   {" "}· 反证步骤{" "}
-                  <span className="font-mono text-xs">{entry.step_id}</span>
+                  <span className="num text-xs">{entry.step_id}</span>
                 </>
               )}
               <div className="mt-1 flex flex-col gap-0.5">
@@ -1197,13 +1270,13 @@ function TimelineEntry({ entry }) {
                       <span
                         key={a.id}
                         className={
-                          "rounded px-2 py-0.5 font-mono text-[10px] " +
+                          "rounded px-2 py-0.5 text-[10px] " +
                           (a.refuted
                             ? "bg-status-success-soft text-status-success"
                             : "bg-status-warning-soft text-status-warning")
                         }
                       >
-                        {a.id} {a.refuted ? "已排除" : "未排除"}
+                        {a.label || a.id} {a.refuted ? "已排除" : "未排除"}
                       </span>
                     ))}
                   </span>
@@ -1213,7 +1286,7 @@ function TimelineEntry({ entry }) {
                 )}
                 {entry.note && (
                   <span className="text-muted-foreground">
-                    备注(不参与机器裁决):{entry.note}
+                    备注(不参与机器判定):{entry.note}
                   </span>
                 )}
               </div>
@@ -1241,7 +1314,7 @@ function TimelineEntry({ entry }) {
                       key={i}
                       title={`${condLabel(c.kind)}(${c.kind}): ${c.actual}/${c.required}`}
                       className={
-                        "rounded px-2 py-0.5 font-mono text-[10px] " +
+                        "rounded px-2 py-0.5 num text-[10px] " +
                         (c.satisfied
                           ? "bg-status-success-soft text-status-success"
                           : "bg-status-danger-soft text-status-danger")
@@ -1266,7 +1339,7 @@ function TimelineEntry({ entry }) {
           detail={
             <>
               触发:{REOPEN_TRIGGERS.find(([v]) => v === entry.trigger)?.[1] || entry.trigger}
-              {" · "}竞争解释全部复活,重新反证
+              {" · "}其他可能原因全部复活,重新反证
               {entry.reason && <div>理由:{entry.reason}</div>}
             </>
           }
@@ -1276,7 +1349,7 @@ function TimelineEntry({ entry }) {
       return (
         <TimelineItem
           rev={entry.rev}
-          title="收割定稿(复现步骤 + 级别)"
+          title="检查归纳定稿(复现步骤 + 级别)"
           tone="success"
           detail={
             <>
@@ -1291,7 +1364,7 @@ function TimelineEntry({ entry }) {
           rev={entry.rev}
           title={`状态 → ${STATE_LABELS[entry.status] || entry.status}`}
           tone={
-            entry.status === "confirmed"
+            entry.status === "confirmed" || entry.status === "fixed"
               ? "success"
               : entry.status === "pending"
                 ? "warning"
@@ -1321,10 +1394,9 @@ function TimelineItem({ rev, title, detail, tone }) {
         }
       />
       <div className="flex flex-wrap items-baseline gap-2">
-        <span className="text-sm font-medium">{title}</span>
-        {rev != null && (
-          <span className="font-mono text-xs text-muted-foreground">版本号 {rev}</span>
-        )}
+        <span className="text-sm font-medium" title={rev != null ? `版本号 ${rev}` : undefined}>
+          {title}
+        </span>
       </div>
       <div className="text-xs text-muted-foreground">{detail}</div>
     </li>
@@ -1351,14 +1423,14 @@ function ReopenPanel({ tid, claimID }) {
       toast.error(`重开被拒:${body.error || "原因未说明"}`);
       return;
     }
-    toast.success("已重开:竞争解释全部复活,重新进入反证");
+    toast.success("已重开:其他可能原因全部复活,重新进入反证");
     setReason("");
   };
 
   return (
     <section className="flex flex-col gap-2 rounded-md border border-status-warning/40 bg-status-warning-soft/40 p-3">
       <div className="text-xs font-medium tracking-wide text-muted-foreground">
-        重开(结论可反驳 · 重开后竞争解释全部复活重新反证)
+        重开(结论可反驳 · 重开后其他可能原因全部复活重新反证)
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <div className="w-44">
@@ -1377,7 +1449,7 @@ function ReopenPanel({ tid, claimID }) {
         </div>
         <Input
           className="w-64"
-          placeholder="重开理由(必填,入账可审计)"
+          placeholder="重开理由(必填,记录可审计)"
           value={reason}
           onChange={(e) => setReason(e.target.value)}
         />
@@ -1398,13 +1470,15 @@ export function HypothesisDetailSheet({ tid, hypID, onClose, onSelectNode }) {
     2000,
     { immediate: Boolean(hypID) },
   );
+  // 时间线展开态(P4-28 ④:默认折叠)。
+  const [hypTlOpen, setHypTlOpen] = React.useState(false);
   if (!hypID) return null;
   if (!data) {
     return (
       <Sheet open onOpenChange={(o) => !o && onClose()}>
         <SheetContent className="overflow-y-auto">
           <SheetHeader>
-            <SheetTitle className="font-mono text-sm">{hypID}</SheetTitle>
+            <SheetTitle className="num">{hypID}</SheetTitle>
             <SheetDescription>
               {error ? `读取失败:${error}` : "读取假设详情…"}
             </SheetDescription>
@@ -1417,35 +1491,51 @@ export function HypothesisDetailSheet({ tid, hypID, onClose, onSelectNode }) {
   const st = HYP_STATUS[h.status] || { label: h.status, variant: "info" };
   const timeline = data.timeline || [];
   const traj = data.trajectory || {};
+  // 当前结论一句话(P4-28 ③ 同款):终态直陈结果;搁置与过程态不呈现。
+  const hypConclusion =
+    h.status === "confirmed"
+      ? "当前结论：成立"
+      : h.status === "discarded"
+        ? "当前结论：不成立，废案留档"
+        : "";
 
   return (
     <Sheet open onOpenChange={(o) => !o && onClose()}>
       <SheetContent className="overflow-y-auto">
         <SheetHeader>
-          <SheetTitle className="flex flex-wrap items-center gap-2 pr-16">
-            <Badge variant={st.variant}>{st.label}</Badge>
-            <span className="font-mono text-sm font-normal text-muted-foreground">{h.id}</span>
+          <SheetTitle className="flex flex-wrap items-center gap-2">
+            <StatusBadge meta={st} />
+            <span className="num text-sm font-normal text-muted-foreground">{h.id}</span>
             <ViewInGraphButton tid={tid} nodeID={h.id} type="hypothesis" onClose={onClose} />
           </SheetTitle>
           <SheetDescription>{h.statement}</SheetDescription>
         </SheetHeader>
-        <div className="flex flex-col gap-5 p-4 text-sm">
+        <div className="flex flex-col gap-5 p-5 text-sm">
+          {/* 结论区置顶(P4-28 ④ 同款:结论先行,过程折叠其下) */}
+          {hypConclusion && (
+            <section className="flex flex-col gap-1">
+              <div className="text-xs font-medium tracking-wide text-muted-foreground">当前结论</div>
+              <div className="rounded-md border border-border/55 bg-card px-3 py-2 text-sm font-medium">
+                {hypConclusion}
+              </div>
+            </section>
+          )}
           <section className="flex flex-col gap-1">
             <div className="text-xs font-medium tracking-wide text-muted-foreground">依据(允许弱依据)</div>
-            <div className="rounded-md border bg-card px-3 py-2">{h.basis || "(未记录)"}</div>
+            <div className="rounded-md border border-border/55 bg-card px-3 py-2">{h.basis || "(未记录)"}</div>
           </section>
 
           <section className="flex flex-col gap-2">
             <div className="text-xs font-medium tracking-wide text-muted-foreground">
-              回流轨迹(提出 → 评估 → 验证)
+              回传轨迹(提出 → 评估 → 验证)
             </div>
-            <div className="flex flex-col gap-2 rounded-md border bg-card px-3 py-2 text-xs">
+            <div className="flex flex-col gap-2 rounded-md border border-border/55 bg-card px-3 py-2 text-xs">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-muted-foreground">提出步骤</span>
                 <NodeRefButton meta={{ id: traj.discover_step, type: "step", typeLabel: "步骤" }} onSelectNode={onSelectNode} />
                 <span className="text-muted-foreground">(产出)</span>
                 <span className="text-muted-foreground">→ 假设</span>
-                <span className="font-mono">{h.id}</span>
+                <span className="num">{h.id}</span>
                 {h.discoverer_unit && (
                   <span className="text-muted-foreground">· 提出单位 {h.discoverer_unit}</span>
                 )}
@@ -1476,9 +1566,7 @@ export function HypothesisDetailSheet({ tid, hypID, onClose, onSelectNode }) {
                         <span className="text-muted-foreground">· 验证单位 {vs.unit}</span>
                       )}
                       {vd && (
-                        <Badge variant={vd.tone === "success" ? "success" : vd.tone === "danger" ? "danger" : "warning"}>
-                          {vd.label}
-                        </Badge>
+                        <StatusBadge meta={vd} />
                       )}
                       <span className="text-muted-foreground break-all">{vs.intent}</span>
                     </div>
@@ -1488,15 +1576,32 @@ export function HypothesisDetailSheet({ tid, hypID, onClose, onSelectNode }) {
             </div>
           </section>
 
+          {/* 时间线(P4-28 ④:过程信息折叠,默认收起) */}
           <section className="flex flex-col gap-2">
             <div className="text-xs font-medium tracking-wide text-muted-foreground">
               时间线(年轮版本刻度)
             </div>
-            <ol className="relative flex flex-col gap-3 border-l pl-4">
-              {timeline.map((e, i) => (
-                <HypTimelineEntry key={`${e.rev}-${i}`} entry={e} />
-              ))}
-            </ol>
+            <button
+              className={
+                "flex w-fit items-center gap-2 rounded-md border px-3 py-1 text-xs transition-colors cursor-pointer " +
+                (hypTlOpen
+                  ? "border-primary/50 text-foreground"
+                  : "text-muted-foreground hover:text-foreground")
+              }
+              onClick={() => setHypTlOpen(!hypTlOpen)}
+            >
+              {React.createElement(iconOf(hypTlOpen ? "chevronDown" : "chevronRight"), {
+                className: "size-3.5",
+              })}
+              完整轨迹 {timeline.length} 条(提出 → 评估 → 验证)
+            </button>
+            {hypTlOpen && (
+              <ol className="relative flex flex-col gap-3 border-l pl-4">
+                {timeline.map((e, i) => (
+                  <HypTimelineEntry key={`${e.rev}-${i}`} entry={e} />
+                ))}
+              </ol>
+            )}
           </section>
         </div>
       </SheetContent>
@@ -1510,11 +1615,11 @@ function HypTimelineEntry({ entry }) {
       return (
         <TimelineItem
           rev={entry.rev}
-          title="候选假设入账"
+          title="猜测已记录，等待评估"
           tone="running"
           detail={
             <>
-              提出单位 <span className="font-mono text-xs">{entry.unit_id || "—"}</span>
+              提出单位 <span className="num text-xs">{entry.unit_id || "—"}</span>
             </>
           }
         />
@@ -1524,7 +1629,7 @@ function HypTimelineEntry({ entry }) {
       return (
         <TimelineItem
           rev={entry.rev}
-          title={`主宰收割评估 · ${meta.label}`}
+          title={`主宰检查归纳后的评估 · ${meta.label}`}
           tone={meta.tone}
           detail={
             <>
@@ -1534,7 +1639,7 @@ function HypTimelineEntry({ entry }) {
               )}
               {entry.step_id && (
                 <div className="text-muted-foreground">
-                  验证步骤 <span className="font-mono text-xs">{entry.step_id}</span>
+                  验证步骤 <span className="num text-xs">{entry.step_id}</span>
                 </div>
               )}
             </>
@@ -1543,18 +1648,18 @@ function HypTimelineEntry({ entry }) {
       );
     }
     case "result": {
-      const vd = HYP_VERDICT[entry.verdict] || { label: entry.verdict, tone: "warning" };
+      const vd = HYP_VERDICT[entry.verdict] || { label: entry.verdict, variant: "warning" };
       return (
         <TimelineItem
           rev={entry.rev}
           title={`独立单位验证结论 · ${vd.label}`}
-          tone={vd.tone}
+          tone={vd.variant}
           detail={
             <>
-              验证单位 <span className="font-mono text-xs">{entry.unit_id || "—"}</span>
+              验证单位 <span className="num text-xs">{entry.unit_id || "—"}</span>
               {entry.step_id && (
                 <>
-                  {" "}· 验证步骤 <span className="font-mono text-xs">{entry.step_id}</span>
+                  {" "}· 验证步骤 <span className="num text-xs">{entry.step_id}</span>
                 </>
               )}
               {entry.evidence_head && (

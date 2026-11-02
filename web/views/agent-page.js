@@ -37,11 +37,15 @@ const ROLE_ORDER = [
 // unlimited 字段留空 = 不限(提交 0,后端删键回默认)。
 const PARAM_FIELDS = {
   overmind: [
+    { key: "queue_limit", label: "派发上限", unit: "步", min: 1, max: 1000, get: (p) => p?.queue?.value, audit: (p) => p?.queue },
     { key: "heartbeat_seconds", label: "心跳巡检间隔", unit: "秒", min: 10, max: 86400, get: (p) => p?.heartbeat?.value, audit: (p) => p?.heartbeat },
+    { key: "closure_rounds", label: "收口信号轮数", unit: "轮", min: 1, max: 100, get: (p) => p?.closure?.rounds?.value, audit: (p) => p?.closure?.rounds },
+    { key: "closure_minutes", label: "收口信号间隔", unit: "分钟", min: 1, max: 1440, get: (p) => p?.closure?.minutes?.value, audit: (p) => p?.closure?.minutes },
   ],
   swarm: [
     { key: "max_concurrent_units", label: "并发上限", unit: "个单位", min: 1, max: 64, get: (p) => p?.units?.value, audit: (p) => p?.units },
     { key: "anchor_every_steps", label: "纠偏步数", unit: "步", min: 1, max: 1000, get: (p) => p?.reanchor?.value, audit: (p) => p?.reanchor },
+    { key: "blocked_deep_minutes", label: "受阻判定时长", unit: "分钟", min: 1, max: 1440, get: (p) => p?.blocked_deep?.value, audit: (p) => p?.blocked_deep },
     { key: "max_turns", label: "轮次上限", unit: "轮", min: 1, max: 1000, unlimited: true, get: (p) => p?.budget?.max_turns, audit: (p) => p?.budget?.max_turns_by ? { by: p.budget.max_turns_by, updated_at: p.budget.max_turns_updated_at } : null },
     { key: "run_seconds", label: "时长上限", unit: "秒", min: 1, max: 86400, unlimited: true, get: (p) => p?.budget?.run_seconds, audit: (p) => p?.budget?.run_seconds_by ? { by: p.budget.run_seconds_by, updated_at: p.budget.run_seconds_updated_at } : null },
   ],
@@ -64,10 +68,10 @@ function cardParamLine(id, params) {
     return v > 0 ? v : "不限";
   };
   if (id === "overmind") {
-    return `心跳巡检 ${params.heartbeat?.value ?? "—"} 秒 · 停滞窗口 ${params.stall_window_seconds ?? "—"} 秒`;
+    return `派发上限 ${params.queue?.value ?? "—"} 步 · 心跳巡检 ${params.heartbeat?.value ?? "—"} 秒 · 收口 ${params.closure?.rounds?.value ?? "—"} 轮 / ${params.closure?.minutes?.value ?? "—"} 分钟 · 停滞窗口 ${params.stall_window_seconds ?? "—"} 秒`;
   }
   if (id === "swarm") {
-    return `并发 ${params.units?.value ?? "—"} · 纠偏 ${params.reanchor?.value ?? "—"} 步 · 轮次 ${budgetVal("max_turns")} · 时长 ${budgetVal("run_seconds")}`;
+    return `并发 ${params.units?.value ?? "—"} · 纠偏 ${params.reanchor?.value ?? "—"} 步 · 受阻判定 ${params.blocked_deep?.value ?? "—"} 分钟 · 轮次 ${budgetVal("max_turns")} · 时长 ${budgetVal("run_seconds")}`;
   }
   return "";
 }
@@ -96,7 +100,7 @@ export function AgentPage() {
         <div className="grid gap-4 lg:grid-cols-2">
           {[0, 1].map((i) => (
             <Card key={i}>
-              <CardContent className="flex flex-col gap-3 p-6">
+              <CardContent className="flex flex-col gap-4 p-5">
                 <div className="skeleton h-5 w-36" />
                 <div className="skeleton h-4 w-48" />
                 <div className="skeleton h-3 max-w-72 w-full" />
@@ -139,9 +143,9 @@ function AgentCard({ id, icon, view, params, onEdit }) {
   const paramLine = cardParamLine(id, params);
   return (
     <Card className="h-full transition-shadow duration-150 hover:shadow-card">
-      <CardContent className="flex h-full flex-col gap-3 p-6">
+      <CardContent className="flex h-full flex-col gap-4 p-5">
         <div className="flex items-center gap-3">
-          <span className="flex items-center gap-2 text-[15px] font-semibold leading-none">
+          <span className="t-sec flex items-center gap-2 leading-none">
             {React.createElement(iconOf(icon), { className: "size-4 text-muted-foreground" })}
             {view.title}
           </span>
@@ -158,7 +162,7 @@ function AgentCard({ id, icon, view, params, onEdit }) {
             固定段 {view.fixed.length} 段 · 内置,编辑不可删
           </div>
           {paramLine && (
-            <div className="truncate font-mono text-xs text-muted-foreground tnum" title={paramLine}>{paramLine}</div>
+            <div className="truncate num text-xs text-muted-foreground" title={paramLine}>{paramLine}</div>
           )}
           {view.overridden && view.editable_by && view.editable_updated_at && (
             <div className="text-xs text-muted-foreground">
@@ -322,7 +326,7 @@ function AgentDialog({ roleId, view, params, onReply, onClose }) {
         {fixedOpen && (
           <div className="flex animate-rise flex-col gap-2">
             {view.fixed.map((seg) => (
-              <div key={seg.label} className="rounded-md border bg-input-surface p-3">
+              <div key={seg.label} className="rounded-md border border-border/55 bg-input-surface p-3">
                 <div className="mb-2 text-xs font-medium text-muted-foreground">{seg.label}</div>
                 <div className="whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">
                   {seg.text}
@@ -368,6 +372,8 @@ function AgentDialog({ roleId, view, params, onReply, onClose }) {
                 <p className="text-xs text-muted-foreground">
                   心跳每轮自动检查在跑单位,有异常才唤醒主宰;改间隔对下一轮生效。停滞窗口与消耗异常上限只读:
                   {" "}{params?.stall_window_seconds ?? "—"} 秒 · {params?.burn_anomaly_tokens ?? "—"} token/轮。
+                  <br />
+                  收口信号两项是全局默认,任务未单独配置时用此值;建任务时与任务运行中(工作台)可按任务改。
                 </p>
               )}
               {roleId === "swarm" && (

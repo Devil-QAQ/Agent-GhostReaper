@@ -583,15 +583,34 @@ func (s *Server) handleTaskHibernate(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleTaskHibernateWake 唤醒(唯一恢复入口;区别于既有 /wake——
-// 那是 RoE/目标改动后唤醒主宰循环的事件通知)。
+// 那是 RoE/目标改动后唤醒主宰循环的事件通知)。P4-25 审核迭代 2:
+// 「冬眠中」盖三种底层态,唤醒按钮统一走本端点,按实际状态路由恢复
+// 通道——真冬眠(hibernated)走 Wake(冬眠时长抵扣),面板暂停
+// (paused)与断点存档(checkpointed)走 Resume(原地拉起);其余
+// 状态如实报错。
 func (s *Server) handleTaskHibernateWake(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 	if !s.taskExists(taskID) {
 		writeErr(w, http.StatusNotFound, fmt.Errorf("任务 %s 不存在", taskID))
 		return
 	}
-	if err := s.Manager.Wake(taskID, nil); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
+	st := ""
+	if t := s.Manager.Task(taskID); t != nil {
+		st = t.Status()
+	}
+	switch st {
+	case manager.StatusHibernated:
+		if err := s.Manager.Wake(taskID, nil); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+	case manager.StatusPaused, manager.StatusCheckpointed:
+		if err := s.Manager.Resume(taskID); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+	default:
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("任务 %s 状态 %s 不可唤醒", taskID, st))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "awake"})

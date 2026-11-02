@@ -38,7 +38,7 @@ func TestServerClaimRetest(t *testing.T) {
 	h := srv.Handler()
 
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"title":"复测端点验证"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"复测端点验证"}`, http.StatusOK, &created)
 	task := created["id"]
 
 	// 铺垫:资产 + 候选声明(先停在 candidate 验证 400,再转 confirmed)。
@@ -72,8 +72,10 @@ func TestServerClaimRetest(t *testing.T) {
 		t.Fatalf("构建 provider 失败: %v", err)
 	}
 	exec := swarm.NewExecutor(store, prov, filepath.Join(dir, "tasks"), swarm.Budget{})
-	exec.ModelRetryBackoff = 10 * time.Millisecond
-	exec.ModelRetryLimit = 0
+	// P4-27 ① 长退避测试旋钮:毫秒级梯子与深阈值,断连后快速落
+	// blocked 收场(限期内确定性)。
+	exec.ModelRetryLadder = []time.Duration{5 * time.Millisecond}
+	exec.BlockedDeepAfter = 20 * time.Millisecond
 	exec.Mirror = mirror.New(store, exec.Blobs, t.TempDir())
 	srv.AttachRuntime(exec)
 
@@ -199,7 +201,7 @@ func TestServerClaimRetestViewFieldsAfterVerdict(t *testing.T) {
 	h := srv.Handler()
 
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"title":"复测视图验证"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"复测视图验证"}`, http.StatusOK, &created)
 	task := created["id"]
 
 	appendEvents(t, store, task,

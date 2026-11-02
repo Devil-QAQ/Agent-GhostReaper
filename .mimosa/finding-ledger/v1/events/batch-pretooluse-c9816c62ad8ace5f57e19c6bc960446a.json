@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "pretooluse-c9816c62ad8ace5f57e19c6bc960446a",
+  "runId": null,
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": []
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "PreToolUse"
+  },
+  "revision": null,
+  "diffHash": null,
+  "rulesVersion": null,
+  "sessionHash": "3a298171095e9c22c42b0d88423e9a5af6d73d62be310504f32e73ebd9e00f79",
+  "reportRef": null,
+  "events": [
+    {
+      "eventId": "hook-bd9b6f878d5b174c35fbdfd1416ecaf0",
+      "findingId": "mimosa-2242eaf633c9eba37343655a",
+      "type": "finding_blocked",
+      "at": "2026-10-24T14:09:17.360Z",
+      "identity": {
+        "projectRelativeFile": "internal/swarm/modelretry_test.go",
+        "ruleId": "security",
+        "codeEvidenceHash": "8b8744f1adfa033d4c7ecd682e25341338a3cb934feb19c450ae8ed554da6bb8",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 74,
+      "endLine": 74,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "8b8744f1adfa033d4c7ecd682e25341338a3cb934feb19c450ae8ed554da6bb8"
+      },
+      "sequence": 0
+    }
+  ],
+  "observedFindingIds": [],
+  "verifiedFiles": [],
+  "recordedAt": "2026-10-24T14:09:17.681Z"
+}

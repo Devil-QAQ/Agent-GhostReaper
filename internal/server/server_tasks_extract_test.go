@@ -154,9 +154,23 @@ func TestTaskCreateWithGoalsAndRules(t *testing.T) {
 		t.Fatalf("表单外范围应退空(全部资产): %+v", brute)
 	}
 
-	// 有目标无资产的任务同样唤醒(不在此断言唤醒计数——唤醒路径由
-	// CreateTask 主径测试覆盖;这里钉住"不因无资产而 500")。
+	// P4-16 必填校验:目标或资产为空拒建(人话提示),零残留。
+	var errNoGoal struct {
+		Error string `json:"error"`
+	}
 	post(t, h, "POST", "/api/tasks", `{"title": "仅目标任务", "goals": ["只要目标"]}`,
+		http.StatusBadRequest, &errNoGoal)
+	if !strings.Contains(errNoGoal.Error, "资产不能为空") {
+		t.Fatalf("缺资产应人话拒建: %s", errNoGoal.Error)
+	}
+	post(t, h, "POST", "/api/tasks", `{"title": "仅资产任务", "assets": [{"title": "10.0.0.8", "class": "host"}]}`,
+		http.StatusBadRequest, &errNoGoal)
+	if !strings.Contains(errNoGoal.Error, "目标不能为空") {
+		t.Fatalf("缺目标应人话拒建: %s", errNoGoal.Error)
+	}
+	// 任务名可选(P4-16):空标题 + 齐全目标资产照建。
+	post(t, h, "POST", "/api/tasks",
+		`{"title": "  ", "goals": ["只要目标"], "assets": [{"title": "10.0.0.8", "class": "host"}]}`,
 		http.StatusOK, &struct {
 			ID string `json:"id"`
 		}{})

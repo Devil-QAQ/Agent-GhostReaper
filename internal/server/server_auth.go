@@ -266,10 +266,15 @@ func (s *Server) handleAuthPassword(w http.ResponseWriter, r *http.Request) {
 // ---- 生产装配总门 ----
 
 // authPublicPaths 未登录可访问的路径(认证自身的入口:方法 + 路径)。
+// favicon 三件套(P4-26 审核迭代)豁免:品牌图标是公开资源,登录页自身
+// 也要引用——未登录/隐私窗口首访标签页即显示图标,不泄露任何信息。
 var authPublicPaths = map[string]bool{
 	"GET /api/auth/status": true,
 	"POST /api/auth/setup": true,
 	"POST /api/auth/login": true,
+	"GET /favicon.ico":     true,
+	"GET /icon.svg":        true,
+	"GET /favicon-64.png":  true,
 }
 
 // WrapAuth 面板认证总门(P3-09 完成标准:未登录不可访问面板与 API)。
@@ -304,7 +309,8 @@ func (s *Server) WrapAuth(h http.Handler) http.Handler {
 }
 
 // serveLoginPage 登录页(P3-09):未登录时页面请求的统一应答。内联
-// 样式与脚本自足(不依赖面板静态资源),配色沿用 8.4 token 且随主题
+// 样式与脚本自足(不依赖面板应用资源;favicon 三件套经豁免可引用,
+// P4-26 审核迭代),配色沿用 8.4 token 且随主题
 // 三态切换(P3-10:head 内联 boot script 与面板同键 gr.theme,亮色
 // 首帧前落定);状态端点区分首设(设置密码)与常规登录,成功后整页
 // 重载进面板。
@@ -319,11 +325,14 @@ const loginPageHTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GhostReaper</title>
-<script>(function(){try{var t=localStorage.getItem("gr.theme");var l=t==="light"||(t==="system"&&window.matchMedia("(prefers-color-scheme: light)").matches);document.documentElement.classList.toggle("light",l);}catch(e){}})();</script>
+<title>Agent GhostReaper</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon-64.png" sizes="64x64" type="image/png">
+<script>(function(){try{var t=localStorage.getItem("gr.theme");if(t!=="dark"&&t!=="light")t="system";var l=t==="light"||(t==="system"&&window.matchMedia("(prefers-color-scheme: light)").matches);document.documentElement.classList.toggle("light",l);}catch(e){}})();</script>
 <style>
-:root{--bg:#0b0e14;--card:#111827;--fg:#e5e7eb;--muted:#9ca3af;--border:#1f2937;--input:#141b2a;--inputb:#243044;--primary:#3b82f6;--danger:#ef4444;--shadow:0 8px 32px rgba(0,0,0,.45);color-scheme:dark}
-.light{--bg:#f8fafc;--card:#ffffff;--fg:#0f172a;--muted:#64748b;--border:#e2e8f0;--input:#f1f5f9;--inputb:#cbd5e1;--primary:#2563eb;--danger:#dc2626;--shadow:0 8px 32px rgba(15,23,42,.14);color-scheme:light}
+:root{--bg:#060607;--card:#0d0d0f;--fg:#e7e5e4;--muted:#9b9a94;--border:#232327;--input:#121215;--inputb:#2c2c32;--primary:#8fae94;--ink:#0a0a0b;--danger:#e5484d;--shadow:0 8px 32px rgba(0,0,0,.45);color-scheme:dark}
+.light{--bg:#fcfcfd;--card:#f4f4f6;--fg:#2a2a30;--muted:#4a4a52;--border:#e2e2e7;--input:#ececef;--inputb:#c8c8d0;--primary:#17171a;--ink:#ffffff;--danger:#b23c34;--shadow:0 8px 32px rgba(23,23,26,.12);color-scheme:light}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center}
 main{width:360px;max-width:92vw;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:32px 28px;display:flex;flex-direction:column;gap:14px;box-shadow:var(--shadow)}
@@ -332,7 +341,7 @@ p{color:var(--muted);font-size:12px}
 form{display:flex;flex-direction:column;gap:10px}
 input{width:100%;background:var(--input);border:1px solid var(--inputb);border-radius:8px;color:var(--fg);padding:9px 12px;font-size:14px;outline:none;transition:border-color .15s}
 input:focus{border-color:var(--primary)}
-button{width:100%;background:var(--primary);color:#fff;border:0;border-radius:8px;padding:9px 0;font-size:14px;cursor:pointer;margin-top:4px}
+button{width:100%;background:var(--primary);color:var(--ink);border:0;border-radius:8px;padding:9px 0;font-size:14px;cursor:pointer;margin-top:4px}
 button:disabled{opacity:.6;cursor:default}
 .err{color:var(--danger);font-size:12px;min-height:18px;margin:0}
 </style>

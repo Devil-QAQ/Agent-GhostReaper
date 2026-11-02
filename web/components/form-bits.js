@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 // Field 左标签右控件的表单行 · Fold 横线—箭头—文字—横线高级折叠 · 输入规格。
 
 export const INPUT = "h-9";
-export const NUM = "h-9 w-24 text-right font-mono text-xs tnum";
+export const NUM = "h-9 w-24 text-right num text-xs";
 
 // Field 表单行:标签定宽左对齐,控件区占满右侧(不换行、不错位)。
 export function Field({ label, children, className, labelClassName }) {

@@ -1,0 +1,624 @@
+package swarm
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/Autumn-27/norma/tool"
+
+	"ghostreaper/internal/failover"
+	"ghostreaper/internal/rings"
+	"ghostreaper/internal/vault"
+)
+
+// 复测会话(P3-06,第八章 8.8 漏洞复测 / 第三章 §5 复测语义):对一条
+// 锤炼完成的发现(confirmed/pending/fixed)发起修复状态复核——会话由
+// 面板从发现列表/详情发起,执行侧走虫群执行器同款机制(drive 循环:
+// 审批门、镜留痕、门卫、模型重试、账本实时记账全套复用,零平行实现)。
+//
+// 三机制:
+//   - 自动首条消息:发起时服务端从账本确定性组装复测上下文(声明两维、
+//     严重级别、资产、收割定稿的复现步骤原文引用、历史复测),作为会话
+//     首条 user turn 注入——操作者不粘贴任何东西;
+//   - 专用受限工具:结论只经 submit_retest_result 写回,参数无声明 ID
+//     (绑定在单位环境,服务端定死)——串号在结构上不可能;工具集收窄
+//     为 bash/只读探测/read + 该工具(无候选回流、无声明提交——复测不
+//     是发现通道);
+//   - 结论自动更新状态:fixed → 声明状态迁 fixed;unfixed → 回滚到修复
+//     前状态(账本历史里最近一个非 fixed 态);inconclusive 只入记录
+//     (诚实呈现,与 R4 同精神)。状态迁移与结论记录同批原子落账。
+//
+// 复测不进图:无 Step 节点、不经主宰派发(复测常发生在任务终态后),
+// 会话锚为伪步骤 ID(StepID=TranscriptID=RetestSID),虫群会话页按同款
+// 事件流列出;流量经镜留痕归因到该锚。
+
+// 复测会话标识规约。
+const (
+	retestUnitPrefix = "rt-"     // 复测单位号前缀(与 uN/fr-* 区分,审计一眼可辨)
+	retestStepPrefix = "retest-" // 伪步骤 ID 前缀
+)
+
+// RetestSID 第 N 轮复测的会话锚:伪步骤 ID,兼作会话转录名与账本归因键。
+func RetestSID(claimID string, round int) string {
+	return fmt.Sprintf("%s%s-r%d", retestStepPrefix, claimID, round)
+}
+
+// 复测发起与写回的错误词汇(server 据此映射 HTTP 状态)。
+var (
+	// ErrRetestInFlight 该声明已有活复测会话(同声明同时至多一轮)。
+	ErrRetestInFlight = errors.New("该判断复测进行中,等本轮结束再发起")
+	// ErrRetestNotRetestable 声明不在可复测状态(锤炼中态不可复测)。
+	ErrRetestNotRetestable = errors.New("判断不在可复测状态(须为 已确认/待确认/已修复)")
+	// ErrRetestUnavailable 复测依赖未装配(模型/镜)。
+	ErrRetestUnavailable = errors.New("swarm: 复测依赖未装配(模型或镜缺失,面板激活主用模型后自动装配)")
+)
+
+// Retestable 声明当前状态是否可复测。
+func Retestable(status string) bool {
+	switch status {
+	case rings.TestClaimConfirmed, rings.TestClaimPending, rings.TestClaimFixed:
+		return true
+	}
+	return false
+}
+
+// retestBinding 复测会话的单位绑定:声明、轮次与会话锚在起飞时定死,
+// 受限工具的写回目标从绑定取——模型无通道改写(防串号)。
+type retestBinding struct {
+	ClaimID      string
+	Round        int
+	SID          string // 会话锚(RetestSID;StepID=TranscriptID 同值)
+	firstMessage string // 自动首条消息(复测上下文,发起时确定性组装)
+}
+
+// RetestRun 一轮已登记起飞的复测(BeginRetest 返回,DriveRetest 驱动)。
+type RetestRun struct {
+	env    *unitEnv
+	pack   *TaskPack
+	budget Budget
+}
+
+// Round 本轮轮次(自 1 起)。
+func (r *RetestRun) Round() int { return r.env.retest.Round }
+
+// SID 本轮会话锚(伪步骤 ID,兼转录名——原文下钻与流量归因键)。
+func (r *RetestRun) SID() string { return r.env.retest.SID }
+
+// RetestRunning 该声明当前是否有活复测会话(进程内登记——进程重启后
+// 登记清零,账本悬空会话由下次发起收口,不会误报)。
+func (e *Executor) RetestRunning(taskID, claimID string) bool {
+	e.rtMu.Lock()
+	defer e.rtMu.Unlock()
+	return e.liveRetests[taskID+"\x00"+claimID]
+}
+
+// BeginRetest 登记并起飞一轮复测:前置校验(声明状态、依赖装配、并发
+// 互斥)→ 悬空会话收口 → 组装复测上下文与受限任务包 → session_started
+// 入账。长执行由 DriveRetest 驱动(调用方异步跑)。
+func (e *Executor) BeginRetest(ctx context.Context, taskID, claimID string) (*RetestRun, error) {
+	claim, err := e.Store.Node(ctx, taskID, claimID)
+	if err != nil {
+		return nil, fmt.Errorf("swarm: 复测判断 %s: %w", claimID, err)
+	}
+	if claim.Type != rings.NodeTestClaim {
+		return nil, fmt.Errorf("swarm: 节点 %s 是 %s 不是 testclaim", claimID, claim.Type)
+	}
+	if !Retestable(claim.Status) {
+		return nil, fmt.Errorf("%w(当前 %s)", ErrRetestNotRetestable, claim.Status)
+	}
+	// 依赖装配后置检查:锤炼中状态先拒(状态是声明自身事实,不依赖装配)。
+	if e.Provider == nil || e.Mirror == nil {
+		return nil, ErrRetestUnavailable
+	}
+
+	e.rtMu.Lock()
+	defer e.rtMu.Unlock()
+	key := taskID + "\x00" + claimID
+	if e.liveRetests[key] {
+		return nil, ErrRetestInFlight
+	}
+	// 账本扫描一遍三用:悬空会话收口 + 轮次计数 + 复测历史。
+	evs, err := e.Store.Events(ctx, taskID, 0, 0)
+	if err != nil {
+		return nil, fmt.Errorf("swarm: 复测读事件流: %w", err)
+	}
+	prefix := retestStepPrefix + claimID + "-"
+	type startedRun struct {
+		unitID, transcript string
+	}
+	started := map[string]startedRun{}
+	everStarted := 0
+	var dangling []string
+	var history []rings.TestClaimRecord
+	for _, ev := range evs {
+		switch ev.Kind {
+		case rings.EventSwarmRecord:
+			var r rings.SwarmRecord
+			if json.Unmarshal(ev.Payload, &r) != nil || !strings.HasPrefix(r.StepID, prefix) {
+				continue
+			}
+			switch r.Type {
+			case rings.SwarmRecSessionStarted:
+				started[r.StepID] = startedRun{unitID: r.UnitID, transcript: r.TranscriptID}
+				everStarted++
+			case rings.SwarmRecSessionEnd:
+				delete(started, r.StepID)
+			}
+		case rings.EventTestClaimRecord:
+			var rec rings.TestClaimRecord
+			if json.Unmarshal(ev.Payload, &rec) == nil &&
+				rec.Type == rings.TestClaimRecRetest && rec.ClaimID == claimID {
+				history = append(history, rec)
+			}
+		}
+	}
+	for sid := range started {
+		dangling = append(dangling, sid)
+	}
+	// 悬空会话收口:不在进程内活动登记中的 started-无-finished = 上一
+	// 进程中断的复测——如实补 session_finished(按原 started 记录归因,
+	// 审计不留活体假象),之后照常发起新一轮(轮次计数含中断轮,转录
+	// 名不撞)。
+	for _, sid := range dangling {
+		st := started[sid]
+		_, _ = e.Store.Append(ledgerCtx, taskID, rings.Event{
+			Kind: rings.EventSwarmRecord, Actor: "swarm:" + st.unitID,
+			Payload: rings.SwarmRecord{
+				StepID: sid, UnitID: st.unitID, TranscriptID: st.transcript,
+				Type: rings.SwarmRecSessionEnd,
+				Note: "进程重启,复测中断(可重新发起)",
+			},
+		})
+	}
+	round := everStarted + 1
+
+	sid := RetestSID(claimID, round)
+	msg, err := e.retestContext(ctx, taskID, claim, history)
+	if err != nil {
+		return nil, err
+	}
+
+	// 任务包(受限):分级定死为主动测试(L2——复测即对授权目标的主动
+	// 验证;更严门槛的任务照常逐次弹门,R9 对话/面板入口不构成旁路);
+	// 结论工具恒可用(记账入口不触目标侧,与 ReadOnly 工具同纪律)。
+	roe, err := e.Store.CurrentRoE(ctx, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("swarm: 复测读 RoE: %w", err)
+	}
+	auth := RoE{
+		AllowedTools:      withoutTool(roe.AllowedTools, "submit_retest_result"),
+		DeniedTools:       withoutTool(roe.DeniedTools, "submit_retest_result"),
+		ApprovalThreshold: roe.ApprovalThreshold,
+		IntentRules:       roe.IntentRules,
+	}
+	if len(auth.AllowedTools) > 0 {
+		auth.AllowedTools = append(auth.AllowedTools, "submit_retest_result")
+	}
+	pack := &TaskPack{
+		TaskID:     taskID,
+		StepID:     sid,
+		StepIntent: fmt.Sprintf("复测判断 %s:%s", claimID, clipLine(claim.Title, 80)),
+		ExpectedObservation: "漏洞按复现步骤重放后的当前可触发性结论," +
+			"经 submit_retest_result 写回(fixed|unfixed|inconclusive + 证据)",
+		ActionLevel:   rings.ActionActiveTest,
+		Authorization: auth,
+	}
+	budget := e.Budget.withDefaults()
+	applyBudgetOverrides(ctx, e.Store, &budget)
+	pack.Budget = budget
+	// 可用目标凭据(P3-09):复测常需登录目标,同正常领取口径。
+	if creds, verr := vault.Briefs(ctx, e.Store); verr == nil {
+		pack.Credentials = creds
+	}
+	pack.GraphVersion, err = e.Store.CurrentRevision(ctx, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("swarm: 复测读图版本: %w", err)
+	}
+	// 资产锚点(声明 about 边):复测上下文与门卫锚定资产同源。
+	if abouts, aerr := e.Store.Edges(ctx, taskID, rings.EdgeAbout); aerr == nil {
+		for _, ed := range abouts {
+			if ed.From != claimID {
+				continue
+			}
+			if a, aerr := e.Store.Node(ctx, taskID, ed.To); aerr == nil && a.Type == rings.NodeAsset {
+				pack.Assets = append(pack.Assets, AssetBrief{ID: a.ID, Title: a.Title, Class: string(a.AssetClass)})
+			}
+		}
+	}
+
+	env := &unitEnv{
+		Executor: e, TaskID: taskID, StepID: sid,
+		UnitID: shortID(retestUnitPrefix), TranscriptID: sid,
+		retest: &retestBinding{ClaimID: claimID, Round: round, SID: sid, firstMessage: msg},
+	}
+	if _, err := e.Store.Append(ledgerCtx, taskID, rings.Event{
+		Kind: rings.EventSwarmRecord, Actor: "swarm:" + env.UnitID,
+		Payload: rings.SwarmRecord{
+			StepID: sid, UnitID: env.UnitID, TranscriptID: sid,
+			Type: rings.SwarmRecSessionStarted, GraphVersion: pack.GraphVersion,
+			Note: fmt.Sprintf("复测第 %d 轮 · 判断 %s · %s", round, claimID, clipLine(claim.Title, 60)),
+		},
+	}); err != nil {
+		return nil, fmt.Errorf("swarm: 复测起飞写入: %w", err)
+	}
+	if e.liveRetests == nil {
+		e.liveRetests = map[string]bool{}
+	}
+	e.liveRetests[key] = true
+	return &RetestRun{env: env, pack: pack, budget: budget}, nil
+}
+
+// withoutTool 从清单里剔除某工具(白/黑名单调整用)。
+func withoutTool(list []string, name string) []string {
+	out := make([]string, 0, len(list))
+	for _, t := range list {
+		if t != name {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// DriveRetest 驱动一轮已起飞的复测到落地:drive 循环(镜/审批门/门卫/
+// 记账全套)→ session_finished 终态入账(无 Step 状态可迁,审计闭环)。
+// 活动登记在落地时注销;后台 bash 整组回收(同单位落地纪律)。
+func (e *Executor) DriveRetest(ctx context.Context, run *RetestRun) (*RunResult, error) {
+	env, pack := run.env, run.pack
+	key := env.TaskID + "\x00" + env.retest.ClaimID
+	defer func() {
+		e.reapUnitBG(env.UnitID)
+		e.rtMu.Lock()
+		delete(e.liveRetests, key)
+		e.rtMu.Unlock()
+	}()
+	res, err := e.drive(failover.WithTask(ctx, env.TaskID), env, pack, run.budget)
+	_, serr := e.Store.Append(ledgerCtx, env.TaskID, rings.Event{
+		Kind: rings.EventSwarmRecord, Actor: "swarm:" + env.UnitID,
+		Payload: rings.SwarmRecord{
+			StepID: env.StepID, UnitID: env.UnitID, TranscriptID: env.TranscriptID,
+			Type: rings.SwarmRecSessionEnd, GraphVersion: pack.GraphVersion,
+			Note: fmt.Sprintf("reason=%s turns=%d status=%s billable=%.1fs gate_wait=%.1fs block_wait=%.1fs pause_wait=%.1fs",
+				res.Reason, res.Turns, res.StepStatus,
+				res.billable.Seconds(), res.gateWait.Seconds(), res.blockWait.Seconds(), res.pauseWait.Seconds()),
+		},
+	})
+	if serr != nil && err == nil {
+		err = fmt.Errorf("swarm: 复测结束状态写入: %w", serr)
+	}
+	return res, err
+}
+
+// ---- 自动首条消息(复测上下文,账本确定性组装) ----
+
+// retestContext 组装复测上下文:声明两维 + 严重级别(最新定稿)+ 资产 +
+// 复现步骤(收割定稿,含操作方法/描述/请求包原文引用)+ 历史复测 +
+// 判定与写回指引。零 LLM(读侧确定性组装,R17 同源纪律)。
+func (e *Executor) retestContext(ctx context.Context, taskID string, claim *rings.NodeFull, history []rings.TestClaimRecord) (string, error) {
+	var b strings.Builder
+	statusWord := rings.ClaimStatusWord(claim.Status)
+	fmt.Fprintf(&b, "【复测上下文 · 第 %d 轮】\n", len(history)+1)
+	fmt.Fprintf(&b, "任务 %s · 判断 %s(%s)\n", taskID, claim.ID, statusWord)
+	fmt.Fprintf(&b, "本轮目标:重放该漏洞的复现步骤,判定其当前是否已修复,经 submit_retest_result 写回结论。\n")
+
+	fmt.Fprintf(&b, "\n一、判断\n")
+	fmt.Fprintf(&b, "  存在性判断: %s\n", claim.Title)
+	if impact, _ := claim.Detail["impact"].(string); impact != "" {
+		fmt.Fprintf(&b, "  影响面判断: %s\n", impact)
+	}
+	if vc, _ := claim.Detail["vulnclass"].(string); vc != "" {
+		fmt.Fprintf(&b, "  漏洞类型: %s\n", vc)
+	}
+
+	// 复现步骤与严重级别:最新收割定稿(读取侧取最新,与报告同源)。
+	evs, err := e.Store.Events(ctx, taskID, 0, 0)
+	if err != nil {
+		return "", fmt.Errorf("swarm: 复测上下文读事件流: %w", err)
+	}
+	var repro *rings.TestClaimRecord
+	for _, ev := range evs {
+		if ev.Kind != rings.EventTestClaimRecord {
+			continue
+		}
+		var rec rings.TestClaimRecord
+		if json.Unmarshal(ev.Payload, &rec) != nil ||
+			rec.ClaimID != claim.ID || rec.Type != rings.TestClaimRecRepro {
+			continue
+		}
+		r := rec
+		repro = &r
+	}
+	if repro != nil {
+		if repro.Severity != "" {
+			fmt.Fprintf(&b, "  严重级别: %s(定稿)\n", repro.Severity)
+		}
+		fmt.Fprintf(&b, "\n二、复现步骤(检查归纳定稿,重放基准;步骤偏离处须在证据中写明)\n")
+		for _, st := range repro.Steps {
+			line := fmt.Sprintf("  %d. ", st.Seq)
+			if st.Desc != "" {
+				line += st.Desc
+			} else if st.Op != "" {
+				line += st.Op
+			}
+			if st.Method != "" || st.URL != "" {
+				line += fmt.Sprintf(" [%s %s", st.Method, st.URL)
+				if st.Status != 0 {
+					line += fmt.Sprintf(" → %d", st.Status)
+				}
+				line += "]"
+			}
+			b.WriteString(line + "\n")
+			// 请求包原文引用:数据包原文在内容寻址存储,引用即审计锚点。
+			if st.BlobRef != "" {
+				fmt.Fprintf(&b, "     原文: %s\n", st.BlobRef)
+			}
+		}
+	} else {
+		b.WriteString("\n二、复现步骤\n  (无检查归纳定稿——按判断与证据自行设计重放)\n")
+	}
+
+	fmt.Fprintf(&b, "\n三、资产与目标\n")
+	abouts, err := e.Store.Edges(ctx, taskID, rings.EdgeAbout)
+	if err != nil {
+		return "", fmt.Errorf("swarm: 复测上下文读资产锚点: %w", err)
+	}
+	n := 0
+	for _, ed := range abouts {
+		if ed.From != claim.ID {
+			continue
+		}
+		a, aerr := e.Store.Node(ctx, taskID, ed.To)
+		if aerr != nil || a.Type != rings.NodeAsset {
+			continue
+		}
+		n++
+		fmt.Fprintf(&b, "  - %s [%s] %s\n", a.ID, a.AssetClass, a.Title)
+	}
+	if n == 0 {
+		b.WriteString("  (判断未锚定资产)\n")
+	}
+
+	fmt.Fprintf(&b, "\n四、历史复测\n")
+	if len(history) == 0 {
+		b.WriteString("  (本轮为第一次复测)\n")
+	}
+	for _, h := range history {
+		line := fmt.Sprintf("  - 第 %d 轮 %s", h.Round, retestVerdictWord(h.RetestVerdict))
+		if h.Note != "" {
+			line += " · " + clipLine(h.Note, 120)
+		}
+		b.WriteString(line + "\n")
+	}
+
+	b.WriteString("\n五、判定与写回\n")
+	b.WriteString("  重放上述步骤,按当前观察给结论:\n")
+	b.WriteString("  - 漏洞仍可触发 → verdict=unfixed(未修复)\n")
+	b.WriteString("  - 重放显示漏洞不再可触发且有支撑证据 → verdict=fixed(已修复)\n")
+	b.WriteString("  - 无法判定(目标不可达/前置无法重建)→ verdict=inconclusive(只入记录,不改状态)\n")
+	b.WriteString("  证据附本轮命令与输出原文;每轮只许提交一次。前置条件(登录态/会话)失效时先重建再判定,不得臆断。\n")
+	return b.String(), nil
+}
+
+// retestVerdictWord 复测结论词的会话内呈现。
+func retestVerdictWord(v string) string {
+	switch v {
+	case rings.RetestVerdictFixed:
+		return "已修复"
+	case rings.RetestVerdictUnfixed:
+		return "未修复"
+	case rings.RetestVerdictInconclusive:
+		return "未能定论"
+	}
+	return v
+}
+
+// ---- 专用受限工具:复测结论写回(P3-06) ----
+
+const toolDescSubmitRetestResult = "复测任务专用:写回本轮复测结论。verdict=fixed(已修复:本轮真实重放显示漏洞不再可触发)|unfixed(未修复:漏洞仍可触发,或未取得已修复证据)|inconclusive(未能定论:目标不可达、前置无法重建等,只入记录不改状态)。结论写回的是本会话绑定的判断——无需也无法指定其他判断。须附本轮真实取得的证据(命令与其输出、请求/响应原文),只写结论不算复测;每轮只许提交一次。"
+
+// submitRetestResultTool 复测结论的受控入口:参数只有结论/证据/备注,
+// 声明绑定在单位环境(服务端定死)——串号在结构上不可能。ReadOnly:
+// 只写自家账本,不触目标侧,不设审批门(RoE 过滤对其恒放行,见
+// BeginRetest 的授权调整)。
+func (env *unitEnv) submitRetestResultTool() tool.CoreTool {
+	return tool.Build(tool.Spec{
+		Name:        "submit_retest_result",
+		Description: toolDescSubmitRetestResult,
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"verdict":  map[string]any{"type": "string", "enum": []string{"fixed", "unfixed", "inconclusive"}, "description": "复测结论(三值,见工具描述)"},
+				"evidence": map[string]any{"type": "string", "description": "本轮复测取得的证据:须含可独立复核的关键原文(命令与其输出、请求/响应片段),只写结论不算证据"},
+				"note":     map[string]any{"type": "string", "description": "备注(可选;不构成结论,如实写障碍与偏离)"},
+			},
+			"required": []string{"verdict", "evidence"},
+		},
+		ReadOnly:    alwaysRO,
+		Permissions: allowReadOnly,
+		Run: func(ctx context.Context, in json.RawMessage, _ *tool.ToolContext) (tool.Result, error) {
+			var args struct {
+				Verdict  string `json:"verdict"`
+				Evidence string `json:"evidence"`
+				Note     string `json:"note"`
+			}
+			if err := json.Unmarshal(in, &args); err != nil {
+				return tool.Errorf("bad input: " + err.Error()), nil
+			}
+			if err := env.SubmitRetestResult(ctx, args.Verdict, args.Evidence, args.Note); err != nil {
+				return tool.Errorf("写回复测结论失败: " + err.Error()), nil
+			}
+			return tool.Text(fmt.Sprintf(
+				"复测结论已记录(testclaim.record retest:%s),判断状态已按结论更新。", retestVerdictWord(args.Verdict))), nil
+		},
+	})
+}
+
+// SubmitRetestResult 受控入口:复测结论落 testclaim.record(retest)+
+// 状态迁移(fixed/unfixed;inconclusive 只入记录)。入口校验:绑定存在、
+// 结论词受限、证据非空、声明仍在可复测状态(并发重开防护)、本轮
+// (SID)未写过(每轮一次,R1)。unfixed 回滚目标 = 账本状态历史里最近
+// 一个非 fixed 态(锤炼态与修复态正交:fixed 是已确认发现之上的修复
+// 标记,回滚回到修复前的锤炼终态);与当前状态一致时不落空事件。
+// 程序化调用与工具调用走同一条路(R8)。
+func (env *unitEnv) SubmitRetestResult(ctx context.Context, verdict, evidence, note string) error {
+	if env.retest == nil {
+		return errors.New("swarm: 非复测单位,无复测结论通道")
+	}
+	verdict = strings.TrimSpace(verdict)
+	if !rings.IsValidRetestVerdict(verdict) {
+		return fmt.Errorf("swarm: 复测结论必须是 fixed|unfixed|inconclusive 之一,得到 %q", verdict)
+	}
+	if strings.TrimSpace(evidence) == "" {
+		return errors.New("swarm: 复测结论必须附本轮证据")
+	}
+	claim, err := env.Executor.Store.Node(ctx, env.TaskID, env.retest.ClaimID)
+	if err != nil {
+		return fmt.Errorf("swarm: 复测判断 %s: %w", env.retest.ClaimID, err)
+	}
+	if claim.Type != rings.NodeTestClaim {
+		return fmt.Errorf("swarm: 节点 %s 是 %s 不是 testclaim", env.retest.ClaimID, claim.Type)
+	}
+	if !Retestable(claim.Status) {
+		return fmt.Errorf("swarm: 判断 %s 当前状态 %s,不在复测可写回状态(状态机拒绝写回)", env.retest.ClaimID, claim.Status)
+	}
+	evs, err := env.Executor.Store.Events(ctx, env.TaskID, 0, 0)
+	if err != nil {
+		return fmt.Errorf("swarm: 复测写回查历史: %w", err)
+	}
+	lastNonFixed := ""
+	for _, ev := range evs {
+		switch ev.Kind {
+		case rings.EventNodeStateChanged:
+			var p rings.NodeStateChanged
+			if json.Unmarshal(ev.Payload, &p) == nil && p.NodeID == env.retest.ClaimID &&
+				p.Status != rings.TestClaimFixed && p.Status != "" {
+				lastNonFixed = p.Status
+			}
+		case rings.EventTestClaimRecord:
+			var prev rings.TestClaimRecord
+			if json.Unmarshal(ev.Payload, &prev) != nil {
+				continue
+			}
+			if prev.Type == rings.TestClaimRecRetest && prev.ClaimID == env.retest.ClaimID && prev.StepID == env.retest.SID {
+				return fmt.Errorf("swarm: 复测会话 %s 已写回过结论,每轮只许一次(旧结论不得改写,R1)", env.retest.SID)
+			}
+		}
+	}
+	if lastNonFixed == "" {
+		// 异常账本兜底:状态历史无非 fixed 态时按当前态回退,再退已确认。
+		if claim.Status != rings.TestClaimFixed {
+			lastNonFixed = claim.Status
+		} else {
+			lastNonFixed = rings.TestClaimConfirmed
+		}
+	}
+	rec := rings.TestClaimRecord{
+		ClaimID: env.retest.ClaimID, StepID: env.retest.SID, UnitID: env.UnitID,
+		Type: rings.TestClaimRecRetest, RetestVerdict: verdict, Round: env.retest.Round,
+		Note: strings.TrimSpace(note),
+	}
+	if ref, head := env.Executor.Blobs.spill(evidence); ref != "" {
+		rec.EvidenceRef, rec.EvidenceHead = ref, head
+	} else {
+		rec.EvidenceHead = clipLine(evidence, 2048)
+	}
+	events := []rings.Event{{
+		Kind: rings.EventTestClaimRecord, Actor: "swarm:" + env.UnitID, Payload: rec,
+	}}
+	var target string
+	switch verdict {
+	case rings.RetestVerdictFixed:
+		target = rings.TestClaimFixed
+	case rings.RetestVerdictUnfixed:
+		target = lastNonFixed
+	}
+	if target != "" && target != claim.Status {
+		events = append(events, rings.Event{
+			Kind: rings.EventNodeStateChanged, Actor: "swarm:" + env.UnitID,
+			Payload: rings.NodeStateChanged{NodeID: env.retest.ClaimID, Status: target},
+		})
+	}
+	if _, err := env.Executor.Store.Append(ctx, env.TaskID, events...); err != nil {
+		return fmt.Errorf("swarm: 复测结论写入: %w", err)
+	}
+	return nil
+}
+
+// retestToolset 复测单位的受限工具集:bash(重放通道)+ 只读探测 + 本机
+// 读 + 复测结论写回。无候选回流/声明提交/假设通道——复测不是发现通道
+// (P3-06 专用受限)。RoE 过滤照常生效(结论工具恒可用,见 BeginRetest)。
+func (env *unitEnv) retestToolset() []tool.CoreTool {
+	return []tool.CoreTool{
+		env.bashTool(),
+		env.portProbeTool(),
+		env.httpProbeTool(),
+		env.readTool(),
+		env.submitRetestResultTool(),
+	}
+}
+
+// ---- 复测提示词(§11 三段式同规范) ----
+
+// SettingKeyPromptRetest 复测基线可编辑正文(A 段)的配置键。
+const SettingKeyPromptRetest = "prompt.retest.editable"
+
+// retestEditableDefault 复测基线 A 段默认正文(角色与视野;可编辑)。
+const retestEditableDefault = `你是渗透测试复测单位,对一条已锤炼完成的漏洞判断做修复状态复核:按复现步骤对授权目标真实重放,判定该漏洞当前是否已修复。你没有全局视野;你的世界是这份复测上下文与你的工具结果。`
+
+// retestSafetyRules 复测基线 B 段(代码固定,安全底线)。
+const retestSafetyRules = `铁律(代码固定,配置不可移除):
+1. 只复核本判断:按复现步骤重放(参数可按当前环境等价调整并写明偏离),判定的是"该漏洞现在还能不能触发";不测其他漏洞、不扩大范围、不做修复之外的动作。
+2. 结论只经 submit_retest_result 写回(verdict + 本轮证据),文本回复不构成结论;每轮只许提交一次。
+3. 证据须含本轮真实取得的原文(命令与其输出、请求/响应片段),只写结论不算复测。fixed 只许在重放显示漏洞不再可触发且有支撑证据时给出;目标不可达、前置无法重建等无法判定的情形给 inconclusive 并在 note 写明障碍,不得当成已修复。
+4. 复现所需前置(登录态/会话/数据)失效时,先重建前置再重放;无法重建就如实 inconclusive,不得臆断。
+5. 被 RoE 或审批拒绝的操作不得重试。`
+
+// retestArtifactRules 复测基线 C 段(代码固定,输出规约)。
+const retestArtifactRules = `写回与收尾规约(代码固定,配置不可移除):
+- 重放尽量贴复现步骤原文;与定稿步骤的偏离处(参数/环境差异)在证据中写明,结论可独立复核。
+- 完成后输出简短总结:重放了什么、观察到什么、结论与其依据。`
+
+// RetestPromptSpec 复测基线三段式规约(A 可编辑 + B/C/D 代码固定;
+// D 段常驻文风:复测叙述与结论说明按人话写,submit_retest_result
+// 参数照契约)。
+var RetestPromptSpec = PromptSpec{
+	SettingKey:      SettingKeyPromptRetest,
+	DefaultEditable: retestEditableDefault,
+	Fixed:           []string{retestSafetyRules, retestArtifactRules, ResidentStyleRules},
+}
+
+// retestWrapupPrompt 复测会话的收尾指令(Settlement):预算耗尽前把
+// 已取得的判定如实写回,不硬凑。
+const retestWrapupPrompt = `运行预算即将耗尽。立即收尾:已取得可判定证据时经 submit_retest_result 写回结论与证据;尚未取得证据时如实写 inconclusive 并在 note 说明未完成的部分。不要发起新的探测。`
+
+// RetestSystemSegments 组装复测单位 system 段(§11 全规范同构):
+//
+//	[0] RoE 约束块(最顶,凌驾声明)
+//	[1] A 段 可编辑正文(键值覆盖或代码默认)
+//	[2] B 段 复测铁律(代码固定)
+//	[3] C 段 写回规约(代码固定)
+//	[4] D 段 常驻文风(代码固定)
+//	[5] 复测意图块(system 尾,compaction 压不掉)
+//	[6] 启动指令(最后一句)
+func RetestSystemSegments(ctx context.Context, store *rings.Store, roe RoE, rt *retestBinding) []string {
+	segs := []string{RenderRoEConstraint(
+		"你的复测手段受此框定。", roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, nil)}
+	segs = append(segs, RetestPromptSpec.Assemble(ctx, store)...)
+	segs = append(segs, retestIntentBlock(rt), retestStartupInstruction)
+	return segs
+}
+
+// retestIntentBlock 复测意图块:system 尾部的意图核心(判定哪条声明、
+// 三值结论)。compaction 压不到 system,长会话压缩后意图核心仍在。
+func retestIntentBlock(rt *retestBinding) string {
+	var b strings.Builder
+	b.WriteString("【复测任务 · 只判这一条】\n")
+	fmt.Fprintf(&b, "判断 %s(第 %d 轮)\n", rt.ClaimID, rt.Round)
+	b.WriteString("判定: 该漏洞当前是否已修复 — 重放复现步骤,给 fixed|unfixed|inconclusive,经 submit_retest_result 写回。\n")
+	return b.String()
+}
+
+// retestStartupInstruction 复测启动指令(永远是 system 最后一句)。
+const retestStartupInstruction = "【启动指令】现在开始复测:先读复测上下文全文,再动手重放;结论与证据经 submit_retest_result 写回。"

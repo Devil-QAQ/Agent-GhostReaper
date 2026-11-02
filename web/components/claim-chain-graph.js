@@ -36,7 +36,7 @@ function ChainNode({ data }) {
   return (
     <div
       className={cn(
-        "flex w-[200px] cursor-pointer flex-col gap-1 rounded-lg border bg-card px-3 py-2 text-left shadow-card transition-colors duration-150 hover:bg-hover-lift",
+        "flex w-[200px] cursor-pointer flex-col gap-1 rounded-lg border border-border/55 bg-card px-3 py-2 text-left shadow-card transition-colors duration-150 hover:bg-hover-lift",
         data.focused && "border-primary/60",
       )}
       title={`${meta.label} ${data.node.id}:${data.node.title || ""}`}
@@ -127,7 +127,7 @@ function AssetBirthRows({ assets, onSelectNode }) {
       {assets.map((a) => {
         const src = assetSourceMeta(a.source);
         return (
-          <div key={a.id} className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border bg-card px-3 py-2 text-xs">
+          <div key={a.id} className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-border/55 bg-card px-3 py-2 text-xs">
             <NodeRefButton meta={{ id: a.id, type: "asset", typeLabel: "资产" }} onSelectNode={onSelectNode} />
             {React.createElement(iconOf(src.icon), { className: "size-3 text-muted-foreground" })}
             {a.source === "discovered" ? (
@@ -135,7 +135,7 @@ function AssetBirthRows({ assets, onSelectNode }) {
                 <span>发现入图</span>
                 {a.birth_unit && (
                   <span className="text-muted-foreground">
-                    单位 <span className="font-mono">{a.birth_unit}</span>
+                    单位 <span className="num">{a.birth_unit}</span>
                   </span>
                 )}
                 {a.birth_step && (
@@ -180,7 +180,7 @@ export function ClaimChainGraph({ tid, claimID, onSelectNode }) {
   if (subNodes.length <= 1) {
     return (
       <span className="text-xs text-muted-foreground">
-        (无链条血缘:声明未挂发现步骤/资产关联)
+        (无链条血缘:判断未挂发现步骤/资产关联)
       </span>
     );
   }
@@ -205,7 +205,7 @@ export function ClaimChainGraph({ tid, claimID, onSelectNode }) {
       target: leftFirst ? e.to : e.from,
       label: EDGE_LABELS[e.type] || e.type,
       style: { stroke: "var(--muted-foreground)", strokeWidth: 1.2 },
-      labelStyle: { fill: "var(--muted-foreground)", fontSize: 10 },
+      labelStyle: { fill: "var(--muted-foreground)", fontSize: "var(--text-micro)" },
       labelBgStyle: { fill: "var(--card)" },
       markerEnd: { type: "arrowclosed", width: 14, height: 14, color: "var(--muted-foreground)" },
     };
@@ -213,7 +213,7 @@ export function ClaimChainGraph({ tid, claimID, onSelectNode }) {
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="h-72 overflow-hidden rounded-lg border bg-card">
+      <div className="h-72 overflow-hidden rounded-lg border border-border/55 bg-card">
         <ReactFlow
           nodes={rfNodes}
           edges={rfEdges}

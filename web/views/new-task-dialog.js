@@ -4,6 +4,7 @@ import * as React from "react";
 
 import { iconOf } from "@/components/icons";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -28,9 +29,10 @@ import { toast } from "sonner";
 const emptyRow = () => ({ cls: "domain", title: "", parent: "" });
 const emptyConstraint = () => ({ action: "", disposition: "forbid", quota: "", scope: [], patterns: [], basis: "" });
 
-// 批量粘贴识别(#9):启发式分类,识别结果追加为资产行(行编辑器是权威,
-// 识别后仍可改类/改父/删行)。P4-05 起导出复用——资产页"新增资产"
-// 弹窗与建任务种子表单同款能力(不复制平行实现)。
+// 批量粘贴识别(#9):启发式分类,识别结果进资产行。P4-16 起建任务表单
+// 资产框即粘贴口,提交前对框内残余文本兜底解析;P4-05 资产页"新增资产"
+// 弹窗同款能力(不复制平行实现)。条目按换行与常见分隔符(顿号/逗号/
+// 分号/空白)切分——标识(域名/IP/网址)不含这些字符,切分无损。
 //   http(s)://…      → 服务
 //   IP:端口          → 服务
 //   纯 IP            → 主机
@@ -38,41 +40,66 @@ const emptyConstraint = () => ({ action: "", disposition: "forbid", quota: "", s
 //   其余             → 其他
 export function recognizeLines(text) {
   const rows = [];
-  for (const raw of text.split(/\r?\n/)) {
-    const s = raw.trim();
-    if (!s) continue;
-    let cls = "other";
-    if (/^https?:\/\//i.test(s)) cls = "service";
-    else if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(s)) cls = "service";
-    else if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) cls = "host";
-    else if (/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9-]+)+$/i.test(s)) cls = "subdomain";
-    rows.push({ cls, title: s, parent: "" });
+  for (const raw of text.split(/[\r\n]+/)) {
+    for (const piece of raw.split(/[\s、，,;；]+/)) {
+      const s = piece.trim();
+      if (!s) continue;
+      let cls = "other";
+      if (/^https?:\/\//i.test(s)) cls = "service";
+      else if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(s)) cls = "service";
+      else if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) cls = "host";
+      else if (/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9-]+)+$/i.test(s)) cls = "subdomain";
+      rows.push({ cls, title: s, parent: "" });
+    }
   }
   return rows;
 }
 
+// 字段标题:小号淡色标签 + 必填标记(问题清单 #29 ③ 视觉层次——提示
+// 全部收进框内 placeholder,标题退为淡标签)。
+function FieldLabel({ htmlFor, children, required = false }) {
+  return (
+    <Label htmlFor={htmlFor} className="text-xs font-medium text-muted-foreground">
+      {children}
+      {required && <span className="ml-0.5 text-status-danger">*</span>}
+    </Label>
+  );
+}
+
 // NewTaskDialog 新建任务(也承载复制草稿:draft 传入时按其预填,操作者
 // 确认后才创建——复制 = 同种子/同目标的草稿确认流)。
-// P2-08f:新增「从描述提取」——粘贴授权描述,单次模型调用提取目标/
-// 约束/资产候选,回填表单逐条人工确认(描述里没有的不编造;确认是落库
-// 前的兜底)。
-// draft:{ title, description, rows, category, timeout, anchor }
+// P4-16(问题清单 #29)表单按定稿布局:任务名(可选)→ 任务分类(可选,
+// 搜索或输入新名称回车创建)→ 描述(可选,贴"粘贴描述一键提取"——LLM
+// 从描述回填目标与资产,复用既有提取通道)→ 目标(必填,每行一条)→
+// 资产(必填,可批量粘贴,贴"一键优化整理格式"——LLM 只规整不增删,
+// 守恒红线由服务端确定性把关)→ 高级选项折叠(最长跑多久 · 拦截规则 ·
+// 纠偏步数)→ 按钮沉底。默认视图仅五框。
+// draft:{ title, description, rows, goals, category, timeout, anchor }
 export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
   const [title, setTitle] = React.useState("");
   const [description, setDescription] = React.useState("");
-  const [rows, setRows] = React.useState([emptyRow()]);
+  const [goalsText, setGoalsText] = React.useState("");
+  const [rows, setRows] = React.useState([]);
   const [paste, setPaste] = React.useState("");
   const [timeout, setTimeoutSecs] = React.useState("");
   const [anchor, setAnchor] = React.useState("");
-  const [category, setCategory] = React.useState("none");
+  // 收口提醒任务级初始配置(审核迭代 1):开关默认开;数字留空 = 用全局默认。
+  const [closureOn, setClosureOn] = React.useState(true);
+  const [closureRounds, setClosureRounds] = React.useState("");
+  const [closureMinutes, setClosureMinutes] = React.useState("");
+  const [advOpen, setAdvOpen] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
-  // 从描述提取(P2-08f)。
-  const [extractText, setExtractText] = React.useState("");
+  // 任务分类:搜索选择,或输入新名称回车创建(建任务时随种子指派)。
+  const [catID, setCatID] = React.useState("");
+  const [catText, setCatText] = React.useState("");
+  const [catOpen, setCatOpen] = React.useState(false);
+  // 从描述提取(P2-08f,描述框即提取源)。
   const [extracting, setExtracting] = React.useState(false);
   const [extractIssues, setExtractIssues] = React.useState([]);
-  const [goals, setGoals] = React.useState([]);
-  const [goalDraft, setGoalDraft] = React.useState("");
   const [constraints, setConstraints] = React.useState([]);
+  // 资产一键优化整理(P4-16,守恒把关在服务端)。
+  const [organizing, setOrganizing] = React.useState(false);
+  const [organizeIssues, setOrganizeIssues] = React.useState([]);
 
   const { data: catBody } = usePolling("/api/task-categories", 8000, { immediate: open });
   const categories = Array.isArray(catBody?.categories) ? catBody.categories : [];
@@ -82,45 +109,84 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
     if (!open) return;
     setTitle(draft?.title ?? "");
     setDescription(draft?.description ?? "");
+    setGoalsText(Array.isArray(draft?.goals) ? draft.goals.join("\n") : "");
     setRows(
       Array.isArray(draft?.rows) && draft.rows.length > 0
         ? draft.rows.map((r) => ({ cls: r.cls || "domain", title: r.title || "", parent: r.parent || "" }))
-        : [emptyRow()]
+        : []
     );
     setPaste("");
     setTimeoutSecs(draft?.timeout ?? "");
     setAnchor(draft?.anchor ?? "");
-    setCategory(draft?.category || "none");
-    setExtractText("");
+    setClosureOn(true);
+    setClosureRounds("");
+    setClosureMinutes("");
+    setAdvOpen(false);
+    setCatID(draft?.category || "");
+    setCatText("");
+    setCatOpen(false);
     setExtracting(false);
     setExtractIssues([]);
-    setGoals([]);
-    setGoalDraft("");
     setConstraints([]);
+    setOrganizing(false);
+    setOrganizeIssues([]);
   }, [open, draft]);
+
+  // 分类草稿:清单载入后按 ID 呈现名称。
+  React.useEffect(() => {
+    if (catID && !catText) {
+      const hit = categories.find((c) => c.id === catID);
+      if (hit) setCatText(hit.name);
+    }
+  }, [categories, catID, catText]);
 
   const setRow = (i, patch) =>
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
 
-  const removeRow = (i) =>
-    setRows((rs) => (rs.length <= 1 ? [emptyRow()] : rs.filter((_, j) => j !== i)));
+  const removeRow = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
 
-  const recognize = () => {
-    const found = recognizeLines(paste);
-    if (found.length === 0) {
-      toast.error("未识别出任何资产行(每行一个标识)");
+  // 分类:回车 = 精确命中即选,未命中即创建后选。
+  const pickOrCreateCategory = async () => {
+    const text = catText.trim();
+    if (!text) {
+      setCatID("");
+      setCatOpen(false);
       return;
     }
-    setRows((rs) => [...rs.filter((r) => r.title.trim() !== ""), ...found]);
-    setPaste("");
-    toast.success(`已识别 ${found.length} 行,可在行内修改`);
+    const exact = categories.find((c) => c.name === text);
+    if (exact) {
+      setCatID(exact.id);
+      setCatText(exact.name);
+      setCatOpen(false);
+      return;
+    }
+    const { ok, body } = await postJSON("/api/task-categories", { name: text });
+    if (!ok) {
+      toast.error(`创建分类失败:${body.error || "原因未说明"}`);
+      return;
+    }
+    setCatID(body.id);
+    setCatText(body.name);
+    setCatOpen(false);
   };
+
+  const filteredCategories = catID
+    ? categories
+    : categories.filter((c) => c.name.toLowerCase().includes(catText.trim().toLowerCase()));
+
+  // 资产:框内残余文本确定性识别,与行编辑器(权威)合并、按标识去重。
+  const assetsOfForm = React.useMemo(() => {
+    const known = new Set(rows.map((r) => r.title.trim()).filter(Boolean));
+    const fromPaste = recognizeLines(paste).filter((r) => !known.has(r.title));
+    return [...rows.filter((r) => r.title.trim() !== ""), ...fromPaste];
+  }, [rows, paste]);
+  const formIDs = assetsOfForm.map((r) => r.title.trim()).filter(Boolean);
 
   // 从描述提取:单次模型调用,候选回填表单(可改可删,确认前不落库)。
   const extract = async () => {
-    const text = extractText.trim();
+    const text = description.trim();
     if (!text) {
-      toast.error("先粘贴一段授权描述");
+      toast.error("先填写描述");
       return;
     }
     setExtracting(true);
@@ -130,17 +196,29 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
       toast.error(`提取失败:${body.error || "原因未说明"}`);
       return;
     }
-    if (!title.trim() && body.title) setTitle(body.title);
-    const known = new Set(rows.map((r) => r.title.trim()).filter(Boolean));
-    const assets = (body.assets || []).filter((a) => a.title && !known.has(a.title));
-    if (assets.length > 0) {
-      setRows((rs) => [...rs.filter((r) => r.title.trim() !== ""), ...assets.map((a) => ({ cls: a.class, title: a.title, parent: "" }))]);
+    let filledTitle = false;
+    if (!title.trim() && body.title) {
+      setTitle(body.title);
+      filledTitle = true;
     }
-    // 目标候选带判定口径建议(P3-14b ④):面板展示供核对,创建时只落标题。
-    const suggested = (body.goals || [])
-      .map((g) => (typeof g === "string" ? { title: g, pred: "" } : { title: g?.title || "", pred: g?.pred || "" }))
-      .filter((g) => g.title);
-    setGoals((gs) => [...gs, ...suggested.filter((g) => !gs.some((x) => x.title === g.title))]);
+    // 目标候选回描述旁的目标框(每行一条,去重);判定口径建议不上面板
+    //——正式完成条件在 RoE 目标表单锁定。
+    const goals = (body.goals || [])
+      .map((g) => (typeof g === "string" ? g : g?.title || ""))
+      .map((g) => g.trim())
+      .filter(Boolean);
+    if (goals.length > 0) {
+      setGoalsText((t) => {
+        const lines = t.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        const known = new Set(lines);
+        return [...lines, ...goals.filter((g) => !known.has(g))].join("\n");
+      });
+    }
+    const knownAssets = new Set(rows.map((r) => r.title.trim()).filter(Boolean));
+    const assets = (body.assets || []).filter((a) => a.title && !knownAssets.has(a.title));
+    if (assets.length > 0) {
+      setRows((rs) => [...rs, ...assets.map((a) => ({ cls: a.class, title: a.title, parent: "" }))]);
+    }
     setConstraints((cs) => [
       ...cs,
       ...(body.constraints || []).map((c) => ({
@@ -153,12 +231,39 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
       })),
     ]);
     setExtractIssues(body.issues || []);
-    const n =
-      (body.title ? 1 : 0) + (body.assets?.length || 0) + (body.goals?.length || 0) + (body.constraints?.length || 0);
-    toast.success(`已回填 ${n} 项,逐条核对后再创建`);
+    if ((body.constraints || []).length > 0) setAdvOpen(true);
+    const parts = [
+      filledTitle ? "任务名 1" : "",
+      goals.length > 0 ? `目标 ${goals.length}` : "",
+      assets.length > 0 ? `资产 ${assets.length}` : "",
+      (body.constraints || []).length > 0 ? `拦截规则 ${body.constraints.length}` : "",
+    ].filter(Boolean);
+    toast.success(parts.length > 0 ? `已回填：${parts.join(" · ")},逐条核对` : "描述里没有可提取的内容");
   };
 
-  const formIDs = rows.map((r) => r.title.trim()).filter(Boolean);
+  // 一键优化整理格式:LLM 只规整(合并同义/拆行/归类/去重);服务端
+  // 逐条对账原文守恒(新增丢弃、丢失按原文保留),结果回填为资产行。
+  const organize = async () => {
+    const lines = [
+      ...paste.split(/\r?\n/).map((l) => l.trim()),
+      ...rows.map((r) => r.title.trim()),
+    ].filter(Boolean);
+    if (lines.length === 0) {
+      toast.error("资产框没有可整理的条目");
+      return;
+    }
+    setOrganizing(true);
+    const { ok, body } = await postJSON("/api/tasks/assets-organize", { lines });
+    setOrganizing(false);
+    if (!ok) {
+      toast.error(`整理失败:${body.error || "原因未说明"}`);
+      return;
+    }
+    setRows((body.assets || []).map((a) => ({ cls: a.class, title: a.title, parent: "" })));
+    setPaste("");
+    setOrganizeIssues(body.issues || []);
+    toast.success(`已整理为 ${(body.assets || []).length} 条,逐条核对`);
+  };
 
   const toggleScope = (i, t) =>
     setConstraints((cs) =>
@@ -173,36 +278,50 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
     setConstraints((cs) => cs.map((c, j) => (j === i ? { ...c, ...patch } : c)));
 
   const create = async () => {
-    if (!title.trim()) {
-      toast.error("任务标题不能为空");
+    const goalTitles = goalsText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (goalTitles.length === 0) {
+      toast.error("目标不能为空：写明这个任务要拿到什么，如：拿下管理权限");
       return;
     }
-    const assets = rows
-      .map((r) => ({ class: r.cls, title: r.title.trim(), parent: r.parent.trim() }))
-      .filter((r) => r.title !== "");
+    const assets = assetsOfForm.map((r) => ({ class: r.cls, title: r.title.trim(), parent: r.parent.trim() }));
+    if (assets.length === 0) {
+      toast.error("资产不能为空：至少填一个域名 / IP / 网址");
+      return;
+    }
     const t = parseInt(timeout, 10);
     if (timeout.trim() !== "" && (!Number.isFinite(t) || t <= 0)) {
-      toast.error("整体超时须为正整数秒(留空不限)");
+      toast.error("最长跑多久须为正整数秒（留空不限）");
       return;
     }
     const a = parseInt(anchor, 10);
     if (anchor.trim() !== "" && (!Number.isFinite(a) || a < 1 || a > 1000)) {
-      toast.error("纠偏间隔须为 1~1000 步(留空取 Agent 页全局默认)");
+      toast.error("纠偏步数须为 1~1000（留空取全局默认）");
       return;
     }
-    // 约束校验:动作描述非空;允许+次数须为正整数(不填 = 不限)。
+    // 收口提醒初始配置(审核迭代 1):数字留空 = 用全局默认。
+    const cr = closureRounds.trim() === "" ? 0 : parseInt(closureRounds, 10);
+    const cm = closureMinutes.trim() === "" ? 0 : parseInt(closureMinutes, 10);
+    if (!Number.isFinite(cr) || cr < 0 || cr > 100) {
+      toast.error("收口信号轮数须为 1~100 的整数（留空用全局默认）");
+      return;
+    }
+    if (!Number.isFinite(cm) || cm < 0 || cm > 1440) {
+      toast.error("收口信号间隔须为 1~1440 的整数（留空用全局默认）");
+      return;
+    }
+    // 拦截规则校验:动作描述非空;允许+次数须为正整数(不填 = 不限)。
     const rules = [];
     for (const c of constraints) {
       const action = c.action.trim();
       if (!action) {
-        toast.error("约束的动作描述不能为空(删掉不用的约束行)");
+        toast.error("拦截规则的动作不能为空（删掉不用的规则行）");
         return;
       }
       let quota = 0;
       if (c.quota.trim() !== "") {
         quota = parseInt(c.quota, 10);
         if (!Number.isFinite(quota) || quota < 1) {
-          toast.error(`约束「${action}」的次数上限须为正整数(不填 = 不限)`);
+          toast.error(`拦截规则「${action}」的次数上限须为正整数（不填 = 不限）`);
           return;
         }
       }
@@ -216,12 +335,15 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
       });
     }
     setBusy(true);
-    const goalTitles = goals.map((g) => (g?.title || "").trim()).filter(Boolean);
     const body = { title: title.trim(), assets, goals: goalTitles };
     if (description.trim()) body.description = description.trim();
-    if (category !== "none") body.category = category;
+    if (catID) body.category = catID;
     if (Number.isFinite(t) && t > 0) body.timeout_seconds = t;
     if (Number.isFinite(a) && a > 0) body.anchor_every_steps = a;
+    // 只在偏离默认时提交(开 + 全留空 = 缺省,不落任务级配置)。
+    if (!closureOn || cr > 0 || cm > 0) {
+      body.closure = { enabled: closureOn, rounds: cr, minutes: cm };
+    }
     if (rules.length > 0) body.roe = { intent_rules: rules };
     const { ok, body: resp } = await postJSON("/api/tasks", body);
     setBusy(false);
@@ -231,325 +353,407 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
     }
     onOpenChange(false);
     const extra = [
-      assets.length > 0 ? `资产 ${assets.length} 个` : "",
-      goalTitles.length > 0 ? `目标 ${goalTitles.length} 个` : "",
-      rules.length > 0 ? `约束 ${rules.length} 条` : "",
+      `目标 ${goalTitles.length} 个`,
+      `资产 ${assets.length} 个`,
+      rules.length > 0 ? `拦截规则 ${rules.length} 条` : "",
     ].filter(Boolean);
-    toast.success(extra.length > 0 ? `已建任务 · ${extra.join(",")},主宰已唤醒` : "已建任务(无资产种子)");
+    toast.success(`已建任务 · ${extra.join(",")},主宰已唤醒`);
     if (onCreated) onCreated(resp.id);
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[92vh] max-w-2xl overflow-y-auto">
+      <DialogContent className="flex max-h-[92vh] max-w-2xl flex-col gap-4 overflow-hidden">
         <DialogHeader>
           <DialogTitle>{draft ? "复制任务" : "新建任务"}</DialogTitle>
-          <DialogDescription>
-            {draft
-              ? "已按原任务预填种子与描述,确认后创建新任务。"
-              : "12 类资产随任务种子入年轮账本;父标识指向表单内另一资产的标识,构成父子层级。"}
-          </DialogDescription>
+          {draft ? (
+            <DialogDescription>已按原任务预填，确认后创建新任务。</DialogDescription>
+          ) : (
+            <DialogDescription className="sr-only">填目标与资产创建任务</DialogDescription>
+          )}
         </DialogHeader>
 
-        <div className="grid gap-2">
-          <Label htmlFor="nt-extract">从描述提取(可选)</Label>
-          <Textarea
-            id="nt-extract"
-            rows={3}
-            placeholder={"粘贴授权描述,提取目标 / 约束 / 资产候选,回填后逐条核对:\n例:授权对 10.10.0.5 与 http://10.10.0.6:8080 测试,目标确认登录面暴露情况;不允许上传文件,爆破类操作最多 20 次。"}
-            className="text-xs"
-            value={extractText}
-            onChange={(e) => setExtractText(e.target.value)}
-          />
-          <div className="flex items-center gap-2">
-            <Button type="button" variant="outline" size="sm" onClick={extract} disabled={extracting}>
-              {extracting ? "提取中…" : "提取"}
-            </Button>
-            <span className="text-xs text-muted-foreground">
-              单次模型调用;描述里没有的不编造,提取结果确认后才落库
-            </span>
-          </div>
-          {extractIssues.length > 0 && (
-            <div className="rounded-md border border-status-warning/40 bg-status-warning-soft px-2 py-1 text-xs text-status-warning">
-              {extractIssues.length} 条候选项有问题被丢弃:{extractIssues.join(";")}
+        <div className="-mr-1 flex-1 overflow-y-auto rounded-xl pr-1">
+          <div className="grid gap-4">
+            <div className="grid gap-2">
+              <FieldLabel htmlFor="nt-name">任务名</FieldLabel>
+              <Input
+                id="nt-name"
+                placeholder="给任务起个便于识别的名字，如：xx官网渗透"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+              />
             </div>
-          )}
-        </div>
 
-        <div className="grid gap-2">
-          <Label htmlFor="nt-title">任务标题</Label>
-          <Input
-            id="nt-title"
-            placeholder="如:某授权目标首轮侦察"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-          />
-        </div>
-
-        <div className="grid gap-2">
-          <Label htmlFor="nt-desc">描述(可选)</Label>
-          <Input
-            id="nt-desc"
-            placeholder="一句话说明任务范围与目的"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-        </div>
-
-        <div className="grid gap-2">
-          <Label>目标(可核验的最终目标)</Label>
-          <div className="flex max-h-32 flex-col gap-1 overflow-y-auto pr-1">
-            {goals.length === 0 && (
-              <div className="text-xs text-muted-foreground">无目标种子(可留空,RoE 面板随时补)</div>
-            )}
-            {goals.map((g, i) => (
-              <div key={i} className="flex flex-col gap-0.5">
-                <div className="flex items-center gap-2">
-                  <span className="flex-1 rounded-md border bg-background px-2 py-1 text-xs">{g.title}</span>
+            <div className="grid gap-2">
+              <FieldLabel htmlFor="nt-category">任务分类</FieldLabel>
+              <div className="relative">
+                <Input
+                  id="nt-category"
+                  placeholder="搜索分类，或输入新名称回车创建"
+                  value={catText}
+                  onChange={(e) => {
+                    setCatText(e.target.value);
+                    setCatID("");
+                    setCatOpen(true);
+                  }}
+                  onFocus={() => setCatOpen(true)}
+                  onBlur={() => {
+                    setCatOpen(false);
+                    if (catID) {
+                      const hit = categories.find((c) => c.id === catID);
+                      setCatText(hit ? hit.name : "");
+                    } else {
+                      setCatText("");
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      pickOrCreateCategory();
+                    }
+                    if (e.key === "Escape") {
+                      e.stopPropagation();
+                      setCatOpen(false);
+                    }
+                  }}
+                />
+                {catID && (
                   <Button
                     type="button"
                     variant="ghost"
                     size="icon"
-                    title="删除此目标"
-                    onClick={() => setGoals((gs) => gs.filter((_, j) => j !== i))}
+                    className="absolute top-1/2 right-1 size-6 -translate-y-1/2"
+                    title="清除分类"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      setCatID("");
+                      setCatText("");
+                    }}
                   >
-                    {React.createElement(iconOf("x"), { className: "size-4" })}
+                    {React.createElement(iconOf("x"), { className: "size-3.5" })}
                   </Button>
-                </div>
-                {g.pred && <div className="pl-1 text-xs text-muted-foreground">判定:{g.pred}</div>}
-              </div>
-            ))}
-          </div>
-          <div className="flex items-center gap-2">
-            <Input
-              className="text-xs"
-              placeholder="添加目标(写明怎样算完成,回车确认)"
-              value={goalDraft}
-              onChange={(e) => setGoalDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && goalDraft.trim()) {
-                  e.preventDefault();
-                  setGoals((gs) => [...gs, { title: goalDraft.trim(), pred: "" }]);
-                  setGoalDraft("");
-                }
-              }}
-            />
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                if (goalDraft.trim()) {
-                  setGoals((gs) => [...gs, { title: goalDraft.trim(), pred: "" }]);
-                  setGoalDraft("");
-                }
-              }}
-            >
-              添加
-            </Button>
-          </div>
-        </div>
-
-        <div className="grid gap-2">
-          <Label>操作约束(任务级拦截规则)</Label>
-          <div className="flex max-h-56 flex-col gap-2 overflow-y-auto pr-1">
-            {constraints.length === 0 && (
-              <div className="text-xs text-muted-foreground">无约束(默认按授权边界与审批门槛执行)</div>
-            )}
-            {constraints.map((c, i) => (
-              <div key={i} className="flex flex-col gap-1 rounded-md border p-2">
-                <div className="flex items-center gap-2">
-                  <Input
-                    className="h-8 flex-1 text-xs"
-                    placeholder="动作描述(如 上传文件 / 数据读取)"
-                    value={c.action}
-                    onChange={(e) => setConstraint(i, { action: e.target.value })}
-                  />
-                  <div className="w-24 shrink-0">
-                    <Select value={c.disposition} onValueChange={(v) => setConstraint(i, { disposition: v })}>
-                      <SelectTrigger className="h-8 text-xs">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="forbid">禁止</SelectItem>
-                        <SelectItem value="allow">允许</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  {c.disposition === "allow" && (
-                    <Input
-                      className="h-8 w-28 shrink-0 text-xs"
-                      inputMode="numeric"
-                      placeholder="次数上限"
-                      value={c.quota}
-                      onChange={(e) => setConstraint(i, { quota: e.target.value })}
-                    />
-                  )}
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    title="删除此约束"
-                    onClick={() => setConstraints((cs) => cs.filter((_, j) => j !== i))}
-                  >
-                    {React.createElement(iconOf("x"), { className: "size-4" })}
-                  </Button>
-                </div>
-                <div className="flex flex-wrap items-center gap-1">
-                  <span className="text-xs text-muted-foreground">范围:</span>
-                  {formIDs.length === 0 && <span className="text-xs text-muted-foreground">全部资产(表单内无资产行)</span>}
-                  {formIDs.map((t2) => (
-                    <button
-                      key={t2}
-                      type="button"
-                      className={`rounded-full border px-2 py-0.5 font-mono text-xs ${
-                        c.scope.includes(t2) ? "border-primary/60 bg-primary/15 text-foreground" : "text-muted-foreground"
-                      }`}
-                      onClick={() => toggleScope(i, t2)}
-                    >
-                      {t2}
-                    </button>
-                  ))}
-                  {c.scope.filter((t2) => !formIDs.includes(t2)).length > 0 && (
-                    <span className="text-xs text-status-warning">
-                      {c.scope.filter((t2) => !formIDs.includes(t2)).length} 个范围引用不在资产行内,创建时按全部资产处理
-                    </span>
-                  )}
-                </div>
-                {c.basis && <div className="text-xs text-muted-foreground">描述原句:{c.basis}</div>}
-              </div>
-            ))}
-          </div>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="w-fit"
-            onClick={() => setConstraints((cs) => [...cs, emptyConstraint()])}
-          >
-            添加约束
-          </Button>
-        </div>
-
-        <div className="grid gap-2">
-          <Label htmlFor="nt-category">分类(可选)</Label>
-          <div className="w-56">
-            <Select value={category} onValueChange={setCategory}>
-              <SelectTrigger id="nt-category">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="none">不分类</SelectItem>
-                {categories.map((c) => (
-                  <SelectItem key={c.id} value={c.id}>
-                    {c.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-
-        <div className="grid gap-2">
-          <Label htmlFor="nt-timeout">整体超时(秒,可选)</Label>
-          <Input
-            id="nt-timeout"
-            inputMode="numeric"
-            placeholder="留空不限;到点依序收场"
-            value={timeout}
-            onChange={(e) => setTimeoutSecs(e.target.value)}
-          />
-        </div>
-
-        <div className="grid gap-2">
-          <Label htmlFor="nt-anchor">纠偏间隔(步,可选)</Label>
-          <Input
-            id="nt-anchor"
-            inputMode="numeric"
-            placeholder="留空取 Agent 页全局默认;每 N 次工具调用重注入一次任务锚"
-            value={anchor}
-            onChange={(e) => setAnchor(e.target.value)}
-          />
-        </div>
-
-        <div className="grid gap-2">
-          <Label htmlFor="nt-paste">批量粘贴识别(可选)</Label>
-          <Textarea
-            id="nt-paste"
-            rows={3}
-            placeholder={"每行一个标识,自动识别:\nhttp://10.10.0.5:8080 → 服务\n10.10.0.6 → 主机\napp.example.com → 子域名"}
-            className="font-mono text-xs"
-            value={paste}
-            onChange={(e) => setPaste(e.target.value)}
-          />
-          <div className="flex items-center gap-2">
-            <Button type="button" variant="outline" size="sm" onClick={recognize}>
-              识别
-            </Button>
-            <span className="text-xs text-muted-foreground">
-              URL/带端口 IP → 服务 · 纯 IP → 主机 · 点分域名 → 子域名 · 其余 → 其他
-            </span>
-          </div>
-        </div>
-
-        <div className="grid gap-2">
-          <Label>资产种子</Label>
-          <div className="flex max-h-64 flex-col gap-2 overflow-y-auto pr-1">
-            {rows.map((row, i) => (
-              <div key={i} className="flex items-center gap-2">
-                <div className="w-32 shrink-0">
-                  <Select value={row.cls} onValueChange={(v) => setRow(i, { cls: v })}>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {ASSET_CLASSES.map(([v, label]) => (
-                        <SelectItem key={v} value={v}>
-                          {label}
-                        </SelectItem>
+                )}
+                {catOpen && (
+                  <div className="absolute top-full left-0 z-20 mt-1 w-full rounded-lg border border-border/55 bg-popover p-1 shadow-float">
+                    <div className="max-h-44 overflow-y-auto">
+                      {catID && (
+                        <button
+                          type="button"
+                          className="flex h-8 w-full items-center gap-2 rounded-md px-3 text-left text-[13px] text-muted-foreground hover:bg-primary/10"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => {
+                            setCatID("");
+                            setCatText("");
+                          }}
+                        >
+                          不分类
+                        </button>
+                      )}
+                      {filteredCategories.map((c) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          className="flex h-8 w-full items-center gap-2 rounded-md px-3 text-left text-[13px] hover:bg-primary/10 data-[on=true]:text-primary"
+                          data-on={c.id === catID}
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => {
+                            setCatID(c.id);
+                            setCatText(c.name);
+                            setCatOpen(false);
+                          }}
+                        >
+                          {React.createElement(iconOf("check"), {
+                            className: `size-3.5 ${c.id === catID ? "opacity-100" : "opacity-0"}`,
+                          })}
+                          {c.name}
+                        </button>
                       ))}
-                    </SelectContent>
-                  </Select>
+                      {!catID && catText.trim() && !categories.some((c) => c.name === catText.trim()) && (
+                        <button
+                          type="button"
+                          className="flex h-8 w-full items-center gap-2 rounded-md px-3 text-left text-[13px] text-primary hover:bg-primary/10"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={pickOrCreateCategory}
+                        >
+                          {React.createElement(iconOf("plus"), { className: "size-3.5" })}
+                          新建分类「{catText.trim()}」
+                        </button>
+                      )}
+                      {categories.length === 0 && !catText.trim() && (
+                        <div className="px-2 py-1.5 text-sm text-muted-foreground">输入名称回车创建</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="grid gap-2">
+              <FieldLabel htmlFor="nt-desc">描述</FieldLabel>
+              <Textarea
+                id="nt-desc"
+                rows={2}
+                placeholder="测试对象与背景，如：测试 example.com 这个站点"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+              />
+              <div className="flex items-center gap-2">
+                <Button type="button" variant="outline" size="sm" className="h-8" onClick={extract} disabled={extracting}>
+                  {extracting ? "提取中…" : "粘贴描述一键提取"}
+                </Button>
+              </div>
+              {extractIssues.length > 0 && (
+                <div className="rounded-md border border-status-warning/40 bg-status-warning-soft px-2 py-1 text-xs text-status-warning">
+                  {extractIssues.length} 条提取项有问题被丢弃:{extractIssues.join(";")}
                 </div>
-                <Input
-                  className="font-mono text-xs"
-                  placeholder="资产标识(如 http://10.10.0.5:8080)"
-                  value={row.title}
-                  onChange={(e) => setRow(i, { title: e.target.value })}
-                />
-                <Input
-                  list="nt-parent-ids"
-                  className="w-40 shrink-0 font-mono text-xs"
-                  placeholder="父标识(可选)"
-                  value={row.parent}
-                  onChange={(e) => setRow(i, { parent: e.target.value })}
-                />
-                <datalist id="nt-parent-ids">
-                  {formIDs.map((id) => (
-                    <option key={id} value={id} />
-                  ))}
-                </datalist>
+              )}
+            </div>
+
+            <div className="grid gap-2">
+              <FieldLabel htmlFor="nt-goals" required>
+                目标
+              </FieldLabel>
+              <Textarea
+                id="nt-goals"
+                rows={2}
+                placeholder="如：拿下管理权限、获取 xx 数据"
+                value={goalsText}
+                onChange={(e) => setGoalsText(e.target.value)}
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <FieldLabel htmlFor="nt-assets" required>
+                资产
+              </FieldLabel>
+              <Textarea
+                id="nt-assets"
+                rows={2}
+                placeholder="如：example.com、192.168.1.10、https://xx.com/login（可批量粘贴）"
+                className="num text-xs"
+                value={paste}
+                onChange={(e) => setPaste(e.target.value)}
+              />
+              <div className="flex items-center gap-2">
+                <Button type="button" variant="outline" size="sm" className="h-8" onClick={organize} disabled={organizing}>
+                  {organizing ? "整理中…" : "一键优化整理格式"}
+                </Button>
                 <Button
                   type="button"
                   variant="ghost"
-                  size="icon"
-                  title="删除此行"
-                  onClick={() => removeRow(i)}
+                  size="sm"
+                  className="h-8 px-2 text-xs text-muted-foreground"
+                  onClick={() => setRows((rs) => [...rs, emptyRow()])}
                 >
-                  {React.createElement(iconOf("x"), { className: "size-4" })}
+                  添加资产
                 </Button>
               </div>
-            ))}
+              {organizeIssues.length > 0 && (
+                <div className="rounded-md border border-status-warning/40 bg-status-warning-soft px-2 py-1 text-xs text-status-warning">
+                  {organizeIssues.join(";")}
+                </div>
+              )}
+              {rows.length > 0 && (
+                <div className="grid gap-2">
+                  {rows.map((row, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <div className="w-28 shrink-0">
+                        <Select value={row.cls} onValueChange={(v) => setRow(i, { cls: v })}>
+                          <SelectTrigger className="h-8 text-xs">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {ASSET_CLASSES.map(([v, label]) => (
+                              <SelectItem key={v} value={v}>
+                                {label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <Input
+                        className="h-8 num text-xs"
+                        placeholder="资产标识(如 http://10.10.0.5:8080)"
+                        value={row.title}
+                        onChange={(e) => setRow(i, { title: e.target.value })}
+                      />
+                      <Input
+                        list="nt-parent-ids"
+                        className="h-8 w-36 shrink-0 num text-xs"
+                        placeholder="父标识(可选)"
+                        value={row.parent}
+                        onChange={(e) => setRow(i, { parent: e.target.value })}
+                      />
+                      <datalist id="nt-parent-ids">
+                        {formIDs.map((id) => (
+                          <option key={id} value={id} />
+                        ))}
+                      </datalist>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        title="删除此行"
+                        onClick={() => removeRow(i)}
+                      >
+                        {React.createElement(iconOf("x"), { className: "size-4" })}
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="grid gap-4">
+              <button
+                type="button"
+                className="flex items-center gap-1 self-start text-xs text-muted-foreground transition-colors hover:text-foreground"
+                onClick={() => setAdvOpen((v) => !v)}
+              >
+                {React.createElement(iconOf(advOpen ? "chevronDown" : "chevronRight"), { className: "size-3.5" })}
+                高级选项
+              </button>
+              {advOpen && (
+                <div className="grid gap-4 rounded-xl bg-input-surface/60 p-4">
+                  <div className="grid gap-2">
+                    <FieldLabel htmlFor="nt-timeout">最长跑多久</FieldLabel>
+                    <Input
+                      id="nt-timeout"
+                      inputMode="numeric"
+                      placeholder="秒数，留空不限；到点依序收场"
+                      value={timeout}
+                      onChange={(e) => setTimeoutSecs(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="grid gap-2">
+                    <FieldLabel>拦截规则</FieldLabel>
+                    <div className="flex max-h-56 flex-col gap-2 overflow-y-auto rounded-xl pr-1">
+                      {constraints.length === 0 && (
+                        <div className="text-xs text-muted-foreground">未添加，默认按授权边界与审批门槛执行</div>
+                      )}
+                      {constraints.map((c, i) => (
+                        <div key={i} className="flex flex-col gap-1 rounded-md border border-border/50 p-2">
+                          <div className="flex items-center gap-2">
+                            <Input
+                              className="h-8 flex-1 text-xs"
+                              placeholder="动作(如 上传文件 / 数据读取)"
+                              value={c.action}
+                              onChange={(e) => setConstraint(i, { action: e.target.value })}
+                            />
+                            <div className="w-24 shrink-0">
+                              <Select value={c.disposition} onValueChange={(v) => setConstraint(i, { disposition: v })}>
+                                <SelectTrigger className="h-8 text-xs">
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="forbid">禁止</SelectItem>
+                                  <SelectItem value="allow">允许</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            {c.disposition === "allow" && (
+                              <Input
+                                className="h-8 w-28 shrink-0 text-xs"
+                                inputMode="numeric"
+                                placeholder="次数上限"
+                                value={c.quota}
+                                onChange={(e) => setConstraint(i, { quota: e.target.value })}
+                              />
+                            )}
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              title="删除此规则"
+                              onClick={() => setConstraints((cs) => cs.filter((_, j) => j !== i))}
+                            >
+                              {React.createElement(iconOf("x"), { className: "size-4" })}
+                            </Button>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1">
+                            <span className="text-xs text-muted-foreground">范围:</span>
+                            {formIDs.length === 0 && <span className="text-xs text-muted-foreground">全部资产</span>}
+                            {formIDs.map((t2) => (
+                              <button
+                                key={t2}
+                                type="button"
+                                className={`rounded-full border px-2 py-0.5 num text-xs ${
+                                  c.scope.includes(t2) ? "border-primary/60 bg-primary/15 text-foreground" : "text-muted-foreground"
+                                }`}
+                                onClick={() => toggleScope(i, t2)}
+                              >
+                                {t2}
+                              </button>
+                            ))}
+                            {c.scope.filter((t2) => !formIDs.includes(t2)).length > 0 && (
+                              <span className="text-xs text-status-warning">
+                                {c.scope.filter((t2) => !formIDs.includes(t2)).length} 个范围引用不在资产内,创建时按全部资产处理
+                              </span>
+                            )}
+                          </div>
+                          {c.basis && <div className="text-xs text-muted-foreground">描述原句:{c.basis}</div>}
+                        </div>
+                      ))}
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="w-fit"
+                      onClick={() => setConstraints((cs) => [...cs, emptyConstraint()])}
+                    >
+                      添加拦截规则
+                    </Button>
+                  </div>
+
+                  <div className="grid gap-2">
+                    <FieldLabel htmlFor="nt-anchor">纠偏步数</FieldLabel>
+                    <Input
+                      id="nt-anchor"
+                      inputMode="numeric"
+                      title="每 N 次工具调用重注入一次任务锚"
+                      placeholder="留空取全局默认"
+                      value={anchor}
+                      onChange={(e) => setAnchor(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="grid gap-2">
+                    <label
+                      className="flex items-center gap-2 text-sm"
+                      title="任务连续多轮规划没有任何新发现（新事实、新资产、新发现记录），且距上次新发现超过设定分钟数时，弹窗询问是否收口。两个条件同时满足才提醒；任务照常运行，不会被暂停。"
+                    >
+                      <Checkbox checked={closureOn} onCheckedChange={(v) => setClosureOn(Boolean(v))} />
+                      收口提醒
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Input
+                        inputMode="numeric"
+                        disabled={!closureOn}
+                        title="连续多少轮规划零新发现才算满足条件之一"
+                        placeholder="轮数，留空用默认"
+                        value={closureRounds}
+                        onChange={(e) => setClosureRounds(e.target.value)}
+                      />
+                      <Input
+                        inputMode="numeric"
+                        disabled={!closureOn}
+                        title="距上次新发现超过多少分钟才算满足条件之一"
+                        placeholder="间隔分钟，留空用默认"
+                        value={closureMinutes}
+                        onChange={(e) => setClosureMinutes(e.target.value)}
+                      />
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      轮数 = 连续多少轮规划零新发现；间隔 = 距上次新发现多少分钟。留空用全局默认（Agent 页可改），任务运行中可在工作台改。
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="w-fit"
-            onClick={() => setRows((rs) => [...rs, emptyRow()])}
-          >
-            添加资产
-          </Button>
         </div>
 
         <DialogFooter>

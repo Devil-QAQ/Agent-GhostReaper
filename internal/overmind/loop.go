@@ -32,8 +32,10 @@ import (
 )
 
 // DefaultMaxConcurrentUnits 虫群并发上限默认值(P1-05):单任务同时在
-// 跑的虫群单位至多 3 只。
-const DefaultMaxConcurrentUnits = 3
+// 跑的虫群单位至多 5 只。原 3;2026-10-26 造物主拍板上调——5 并发实测
+// (GLM glm-5.3,持续约 8 分钟满并发)零限流零退避零切备,详见
+// Process/P4进度.md P4-29 调优简记。
+const DefaultMaxConcurrentUnits = 5
 
 // DefaultSettleGraceSeconds 收尾宽限默认值(第四章 §6:在跑单位优雅
 // 收尾 90 秒,超时硬停)。
@@ -107,6 +109,10 @@ type Loop struct {
 	mu       sync.Mutex
 	lastErr  error
 	settling bool // 已进入收尾(停止派发;l.mu 保护——定时器/循环两路写)
+	// settleBy 收尾发起方(l.mu 保护,进入收尾时定格):task_gate(整体
+	// 超时,缺省)/ closure_prompt(收口提醒「结束」键,P4-18)——定终态
+	// 的 detail.settled_by 由此透出,面板区分「已收尾」的两种来路。
+	settleBy string
 	// pauseCh 主宰循环的暂停闩(P2-08 单位控制的主宰循环粒度):nil/已
 	// 关闭 = 运行中,开放 = 暂停中(轮次边界挂起)。l.mu 保护。
 	pauseCh chan struct{}
@@ -155,9 +161,12 @@ type Loop struct {
 	// 到者会把先到者的在途会话误判为崩溃残留而"重启收养");finished
 	// 关闭"静默判定后尾部续派再起新单位"的竞态——完成收口与 schedule
 	// 起单位在同一临界区互斥。
-	flight    int
-	launching map[string]struct{}
-	finished  bool
+	flight       int
+	launching    map[string]struct{}
+	finished     bool
+	planned      bool
+	lastPlanRev  int64
+	planTriggers []int64
 }
 
 // isSettling 是否已进入收尾(l.mu 保护)。
@@ -218,9 +227,20 @@ func (l *Loop) taskBlockedThreshold() int {
 	return DefaultTaskBlockedThreshold
 }
 
+// deterministicErr 是否确定性拒绝(4xx/超长,P4-27 ⑦)——重试与换腿
+// 都无意义,不计任务级故障计数(程序缺陷非模型故障)。
+func deterministicErr(err error) bool {
+	switch failover.Classify(context.Background(), err) {
+	case failover.ClassDeterminant, failover.ClassTooLong:
+		return true
+	}
+	return false
+}
+
 // noteLLMFailure 记一次任务级 LLM 失败(P2-06e):达阈值且未记过时落
 // 黑匣子 task_blocked(带原因);幂等(受阻期间不重复记)。留痕走独立
-// ctx(记账不随任务熔断断链)。
+// ctx(记账不随任务熔断断链)。P4-27 ⑦:确定性拒绝由调用侧判定排除
+// (deterministicErr / RunResult.BlockedClass),本计数只认模型故障。
 func (l *Loop) noteLLMFailure(_ context.Context, reason string) {
 	l.mu.Lock()
 	l.llmFails++
@@ -277,7 +297,7 @@ func (l *Loop) unitLimit() int {
 }
 
 // Run 循环主体:等待事件唤醒,每轮唤醒执行一轮 cycle(拆解→派发→
-// 执行→收割,反复至无新意图);ctx 结束(熔断/暂停)时退出,在飞
+// 执行→收割);ctx 结束(熔断/暂停)时退出,在飞
 // 单位随 ctx 中止后由 unitsWG 收拢。cycle 报告任务完成(全部目标经
 // 仲裁者机器判定达成)时循环退出——任务 goroutine 随之自然让位,
 // Manager 据此落 completed 完成终态(P1-10)。唤醒通道容量 1,处理期间
@@ -299,7 +319,9 @@ func (l *Loop) Run(ctx context.Context, wake <-chan struct{}) {
 	// 任务标记进请求 ctx(P2-06e):拆解会话的模型请求经 failover 链时
 	// 据此应用任务级主备覆盖(虫群侧在执行器 finishUnit 同样挂接)。
 	ctx = failover.WithTask(ctx, l.TaskID)
+	l.mu.Lock()
 	l.runDone = make(chan struct{})
+	l.mu.Unlock()
 	defer close(l.runDone)
 	l.settleKick = make(chan struct{}, 1)
 	l.hbKick = make(chan struct{}, 1)
@@ -486,27 +508,15 @@ func (l *Loop) settleWatch(ctx context.Context) {
 	}
 }
 
-// cycle 一次唤醒的处理:反复"TestClaim 确认判定 → 收割(候选事实转正
-// + 候选声明派反证 + 候选假设收割评估/验证结论迁移)→ Goal 完成判定
-// → LLM 拆解 → 派发 Step → 调度虫群",直到一轮下来全无活动(零裁决、
-// 零派发、零执行、零收割产出)。全部目标经机器判定达成即停派(P1-06
-// 语义),但已派出的在飞工作(含反证/验证 Step)照常收尾——P1-08
-// 时序不变式:反证/验证 Step 靠 ran/judged/收割计数把循环撑到终态,
-// 不得因目标达成而遗弃。真正静默且目标全部达成时返回 true(P1-10:
-// 循环退出,任务进完成终态,completed 由 Manager 记账),拆解失败
-// 不派发不崩溃(留 LastErr),等下一次唤醒重试。ctx 结束时尽快收尾:
-// 不再派发,在飞单位随 ctx 中止。
-// P4-04 增量粒度:收割前置到拆解之前(落地即转正,本轮研判的态势
-// 快照就含最新增量);调度不等批(schedule 起单位即返);全无活动但
-// 仍有在飞单位时等下一只落地(waitLanding)——任一单位结果落地,
-// 本轮即基于增量规划下一步,在途步骤不阻塞对新结果的响应。
+// cycle 一次唤醒只处理一轮。派发与领取不触发下一次规划；新结果、
+// 操作者指令与外部图变化由 Run 的通知唤醒，单位落地无需等批。
 func (l *Loop) cycle(ctx context.Context) bool {
 	// 直驱 cycle 的路径(单测)无 Run 装配:落地通知通道按需建(Run
 	// 正常装配时已建,此处幂等;建先于任何单位起飞,无竞态)。
 	if l.landKick == nil {
 		l.landKick = make(chan struct{}, 1)
 	}
-	for ctx.Err() == nil {
+	if ctx.Err() == nil {
 		// ---- P2-08 轮次边界挂起:冬眠门/循环暂停闩 ----
 		if !l.parkGate(ctx) {
 			return false
@@ -523,10 +533,16 @@ func (l *Loop) cycle(ctx context.Context) bool {
 		if l.isSettling() {
 			return false // 在飞单位由 settle 流程等齐;终局判定由 settle 做
 		}
+		triggers, err := l.planningTriggers(ctx)
+		if err != nil {
+			l.setErr(err)
+			return false
+		}
+		shouldPlan := !l.planned || len(triggers) > 0
 		// ① TestClaim 确认判定:反证轮已到终态的声明交仲裁者机器裁决
 		// (R2/R3:执行成功 ≠ 结论成立,确认只认机器求值)。先于收割与
 		// Goal 判定——目标达成停派时不得把反证中的声明永久搁置。
-		judged, err := l.judgeClaims(ctx)
+		_, err = l.judgeClaims(ctx)
 		if err != nil {
 			l.setErr(err)
 			return false
@@ -540,19 +556,24 @@ func (l *Loop) cycle(ctx context.Context) bool {
 			l.setErr(err)
 			return false
 		}
-		claims, err := HarvestClaims(ctx, l.Store, l.TaskID)
+		_, err = HarvestClaims(ctx, l.Store, l.TaskID)
 		if err != nil {
 			l.setErr(err)
 			return false
 		}
-		hypos, err := l.harvestHypotheses(ctx)
-		if err != nil {
+		if _, err = l.closeHypotheses(ctx); err != nil {
 			l.setErr(err)
 			return false
+		}
+		if shouldPlan {
+			if _, err = l.evaluateHypotheses(ctx); err != nil {
+				l.setErr(err)
+				return false
+			}
 		}
 		// ③ Goal 完成判定:机器终审先于 LLM 拆解(R2——连主宰的
 		// "看起来完成了"都不算数,只有仲裁者对冻结谓词的求值算数)。
-		// 达成即停派,但在飞工作继续收尾(waitLanding 等齐)。
+		// 达成即停派，但在飞工作继续收尾，落地通知后再判完成。
 		done, err := l.judgeGoals(ctx)
 		if err != nil {
 			l.setErr(err)
@@ -560,11 +581,26 @@ func (l *Loop) cycle(ctx context.Context) bool {
 		}
 		dispatched := 0
 		var combinedIDs []string
-		if !done {
+		if !done && shouldPlan {
+			l.planTriggers = triggers
 			reply, evalRev, err := l.decompose(ctx)
 			if err != nil {
 				l.setErr(err)
 				return false
+			}
+			l.planned, l.lastPlanRev = true, evalRev
+			for _, cp := range reply.CancelSteps {
+				if err := l.cancelQueued(ctx, cp, evalRev); err != nil {
+					l.noteGuardReject(fmt.Sprintf("取消步骤 %s 被拒：%v", cp.StepID, err))
+				}
+			}
+			// P4-30 ③ 存量复核:主宰按立判危害门槛复核图上既有判断,
+			// 信息性的标记不纳入报告(程序校验形状并留痕;账本不涂改,
+			// 报告过滤按标记走)。单条被拒不拖垮其余,拒因回流简报。
+			for _, ep := range reply.ReportExclusions {
+				if err := l.applyReportExclusion(ctx, ep, evalRev); err != nil {
+					l.noteGuardReject(fmt.Sprintf("标记判断 %s 不纳入报告被拒：%v", ep.ClaimID, err))
+				}
 			}
 			// 组合发现(五问第③问的产物):多条已确认 Fact 合并为攻击链级
 			// TestClaim,血缘(derived_from × N + about)随创建一批落账;
@@ -578,8 +614,8 @@ func (l *Loop) cycle(ctx context.Context) bool {
 					chainLinksOf(cp.Chain), cp.AssetID, cp.Vulnclass, cp.Alternatives)
 				if err != nil {
 					if ctx.Err() == nil {
-						l.setErr(fmt.Errorf("overmind: 组合声明: %w", err))
-						l.noteGuardReject(fmt.Sprintf("组合声明「%s」被拒: %v", cp.Statement, err))
+						l.setErr(fmt.Errorf("overmind: 组合判断: %w", err))
+						l.noteGuardReject(fmt.Sprintf("组合判断「%s」被拒: %v", cp.Statement, err))
 					}
 					continue
 				}
@@ -591,7 +627,10 @@ func (l *Loop) cycle(ctx context.Context) bool {
 					// 不拖垮其余意图;失败如实留在 LastErr,拒因回流进简报
 					//(P2-06c,同上)。
 					if ctx.Err() == nil {
-						l.setErr(err)
+						var full *QueueFullError
+						if !errors.As(err, &full) {
+							l.setErr(err)
+						}
 						l.noteGuardReject(fmt.Sprintf("意图「%s」被拒: %v", p.Intent, err))
 					}
 					continue
@@ -610,7 +649,7 @@ func (l *Loop) cycle(ctx context.Context) bool {
 				a := reply.Assessment
 				rec := rings.OvermindRecord{
 					Type: rings.OvermindRecAssessment, SessionID: reply.sessionID,
-					EvaluatedRev: evalRev, Dispatched: dispatched, Combined: combinedIDs,
+					EvaluatedRev: evalRev, Dispatched: dispatched, Combined: combinedIDs, Queue: reply.queue, TriggerRevisions: triggers,
 					QAccess:      strings.TrimSpace(a.QAccess),
 					QPrivilege:   strings.TrimSpace(a.QPrivilege),
 					QCombination: strings.TrimSpace(a.QCombination),
@@ -621,7 +660,11 @@ func (l *Loop) cycle(ctx context.Context) bool {
 				if _, err := l.Store.Append(ctx, l.TaskID, rings.Event{
 					Kind: rings.EventOvermindRecord, Actor: ActorOvermind, Payload: rec,
 				}); err != nil {
-					l.setErr(fmt.Errorf("overmind: 研判记录入账: %w", err))
+					l.setErr(fmt.Errorf("overmind: 规划记录写入: %w", err))
+				} else {
+					// P4-18:一轮研判刚落账,评估收口信号(连续零新发现
+					// 双条件;只写提醒不动任务,见 closure.go)。
+					l.evalClosure(ctx)
 				}
 			}
 			// 组合声明的反证即时派发(P4-04 收割前置的补位):前置收割发生
@@ -629,82 +672,33 @@ func (l *Loop) cycle(ctx context.Context) bool {
 			// 本轮立即补收割,反证照常进本轮调度,不得遗弃到下一次外部
 			// 唤醒(与虫群候选声明的派发节奏对齐)。
 			if len(combinedIDs) > 0 {
-				if c2, err := HarvestClaims(ctx, l.Store, l.TaskID); err != nil {
+				if _, err := HarvestClaims(ctx, l.Store, l.TaskID); err != nil {
 					l.setErr(err)
-				} else {
-					claims = c2
 				}
 			}
 		}
 		// ④ 调度(P4-04 不等批):本轮派发的意图与图上遗留的 dispatched
 		// 步骤(如收割派出的反证 Step,目标达成后亦照常执行)一并启动
 		// 单位,启动即返;单位生命周期独立于本轮迭代,落地通知见 ⑤。
-		ran := l.schedule(ctx)
+
+		l.schedule(ctx)
 		if ctx.Err() != nil {
 			return false
 		}
-		// ⑤ 静默判定:本轮零裁决、零派发、零执行、零收割产出 → 仍有
-		// 在飞单位时等下一只落地(增量响应点,不空转烧拆解);真正无
-		// 在飞才回静默。拆解产物全灭时立即重拆解只会拿到同样的坏产物,
-		// 形成零进展热循环(每圈烧一次 LLM 调用)——留 LastErr 等下一次
-		// 唤醒。
-		if judged == 0 && dispatched == 0 && ran == 0 && len(claims.Dispatched) == 0 && hypos == 0 {
-			if l.waitLanding(ctx) {
-				continue // 有新落地(或收尾/心跳信号):回顶收割→拆解增量轮
-			}
-			// 静默点复判目标:收割可能在本次迭代内补齐了最后的达成证据
-			// (如候选事实转正),完成不必等下一次唤醒迟到。此刻无任何
-			// 在飞工作,全部达成即任务完成(P1-10)。
-			settled, err := l.judgeGoals(ctx)
-			if err != nil {
-				l.setErr(err)
-				return false
-			}
-			// 完成收口(P4-04):与调度起单位同临界区互斥——目标全达成
-			// 且在飞为零时锁定完成(finished 后调度不再起新单位,关
-			// "判定后尾部续派"竞态);竞态下又有单位起飞则回迭代顶。
-			l.mu.Lock()
-			quiet := l.flight == 0 && !l.finished
-			if quiet && settled {
-				l.finished = true
-			}
-			l.mu.Unlock()
-			if !quiet {
-				continue
-			}
-			return settled
+		settled, err := l.judgeGoals(ctx)
+		if err != nil {
+			l.setErr(err)
+			return false
 		}
+		l.mu.Lock()
+		quiet := l.flight == 0 && !l.finished
+		if quiet && settled {
+			l.finished = true
+		}
+		l.mu.Unlock()
+		return quiet && settled
 	}
 	return false
-}
-
-// waitLanding 等待下一只单位落地(P4-04 增量响应):true = 有新落地
-// (或收尾线/心跳信号,回迭代顶处理);false = 无在飞单位且无未消费
-// 的落地通知——静默,回 Run 等外部唤醒。落地通知容量 1 合并:同窗
-// 多只落地并成一轮,轮内收割全可见。等待期间任务总闸到点
-// (settleKick)与心跳预筛发现(hbKick)同样打断——迭代顶的检查自会
-// 路由进收尾/复查。
-func (l *Loop) waitLanding(ctx context.Context) bool {
-	if l.inFlight() == 0 {
-		// 计数已清零但通知未消费(落地写账晚于本轮收割的竞态):补一轮,
-		// 下一迭代的前置收割会处理其账本写入。
-		select {
-		case <-l.landKick:
-			return true
-		default:
-		}
-		return false
-	}
-	select {
-	case <-ctx.Done():
-		return false
-	case <-l.settleKick:
-		return true // 顶部收尾检查接管
-	case <-l.hbKick:
-		return true // 心跳发现:回顶复查
-	case <-l.landKick:
-		return true
-	}
 }
 
 // inFlight 在飞单位数快照(l.mu 保护)。
@@ -753,7 +747,7 @@ func (l *Loop) judgeGoals(ctx context.Context) (bool, error) {
 			rings.Event{Kind: rings.EventNodeStateChanged, Actor: arbiter.ActorArbiter,
 				Payload: rings.NodeStateChanged{NodeID: g.ID, Status: GoalStatusAchieved}},
 		); err != nil {
-			return false, fmt.Errorf("overmind: 目标 %s 裁决落账: %w", g.ID, err)
+			return false, fmt.Errorf("overmind: 目标 %s 判定落账: %w", g.ID, err)
 		}
 	}
 	return !pending, nil
@@ -771,7 +765,7 @@ func (l *Loop) judgeGoals(ctx context.Context) (bool, error) {
 func (l *Loop) judgeClaims(ctx context.Context) (int, error) {
 	claims, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeTestClaim, rings.TestClaimTesting)
 	if err != nil {
-		return 0, fmt.Errorf("overmind: 判定: 查声明: %w", err)
+		return 0, fmt.Errorf("overmind: 判定: 查判断: %w", err)
 	}
 	judged := 0
 	for _, c := range claims {
@@ -780,7 +774,7 @@ func (l *Loop) judgeClaims(ctx context.Context) (int, error) {
 			continue // 当前反证轮未结束,留待下轮
 		}
 		if err != nil {
-			l.setErr(fmt.Errorf("overmind: 判定声明 %s: %w", c.ID, err))
+			l.setErr(fmt.Errorf("overmind: 判定判断 %s: %w", c.ID, err))
 			continue
 		}
 		// 落账次序:裁决 → (确认时)收割定稿 → 状态迁移,同一批事务。
@@ -795,7 +789,7 @@ func (l *Loop) judgeClaims(ctx context.Context) (int, error) {
 			// 确定性描述,不阻塞裁决);重开再确认随新定稿重新生成。
 			repro, rerr := AssembleRepro(ctx, l.Store, l.TaskID, c.ID, j.Severity)
 			if rerr != nil {
-				l.setErr(fmt.Errorf("overmind: 定稿声明 %s: %w", c.ID, rerr))
+				l.setErr(fmt.Errorf("overmind: 定稿判断 %s: %w", c.ID, rerr))
 			} else {
 				l.genReproDescs(ctx, c.ID, repro)
 				// P4-13:来龙去脉叙述同批生成冻结(链上事实包 → 模型人话,
@@ -809,7 +803,7 @@ func (l *Loop) judgeClaims(ctx context.Context) (int, error) {
 			Kind: rings.EventNodeStateChanged, Actor: arbiter.ActorArbiter,
 			Payload: rings.NodeStateChanged{NodeID: c.ID, Status: j.Status}})
 		if _, err := l.Store.Append(ctx, l.TaskID, events...); err != nil {
-			return judged, fmt.Errorf("overmind: 声明 %s 裁决落账: %w", c.ID, err)
+			return judged, fmt.Errorf("overmind: 判断 %s 判定落账: %w", c.ID, err)
 		}
 		judged++
 	}
@@ -874,10 +868,13 @@ func (a *AssessmentPlan) hasContent() bool {
 }
 
 type decomposeReply struct {
-	Assessment     *AssessmentPlan     `json:"assessment"`
-	NewIntents     []IntentPlan        `json:"new_intents"`
-	CombinedClaims []CombinedClaimPlan `json:"combined_claims"`
-	Advices        []adviceVerdictPlan `json:"advices"` // 待裁决建议的裁决(P2-07 纳谏)
+	CancelSteps    []cancelPlan `json:"cancel_steps"`
+	queue          *QueueWatermark
+	Assessment     *AssessmentPlan        `json:"assessment"`
+	NewIntents     []IntentPlan           `json:"new_intents"`
+	CombinedClaims []CombinedClaimPlan    `json:"combined_claims"`
+	Advices        []adviceVerdictPlan    `json:"advices"` // 待裁决建议的裁决(P2-07 纳谏)
+	ReportExclusions []reportExclusionPlan `json:"report_exclusions"` // 信息性判断复核标记(P4-30 ③)
 
 	sessionID string // 研判会话锚点(研判记录下钻转录用;不参与 JSON)
 }
@@ -889,51 +886,56 @@ const SettingKeyPromptOvermind = "prompt.overmind.editable"
 // overmindEditableDefault 主宰拆解基线 A 段默认正文(角色与研判总则;
 // 可编辑)。五问与拆解纪律、输出契约是代码固定段(见下),编辑正文
 // 删不掉。
-const overmindEditableDefault = `你是渗透测试任务的主宰(Overmind),agents 内部唯一计划权威,负责态势研判与意图拆解:先按标准五问研判态势,再把当前目标拆解为下一步交给虫群执行的意图(Step)。你的判断只来自态势快照中的图上事实,不持有私有记忆;拆解产物会被入口校验,引用不存在的资产或链上未确认的环节会被整批拒收。`
+const overmindEditableDefault = `你是渗透测试任务的主宰(Overmind),agents 内部唯一计划权威,负责态势规划与意图拆解:先按标准五问评估态势,再把当前目标拆解为下一步交给虫群执行的意图(Step)。你的结论只来自态势快照中的图上事实,不持有私有记忆;拆解产物会被入口校验,引用不存在的资产或链上未确认的环节会被整批拒收。`
 
 // overmindDisciplineRules 主宰基线 B 段(代码固定,研判与拆解纪律):
 // P1-05 最简起步,P1-07 补四级分类细则,P2-04 补预算接力规则,P2-06
 // 五问驱动研判与派发策略,P2-06d 补 §11 语义细则(意图数量硬底线/
 // 多样性条款/复核上限/重派判定树/收尾词——防停摆与防乱派双向钉住、
 // 防同方向复读)。
-const overmindDisciplineRules = `态势研判标准五问(逐问给一句结论,写入 assessment;该问本轮无可研判项就写"无",不要编造;五问是起点不是上限,五问之外的重要研判写入 assessment.note):
+const overmindDisciplineRules = `态势规划标准五问(逐问给一句结论,写入 assessment;该问本轮无可评估项就写"无",不要编造;五问是起点不是上限,五问之外的重要发现写入 assessment.note):
 1. 新身份能访问哪些已有资产?(新凭据/新会话/新入口对已有资产的可达性)
 2. 新权限是否改变其他漏洞的影响?(原有发现在新权限下的实际影响是否变化)
-3. 两条单独影响有限的线索是否组合成新的边界问题?(组合成攻击链时用 combined_claims 提交组合声明)
+3. 两条单独影响有限的线索是否组合成新的边界问题?(组合成攻击链时用 combined_claims 提交组合判断)
 4. 新的可达关系是否解锁之前受阻的步骤?(exhausted/failed 的步骤是否值得换路重派)
-5. 新证据是否推翻旧判断?(已有事实/声明是否与新证据矛盾)
+5. 新证据是否推翻旧结论?(已有事实/判断是否与新证据矛盾)
 拆解规则:
 1. 只依据态势快照中真实存在的资产与已确认事实派发意图;意图必须具体、可执行、可观察。
 2. 不重复派发与现有步骤(任何状态)相同或等价的意图。
-3. 无值得新派发的意图时输出空列表,不要为了输出而编造意图——研判后确无工作时 0 条意图是完全正常的结果(收尾词;但受第 10 条硬底线约束)。
+3. 无值得新派发的意图时输出空列表,不要为了输出而编造意图——规划后确无工作时 0 条意图是完全正常的结果(收尾词;但受第 10 条硬底线约束)。
 4. 每条意图必须定动作分级,分档标准按动作对目标环境的因果方向从严选取:
    - 只读探测:只获取信息,不发送攻击载荷、不改变目标任何数据与状态,重复执行结果一致(端口判定、banner 抓取、GET 拉取页面、DNS/公开信息收集)。
    - 主动测试:向目标发送测试载荷检验响应(注入探测、目录枚举、弱口令尝试、畸形请求);发了非正常业务流量但不利用成功结果、不落地持久物。
    - 利用深入:以利用已确认弱点为前提,实际取得未授权访问或数据(读敏感文件、无副作用命令回显、凭据试用、横向探测);仍不修改目标状态。
-   - 修改与持久化:改变目标状态或留下长期存在物(写文件、上传 webshell、建账号、改配置、删数据);执行时逐次弹门等待造物主批准。
-5. 危害声明(harm_class):意图属数据销毁(data_destruction)或拒绝服务类(denial_of_service)时必须声明——此类动作无论审批门槛多宽都直接拒绝,仅当造物主在面板研判后放行才执行;普通意图留空。
+   - 修改与持久化:改变目标状态或留下长期存在物(写文件、上传 webshell、建账号、改配置、删数据);执行时逐次需批准,等待造物主批准。
+5. 危害申报(harm_class):意图属数据销毁(data_destruction)或拒绝服务类(denial_of_service)时必须申报——此类动作无论审批门槛多宽都直接拒绝,仅当造物主在面板规划后放行才执行;普通意图留空。
 6. 预算耗尽(exhausted)的步骤是暂停接力,不是失败:其单位撞预算前已把发现写回图(见"预算耗尽步骤"轨迹)。同一条工作线值得继续时,派"接着上次进度继续"的意图(接力单位在任务包里能看到前序尝试与已确认事实,从暂停点续跑);不值得继续或方向应换时,按态势另派。接续意图要写明从哪条轨迹续起。
 7. 每条意图可带优先级(high|normal|low,缺省 normal)与前置步骤(depends_on,Step ID 清单;前置完成后才执行——只在后一步必须用到前一步产出时才声明,不设多余依赖)。
-8. 被审批拒绝终止(approval_denied)的步骤:拒绝原因见"审批拒绝"节——被拒单位不得换法重试;研判后确有必要再走该方向时,须依据新的证据或方法另派意图,不得原样重派。
-9. 组合声明(combined_claims):仅当两条及以上已确认事实组合出新的边界问题时提交——存在性与影响面分开声明,链条逐环节引用已确认事实 ID 并注明环节角色(如 入口/凭据/横移/目标),组合声明同样要经受独立反证,不得自评成立。
+8. 被审批拒绝终止(approval_denied)的步骤:拒绝原因见"审批拒绝"节——被拒单位不得换法重试;规划后确有必要再走该方向时,须依据新的证据或方法另派意图,不得原样重派。
+9. 组合判断(combined_claims):仅当两条及以上已确认事实组合出新的边界问题时提交——存在性与影响面分开申报,链条逐环节引用已确认事实 ID 并注明环节角色(如 入口/凭据/横移/目标),组合判断同样要经受独立反证,不得自评成立。
 10. 意图数量硬底线:图上无未完成步骤(dispatched/running)且仍有未达成目标时,必须派发至少 1 条意图;输出 0 条意图仅在两种情形正当——①在等在跑单位产出(图上有未完成步骤)②全部目标已达成。其余情形的 0 意图是停摆,不许。目标未达成且图上无在跑/待执行工作时,本轮必须产出至少一个新方向(新模块/新角度/更深一层),禁止重复已确认事实与已完成步骤。
 11. 路线多样性:探索期理想同时维持 2~3 条机理不同的路线(不同入口、不同技术路径)并存,防单点钻牛角尖;多样性永远服从 RoE 与优先级,不为多而多。
 12. 复核上限:同一否定方向至多复核一次——复核后仍是否定,尊重结论,不再向该方向派发;后续新证据出现时走 TestClaim 重开与 Hypothesis 图上留档机制兜底,不靠重复派发。
-13. 重派判定树:停下的步骤按停法分别处置——done:收割产出后按产出研判;exhausted:读"预算耗尽步骤"执行轨迹的真实进度(轮数、工具实调、产出物)决定接力或换向;blocked(受阻):按受阻原因换路绕行或换前提,仅当阻塞已解除才回原路。依据一律是轨迹真实进度,不是状态措辞。
-14. 待裁决建议(纳谏):快照「待裁决建议」区每条都必须在 advices 里裁决——adopt=true 须在本轮意图中体现或在理由中写明何时体现;adopt=false 的理由必须基于图上事实(不空泛)。牧者的建议是研判输入,不是命令;裁决后规划随之改变,建议状态随之更新。`
+13. 重派判定树:停下的步骤按停法分别处置——done:检查归纳产出后按产出规划;exhausted:读"预算耗尽步骤"执行轨迹的真实进度(轮数、工具实调、产出物)决定接力或换向;blocked(受阻):按受阻原因换路绕行或换前提,仅当阻塞已解除才回原路。依据一律是轨迹真实进度,不是状态措辞。
+14. 待判定建议(纳谏):快照「待判定建议」区每条都必须在 advices 里判定——adopt=true 须在本轮意图中体现或在理由中写明何时体现;adopt=false 的理由必须基于图上事实(不空泛)。牧者的建议是规划输入,不是命令;判定后规划随之改变,建议状态随之更新。
+15. 本机回环(127.0.0.1 / localhost / ::1)与镜等测试环境自身设施不是目标攻击面:不对其派发探测或验证意图,也不把虫群对它们的观察当作发现规划后续;虫群的相关提交会被入口拒收并记为环境观察。任务资产清单内的目标(含操作者声明的本机测试靶标)不受此限。
+16. 队列治理:先读队列水位，等前置步骤也预留容量，避免前置完成时集中转排队突破上限。普通探索最多提交本轮还可新增数；容量满是正常等待，不是模型故障，不重复提交。反证、假设验证与操作者急活由各自入口豁免。每轮审视全部未领取步骤，结合最新证据取消重复、过时、前提失败的普通探索；用 cancel_steps 给步骤 ID、具体理由与图上依据 ID。反证、假设验证、急活及它们的关键前置保留，程序会复检并连带取消普通后继；不取消正在执行的步骤。刚派发新步骤不是继续规划的依据；一只单位结果落地就处理新结果，不等整批。
+17. 立判危害门槛:` + swarm.ClaimHarmGate + `(虫群的漏洞提交与你的组合立判同守此门)。对图上按旧口径已立的信息性判断(纯前置条件/环境特性/无害观察,含已确认的),用 report_exclusions 提交 {claim_id, reason} 标记"不纳入报告"——理由基于判断内容与影响面证据,写明为何无直接危害;已标记的不重复标记;无可标记时省略该字段。报告只收已确认且非信息性判断。`
 
 // overmindOutputContract 主宰基线 C 段(代码固定,输出规约):JSON
 // 契约是机器解析接口,配置不可移除。P4-11 ①:契约内带 intent 等结构化
 // 展示字段的文风收口与正反样例(只管新生成,不改写图上已有步骤)。
-const overmindOutputContract = `只输出 JSON:{"assessment":{"q_access":"…","q_privilege":"…","q_combination":"…","q_unlock":"…","q_overturn":"…","note":"…"},"new_intents":[{"intent":"一句话意图","expected_observation":"预期观察","action_level":"只读探测|主动测试|利用深入|修改与持久化","harm_class":"data_destruction|denial_of_service(仅危害类意图,普通意图省略)","covers":["资产ID"],"priority":"high|normal|low","depends_on":["StepID"]}],"combined_claims":[{"statement":"存在性声明(攻击链整体效果)","impact":"影响面声明","rationale":"组合理由","chain":[{"fact_id":"f-…","role":"入口"}],"asset_id":"资产ID","vulnclass":"漏洞类型","alternatives":["竞争性替代解释"]}],"advices":[{"id":"av-…","adopt":true,"reason":"裁决理由(不采纳须基于图上事实)"}]}
-(advices 仅在快照存在待裁决建议时输出,无则省略该字段。)
-字段文风(intent 与声明是面板高频展示字段,生成时收口;只管新写,不改写图上已有步骤):
+const overmindOutputContract = `只输出 JSON:{"assessment":{"q_access":"…","q_privilege":"…","q_combination":"…","q_unlock":"…","q_overturn":"…","note":"…"},"new_intents":[{"intent":"一句话意图","expected_observation":"预期观察","action_level":"只读探测|主动测试|利用深入|修改与持久化","harm_class":"data_destruction|denial_of_service(仅危害类意图,普通意图省略)","covers":["资产ID"],"priority":"high|normal|low","depends_on":["StepID"]}],"combined_claims":[{"statement":"存在性判断(攻击链整体效果)","impact":"影响面判断","rationale":"组合理由","chain":[{"fact_id":"f-…","role":"入口"}],"asset_id":"资产ID","vulnclass":"漏洞类型","alternatives":["其他可能原因(每条一句话)"]}],"advices":[{"id":"av-…","adopt":true,"reason":"判定理由(不采纳须基于图上事实)"}]}
+可选取消字段:"cancel_steps":[{"step_id":"sN","reason":"最新证据表明重复、过时或前提已失败的具体理由","evidence":["图上依据节点ID"]}]。取消后仍保留节点与轨迹；没有应取消步骤时输出空列表。
+可选复核字段:"report_exclusions":[{"claim_id":"tc-…","reason":"该判断为纯信息性观察(无直接危害)的具体理由"}]。标记该判断不纳入报告；已标记过的不重复标记，无可标记时省略该字段。
+(advices 仅在快照存在待判定建议时输出,无则省略该字段。)
+字段文风(intent 与判断是面板高频展示字段,生成时收口;只管新写,不改写图上已有步骤):
 - intent:资产+手法+目标的点式短句,` + swarm.StructuredFieldStyle + `;写不下就收窄定位——点一个代表路径加"等 N 个",不铺枚举清单;命令与参数留给执行,不进意图。
   正例:对 10.0.0.5:8080 做目录枚举,找未授权入口
   正例(长定位收窄):对 4330 根目录直取 20 个常见文件名(README.md 等),确认根外文件是否暴露
   反例:针对目标 Web 应用开展全面深入的安全测试,利用多种手段验证潜在漏洞的存在性并评估影响范围(无定位、无数字、长而空)
   反例(铺清单):对 4330 根目录直取 20 个常见顶层文件名(如 README.md、LICENSE、CHANGELOG.md、site.log、key、.tok),确认根外敏感文件是否被静态暴露
-- statement / impact(combined_claims,与虫群声明提交同款):一句话写明资产与端口/路径定位要素,` + swarm.StructuredFieldStyle + `。
+- statement / impact(combined_claims,与虫群判断提交同款):一句话写明资产与端口/路径定位要素,` + swarm.StructuredFieldStyle + `。
 不要输出 JSON 以外的任何内容。`
 
 // OvermindPromptSpec 主宰拆解基线三段式规约(P2-06d,§11):A 可编辑
@@ -988,11 +990,16 @@ func (l *Loop) nextSessionID(prefix string) string {
 // 四类记录分工)。返回研判所读的账本版本(evaluatedRev)——研判记录
 // 的锚点兼下一轮变化集的计算起点。
 func (l *Loop) decompose(ctx context.Context) (*decomposeReply, int64, error) {
-	snapshot, rev, err := l.snapshot(ctx)
+	snapshot, rev, water, err := l.snapshotDetails(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
 	sid := l.nextSessionID("d")
+	if _, err := l.Store.Append(ctx, l.TaskID, rings.Event{Kind: rings.EventOvermindRecord, Actor: ActorOvermind,
+		Payload: rings.OvermindRecord{Type: rings.OvermindRecPlanning, SessionID: sid, EvaluatedRev: rev,
+			TriggerRevisions: l.planTriggers, Bootstrap: !l.planned, Queue: &water}}); err != nil {
+		return nil, rev, err
+	}
 	opts := agentcore.Options{
 		// 输出上限跟模型库配置走(P3-14a a):剥掉本地 MaxTokens——
 		// failover 链的 capTokensProvider 在库配置了上限时压入配置值,
@@ -1018,7 +1025,9 @@ func (l *Loop) decompose(ctx context.Context) (*decomposeReply, int64, error) {
 	var term *harness.Terminal
 	for ev, err := range sess.Prompt(ctx, snapshot) {
 		if err != nil {
-			l.noteLLMFailure(ctx, err.Error())
+			if !deterministicErr(err) {
+				l.noteLLMFailure(ctx, err.Error())
+			}
 			return nil, rev, fmt.Errorf("overmind: 拆解会话: %w", err)
 		}
 		if ev.Kind == harness.KindUsage && ev.Usage != nil {
@@ -1028,7 +1037,9 @@ func (l *Loop) decompose(ctx context.Context) (*decomposeReply, int64, error) {
 		}
 		if ev.Kind == harness.KindResult && ev.Terminal != nil {
 			if ev.Terminal.Err != nil {
-				l.noteLLMFailure(ctx, ev.Terminal.Err.Error())
+				if !deterministicErr(ev.Terminal.Err) {
+					l.noteLLMFailure(ctx, ev.Terminal.Err.Error())
+				}
 				return nil, rev, fmt.Errorf("overmind: 拆解终止: %w", ev.Terminal.Err)
 			}
 			term = ev.Terminal
@@ -1043,6 +1054,7 @@ func (l *Loop) decompose(ctx context.Context) (*decomposeReply, int64, error) {
 		return nil, rev, err
 	}
 	reply.sessionID = sid
+	reply.queue = &water
 	return reply, rev, nil
 }
 
@@ -1070,7 +1082,8 @@ func parseIntents(text string) (*decomposeReply, error) {
 	if err := json.Unmarshal([]byte(body), &r); err != nil {
 		return nil, fmt.Errorf("overmind: 拆解回复不是合法 JSON: %w", err)
 	}
-	out := &decomposeReply{Assessment: r.Assessment, CombinedClaims: r.CombinedClaims, Advices: r.Advices}
+	out := &decomposeReply{Assessment: r.Assessment, CombinedClaims: r.CombinedClaims, Advices: r.Advices,
+		CancelSteps: r.CancelSteps, ReportExclusions: r.ReportExclusions}
 	for _, p := range r.NewIntents {
 		if strings.TrimSpace(p.Intent) == "" {
 			continue
@@ -1109,7 +1122,7 @@ func parseDecomposeTerminal(term *harness.Terminal) (*decomposeReply, error) {
 		}
 	}
 	if term == nil {
-		return nil, fmt.Errorf("overmind: 拆解无终态")
+		return nil, fmt.Errorf("overmind: 拆解未结束")
 	}
 	return parseIntents(term.Text)
 }
@@ -1137,56 +1150,81 @@ func (p stripTokensProvider) Stream(ctx context.Context, req llm.CompletionReque
 // 唯一真相源),不持有私有记忆。返回快照文本与所读账本版本(研判
 // 记录的锚点)。
 func (l *Loop) snapshot(ctx context.Context) (string, int64, error) {
+	text, rev, _, err := l.snapshotDetails(ctx)
+	return text, rev, err
+}
+
+func (l *Loop) snapshotDetails(ctx context.Context) (string, int64, QueueWatermark, error) {
+	for ctx.Err() == nil {
+		text, rev, water, err := l.buildSnapshot(ctx)
+		if err != nil {
+			return "", 0, QueueWatermark{}, err
+		}
+		now, err := l.Store.CurrentRevision(ctx, l.TaskID)
+		if err != nil {
+			return "", 0, QueueWatermark{}, err
+		}
+		if now == rev {
+			return text, rev, water, nil
+		}
+	}
+	return "", 0, QueueWatermark{}, ctx.Err()
+}
+
+func (l *Loop) buildSnapshot(ctx context.Context) (string, int64, QueueWatermark, error) {
 	rev, err := l.Store.CurrentRevision(ctx, l.TaskID)
 	if err != nil {
-		return "", 0, fmt.Errorf("overmind: 查图版本: %w", err)
+		return "", 0, QueueWatermark{}, fmt.Errorf("overmind: 查图版本: %w", err)
 	}
 	goals, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeGoal, "")
 	if err != nil {
-		return "", 0, fmt.Errorf("overmind: 查目标: %w", err)
+		return "", 0, QueueWatermark{}, fmt.Errorf("overmind: 查目标: %w", err)
 	}
 	steps, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeStep, "")
 	if err != nil {
-		return "", 0, fmt.Errorf("overmind: 查步骤: %w", err)
+		return "", 0, QueueWatermark{}, fmt.Errorf("overmind: 查步骤: %w", err)
 	}
 	facts, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeFact, "confirmed")
 	if err != nil {
-		return "", 0, fmt.Errorf("overmind: 查事实: %w", err)
+		return "", 0, QueueWatermark{}, fmt.Errorf("overmind: 查事实: %w", err)
 	}
 	hyps, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeHypothesis, "")
 	if err != nil {
-		return "", 0, fmt.Errorf("overmind: 查假设: %w", err)
+		return "", 0, QueueWatermark{}, fmt.Errorf("overmind: 查假设: %w", err)
 	}
 	claims, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeTestClaim, "")
 	if err != nil {
-		return "", 0, fmt.Errorf("overmind: 查漏洞声明: %w", err)
+		return "", 0, QueueWatermark{}, fmt.Errorf("overmind: 查漏洞判断: %w", err)
 	}
 	ag, err := l.Store.AssetGraph(ctx, l.TaskID)
 	if err != nil {
-		return "", 0, fmt.Errorf("overmind: 查资产图: %w", err)
+		return "", 0, QueueWatermark{}, fmt.Errorf("overmind: 查资产图: %w", err)
 	}
 	abouts, err := l.Store.Edges(ctx, l.TaskID, rings.EdgeAbout)
 	if err != nil {
-		return "", 0, fmt.Errorf("overmind: 查资产锚点: %w", err)
+		return "", 0, QueueWatermark{}, fmt.Errorf("overmind: 查资产锚点: %w", err)
 	}
 	depEdges, err := l.Store.Edges(ctx, l.TaskID, rings.EdgeDependsOn)
 	if err != nil {
-		return "", 0, fmt.Errorf("overmind: 查依赖边: %w", err)
+		return "", 0, QueueWatermark{}, fmt.Errorf("overmind: 查依赖边: %w", err)
 	}
 
+	water := QueueWatermarkOf(steps, depEdges, QueueLimit(ctx, l.Store))
 	var b strings.Builder
 	fmt.Fprintf(&b, "【态势快照】\n图版本: %d\n", rev)
 
+	fmt.Fprintf(&b, "\n队列水位：%s\n", queueLine(water))
+	b.WriteString("反证优先领取下一个空位；等正在执行单位释放名额，不能保证立即起飞。\n")
 	// 自上轮研判以来的变化(P2-06 五问的输入):从最近一次研判记录的
 	// EvaluatedRev 之后扫事件——新增资产/新确认事实(候选转正)/新声明
 	// 与新假设/步骤状态迁移。首轮(无研判记录)如实标注。
-	b.WriteString("\n自上轮研判以来的变化(五问审视对象):\n")
+	b.WriteString("\n自上轮规划以来的变化(五问审视对象):\n")
 	if lines := l.deltaSinceLastAssessment(ctx); len(lines) > 0 {
 		for _, line := range lines {
 			fmt.Fprintf(&b, "  - %s\n", line)
 		}
 	} else {
-		b.WriteString("  (无;首轮或上轮研判后账本无新变化)\n")
+		b.WriteString("  (无;首轮或上轮规划后账本无新变化)\n")
 	}
 
 	b.WriteString("\n目标:\n")
@@ -1249,7 +1287,7 @@ func (l *Loop) snapshot(ctx context.Context) (string, int64, error) {
 	// 原因——主宰收割可见原因并重新研判(被拒单位不得换法重试;确有
 	// 必要再走该方向须凭新证据/新方法另派)。含造物主研判后放行的记录。
 	denials := l.denialBriefs(ctx)
-	b.WriteString("\n审批拒绝(拒绝线自动拒绝/面板拒绝;被拒单位已熔断,不得换法重试):\n")
+	b.WriteString("\n审批拒绝(拒绝线自动拒绝/面板拒绝;被拒单位已终止,不得换法重试):\n")
 	if len(denials) == 0 {
 		b.WriteString("  (无)\n")
 	}
@@ -1313,7 +1351,7 @@ func (l *Loop) snapshot(ctx context.Context) (string, int64, error) {
 		b.WriteString("\n")
 	}
 
-	b.WriteString("\n假设(虫群直觉回流):\n")
+	b.WriteString("\n假设(虫群直觉回传):\n")
 	if len(hyps) == 0 {
 		b.WriteString("  (无)\n")
 	}
@@ -1321,17 +1359,30 @@ func (l *Loop) snapshot(ctx context.Context) (string, int64, error) {
 		fmt.Fprintf(&b, "  - %s [%s] %s\n", h.ID, h.Status, h.Title)
 	}
 
-	b.WriteString("\n发现(漏洞声明,可证伪):\n")
+	// P4-30 ③:判断行带影响面与定稿级别(按锚复核的输入)、已标记
+	// 不纳入报告的如实标注(不重复标记)。
+	sevOf, marked := l.claimReportState(ctx)
+	b.WriteString("\n发现(漏洞判断):\n")
 	if len(claims) == 0 {
 		b.WriteString("  (无)\n")
 	}
 	for _, c := range claims {
-		fmt.Fprintf(&b, "  - %s [%s] %s\n", c.ID, c.Status, c.Title)
+		fmt.Fprintf(&b, "  - %s [%s] %s", c.ID, c.Status, c.Title)
+		if imp, _ := c.Detail["impact"].(string); imp != "" {
+			fmt.Fprintf(&b, "(影响面: %s)", clipLine(imp, 60))
+		}
+		if sev := sevOf[c.ID]; sev != "" {
+			fmt.Fprintf(&b, " [级别 %s]", sev)
+		}
+		if marked[c.ID] {
+			b.WriteString(" [已标记不纳入报告]")
+		}
+		b.WriteString("\n")
 	}
 
 	// 待裁决建议(P2-07 纳谏):牧者代造物主提交的方向性建议,逐条
 	// 裁决后状态改变(adopted|rejected 带理由);裁决规则见拆解规则 14。
-	b.WriteString("\n待裁决建议(牧者代造物主提交;逐条在 advices 裁决):\n")
+	b.WriteString("\n待判定建议(牧者代造物主提交;逐条在 advices 判定):\n")
 	if advices, aerr := l.pendingAdvices(ctx); aerr != nil || len(advices) == 0 {
 		if aerr != nil {
 			b.WriteString("  (读取失败)\n")
@@ -1344,9 +1395,35 @@ func (l *Loop) snapshot(ctx context.Context) (string, int64, error) {
 		}
 	}
 
-	b.WriteString("\n【拆解指令】\n先按五问研判态势(assessment 逐问一句结论),再依据以上态势输出下一步要派发的意图列表与组合声明,只输出 JSON;" +
+	b.WriteString("\n【拆解指令】\n先按五问评估态势(assessment 逐问一句结论),再依据以上态势输出下一步要派发的意图列表与组合判断,只输出 JSON;" +
 		"若无新意图输出空列表。\n")
-	return b.String(), rev, nil
+	return b.String(), rev, water, nil
+}
+
+// claimReportState 判断的报告侧状态(P4-30 ③):最新定稿级别与是否已
+// 标记不纳入报告——事件流一次扫描,快照发现区与复核输入共用。
+func (l *Loop) claimReportState(ctx context.Context) (sev map[string]string, marked map[string]bool) {
+	sev, marked = map[string]string{}, map[string]bool{}
+	evs, err := l.Store.Events(ctx, l.TaskID, 0, 0)
+	if err != nil {
+		return
+	}
+	for _, ev := range evs {
+		if ev.Kind != rings.EventTestClaimRecord {
+			continue
+		}
+		var r rings.TestClaimRecord
+		if json.Unmarshal(ev.Payload, &r) != nil {
+			continue
+		}
+		switch r.Type {
+		case rings.TestClaimRecRepro:
+			sev[r.ClaimID] = r.Severity // 最新定稿取代(重开再确认随新定稿走)
+		case rings.TestClaimRecReportReview:
+			marked[r.ClaimID] = true
+		}
+	}
+	return
 }
 
 // deltaSinceLastAssessment 自上轮研判以来的变化集(P2-06,五问的输入):
@@ -1393,7 +1470,7 @@ func (l *Loop) deltaSinceLastAssessment(ctx context.Context) []string {
 				if ev.Actor == "creator" {
 					lines = append(lines, fmt.Sprintf("人新增了目标 %s [%s] %s → 据此补充探索方向", p.NodeID, p.Status, p.Title))
 				} else {
-					lines = append(lines, fmt.Sprintf("新增目标 %s [%s] %s → 纳入本轮研判", p.NodeID, p.Status, p.Title))
+					lines = append(lines, fmt.Sprintf("新增目标 %s [%s] %s → 纳入本轮规划", p.NodeID, p.Status, p.Title))
 				}
 			case rings.NodeAsset:
 				// 来源三态(P4-05):手动补入是造物主的动作指令——已默认
@@ -1404,11 +1481,11 @@ func (l *Loop) deltaSinceLastAssessment(ctx context.Context) []string {
 					lines = append(lines, fmt.Sprintf("新资产 %s [%s] %s → 评估覆盖缺口,优先派探测", p.NodeID, p.AssetClass, p.Title))
 				}
 			case rings.NodeFact:
-				lines = append(lines, fmt.Sprintf("新事实入账 %s [%s] %s → 按五问①③审视(可达性/组合)", p.NodeID, p.Status, p.Title))
+				lines = append(lines, fmt.Sprintf("新事实记录 %s [%s] %s → 按五问①③审视(可达性/组合)", p.NodeID, p.Status, p.Title))
 			case rings.NodeTestClaim:
-				lines = append(lines, fmt.Sprintf("新声明 %s [%s] %s → 跟进反证进展;确认后按五问②重估影响", p.NodeID, p.Status, p.Title))
+				lines = append(lines, fmt.Sprintf("新判断 %s [%s] %s → 跟进反证进展;确认后按五问②重估影响", p.NodeID, p.Status, p.Title))
 			case rings.NodeHypothesis:
-				lines = append(lines, fmt.Sprintf("新假设 %s [%s] %s → 收割评估时裁决去留", p.NodeID, p.Status, p.Title))
+				lines = append(lines, fmt.Sprintf("新假设 %s [%s] %s → 检查归纳评估时判定去留", p.NodeID, p.Status, p.Title))
 			}
 		case rings.EventNodeStateChanged:
 			var p rings.NodeStateChanged
@@ -1451,7 +1528,7 @@ func (l *Loop) deltaSinceLastAssessment(ctx context.Context) []string {
 func stepStopDirective(status string) string {
 	switch status {
 	case "done":
-		return " → 收割产出后按产出研判"
+		return " → 检查归纳产出后按产出规划"
 	case "exhausted":
 		return " → 读轨迹定接力或换向(不凭状态措辞)"
 	case "failed":
@@ -1559,6 +1636,7 @@ func UrgentDispatch(ctx context.Context, store *rings.Store, taskID, intent, exp
 		return "", err
 	}
 	opt := DispatchOptions{
+		source:              sourceUrgent,
 		GoalID:              CurrentGoalID(ctx, store, taskID),
 		ExpectedObservation: expected,
 		ActionLevel:         actionLevel,
@@ -1604,7 +1682,7 @@ func (l *Loop) schedule(ctx context.Context) int {
 	}
 	steps, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeStep, "dispatched")
 	if err != nil {
-		l.setErr(fmt.Errorf("overmind: 查待执行步骤: %w", err))
+		l.lastErr = fmt.Errorf("overmind: 查待执行步骤: %w", err)
 		return 0
 	}
 	if len(steps) == 0 {
@@ -1612,12 +1690,12 @@ func (l *Loop) schedule(ctx context.Context) int {
 	}
 	depEdges, err := l.Store.Edges(ctx, l.TaskID, rings.EdgeDependsOn)
 	if err != nil {
-		l.setErr(fmt.Errorf("overmind: 查依赖边: %w", err))
+		l.lastErr = fmt.Errorf("overmind: 查依赖边: %w", err)
 		return 0
 	}
 	all, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeStep, "")
 	if err != nil {
-		l.setErr(fmt.Errorf("overmind: 查全部步骤(依赖闸): %w", err))
+		l.lastErr = fmt.Errorf("overmind: 查全部步骤(依赖闸): %w", err)
 		return 0
 	}
 	runnable := selectRunnable(steps, all, depEdges)
@@ -1681,27 +1759,7 @@ func (l *Loop) launchUnit(ctx context.Context, stepID string) {
 // 等待态(主宰快照可见"前置 [sN]",研判可换路重派)。dispatched 为
 // 待执行步骤集,all 为全图步骤(依赖闸需查前置的真实状态)。
 func selectRunnable(dispatched, all []rings.NodeFull, depEdges []rings.EdgeView) []rings.NodeFull {
-	depsOf := map[string][]string{}
-	for _, e := range depEdges {
-		depsOf[e.From] = append(depsOf[e.From], e.To)
-	}
-	statusOf := map[string]string{}
-	for _, s := range all {
-		statusOf[s.ID] = s.Status
-	}
-	var out []rings.NodeFull
-	for _, s := range dispatched {
-		ready := true
-		for _, dep := range depsOf[s.ID] {
-			if statusOf[dep] != "done" { // 前置不存在/未完成/失败/耗尽:一律等待
-				ready = false
-				break
-			}
-		}
-		if ready {
-			out = append(out, s)
-		}
-	}
+	out := RunnableSteps(dispatched, all, depEdges)
 	sort.Slice(out, func(i, j int) bool { return StepLaunchLess(out[i], out[j]) })
 	return out
 }
@@ -1727,7 +1785,7 @@ func StepLaunchLess(a, b rings.NodeFull) bool {
 // stepClassRank 同优先级内的类别权重(P4-08 ①):急活(造物主插急活)
 // 0 < 反证 1 < 其余 2。
 func stepClassRank(s rings.NodeFull) int {
-	if _, ok := s.Detail["urgent"].(bool); ok {
+	if urgent, _ := s.Detail["urgent"].(bool); urgent {
 		return 0
 	}
 	if k, _ := s.Detail["kind"].(string); k == "falsify" {
@@ -1748,15 +1806,18 @@ func stepPriorityRank(s rings.NodeFull) int {
 // runUnit 一只虫群单位:RunStep(领取+复检+起飞同临界区,并发安全)
 // → 执行。R14 拒绝不改步骤状态(回 dispatched 待重领);熔断收尾
 // 静默让位;其余错误执行器已记账,此处如实暴露到 LastErr。单位落
-// blocked(P2-06e 模型故障受阻)计任务级 LLM 失败;完成即记成功
-// (清计数)。P4-04 返回是否真实落地(有单位会话跑完并落终态账;
-// R14/领取竞态/熔断让位不算)——落地通知的判定依据。
+// blocked 计任务级 LLM 失败(P2-06e;P4-27 ⑦:确定性拒绝归因除外
+// ——程序缺陷非模型故障,不污染健康判定),完成即记成功(清计数)。
+// P4-04 返回是否真实落地(有单位会话跑完并落终态账;R14/领取竞态/
+// 熔断让位不算)——落地通知的判定依据。
 func (l *Loop) runUnit(ctx context.Context, stepID string) bool {
 	res, err := l.Swarm.RunStep(ctx, l.TaskID, stepID)
 	if res != nil {
 		switch res.StepStatus {
 		case swarm.StepBlocked:
-			l.noteLLMFailure(ctx, res.Reason)
+			if res.BlockedClass != swarm.BlockedClassDeterminant {
+				l.noteLLMFailure(ctx, res.Reason)
+			}
 		case "done":
 			l.noteLLMSuccess()
 		}
@@ -1825,7 +1886,7 @@ func (l *Loop) denialBriefs(ctx context.Context) []string {
 		fmt.Fprintf(&b, "%s %s | 工具 %s | 原因: %s", d.rec.StepID, clipEval(d.rec.Intent),
 			d.rec.ToolName, clipEval(d.rec.Reason))
 		if d.forced != nil {
-			fmt.Fprintf(&b, " | 造物主已研判后放行(逐次执行,全记账)")
+			fmt.Fprintf(&b, " | 造物主已规划后放行(逐次执行,全记账)")
 		}
 		out = append(out, b.String())
 	}

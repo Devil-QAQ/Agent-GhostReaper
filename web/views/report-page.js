@@ -88,7 +88,7 @@ export function ReportPage({ currentTask }) {
       {error ? (
         <EmptyState icon="fileText" title="读取失败" hint={error} />
       ) : md ? (
-        <div className="rounded-xl border bg-card p-6">
+        <div className="rounded-xl border border-border/55 bg-card p-6">
           <ReportMarkdown>{md}</ReportMarkdown>
         </div>
       ) : (
@@ -141,7 +141,7 @@ function ArchivesCard({ tid }) {
       toast.error(`存档失败:${body?.error || `HTTP ${status}`}`);
       return;
     }
-    toast.success(`已存档(版本号 ${body.rev} · 证据版本 ${body.evidence_version})`);
+    toast.success(`已存档(证据版本 ${body.evidence_version})`);
     // 即时回填:存档进清单(不再等下一拍)。
     fetch(`/api/tasks/${tid}/report/archives`)
       .then((r) => r.json())
@@ -150,11 +150,11 @@ function ArchivesCard({ tid }) {
   };
 
   return (
-    <div className="flex flex-col gap-3 rounded-xl border bg-card p-6">
+    <div className="flex flex-col gap-3 rounded-xl border border-border/55 bg-card p-6">
       <div className="flex flex-wrap items-center gap-3">
         <div className="text-sm font-semibold">报告存档</div>
         <span className="text-xs text-muted-foreground">
-          当前证据版本 <span className="tabular-nums">{currentEV}</span>(随绑定/补绑/收割定稿推进)
+          当前证据版本 <span className="tabular-nums">{currentEV}</span>(随绑定/补绑/检查归纳定稿推进)
         </span>
         <Button size="sm" className="ml-auto" disabled={busy} onClick={archive}>
           {busy ? "存档中…" : "存档"}
@@ -170,12 +170,13 @@ function ArchivesCard({ tid }) {
             <li
               key={a.rev}
               className={cn(
-                "flex flex-wrap items-center gap-2 rounded-md border bg-card px-3 py-2 text-xs",
+                "flex flex-wrap items-center gap-2 rounded-md border border-border/55 bg-card px-3 py-2 text-xs",
                 a.stale && "border-status-warning/40",
               )}
             >
-              <span className="font-mono">版本号 {a.rev}</span>
-              <span className="text-muted-foreground">{fmtAt(a.at)}</span>
+              <span className="text-muted-foreground" title={`版本号 ${a.rev}`}>
+                {fmtAt(a.at)}
+              </span>
               <span className="text-muted-foreground">
                 证据版本 <span className="tabular-nums">{a.evidence_version}</span>
               </span>
@@ -225,10 +226,10 @@ function ReportMarkdown({ children }) {
       <Markdown
         remarkPlugins={[remarkGfm]}
         components={{
-          h1: (p) => <h1 className="text-xl font-semibold text-foreground" {...p} />,
+          h1: (p) => <h1 className="t-page text-foreground" {...p} />,
           // P2-14b⑤:分节留白拉开(h2 mt-6),分组靠留白不靠线(8.9 §2)
           h2: (p) => (
-            <h2 className="mt-6 border-b pb-2 text-base font-semibold text-foreground" {...p} />
+            <h2 className="t-sec mt-6 border-b pb-2 text-foreground" {...p} />
           ),
           h3: (p) => <h3 className="mt-4 text-sm font-semibold text-foreground" {...p} />,
           p: (p) => <p className="leading-relaxed text-foreground" {...p} />,
@@ -254,7 +255,7 @@ function ReportMarkdown({ children }) {
           code: ({ className, ...p }) => (
             <code
               className={cn(
-                "rounded bg-accent px-1 py-0.5 font-mono text-xs",
+                "rounded bg-accent px-1 py-0.5 num text-xs",
                 className
               )}
               {...p}

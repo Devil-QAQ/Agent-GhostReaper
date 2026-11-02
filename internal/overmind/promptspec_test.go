@@ -170,7 +170,7 @@ func TestDeltaLinesCarryDirectives(t *testing.T) {
 	for _, want := range []string{
 		"人新增了目标 g1 [active] 摸清暴露面 → 据此补充探索方向",
 		"新资产 a1 [service] 演示站点 → 评估覆盖缺口",
-		"步骤 s1 → done → 收割产出后按产出研判",
+		"步骤 s1 → done → 检查归纳产出后按产出规划",
 		"f-1 → confirmed(路径存在) → 新确认事实",
 		"RoE 授权边界已更新 → 复核后续派发是否越界",
 	} {

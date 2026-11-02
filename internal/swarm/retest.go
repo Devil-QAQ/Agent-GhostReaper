@@ -49,9 +49,9 @@ func RetestSID(claimID string, round int) string {
 // 复测发起与写回的错误词汇(server 据此映射 HTTP 状态)。
 var (
 	// ErrRetestInFlight 该声明已有活复测会话(同声明同时至多一轮)。
-	ErrRetestInFlight = errors.New("swarm: 该声明复测进行中,等本轮结束再发起")
+	ErrRetestInFlight = errors.New("该判断复测进行中,等本轮结束再发起")
 	// ErrRetestNotRetestable 声明不在可复测状态(锤炼中态不可复测)。
-	ErrRetestNotRetestable = errors.New("swarm: 声明不在可复测状态(须为 已确认/待确认/已修复)")
+	ErrRetestNotRetestable = errors.New("判断不在可复测状态(须为 已确认/待确认/已修复)")
 	// ErrRetestUnavailable 复测依赖未装配(模型/镜)。
 	ErrRetestUnavailable = errors.New("swarm: 复测依赖未装配(模型或镜缺失,面板激活主用模型后自动装配)")
 )
@@ -101,7 +101,7 @@ func (e *Executor) RetestRunning(taskID, claimID string) bool {
 func (e *Executor) BeginRetest(ctx context.Context, taskID, claimID string) (*RetestRun, error) {
 	claim, err := e.Store.Node(ctx, taskID, claimID)
 	if err != nil {
-		return nil, fmt.Errorf("swarm: 复测声明 %s: %w", claimID, err)
+		return nil, fmt.Errorf("swarm: 复测判断 %s: %w", claimID, err)
 	}
 	if claim.Type != rings.NodeTestClaim {
 		return nil, fmt.Errorf("swarm: 节点 %s 是 %s 不是 testclaim", claimID, claim.Type)
@@ -200,7 +200,7 @@ func (e *Executor) BeginRetest(ctx context.Context, taskID, claimID string) (*Re
 	pack := &TaskPack{
 		TaskID:     taskID,
 		StepID:     sid,
-		StepIntent: fmt.Sprintf("复测声明 %s:%s", claimID, clipLine(claim.Title, 80)),
+		StepIntent: fmt.Sprintf("复测判断 %s:%s", claimID, clipLine(claim.Title, 80)),
 		ExpectedObservation: "漏洞按复现步骤重放后的当前可触发性结论," +
 			"经 submit_retest_result 写回(fixed|unfixed|inconclusive + 证据)",
 		ActionLevel:   rings.ActionActiveTest,
@@ -239,10 +239,10 @@ func (e *Executor) BeginRetest(ctx context.Context, taskID, claimID string) (*Re
 		Payload: rings.SwarmRecord{
 			StepID: sid, UnitID: env.UnitID, TranscriptID: sid,
 			Type: rings.SwarmRecSessionStarted, GraphVersion: pack.GraphVersion,
-			Note: fmt.Sprintf("复测第 %d 轮 · 声明 %s · %s", round, claimID, clipLine(claim.Title, 60)),
+			Note: fmt.Sprintf("复测第 %d 轮 · 判断 %s · %s", round, claimID, clipLine(claim.Title, 60)),
 		},
 	}); err != nil {
-		return nil, fmt.Errorf("swarm: 复测起飞入账: %w", err)
+		return nil, fmt.Errorf("swarm: 复测起飞写入: %w", err)
 	}
 	if e.liveRetests == nil {
 		e.liveRetests = map[string]bool{}
@@ -286,7 +286,7 @@ func (e *Executor) DriveRetest(ctx context.Context, run *RetestRun) (*RunResult,
 		},
 	})
 	if serr != nil && err == nil {
-		err = fmt.Errorf("swarm: 复测终态入账: %w", serr)
+		err = fmt.Errorf("swarm: 复测结束状态写入: %w", serr)
 	}
 	return res, err
 }
@@ -298,15 +298,15 @@ func (e *Executor) DriveRetest(ctx context.Context, run *RetestRun) (*RunResult,
 // 判定与写回指引。零 LLM(读侧确定性组装,R17 同源纪律)。
 func (e *Executor) retestContext(ctx context.Context, taskID string, claim *rings.NodeFull, history []rings.TestClaimRecord) (string, error) {
 	var b strings.Builder
-	statusWord := claimStatusLabel(claim.Status)
+	statusWord := rings.ClaimStatusWord(claim.Status)
 	fmt.Fprintf(&b, "【复测上下文 · 第 %d 轮】\n", len(history)+1)
-	fmt.Fprintf(&b, "任务 %s · 声明 %s(%s)\n", taskID, claim.ID, statusWord)
+	fmt.Fprintf(&b, "任务 %s · 判断 %s(%s)\n", taskID, claim.ID, statusWord)
 	fmt.Fprintf(&b, "本轮目标:重放该漏洞的复现步骤,判定其当前是否已修复,经 submit_retest_result 写回结论。\n")
 
-	fmt.Fprintf(&b, "\n一、声明\n")
-	fmt.Fprintf(&b, "  存在性声明: %s\n", claim.Title)
+	fmt.Fprintf(&b, "\n一、判断\n")
+	fmt.Fprintf(&b, "  存在性判断: %s\n", claim.Title)
 	if impact, _ := claim.Detail["impact"].(string); impact != "" {
-		fmt.Fprintf(&b, "  影响面声明: %s\n", impact)
+		fmt.Fprintf(&b, "  影响面判断: %s\n", impact)
 	}
 	if vc, _ := claim.Detail["vulnclass"].(string); vc != "" {
 		fmt.Fprintf(&b, "  漏洞类型: %s\n", vc)
@@ -334,7 +334,7 @@ func (e *Executor) retestContext(ctx context.Context, taskID string, claim *ring
 		if repro.Severity != "" {
 			fmt.Fprintf(&b, "  严重级别: %s(定稿)\n", repro.Severity)
 		}
-		fmt.Fprintf(&b, "\n二、复现步骤(收割定稿,重放基准;步骤偏离处须在证据中写明)\n")
+		fmt.Fprintf(&b, "\n二、复现步骤(检查归纳定稿,重放基准;步骤偏离处须在证据中写明)\n")
 		for _, st := range repro.Steps {
 			line := fmt.Sprintf("  %d. ", st.Seq)
 			if st.Desc != "" {
@@ -356,7 +356,7 @@ func (e *Executor) retestContext(ctx context.Context, taskID string, claim *ring
 			}
 		}
 	} else {
-		b.WriteString("\n二、复现步骤\n  (无收割定稿——按声明与证据自行设计重放)\n")
+		b.WriteString("\n二、复现步骤\n  (无检查归纳定稿——按判断与证据自行设计重放)\n")
 	}
 
 	fmt.Fprintf(&b, "\n三、资产与目标\n")
@@ -377,7 +377,7 @@ func (e *Executor) retestContext(ctx context.Context, taskID string, claim *ring
 		fmt.Fprintf(&b, "  - %s [%s] %s\n", a.ID, a.AssetClass, a.Title)
 	}
 	if n == 0 {
-		b.WriteString("  (声明未锚定资产)\n")
+		b.WriteString("  (判断未锚定资产)\n")
 	}
 
 	fmt.Fprintf(&b, "\n四、历史复测\n")
@@ -416,7 +416,7 @@ func retestVerdictWord(v string) string {
 
 // ---- 专用受限工具:复测结论写回(P3-06) ----
 
-const toolDescSubmitRetestResult = "复测任务专用:写回本轮复测结论。verdict=fixed(已修复:本轮真实重放显示漏洞不再可触发)|unfixed(未修复:漏洞仍可触发,或未取得已修复证据)|inconclusive(未能定论:目标不可达、前置无法重建等,只入记录不改状态)。结论写回的是本会话绑定的声明——无需也无法指定其他声明。须附本轮真实取得的证据(命令与其输出、请求/响应原文),只写结论不算复测;每轮只许提交一次。"
+const toolDescSubmitRetestResult = "复测任务专用:写回本轮复测结论。verdict=fixed(已修复:本轮真实重放显示漏洞不再可触发)|unfixed(未修复:漏洞仍可触发,或未取得已修复证据)|inconclusive(未能定论:目标不可达、前置无法重建等,只入记录不改状态)。结论写回的是本会话绑定的判断——无需也无法指定其他判断。须附本轮真实取得的证据(命令与其输出、请求/响应原文),只写结论不算复测;每轮只许提交一次。"
 
 // submitRetestResultTool 复测结论的受控入口:参数只有结论/证据/备注,
 // 声明绑定在单位环境(服务端定死)——串号在结构上不可能。ReadOnly:
@@ -450,7 +450,7 @@ func (env *unitEnv) submitRetestResultTool() tool.CoreTool {
 				return tool.Errorf("写回复测结论失败: " + err.Error()), nil
 			}
 			return tool.Text(fmt.Sprintf(
-				"复测结论已入账(testclaim.record retest:%s),声明状态已按结论更新。", retestVerdictWord(args.Verdict))), nil
+				"复测结论已记录(testclaim.record retest:%s),判断状态已按结论更新。", retestVerdictWord(args.Verdict))), nil
 		},
 	})
 }
@@ -475,13 +475,13 @@ func (env *unitEnv) SubmitRetestResult(ctx context.Context, verdict, evidence, n
 	}
 	claim, err := env.Executor.Store.Node(ctx, env.TaskID, env.retest.ClaimID)
 	if err != nil {
-		return fmt.Errorf("swarm: 复测声明 %s: %w", env.retest.ClaimID, err)
+		return fmt.Errorf("swarm: 复测判断 %s: %w", env.retest.ClaimID, err)
 	}
 	if claim.Type != rings.NodeTestClaim {
 		return fmt.Errorf("swarm: 节点 %s 是 %s 不是 testclaim", env.retest.ClaimID, claim.Type)
 	}
 	if !Retestable(claim.Status) {
-		return fmt.Errorf("swarm: 声明 %s 当前状态 %s,不在复测可写回状态(状态机拒绝写回)", env.retest.ClaimID, claim.Status)
+		return fmt.Errorf("swarm: 判断 %s 当前状态 %s,不在复测可写回状态(状态机拒绝写回)", env.retest.ClaimID, claim.Status)
 	}
 	evs, err := env.Executor.Store.Events(ctx, env.TaskID, 0, 0)
 	if err != nil {
@@ -541,7 +541,7 @@ func (env *unitEnv) SubmitRetestResult(ctx context.Context, verdict, evidence, n
 		})
 	}
 	if _, err := env.Executor.Store.Append(ctx, env.TaskID, events...); err != nil {
-		return fmt.Errorf("swarm: 复测结论入账: %w", err)
+		return fmt.Errorf("swarm: 复测结论写入: %w", err)
 	}
 	return nil
 }
@@ -565,11 +565,11 @@ func (env *unitEnv) retestToolset() []tool.CoreTool {
 const SettingKeyPromptRetest = "prompt.retest.editable"
 
 // retestEditableDefault 复测基线 A 段默认正文(角色与视野;可编辑)。
-const retestEditableDefault = `你是渗透测试复测单位,对一条已锤炼完成的漏洞声明做修复状态复核:按复现步骤对授权目标真实重放,判定该漏洞当前是否已修复。你没有全局视野;你的世界是这份复测上下文与你的工具结果。`
+const retestEditableDefault = `你是渗透测试复测单位,对一条已锤炼完成的漏洞判断做修复状态复核:按复现步骤对授权目标真实重放,判定该漏洞当前是否已修复。你没有全局视野;你的世界是这份复测上下文与你的工具结果。`
 
 // retestSafetyRules 复测基线 B 段(代码固定,安全底线)。
 const retestSafetyRules = `铁律(代码固定,配置不可移除):
-1. 只复核本声明:按复现步骤重放(参数可按当前环境等价调整并写明偏离),判定的是"该漏洞现在还能不能触发";不测其他漏洞、不扩大范围、不做修复之外的动作。
+1. 只复核本判断:按复现步骤重放(参数可按当前环境等价调整并写明偏离),判定的是"该漏洞现在还能不能触发";不测其他漏洞、不扩大范围、不做修复之外的动作。
 2. 结论只经 submit_retest_result 写回(verdict + 本轮证据),文本回复不构成结论;每轮只许提交一次。
 3. 证据须含本轮真实取得的原文(命令与其输出、请求/响应片段),只写结论不算复测。fixed 只许在重放显示漏洞不再可触发且有支撑证据时给出;目标不可达、前置无法重建等无法判定的情形给 inconclusive 并在 note 写明障碍,不得当成已修复。
 4. 复现所需前置(登录态/会话/数据)失效时,先重建前置再重放;无法重建就如实 inconclusive,不得臆断。
@@ -615,7 +615,7 @@ func RetestSystemSegments(ctx context.Context, store *rings.Store, roe RoE, rt *
 func retestIntentBlock(rt *retestBinding) string {
 	var b strings.Builder
 	b.WriteString("【复测任务 · 只判这一条】\n")
-	fmt.Fprintf(&b, "声明 %s(第 %d 轮)\n", rt.ClaimID, rt.Round)
+	fmt.Fprintf(&b, "判断 %s(第 %d 轮)\n", rt.ClaimID, rt.Round)
 	b.WriteString("判定: 该漏洞当前是否已修复 — 重放复现步骤,给 fixed|unfixed|inconclusive,经 submit_retest_result 写回。\n")
 	return b.String()
 }

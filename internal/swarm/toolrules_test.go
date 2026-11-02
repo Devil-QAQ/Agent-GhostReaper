@@ -64,7 +64,7 @@ func TestToolDescriptionsEmbedRules(t *testing.T) {
 	for name, want := range map[string][]string{
 		"submit_candidate_fact":    {"可独立复核", "只写结论不附原文"},
 		"submit_test_claim":        {"可独立重放", "只写结论不算证据"},
-		"submit_falsify_result":    {"只写结论不参与机器裁决"},
+		"submit_falsify_result":    {"只写结论不参与机器判定"},
 		"submit_hypothesis_result": {"只写结论不算证据"},
 	} {
 		var tt tool.CoreTool
@@ -128,9 +128,9 @@ func TestClaimFieldStyleClause(t *testing.T) {
 	if n := strings.Count(s, StructuredFieldStyle); n != 2 {
 		t.Fatalf("statement 与 impact 两个参数描述应各带一次共用文风句(实际 %d 次): %s", n, s)
 	}
-	for _, want := range []string{"存在性声明", "影响面声明"} {
+	for _, want := range []string{"存在性判断", "影响面判断"} {
 		if !strings.Contains(s, want) {
-			t.Fatalf("声明参数描述缺 %q", want)
+			t.Fatalf("判断参数描述缺 %q", want)
 		}
 	}
 }

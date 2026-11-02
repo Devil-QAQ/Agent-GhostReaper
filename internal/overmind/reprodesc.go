@@ -4,15 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
-
-	"github.com/Autumn-27/norma/agentcore"
-	"github.com/Autumn-27/norma/harness"
-	"github.com/Autumn-27/norma/llm"
-	"github.com/Autumn-27/norma/permission"
-	"github.com/Autumn-27/norma/tool"
-	"github.com/Autumn-27/norma/transcript"
 
 	"ghostreaper/internal/mirror"
 	"ghostreaper/internal/rings"
@@ -45,6 +37,7 @@ type reproDescStep struct {
 
 // genReproDescs 定稿描述生成:改写 rec.Steps[i].Desc 为指令式人话。
 // 零步骤/无 Provider 直接返回(单测与未配模型路径,零外呼)。
+// P4-24:生成后接定稿校对+模式闸门(同会话,见 proofread.go)。
 func (l *Loop) genReproDescs(ctx context.Context, claimID string, rec *rings.TestClaimRecord) {
 	if l.Provider == nil || len(rec.Steps) == 0 {
 		return
@@ -54,12 +47,21 @@ func (l *Loop) genReproDescs(ctx context.Context, claimID string, rec *rings.Tes
 		claimTitle = n.Title
 	}
 	facts := l.reproFacts(rec)
-	descs, err := l.askReproDescs(ctx, claimTitle, facts)
+	gs := l.newGenSession(reproDescSystem)
+	defer gs.close()
+	descs, err := l.askReproDescs(ctx, gs, claimTitle, facts)
 	if err != nil {
-		runlog.Warnf("定稿描述生成失败: 任务 %s 声明 %s 原因 %s(回退确定性描述)",
+		runlog.Warnf("定稿描述生成失败: 任务 %s 判断 %s 原因 %s(回退确定性描述)",
 			l.TaskID, claimID, clipEval(err.Error()))
 		return
 	}
+	applyReproDescs(rec, descs)
+	l.polishReproDescs(ctx, claimID, gs, rec)
+}
+
+// applyReproDescs 按 seq 应用模型描述(截断到落账上限;漏 seq 的步骤
+// 保留原描述——确定性兜底或上一轮改写稿)。
+func applyReproDescs(rec *rings.TestClaimRecord, descs []reproDescStep) {
 	bySeq := map[int]string{}
 	for _, d := range descs {
 		if d.Seq > 0 && strings.TrimSpace(d.Desc) != "" {
@@ -171,71 +173,16 @@ func headerValue(headers []mirror.Header, name string) string {
 // askReproDescs 一次无工具单轮会话:事实包 → 指令式描述 JSON(引擎
 // 链路与转录/用量记账同拆解会话)。claimTitle 是声明的存在性陈述,
 // 给模型"什么构成复现"的上下文(只进提示词,不复述进步骤描述)。
-func (l *Loop) askReproDescs(ctx context.Context, claimTitle string, facts []reproFact) ([]reproDescStep, error) {
+func (l *Loop) askReproDescs(ctx context.Context, gs *genSession, claimTitle string, facts []reproFact) ([]reproDescStep, error) {
 	payload, err := json.Marshal(facts)
 	if err != nil {
 		return nil, err
 	}
-	text, err := l.runNoToolSession(ctx, l.nextSessionID("r"), reproDescSystem,
-		"声明: "+claimTitle+"\n复现步骤事实:\n"+string(payload))
+	text, err := gs.ask(ctx, "判断: "+claimTitle+"\n复现步骤事实:\n"+string(payload))
 	if err != nil {
 		return nil, err
 	}
 	return parseReproDescs(text)
-}
-
-// runNoToolSession 一次无工具单轮会话(引擎链路与转录/用量记账同拆解
-// 会话;P4-08 ④ 复现描述与 P4-13 来龙去脉叙述共用)。返回终态的
-// assistant 文本(跨段拼接)。
-func (l *Loop) runNoToolSession(ctx context.Context, sid, system, user string) (string, error) {
-	opts := agentcore.Options{
-		Provider:               stripTokensProvider{l.Provider},
-		SystemPrompt:           []string{system},
-		Tools:                  []tool.CoreTool{}, // 显式空表:生成会话无工具(nil 会挂引擎默认工具集)
-		PermissionMode:         permission.ModeDefault,
-		MaxTurns:               2,
-		SessionID:              sid,
-		DisableBackgroundTasks: true,
-	}
-	if l.RootDir != "" {
-		opts.Transcript = transcript.NewStore(filepath.Join(l.RootDir, l.TaskID, "transcripts"))
-	}
-	sess := agentcore.NewSession(opts)
-	defer sess.Close()
-	usage := &swarm.UsageTracker{
-		Store: l.Store, TaskID: l.TaskID, Agent: ActorOvermind,
-		Model: l.Model, ModelOf: l.modelNow(), Transcript: sid, // MaxTurns=0:规划会话不落里程碑
-	}
-	for ev, err := range sess.Prompt(ctx, user) {
-		if err != nil {
-			return "", fmt.Errorf("生成会话: %w", err)
-		}
-		if ev.Kind == harness.KindUsage && ev.Usage != nil {
-			if uerr := usage.OnUsage(*ev.Usage); uerr != nil {
-				l.setErr(uerr)
-			}
-		}
-		if ev.Kind == harness.KindResult && ev.Terminal != nil {
-			if ev.Terminal.Err != nil {
-				return "", fmt.Errorf("生成终止: %w", ev.Terminal.Err)
-			}
-			return termText(ev.Terminal), nil
-		}
-	}
-	return "", fmt.Errorf("生成无终态")
-}
-
-// termText 终态的 assistant 文本拼接(与拆解解析同法:跨段拼接)。
-func termText(term *harness.Terminal) string {
-	var texts []string
-	for _, m := range term.Messages {
-		if m.Role == llm.RoleAssistant {
-			if t := strings.TrimSpace(m.Text()); t != "" {
-				texts = append(texts, t)
-			}
-		}
-	}
-	return strings.Join(texts, "")
 }
 
 // parseReproDescs 宽容解析模型回复:剥围栏、取首尾大括号主体、漏步骤

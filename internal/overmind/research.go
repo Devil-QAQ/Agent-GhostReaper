@@ -4,7 +4,7 @@ package overmind
 //
 //   - 态势研判五问:新身份能访问哪些已有资产?新权限是否改变其他漏洞
 //     的影响?两条单独影响有限的线索是否组合成新的边界问题?新的可达
-//     关系是否解锁之前受阻的步骤?新证据是否推翻旧判断?五问是启发式
+//     关系是否解锁之前受阻的步骤?新证据是否推翻旧结论?五问是启发式
 //     起点(保证下限),不是封闭问题清单(不设上限)——每轮拆解会话
 //     按五问审视态势,结论落 overmind.record(assessment)审计流,
 //     "研判发生过、研判了什么"从账本可验证;
@@ -36,7 +36,7 @@ const (
 	AssessQPrivilege   = "q_privilege"   // 新权限是否改变其他漏洞的影响
 	AssessQCombination = "q_combination" // 两条单独影响有限的线索是否组合成新的边界问题
 	AssessQUnlock      = "q_unlock"      // 新的可达关系是否解锁之前受阻的步骤
-	AssessQOverturn    = "q_overturn"    // 新证据是否推翻旧判断
+	AssessQOverturn    = "q_overturn"    // 新证据是否推翻旧结论
 )
 
 // Step 优先级词汇(P2-06 派发策略:并发满员时空出名额按优先级领取)。
@@ -88,16 +88,16 @@ func SubmitCombinedClaim(ctx context.Context, store *rings.Store, taskID, statem
 	chain []ChainLink, assetID, vulnclass string, alternatives []string) (string, error) {
 	statement, impact = strings.TrimSpace(statement), strings.TrimSpace(impact)
 	if statement == "" || impact == "" {
-		return "", fmt.Errorf("overmind: 组合声明须同时具备存在性声明与影响面声明(分开声明,缺一不可)")
+		return "", fmt.Errorf("overmind: 组合判断须同时具备存在性判断与影响面判断(分开申报,缺一不可)")
 	}
 	if len(chain) < MinChainLinks {
-		return "", fmt.Errorf("overmind: 组合声明至少须 %d 条链环节(单线索走普通声明通道),得到 %d", MinChainLinks, len(chain))
+		return "", fmt.Errorf("overmind: 组合判断至少须 %d 条链环节(单线索走普通判断通道),得到 %d", MinChainLinks, len(chain))
 	}
 	if strings.TrimSpace(assetID) == "" {
-		return "", fmt.Errorf("overmind: 组合声明必须锚定具体资产(asset_id)")
+		return "", fmt.Errorf("overmind: 组合判断必须锚定具体资产(asset_id)")
 	}
 	if _, err := store.Node(ctx, taskID, assetID); err != nil {
-		return "", fmt.Errorf("overmind: 组合声明锚定资产 %s: %w", assetID, err)
+		return "", fmt.Errorf("overmind: 组合判断锚定资产 %s: %w", assetID, err)
 	}
 	rawChain := make([]any, 0, len(chain))
 	for _, link := range chain {
@@ -155,7 +155,7 @@ func SubmitCombinedClaim(ctx context.Context, store *rings.Store, taskID, statem
 		Payload: rings.EdgeAdded{EdgeType: rings.EdgeAbout, FromNode: id, ToNode: assetID},
 	})
 	if _, err := store.Append(ctx, taskID, events...); err != nil {
-		return "", fmt.Errorf("overmind: 组合声明入账: %w", err)
+		return "", fmt.Errorf("overmind: 组合判断写入: %w", err)
 	}
 	return id, nil
 }

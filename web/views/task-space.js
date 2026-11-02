@@ -46,7 +46,7 @@ function HibernateBanner({ task }) {
       {React.createElement(iconOf("moon"), { className: "size-3.5 shrink-0" })}
       <span>
         任务冬眠中:主宰与虫群挂起,牧者对话冻结,计时器停走;唤醒后原地继续。
-        {pending > 0 && ` 待裁决审批 ${pending} 笔冻结为只读。`}
+        {pending > 0 && ` 待审批 ${pending} 笔冻结为只读。`}
       </span>
     </div>
   );
@@ -61,6 +61,19 @@ export function TaskSpace({ tasks, taskID, tab, focus, unit }) {
 
   const loaded = Array.isArray(tasks);
   const current = loaded ? tasks.find((t) => t.id === taskID) : null;
+
+  // RoE 标签待审批计数(P4-23):红点+计数,approval 实时推送驱动
+  //(推送未连接时轮询降级);点标签即到裁决面。
+  const approvalsURL = current?.id ? `/api/tasks/${current.id}/approvals` : null;
+  const { data: approvalsBody } = usePolling(approvalsURL || "/api/healthz", 4000, {
+    immediate: Boolean(approvalsURL),
+    live: approvalsURL ? [`approval:${current.id}`] : null,
+  });
+  const roePending = approvalsURL
+    ? Array.isArray(approvalsBody?.pending ?? approvalsBody)
+      ? (approvalsBody?.pending ?? approvalsBody).length
+      : 0
+    : 0;
 
   if (!loaded) {
     return <div className="py-12 text-center text-sm text-muted-foreground">读取中</div>;
@@ -90,7 +103,7 @@ export function TaskSpace({ tasks, taskID, tab, focus, unit }) {
             <button
               key={t.id}
               className={
-                "rounded-md px-3 py-1 text-[13px] transition-colors duration-150 cursor-pointer " +
+                "flex items-center rounded-md px-3 py-1 text-[13px] transition-colors duration-150 cursor-pointer " +
                 (tab === t.id
                   ? "bg-popover text-foreground shadow-xs"
                   : "text-muted-foreground hover:bg-hover-lift hover:text-foreground")
@@ -100,6 +113,15 @@ export function TaskSpace({ tasks, taskID, tab, focus, unit }) {
               }}
             >
               {t.title}
+              {/* 待审批红点+计数(P4-23):只标需要动作的事项,处理即消 */}
+              {t.id === "roe" && roePending > 0 && (
+                <span
+                  className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold leading-none text-primary-foreground num"
+                  title={`待审批 ${roePending} 笔`}
+                >
+                  {roePending}
+                </span>
+              )}
             </button>
           ))}
         </div>

@@ -287,7 +287,7 @@ function TokenSection({ body, onDrillTask }) {
                   nameRender={(r) => (
                     <span className="flex items-center gap-2">
                       <span className="truncate max-w-40" title={r.title || r.name}>{r.title || r.name}</span>
-                      <span className="font-mono text-xs text-muted-foreground">{r.name}</span>
+                      <span className="num text-xs text-muted-foreground">{r.name}</span>
                     </span>
                   )}
                   extraHead="模型数"
@@ -302,7 +302,7 @@ function TokenSection({ body, onDrillTask }) {
                   <CardTitle>按模型</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <DimTable rows={body.by_model} compact nameRender={(r) => <span className="font-mono text-xs">{r.name || "(未记模型)"}</span>} />
+                  <DimTable rows={body.by_model} compact nameRender={(r) => <span className="num text-xs">{r.name || "(未记模型)"}</span>} />
                 </CardContent>
               </Card>
               <Card>
@@ -356,16 +356,16 @@ function DimTable({ rows, nameRender, extraHead, extraCell, onRow, compact }) {
             onClick={onRow ? () => onRow(r) : undefined}
           >
             <TableCell className="max-w-56">{nameRender(r)}</TableCell>
-            <TableCell className="text-right tnum">{fmtNum(r.calls)}</TableCell>
-            <TableCell className="text-right tnum">{fmtNum(r.input)}</TableCell>
-            <TableCell className="text-right tnum">{fmtNum(r.output)}</TableCell>
+            <TableCell className="text-right num">{fmtNum(r.calls)}</TableCell>
+            <TableCell className="text-right num">{fmtNum(r.input)}</TableCell>
+            <TableCell className="text-right num">{fmtNum(r.output)}</TableCell>
             {!compact && (
               <>
-                <TableCell className="text-right tnum text-muted-foreground">{fmtNum(r.cache_read)}</TableCell>
-                <TableCell className="text-right tnum text-muted-foreground">{fmtNum(r.cache_write)}</TableCell>
+                <TableCell className="text-right num text-muted-foreground">{fmtNum(r.cache_read)}</TableCell>
+                <TableCell className="text-right num text-muted-foreground">{fmtNum(r.cache_write)}</TableCell>
               </>
             )}
-            {extraHead && <TableCell className="text-right tnum">{extraCell(r)}</TableCell>}
+            {extraHead && <TableCell className="text-right num">{extraCell(r)}</TableCell>}
           </TableRow>
         ))}
       </TableBody>
@@ -406,16 +406,16 @@ function TaskTokenDrawer({ drill, onClose }) {
 
   return (
     <Sheet open={Boolean(drill)} onOpenChange={(o) => !o && onClose()}>
-      <SheetContent className="max-w-2xl">
+      <SheetContent>
         <SheetHeader>
           <SheetTitle>{drill?.title || drill?.id} · token 明细</SheetTitle>
           <SheetDescription>
             {fmtNum(agg.t.calls)} 次调用 · 输入 {fmtNum(agg.t.input)} · 输出 {fmtNum(agg.t.output)} · 缓存读 {fmtNum(agg.t.cache_read)} · 缓存写 {fmtNum(agg.t.cache_write)}
           </SheetDescription>
         </SheetHeader>
-        <div className="flex-1 overflow-y-auto px-4 pb-6">
+        <div className="flex-1 overflow-y-auto px-5 pb-5">
           {list.length === 0 ? (
-            <div className="py-10 text-center text-xs text-muted-foreground">该任务尚无记账</div>
+            <div className="py-12 text-center text-xs text-muted-foreground">该任务尚无记账</div>
           ) : (
             <div className="flex flex-col gap-5">
               <SubAggTable title="按模型" rows={agg.byModel} />
@@ -436,12 +436,12 @@ function TaskTokenDrawer({ drill, onClose }) {
                   <TableBody>
                     {list.slice(-50).reverse().map((r, i) => (
                       <TableRow key={i}>
-                        <TableCell className="font-mono text-xs">{r.occurred_at?.slice(5)}</TableCell>
+                        <TableCell className="num text-xs">{r.occurred_at?.slice(5)}</TableCell>
                         <TableCell>{agentLabel(r.agent)}</TableCell>
-                        <TableCell className="font-mono text-xs">{r.model || "—"}</TableCell>
-                        <TableCell className="tnum">{r.turn}</TableCell>
-                        <TableCell className="text-right tnum">{fmtNum(r.input_tokens)}</TableCell>
-                        <TableCell className="text-right tnum">{fmtNum(r.output_tokens)}</TableCell>
+                        <TableCell className="num text-xs">{r.model || "—"}</TableCell>
+                        <TableCell className="num">{r.turn}</TableCell>
+                        <TableCell className="text-right num">{fmtNum(r.input_tokens)}</TableCell>
+                        <TableCell className="text-right num">{fmtNum(r.output_tokens)}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -480,10 +480,10 @@ function SubAggTable({ title, rows, nameKey }) {
         <TableBody>
           {keys.map((k) => (
             <TableRow key={k}>
-              <TableCell>{nameKey ? k : <span className="font-mono text-xs">{k}</span>}</TableCell>
-              <TableCell className="text-right tnum">{fmtNum(rows[k].calls)}</TableCell>
-              <TableCell className="text-right tnum">{fmtNum(rows[k].input)}</TableCell>
-              <TableCell className="text-right tnum">{fmtNum(rows[k].output)}</TableCell>
+              <TableCell>{nameKey ? k : <span className="num text-xs">{k}</span>}</TableCell>
+              <TableCell className="text-right num">{fmtNum(rows[k].calls)}</TableCell>
+              <TableCell className="text-right num">{fmtNum(rows[k].input)}</TableCell>
+              <TableCell className="text-right num">{fmtNum(rows[k].output)}</TableCell>
             </TableRow>
           ))}
         </TableBody>
@@ -571,7 +571,7 @@ function ToolSection({
       <SectionTitle
         icon="terminal"
         title="工具执行流水"
-        note={counts ? `共 ${fmtNum(counts.total)} 条 · 成功 ${fmtNum(counts.ok)} · 失败 ${fmtNum(counts.error)}${counts.shown < counts.total ? ` · 显示前 ${fmtNum(counts.shown)} 条` : ""}` : "每次工具调用的入账记录"}
+        note={counts ? `共 ${fmtNum(counts.total)} 条 · 成功 ${fmtNum(counts.ok)} · 失败 ${fmtNum(counts.error)}${counts.shown < counts.total ? ` · 显示前 ${fmtNum(counts.shown)} 条` : ""}` : "每次工具调用的记录"}
         right={
           <div className="flex flex-wrap items-center gap-2">
             <TaskSelect taskList={taskList} value={fTask} onChange={onTask} />
@@ -626,11 +626,11 @@ function ToolSection({
             <TableBody>
               {rows.map((r, i) => (
                 <TableRow key={i} className="cursor-pointer" onClick={() => onDrill(r)}>
-                  <TableCell className="font-mono text-xs text-muted-foreground">{r.at?.slice(5)}</TableCell>
+                  <TableCell className="num text-xs text-muted-foreground">{r.at?.slice(5)}</TableCell>
                   <TableCell className="max-w-36 truncate" title={r.task_title || r.task_id}>{r.task_title || r.task_id}</TableCell>
                   <TableCell className="whitespace-nowrap">{agentLabel(r.agent)}</TableCell>
-                  <TableCell className="font-mono text-xs">{r.tool}</TableCell>
-                  <TableCell className="max-w-72 truncate font-mono text-xs text-muted-foreground" title={r.args}>
+                  <TableCell className="num text-xs">{r.tool}</TableCell>
+                  <TableCell className="max-w-72 truncate num text-xs text-muted-foreground" title={r.args}>
                     {briefArgs(r.args)}
                   </TableCell>
                   <TableCell>
@@ -658,10 +658,10 @@ function briefArgs(args) {
 function ToolRowDrawer({ row, onClose }) {
   return (
     <Sheet open={Boolean(row)} onOpenChange={(o) => !o && onClose()}>
-      <SheetContent className="max-w-2xl">
+      <SheetContent>
         <SheetHeader>
           <SheetTitle className="flex items-center gap-2">
-            <span className="font-mono">{row?.tool}</span>
+            <span className="num">{row?.tool}</span>
             <Badge variant={row?.is_error ? "danger" : "success"}>
               {row?.is_error ? "失败" : "成功"}
             </Badge>
@@ -671,11 +671,11 @@ function ToolRowDrawer({ row, onClose }) {
           </SheetDescription>
         </SheetHeader>
         {row && (
-          <div className="flex flex-1 flex-col gap-4 overflow-y-auto px-4 pb-6">
+          <div className="flex flex-1 flex-col gap-4 overflow-y-auto px-5 pb-5">
             {row.step_id && (
               <div className="flex items-center gap-3 text-sm">
                 <span className="text-muted-foreground">步骤</span>
-                <span className="font-mono">{row.step_id}</span>
+                <span className="num">{row.step_id}</span>
                 <button
                   className="text-primary underline-offset-4 hover:underline cursor-pointer"
                   onClick={() =>
@@ -689,7 +689,7 @@ function ToolRowDrawer({ row, onClose }) {
             {row.args && (
               <div>
                 <div className="mb-1 text-xs text-muted-foreground">参数</div>
-                <pre className="overflow-x-auto rounded-md bg-input-surface p-3 font-mono text-xs whitespace-pre-wrap break-all">
+                <pre className="overflow-x-auto rounded-md bg-input-surface p-3 num text-xs whitespace-pre-wrap break-all">
                   {row.args}
                 </pre>
               </div>
@@ -697,7 +697,7 @@ function ToolRowDrawer({ row, onClose }) {
             {row.result_head && (
               <div>
                 <div className="mb-1 text-xs text-muted-foreground">结果</div>
-                <pre className="max-h-72 overflow-y-auto rounded-md bg-input-surface p-3 font-mono text-xs whitespace-pre-wrap break-words">
+                <pre className="max-h-72 overflow-y-auto rounded-md bg-input-surface p-3 num text-xs whitespace-pre-wrap break-words">
                   {row.result_head}
                 </pre>
               </div>
@@ -742,7 +742,7 @@ function InterceptSection({ body, taskList, icTask, onTask, onDrillRule }) {
         <EmptyState
           icon="shieldBan"
           title="尚无拦截命中"
-          hint="虫群调用被拦截规则拒绝或弹门后在此汇总"
+          hint="虫群调用被拦截规则拒绝或提交审批后在此汇总"
           action={{ label: "去任务列表", href: "/tasks" }}
         />
       ) : (
@@ -753,7 +753,7 @@ function InterceptSection({ body, taskList, icTask, onTask, onDrillRule }) {
                 <TableHead>规则</TableHead>
                 <TableHead className="text-right">命中</TableHead>
                 <TableHead className="text-right">拒绝</TableHead>
-                <TableHead className="text-right" title="批准 · 面板拒绝 · 待决">弹门</TableHead>
+                <TableHead className="text-right" title="批准 · 面板拒绝 · 待决">需批准</TableHead>
                 <TableHead>被拒走向</TableHead>
                 <TableHead>最近命中</TableHead>
               </TableRow>
@@ -771,10 +771,10 @@ function InterceptSection({ body, taskList, icTask, onTask, onDrillRule }) {
                       <span className="truncate" title={ruleTitle(r)}>{ruleTitle(r)}</span>
                     </div>
                   </TableCell>
-                  <TableCell className="text-right tnum">{fmtNum(r.hits)}</TableCell>
-                  <TableCell className="text-right tnum">{fmtNum(r.denied)}</TableCell>
+                  <TableCell className="text-right num">{fmtNum(r.hits)}</TableCell>
+                  <TableCell className="text-right num">{fmtNum(r.denied)}</TableCell>
                   <TableCell
-                    className="text-right tnum"
+                    className="text-right num"
                     title={r.gate > 0 ? `批准 ${fmtNum(r.approved)} · 面板拒绝 ${fmtNum(r.panel_denied)} · 待决 ${fmtNum(r.pending)}` : undefined}
                   >
                     {r.gate > 0 ? fmtNum(r.gate) : "—"}
@@ -782,7 +782,7 @@ function InterceptSection({ body, taskList, icTask, onTask, onDrillRule }) {
                   <TableCell className="max-w-64">
                     <span className="text-xs text-muted-foreground">{followSummary(r.follows)}</span>
                   </TableCell>
-                  <TableCell className="font-mono text-xs text-muted-foreground">
+                  <TableCell className="num text-xs text-muted-foreground">
                     {r.last_at?.slice(5)}
                   </TableCell>
                 </TableRow>
@@ -800,11 +800,11 @@ function InterceptSection({ body, taskList, icTask, onTask, onDrillRule }) {
 function RuleHitsDrawer({ rule, onClose, onDrillHit }) {
   const gateNote =
     rule?.gate > 0
-      ? ` · 弹门 ${fmtNum(rule.gate)}(批准 ${fmtNum(rule.approved)} · 面板拒绝 ${fmtNum(rule.panel_denied)} · 待决 ${fmtNum(rule.pending)})`
+      ? ` · 需批准 ${fmtNum(rule.gate)}(批准 ${fmtNum(rule.approved)} · 面板拒绝 ${fmtNum(rule.panel_denied)} · 待决 ${fmtNum(rule.pending)})`
       : "";
   return (
     <Sheet open={Boolean(rule)} onOpenChange={(o) => !o && onClose()}>
-      <SheetContent className="max-w-3xl">
+      <SheetContent>
         <SheetHeader>
           <SheetTitle className="flex items-center gap-2">
             <Badge variant="outline">{RULE_LINE_LABELS[rule?.line] || ""}</Badge>
@@ -814,7 +814,7 @@ function RuleHitsDrawer({ rule, onClose, onDrillHit }) {
             {rule ? `命中 ${fmtNum(rule.hits)} · 拒绝 ${fmtNum(rule.denied)}${gateNote} · 走向 ${followSummary(rule.follows)}` : ""}
           </SheetDescription>
         </SheetHeader>
-        <div className="flex-1 overflow-y-auto px-4 pb-6">
+        <div className="flex-1 overflow-y-auto px-5 pb-5">
           <div className="mb-1 text-xs text-muted-foreground">近期命中(新到旧,至多 10 条;点拒绝类行看后续轨迹)</div>
           <Table>
             <TableHeader>
@@ -843,12 +843,12 @@ function RuleHitsDrawer({ rule, onClose, onDrillHit }) {
                       : undefined
                   }
                 >
-                  <TableCell className="font-mono text-xs text-muted-foreground">{h.at?.slice(5)}</TableCell>
+                  <TableCell className="num text-xs text-muted-foreground">{h.at?.slice(5)}</TableCell>
                   <TableCell className="max-w-32 truncate" title={h.task_title || h.task_id}>
                     {h.task_title || h.task_id}
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{h.unit_id || "—"}</TableCell>
-                  <TableCell className="font-mono text-xs">{h.tool}</TableCell>
+                  <TableCell className="num text-xs">{h.unit_id || "—"}</TableCell>
+                  <TableCell className="num text-xs">{h.tool}</TableCell>
                   <TableCell className="max-w-56">
                     <LongText text={h.args} max={48} mono variant="dialog" label="命令原文" />
                   </TableCell>
@@ -891,8 +891,8 @@ function TrajectoryDrawer({ hit, onClose }) {
   }, [f]);
 
   return (
-    <Sheet open={Boolean(hit)} onOpenChange={(o) => !o && onClose()}>
-      <SheetContent className="max-w-xl">
+    <Sheet nested open={Boolean(hit)} onOpenChange={(o) => !o && onClose()}>
+      <SheetContent>
         <SheetHeader>
           <SheetTitle className="flex items-center gap-2">
             <span>后续轨迹</span>
@@ -907,12 +907,12 @@ function TrajectoryDrawer({ hit, onClose }) {
           </SheetDescription>
         </SheetHeader>
         {hit && f && (
-          <div className="flex flex-1 flex-col gap-4 overflow-y-auto px-4 pb-6">
+          <div className="flex flex-1 flex-col gap-4 overflow-y-auto px-5 pb-5">
             {summary && <div className="text-sm">{summary}</div>}
             {hit.args && (
               <div>
                 <div className="mb-1 text-xs text-muted-foreground">命中命令</div>
-                <pre className="overflow-x-auto rounded-md bg-input-surface p-3 font-mono text-xs whitespace-pre-wrap break-all">
+                <pre className="overflow-x-auto rounded-md bg-input-surface p-3 num text-xs whitespace-pre-wrap break-all">
                   {hit.args}
                 </pre>
                 {hit.reason && <div className="mt-2 text-xs text-muted-foreground">{hit.reason}</div>}
@@ -925,7 +925,7 @@ function TrajectoryDrawer({ hit, onClose }) {
               <div className="flex flex-col gap-1.5">
                 {(f.events || []).map((e, i) => (
                   <div key={i} className="flex items-baseline gap-3 text-sm">
-                    <span className="w-14 shrink-0 font-mono text-xs text-muted-foreground">
+                    <span className="w-14 shrink-0 num text-xs text-muted-foreground">
                       {e.at?.slice(11)}
                     </span>
                     <span>{e.text}</span>
@@ -948,7 +948,7 @@ function SectionTitle({ icon, title, note, right }) {
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="flex items-center gap-3">
         <Icon className="size-4 text-muted-foreground" />
-        <h2 className="text-lg font-semibold">{title}</h2>
+        <h2 className="t-sec">{title}</h2>
         {note && <span className="text-xs text-muted-foreground">{note}</span>}
       </div>
       {right}
@@ -981,13 +981,15 @@ const CHART_W = 800;
 const CHART_H = 180;
 const CHART_PAD = { l: 8, r: 8, t: 14, b: 20 };
 
+// 图表取色(读当前主题 token;SSR/取值失败回退 = 暗色 token 值,
+// 与 globals.css 同源)
 function chartColors() {
-  if (typeof window === "undefined") return { primary: "#3b82f6", muted: "#9ca3af", line: "#1f2937" };
+  if (typeof window === "undefined") return { primary: "#8fae94", muted: "#9b9a94", line: "#232327" };
   const cs = getComputedStyle(document.body);
   return {
-    primary: cs.getPropertyValue("--primary").trim() || "#3b82f6",
-    muted: cs.getPropertyValue("--muted-foreground").trim() || "#9ca3af",
-    line: cs.getPropertyValue("--border").trim() || "#1f2937",
+    primary: cs.getPropertyValue("--primary").trim() || "#8fae94",
+    muted: cs.getPropertyValue("--muted-foreground").trim() || "#9b9a94",
+    line: cs.getPropertyValue("--border").trim() || "#232327",
   };
 }
 
@@ -1069,7 +1071,7 @@ function TokenSeriesChart({ series }) {
 function Legend({ color, label }) {
   return (
     <span className="flex items-center gap-2">
-      <span className="inline-block size-2 rounded-[2px]" style={{ background: color }} />
+      <span className="inline-block size-2 rounded-[4px]" style={{ background: color }} />
       {label}
     </span>
   );

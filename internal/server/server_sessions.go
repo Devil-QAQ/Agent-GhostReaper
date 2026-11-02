@@ -288,22 +288,23 @@ func (rep *panoramaReplay) snapshot() []PanoramaRow {
 // 的全部落账——新增步骤(意图 / 反证 / 验证)、候选事实转正、声明仲裁
 // 裁决、假设收割裁决。全景(P4-11 ②)按本轮研判所读版本回放定格。
 type OvermindRound struct {
-	At             string        `json:"at"`
-	SessionID      string        `json:"session_id,omitempty"`
-	EvaluatedRev   int64         `json:"evaluated_rev,omitempty"`
-	QAccess        string        `json:"q_access,omitempty"`
-	QPrivilege     string        `json:"q_privilege,omitempty"`
-	QCombination   string        `json:"q_combination,omitempty"`
-	QUnlock        string        `json:"q_unlock,omitempty"`
-	QOverturn      string        `json:"q_overturn,omitempty"`
-	Note           string        `json:"note,omitempty"`
-	Dispatched     int           `json:"dispatched,omitempty"`
-	Combined       []string      `json:"combined,omitempty"`
-	Steps          []RoundNode   `json:"steps,omitempty"`
-	FactsConfirmed []string      `json:"facts_confirmed,omitempty"`
-	ClaimsJudged   []RoundNode   `json:"claims_judged,omitempty"`
-	Hypotheses     []RoundNode   `json:"hypotheses,omitempty"`
-	Panorama       []PanoramaRow `json:"panorama"`
+	At             string                `json:"at"`
+	SessionID      string                `json:"session_id,omitempty"`
+	EvaluatedRev   int64                 `json:"evaluated_rev,omitempty"`
+	QAccess        string                `json:"q_access,omitempty"`
+	QPrivilege     string                `json:"q_privilege,omitempty"`
+	QCombination   string                `json:"q_combination,omitempty"`
+	QUnlock        string                `json:"q_unlock,omitempty"`
+	QOverturn      string                `json:"q_overturn,omitempty"`
+	Note           string                `json:"note,omitempty"`
+	Queue          *rings.QueueWatermark `json:"queue,omitempty"`
+	Dispatched     int                   `json:"dispatched,omitempty"`
+	Combined       []string              `json:"combined,omitempty"`
+	Steps          []RoundNode           `json:"steps,omitempty"`
+	FactsConfirmed []string              `json:"facts_confirmed,omitempty"`
+	ClaimsJudged   []RoundNode           `json:"claims_judged,omitempty"`
+	Hypotheses     []RoundNode           `json:"hypotheses,omitempty"`
+	Panorama       []PanoramaRow         `json:"panorama"`
 }
 
 // overmindRounds 主宰研判轨迹:按账本顺序取全部 overmind.record
@@ -345,7 +346,7 @@ func (s *Server) overmindRounds(r *http.Request, taskID string) ([]OvermindRound
 			SessionID: rec.SessionID, EvaluatedRev: rec.EvaluatedRev,
 			QAccess: rec.QAccess, QPrivilege: rec.QPrivilege, QCombination: rec.QCombination,
 			QUnlock: rec.QUnlock, QOverturn: rec.QOverturn, Note: rec.Note,
-			Dispatched: rec.Dispatched, Combined: rec.Combined,
+			Dispatched: rec.Dispatched, Combined: rec.Combined, Queue: rec.Queue,
 		})
 	}
 	if len(rounds) == 0 {

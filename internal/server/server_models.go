@@ -167,7 +167,6 @@ type modelBody struct {
 	RetryEmpty     int     `json:"retry_empty"`
 	RetryReplay    int     `json:"retry_replay"`
 	RetryBreaker   int     `json:"retry_breaker"`
-	RetryRerun     int     `json:"retry_rerun"`
 }
 
 func (b modelBody) toConfig() failover.ModelConfig {
@@ -183,7 +182,6 @@ func (b modelBody) toConfig() failover.ModelConfig {
 		Thinking:       b.Thinking, ThinkingEffort: b.ThinkingEffort,
 		RetryConnect: b.RetryConnect, RetryEmpty: b.RetryEmpty,
 		RetryReplay: b.RetryReplay, RetryBreaker: b.RetryBreaker,
-		RetryRerun: b.RetryRerun,
 	}
 }
 
@@ -289,14 +287,16 @@ func (s *Server) reloadChain(ctx context.Context) {
 
 // reopenBlockedSteps 把非终态任务里 blocked 的 Step 重开回 dispatched
 // 并做执行侧拉起(P3-05c ① 恢复闭环;第七章「自动重开」;人工兜底
-// 「恢复全部」与单任务恢复同一条路径):终态(stopped/completed)与
-// 收尾中(settling)任务不重开——无人执行的死状态;墓碑任务不重开
-// (列表不呈现,历史在账本)。重开后由主宰调度重新领取,R14 复检图
-// 版本(过期计划照旧拒绝)。执行侧拉起分两档:任务在跑(started/
-// settling/queued/created)唤醒即够(循环活着,排队任务唤醒落缓冲,
-// 拉起后消费);任务已暂停(paused,如无模型启动被收养)须 Resume
-// 拉起循环——否则重开的步骤躺在图上没人领取。onlyTask 非空时只处理
-// 该任务(单任务恢复)。返回重开的任务数与步骤数。
+// 「恢复全部」与单任务恢复同一条路径):终态(stopped/completed)任务
+// 不重开——无人执行的死状态;墓碑任务不重开(列表不呈现,历史在账
+// 本)。收尾中(settling)任务同样重开(P4-25 ②):受阻徽标随之解除、
+// 任务回到「收尾中」把尾收完——收尾本就停止派发,重开的步骤如实停留
+// 「已派发未执行」(与收尾纪律同款,不复活派发)。重开后由主宰调度重
+// 新领取,R14 复检图版本(过期计划照旧拒绝)。执行侧拉起分两档:任务
+// 在跑(started/settling/queued/created)唤醒即够(循环活着,排队任务
+// 唤醒落缓冲,拉起后消费);任务已暂停(paused,如无模型启动被收养)
+// 须 Resume 拉起循环——否则重开的步骤躺在图上没人领取。onlyTask 非空
+// 时只处理该任务(单任务恢复)。返回重开的任务数与步骤数。
 func (s *Server) reopenBlockedSteps(ctx context.Context, actor, reason string, onlyTask string) (int, int) {
 	tasks, err := s.Store.Tasks(ctx)
 	if err != nil {
@@ -308,8 +308,8 @@ func (s *Server) reopenBlockedSteps(ctx context.Context, actor, reason string, o
 			continue
 		}
 		switch t.Status {
-		case "stopped", "completed", "settling":
-			continue // 终态不重开;收尾中任务正走向终态
+		case "stopped", "completed":
+			continue // 终态不重开
 		}
 		steps, err := s.Store.NodesByType(ctx, t.ID, rings.NodeStep, "blocked")
 		if err != nil || len(steps) == 0 {
@@ -361,47 +361,30 @@ func (s *Server) handleTaskRecover(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]int{"tasks": tasks, "steps": steps})
 }
 
-// ---- 任务列表受阻徽标(P2-06e) ----
+// ---- 任务受阻徽标(P2-06e 起;P4-27 ② 收紧为任务级普遍故障) ----
 
-// blockedBriefOf 任务受阻原因:优先黑匣子 task_blocked 的原因(任务级
-// 阈值触发时记),退化为图上 blocked 步骤的 session_finished 终因。
-// blocked=true 的判定本身由"图上存在 blocked 步骤"派生(持久真值,
-// 与进程内计数无关)。
-func (s *Server) blockedBriefOf(ctx context.Context, taskID string) (bool, string) {
+// blockedOf 任务是否受阻(P4-27 ②):受阻 = 普遍故障的链级实时信号
+// ——全部模型熔断冷却中(failover 链无任何可路由腿),活动任务
+// (运行中/收尾中)才标;零星单位长退避期间不标(链上有可用腿,单位
+// 会自己续上);恢复(冷却期满探测成功/配置修复重载)后自动消。
+// 阻因(黑匣子 task_blocked / 单位终因)留账本,面板悬停为固定文案
+// "等待模型，恢复后自动继续"。受阻步骤数(blockedSteps)另行透出,
+// 供冬眠悬停"冻结前有 N 条受阻"与任务行计数(全部 blocked 步骤,
+// 含确定性归因——步骤层面都是受阻)。
+func (s *Server) blockedOf(ctx context.Context, status string) bool {
+	if status != "started" && status != "settling" {
+		return false
+	}
+	return s.Chain != nil && s.Chain.AllCooling()
+}
+
+// blockedStepsOf 图上 blocked 步骤数(全部归因;派生自图,持久真值)。
+func (s *Server) blockedStepsOf(ctx context.Context, taskID string) int {
 	steps, err := s.Store.NodesByType(ctx, taskID, rings.NodeStep, "blocked")
-	if err != nil || len(steps) == 0 {
-		return false, ""
+	if err != nil {
+		return 0
 	}
-	reason := ""
-	evs, err := s.Store.Events(ctx, taskID, 0, 0)
-	if err == nil {
-		for _, ev := range evs {
-			switch ev.Kind {
-			case rings.EventBlackboxRecord:
-				var rec rings.BlackboxRecord
-				if json.Unmarshal(ev.Payload, &rec) == nil && rec.Type == rings.BlackboxTaskBlocked {
-					if r, ok := rec.Detail["reason"].(string); ok && r != "" {
-						reason = r
-					}
-				}
-			case rings.EventSwarmRecord:
-				var rec rings.SwarmRecord
-				if reason == "" && json.Unmarshal(ev.Payload, &rec) == nil &&
-					rec.Type == rings.SwarmRecSessionEnd && strings.Contains(rec.Note, "status=blocked") {
-					if i := strings.Index(rec.Note, "reason="); i >= 0 {
-						reason = rec.Note[i+len("reason="):]
-						if j := strings.Index(reason, " turns="); j >= 0 {
-							reason = reason[:j]
-						}
-					}
-				}
-			}
-		}
-	}
-	if reason == "" {
-		reason = fmt.Sprintf("模型故障,%d 个步骤受阻", len(steps))
-	}
-	return true, reason
+	return len(steps)
 }
 
 // ---- P2-08c:测试连接 / 从 API 拉模型列表 / 立即恢复 ----

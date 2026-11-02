@@ -121,7 +121,7 @@ const pauseDeferNote = "本次调用已暂缓(未执行):单位挂起(暂停/任
 
 // deferNote 舵杆暂缓调用的结果文本(账本 tool_call 记录 is_error 的
 // ResultHead 可辨认——被暂缓的调用没有执行内层工具)。
-const deferNote = "本次调用已暂缓(未执行):有舵杆纠偏指令待你消化,见随后的指令消息"
+const deferNote = "本次调用已暂缓(未执行):有纠偏指令待你消化,见随后的指令消息"
 
 // ActorOvermindHelm 主宰经舵杆下达时的 By 标识(与操作者 creator 区分)。
 const ActorOvermindHelm = "overmind"
@@ -213,8 +213,14 @@ func (g *toolGuard) guardReadOnlyCall(toolName string, in json.RawMessage) strin
 				g.env.allowance = nil
 				return ""
 			}
+			// P4-17:代理旁路组单位级放行——同组任何命中直接执行、逐次
+			// 留痕,不再弹门(与审批门 ② 分支同款)。
+			if g.env.bypassPass != nil && r.Group == HardGroupProxyBypass {
+				g.env.recordGateGroupPass(g.pack, r, m, toolName, in)
+				return ""
+			}
 			if g.env.Executor.Gate == nil {
-				reason := "无审批门可用(fail-safe):命中拦截规则(弹门处置)的动作须有人在环批准"
+				reason := "无审批门可用(fail-safe):命中拦截规则(需批准处置)的动作须有人在环批准"
 				g.env.denyGuard(g.pack, toolName, in, rings.DenyLineNoGate, reason)
 				return reason
 			}
@@ -222,13 +228,14 @@ func (g *toolGuard) guardReadOnlyCall(toolName string, in json.RawMessage) strin
 				TaskID: g.pack.TaskID, StepID: g.pack.StepID, UnitID: g.env.UnitID,
 				Intent: g.pack.StepIntent, ActionLevel: g.pack.ActionLevel, HarmClass: g.pack.HarmClass,
 				ToolName: toolName, ToolArgs: string(in), Note: hardRuleGateNote(r, m),
+				GateGroup: r.Group,
 			})
 			if err != nil {
 				return "审批请求登记失败(fail-safe): " + err.Error()
 			}
 			g.env.park = ticket
 			g.env.fuseSegment()
-			return fmt.Sprintf("%s(请求 %s):命令命中拦截规则(%s · %s),已提交面板人工裁决,批准后继续执行",
+			return fmt.Sprintf("%s(请求 %s):命令命中拦截规则(%s · %s),已提交面板审批,批准后继续执行",
 				approvalPendingNote, ticket.Req.ID, r.Group, strings.TrimPrefix(r.Name, HardRuleBuiltinPrefix))
 		}
 		reason := hardRuleDenyReason(r, m)
@@ -307,7 +314,7 @@ func (g *toolGuard) anchorMessage(nthBoundary int) string {
 	if !p.TaskDeadline.IsZero() && p.TaskDeadline.After(time.Now()) {
 		fmt.Fprintf(&b, "任务收尾线: %s(到点就地收尾,把发现写回图)\n", p.TaskDeadline.Format("15:04:05"))
 	}
-	b.WriteString("纪律提醒: 意图外线索只回流不深挖;边发现边写回;被拒不重试。\n")
+	b.WriteString("纪律提醒: 意图外线索只回传不深挖;边发现边写回;被拒不重试。\n")
 	return b.String()
 }
 

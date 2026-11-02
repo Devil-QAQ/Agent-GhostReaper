@@ -2,8 +2,9 @@
 
 import * as React from "react";
 
-// 主题三态(P3-10,8.1"暗色为默认,亮色/跟随系统为可切换项"):
-// dark / light / system。持久键 gr.theme,未设置 = dark(暗色缺省)。
+// 主题三态(P3-10,8.1;P4-26 起缺省改跟随系统——造物主拍板 2026-10-24):
+// dark / light / system。持久键 gr.theme,未设置 = system(随系统深浅色;
+// 手动选择过则记住用户选择,不被系统覆盖)。
 // <html> 上的 .light class 是视觉真值:首帧前由 layout 内联 boot script
 // 落定(防闪烁,见 app/layout.js);此后本模块在切换与系统偏好变化时
 // 维护它。跨组件同步走自定义事件(模块单例,无需 Provider)。
@@ -15,14 +16,15 @@ export const THEMES = [
 ];
 
 const KEY = "gr.theme";
+const DEFAULT = "system";
 const EVT = "gr:theme";
 
 export function storedTheme() {
   try {
     const v = localStorage.getItem(KEY);
-    return THEMES.some((t) => t.value === v) ? v : "dark";
+    return THEMES.some((t) => t.value === v) ? v : DEFAULT;
   } catch {
-    return "dark";
+    return DEFAULT;
   }
 }
 
@@ -46,10 +48,10 @@ export function setTheme(theme) {
   window.dispatchEvent(new Event(EVT));
 }
 
-// useTheme:当前主题(初始 dark,客户端首帧后对齐真值——渲染期不读
-// localStorage,避免 SSG 预渲染与 hydration 不一致)。
+// useTheme:当前主题(初始 system=缺省,客户端首帧后对齐真值——渲染期
+// 不读 localStorage,避免 SSG 预渲染与 hydration 不一致)。
 export function useTheme() {
-  const [theme, setLocal] = React.useState("dark");
+  const [theme, setLocal] = React.useState("system");
   React.useEffect(() => {
     const sync = () => setLocal(storedTheme());
     sync();

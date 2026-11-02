@@ -52,22 +52,24 @@ const APPROVAL_TYPE_LABELS = {
   requested: "请求",
   approved: "批准",
   denied: "拒绝",
-  forced: "研判后放行",
+  forced: "规划后放行",
+  group_pass: "同组放行",
+  step_pass: "同步骤放行",
 };
 
 // 审批门槛的简短说明(操作约束区展示)。
 const APPROVAL_THRESHOLD_HINT = {
-  "修改与持久化": "仅增删改弹门",
-  "利用深入": "利用深入及以上弹门",
-  "主动测试": "主动测试及以上弹门",
-  "只读探测": "全部弹门",
+  "修改与持久化": "仅增删改需批准",
+  "利用深入": "利用深入及以上需批准",
+  "主动测试": "主动测试及以上需批准",
+  "只读探测": "全部需批准",
 };
 
 // 区块卡头:标题 + 徽标/说明 + 右侧操作(全站统一卡形态)。
 function SectionHeader({ title, children, tail }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
-      <h2 className="text-[15px] font-semibold">{title}</h2>
+      <h2 className="t-sec">{title}</h2>
       {children}
       {tail && <div className="ml-auto flex items-center gap-2">{tail}</div>}
     </div>
@@ -142,19 +144,19 @@ function AssetScopeSection({ taskID }) {
 
   return (
     <Card>
-      <CardContent className="flex flex-col gap-3 p-6">
+      <CardContent className="flex flex-col gap-4 p-5">
         <SectionHeader title="资产范围">
           <span className="text-xs text-muted-foreground">
             默认全部纳入授权;摘除的不再派发,下一轮生效
           </span>
-          <span className="ml-auto font-mono text-xs text-muted-foreground">
+          <span className="ml-auto num text-xs text-muted-foreground">
             摘除 {excludedCount}/{assets.length}
           </span>
         </SectionHeader>
         {error && <div className="text-xs text-status-danger">读取失败:{error}</div>}
         {assets.length === 0 ? (
           <div className="rounded-lg border border-dashed py-5 text-center text-sm text-muted-foreground">
-            无资产 · 资产页可手动补入,或等虫群发现回流
+            无资产 · 资产页可手动补入,或等虫群发现回传
           </div>
         ) : (
           <div className="flex max-h-56 flex-col gap-1 overflow-y-auto pr-1">
@@ -168,7 +170,7 @@ function AssetScopeSection({ taskID }) {
                   disabled={busy}
                   onCheckedChange={(v) => toggle(a, Boolean(v))}
                 />
-                <span className="min-w-0 flex-1 truncate font-mono text-xs" title={a.title}>
+                <span className="min-w-0 flex-1 truncate num text-xs" title={a.title}>
                   {a.title}
                 </span>
                 <Badge variant="outline">{assetClassMeta(a.class).label}</Badge>
@@ -200,23 +202,23 @@ function ApprovalSection({ taskID }) {
 
   return (
     <Card>
-      <CardContent className="flex flex-col gap-3 p-6">
-        <SectionHeader title="审批弹门">
+      <CardContent className="flex flex-col gap-4 p-5">
+        <SectionHeader title="审批">
           <Badge variant={approvals.length > 0 ? "danger" : "info"}>
             待决 {approvals.length}
           </Badge>
           <span className="ml-auto text-xs text-muted-foreground">
-            对话内容不能代替这里的裁决
+            对话内容不能代替这里的审批
           </span>
         </SectionHeader>
         <p className="text-xs text-muted-foreground">
           达到审批门槛的动作逐次等批准;批准前不执行,等待期计时停走。
-          拒绝即熔断该单位,不换法重试,主宰重新研判。
+          拒绝就终止这个单位,它不换方法重试;主宰会另想办法。
         </p>
         {error && <div className="text-xs text-status-danger">读取失败:{error}</div>}
         {approvals.length === 0 ? (
           <div className="rounded-lg border border-dashed py-6 text-center text-sm text-muted-foreground">
-            无待裁决请求
+            无待审批请求
           </div>
         ) : (
           approvals.map((a) => (
@@ -255,9 +257,9 @@ function ApprovalRecords({ records, taskID }) {
                   key={`${r.request_id}-${r.type}-${i}`}
                   className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
                 >
-                  <span className="font-mono">{r.occurred_at}</span>
+                  <span className="num">{r.occurred_at}</span>
                   <span>{APPROVAL_TYPE_LABELS[r.type] || r.type}</span>
-                  <span className="font-mono">{r.tool_name}</span>
+                  <span className="num">{r.tool_name}</span>
                   {r.deny_line && <span>({DENY_LINE_LABELS[r.deny_line] || r.deny_line})</span>}
                   {r.wait_millis > 0 && <span>等待 {(r.wait_millis / 1000).toFixed(1)} 秒</span>}
                   {r.reason && (
@@ -265,7 +267,7 @@ function ApprovalRecords({ records, taskID }) {
                       text={r.reason}
                       max={40}
                       variant="dialog"
-                      label="拒绝原因"
+                      label={r.type === "denied" ? "拒绝原因" : "备注"}
                       className="max-w-80 text-xs text-muted-foreground"
                     />
                   )}
@@ -307,14 +309,14 @@ function DeniedCard({ taskID, rec }) {
         {rec.harm_class && (
           <Badge variant="outline">{HARM_CLASS_LABELS[rec.harm_class] || rec.harm_class}</Badge>
         )}
-        <span className="font-mono">{rec.tool_name}</span>
+        <span className="num">{rec.tool_name}</span>
         <span className="text-xs text-muted-foreground">
           步骤 {rec.step_id} · {rec.occurred_at}
         </span>
       </div>
       {rec.intent && (
         <div className="text-xs text-muted-foreground">
-          意图:<LongText text={rec.intent} max={120} label="意图声明" className="align-baseline" />
+          意图:<LongText text={rec.intent} max={120} label="意图原文" className="align-baseline" />
         </div>
       )}
       <div className="text-xs text-muted-foreground">
@@ -325,17 +327,17 @@ function DeniedCard({ taskID, rec }) {
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" variant="destructive" disabled={busy} onClick={() => setConfirmOpen(true)}>
-          研判后放行
+          规划后放行
         </Button>
         <span className="text-xs text-muted-foreground">放行按上方参数执行一次,逐次放行不累计授权</span>
       </div>
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>研判后放行</DialogTitle>
+            <DialogTitle>规划后放行</DialogTitle>
             <DialogDescription>
               将按记录在案的参数执行一次 {rec.tool_name} 调用,执行结果与本次放行全部记账;
-              被熔断的单位不复活。
+              被终止的单位不恢复。
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">
@@ -372,7 +374,7 @@ function ApprovalCard({ taskID, approval }) {
     );
     setBusy(false);
     if (!ok) {
-      toast.error(`裁决失败:${body.error || "原因未说明"}`);
+      toast.error(`审批失败:${body.error || "原因未说明"}`);
       return;
     }
     toast.success(approved ? "已批准(已记账)" : "已拒绝(已记账)");
@@ -384,14 +386,19 @@ function ApprovalCard({ taskID, approval }) {
         <Badge variant={levelVariant(approval.action_level)}>
           {approval.action_level}
         </Badge>
-        <span className="font-mono">{approval.tool_name}</span>
+        <span className="num">{approval.tool_name}</span>
         <span className="text-xs text-muted-foreground">
           步骤 {approval.step_id} · 单位 {approval.unit_id} · {approval.created_at}
         </span>
       </div>
       <div className="text-xs text-muted-foreground">
-        意图声明:<LongText text={approval.intent} max={120} label="意图声明" className="align-baseline" />
+        意图:<LongText text={approval.intent} max={120} label="意图原文" className="align-baseline" />
       </div>
+      {/* 危害说明三段式(P4-27 ⑨):要做什么/目标会怎样/最坏后果,
+          确定性模板拼装——批准后果先说清,不用猜 */}
+      {approval.harm_note && (
+        <div className="text-sm leading-relaxed">{approval.harm_note}</div>
+      )}
       {approval.note && (
         <div className="text-xs text-status-warning">
           <LongText text={approval.note} max={160} label="拦截说明" className="align-baseline" />
@@ -403,7 +410,7 @@ function ApprovalCard({ taskID, approval }) {
       <div className="flex flex-wrap items-center gap-2">
         <Input
           className="w-64"
-          placeholder="裁决理由(随裁决记账)"
+          placeholder="审批理由(随审批记录)"
           value={reason}
           onChange={(e) => setReason(e.target.value)}
         />
@@ -424,17 +431,12 @@ function ConstraintSection({ taskID }) {
   const { data: roe, error } = usePolling(`/api/tasks/${taskID}/roe`, 2000);
   return (
     <Card>
-      <CardContent className="flex flex-col gap-3 p-6">
+      <CardContent className="flex flex-col gap-4 p-5">
         <SectionHeader
-          title="操作约束"
-          tail={
-            <>
-              <span className="font-mono text-xs text-muted-foreground">
-                版本号 {roe?.updated_rev ?? "—"}
-              </span>
-              <ConstraintDialog taskID={taskID} roe={roe} />
-            </>
+          title={
+            <span title={`版本号 ${roe?.updated_rev ?? "—"}`}>操作约束</span>
           }
+          tail={<ConstraintDialog taskID={taskID} roe={roe} />}
         />
         {error && <div className="text-xs text-status-danger">读取失败:{error}</div>}
         {!roe ? (
@@ -447,11 +449,11 @@ function ConstraintSection({ taskID }) {
                 {roe.approval_threshold}
               </Badge>
               <span className="text-xs text-muted-foreground">
-                {APPROVAL_THRESHOLD_HINT[roe.approval_threshold] || "该级及以上弹门"}
+                {APPROVAL_THRESHOLD_HINT[roe.approval_threshold] || "该级及以上需批准"}
               </span>
             </div>
             <div className="text-xs text-muted-foreground">
-              数据销毁与拒绝服务类动作不走弹门,直接拒绝并留在审批记录,可研判后放行。
+              数据销毁与拒绝服务类动作不进审批等待,直接拒绝并留在审批记录,可规划后放行。
             </div>
             <ConstraintRow label="禁止工具" values={roe.denied_tools} empty="无" />
             <ConstraintRow label="仅允许工具" values={roe.allowed_tools} empty="不设白名单" />
@@ -478,7 +480,7 @@ function IntentRulesCard({ taskID }) {
 
   return (
     <Card>
-      <CardContent className="flex flex-col gap-3 p-6">
+      <CardContent className="flex flex-col gap-4 p-5">
         <SectionHeader
           title="任务级拦截"
           tail={
@@ -532,13 +534,13 @@ function IntentRulesCard({ taskID }) {
                   </span>
                 )}
                 <div className="ml-auto flex items-center gap-1">
-                  <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => setEditRule(r)}>
+                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={() => setEditRule(r)}>
                     编辑
                   </Button>
                   <Button
                     size="sm"
                     variant="ghost"
-                    className="h-7 px-2 text-xs text-status-danger"
+                    className="h-8 px-2 text-xs text-status-danger"
                     onClick={() => setDeleteRule(r)}
                   >
                     删除
@@ -572,7 +574,7 @@ function ConstraintRow({ label, values, empty }) {
         values.map((v) => (
           <span
             key={v}
-            className="rounded-md border bg-muted px-2 py-0.5 font-mono text-xs"
+            className="rounded-md border border-border/55 bg-muted px-2 py-0.5 num text-xs"
           >
             {v}
           </span>
@@ -646,7 +648,7 @@ function ConstraintDialog({ taskID, roe }) {
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-h-[88vh] w-[min(620px,94vw)] max-w-none gap-4 overflow-y-auto p-6">
           <DialogHeader>
-            <DialogTitle className="text-base">变更操作约束</DialogTitle>
+            <DialogTitle>变更操作约束</DialogTitle>
             <DialogDescription>
               提交后整体覆盖当前约束,全部记账,下一轮生效;门槛收紧后,
               执行中的单位维持领取时门槛。任务级拦截规则在下方单独增删改。
@@ -658,7 +660,7 @@ function ConstraintDialog({ taskID, roe }) {
             <div className="flex flex-col gap-4">
               <Field label="禁止工具">
                 <Input
-                  className={`${INPUT} font-mono text-xs`}
+                  className={`${INPUT} num text-xs`}
                   placeholder="逗号分隔,如: bash, port_probe"
                   value={form.denied}
                   onChange={(e) => setForm({ ...form, denied: e.target.value })}
@@ -666,7 +668,7 @@ function ConstraintDialog({ taskID, roe }) {
               </Field>
               <Field label="仅允许工具">
                 <Input
-                  className={`${INPUT} font-mono text-xs`}
+                  className={`${INPUT} num text-xs`}
                   placeholder="留空 = 不设白名单"
                   value={form.allowed}
                   onChange={(e) => setForm({ ...form, allowed: e.target.value })}
@@ -688,7 +690,7 @@ function ConstraintDialog({ taskID, roe }) {
                     ))}
                   </SelectContent>
                 </Select>
-                <span className="text-xs text-muted-foreground">该级及以上弹门</span>
+                <span className="text-xs text-muted-foreground">该级及以上需批准</span>
               </Field>
               <Field label="变更说明">
                 <Input
@@ -801,7 +803,7 @@ function RoERuleDialog({ taskID, assets, rule, onClose }) {
     <Dialog open onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="max-h-[88vh] w-[min(620px,94vw)] max-w-none gap-4 overflow-y-auto p-6">
         <DialogHeader>
-          <DialogTitle className="text-base">
+          <DialogTitle>
             {editing ? "编辑任务级规则" : "新增任务级规则"}
           </DialogTitle>
           <DialogDescription>
@@ -828,7 +830,7 @@ function RoERuleDialog({ taskID, assets, rule, onClose }) {
               {form.disposition === "allow" && (
                 <>
                   <Input
-                    className="h-9 w-28 text-right font-mono text-xs tnum"
+                    className="h-9 w-28 text-right num text-xs"
                     inputMode="numeric"
                     value={form.quota}
                     onChange={(e) => {
@@ -885,7 +887,7 @@ function RoERuleDialog({ taskID, assets, rule, onClose }) {
                       <Button
                         size="sm"
                         variant="outline"
-                        className="h-7 px-2 text-xs"
+                        className="h-8 px-2 text-xs"
                         onClick={generate}
                         disabled={busy}
                       >
@@ -897,7 +899,7 @@ function RoERuleDialog({ taskID, assets, rule, onClose }) {
                     </div>
                     <Textarea
                       rows={4}
-                      className="resize-none bg-input-surface font-mono text-xs"
+                      className="resize-none bg-input-surface num text-xs"
                       value={form.patterns}
                       onChange={(e) => setForm({ ...form, patterns: e.target.value })}
                       placeholder={"每行一条正则,如:\\bcurl\\b[^|;&]*(\\s-T\\b|--upload-file)"}
@@ -980,7 +982,7 @@ function GoalSection({ taskID }) {
 
   return (
     <Card>
-      <CardContent className="flex flex-col gap-3 p-6">
+      <CardContent className="flex flex-col gap-4 p-5">
         <SectionHeader
           title="目标管理"
           tail={
@@ -1005,7 +1007,7 @@ function GoalSection({ taskID }) {
                 <Badge variant={GOAL_STATUS[g.status]?.variant || "info"}>
                   {GOAL_STATUS[g.status]?.label || g.status}
                 </Badge>
-                <span className="font-mono text-xs text-muted-foreground">{g.id}</span>
+                <span className="num text-xs text-muted-foreground">{g.id}</span>
                 <span>{g.title}</span>
                 {g.predicate && (
                   <span className="text-xs text-muted-foreground">条件已锁定</span>
@@ -1066,7 +1068,7 @@ function GoalDialog({ taskID, open, onOpenChange }) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[88vh] w-[min(620px,94vw)] max-w-none gap-4 overflow-y-auto p-6">
         <DialogHeader>
-          <DialogTitle className="text-base">新增目标</DialogTitle>
+          <DialogTitle>新增目标</DialogTitle>
           <DialogDescription>
             目标是最终可核验对象;完成条件(可选)创建时锁定。
           </DialogDescription>
@@ -1094,7 +1096,7 @@ function GoalDialog({ taskID, open, onOpenChange }) {
                   </span>
                   <Textarea
                     rows={4}
-                    className="resize-none bg-input-surface font-mono text-xs"
+                    className="resize-none bg-input-surface num text-xs"
                     placeholder={'如 {"op":"all_of","conditions":[{"kind":"fact_confirmed","asset_id":"a1","min":1}]}'}
                     value={predicate}
                     onChange={(e) => setPredicate(e.target.value)}

@@ -122,7 +122,7 @@ func TestBudgetRenewalE2E(t *testing.T) {
 		}
 		// 收尾轮(引擎注入):把 s1 已取得的发现写回再收口。
 		if strings.Contains(rr.LastUser, "运行预算即将耗尽") {
-			if !seenToolResult(rr, "submit_candidate_fact", "已入候选事实") {
+			if !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实") {
 				return scriptedReply{ToolCalls: []scriptedToolCall{{
 					ID: "w1", Name: "submit_candidate_fact",
 					Args: fmt.Sprintf(`{"statement":"robots.txt 与 /api/version 路径存在","evidence":"http_probe 实测 robots Disallow 条目与版本 JSON","asset_id":"web1"}`),
@@ -131,7 +131,7 @@ func TestBudgetRenewalE2E(t *testing.T) {
 			return scriptedReply{Text: "预算到线,发现已写回,等待续跑。", Finish: "stop"}
 		}
 		// 续跑轮(P4-01 ② 原会话续):补齐第二条事实后收口。判据按调用
-		// 参数查(上一段收尾的提交结果已在历史,"已入候选事实"不可复用)。
+		// 参数查(上一段收尾的提交结果已在历史,"已提交待确认事实"不可复用)。
 		if strings.Contains(rr.LastUser, "预算 · 续跑") {
 			if !seenToolCallArg(rr, "submit_candidate_fact", "剩余路径枚举完成") {
 				return scriptedReply{ToolCalls: []scriptedToolCall{{
@@ -293,7 +293,7 @@ func TestTaskSettlingE2E(t *testing.T) {
 				return scriptedReply{ToolCalls: []scriptedToolCall{{
 					ID: "sort1", Name: "bash", Args: `{"command":"sleep 1 && echo 收尾整理完成"}`,
 				}}, Finish: "tool_calls"}
-			case !seenToolResult(rr, "submit_candidate_fact", "已入候选事实"):
+			case !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实"):
 				return scriptedReply{ToolCalls: []scriptedToolCall{{
 					ID: "w1", Name: "submit_candidate_fact",
 					Args: `{"statement":"收尾写回:靶站版本接口存在","evidence":"任务整体超时收尾,探测所得写回","asset_id":"web1"}`,

@@ -50,7 +50,7 @@ func TestServerTaskSeedFormAndAssetTree(t *testing.T) {
 	// leak_info,共 5 资产 3 条 sub_of。
 	var created map[string]any
 	post(t, h, http.MethodPost, "/api/tasks", `{
-		"id":"seed-form","title":"资产同步 v1 验证",
+		"id":"seed-form","title":"资产同步 v1 验证","goals":["种子目标"],
 		"assets":[
 			{"class":"domain","title":"example.com"},
 			{"class":"subdomain","title":"www.example.com","parent":"example.com"},
@@ -157,16 +157,18 @@ func TestServerTaskSeedFormAndAssetTree(t *testing.T) {
 		}
 	}
 
-	// 坏输入 400 且零残留(校验全部前置,任务不建)。
+	// 坏输入 400 且零残留(校验全部前置,任务不建)。P4-16:任务名可选,
+	// 目标与资产必填。
 	bad := []string{
-		`{"title":"坏类","assets":[{"class":"planet","title":"x"}]}`,                                                      // 未知类
-		`{"title":"空类","assets":[{"class":"","title":"x"}]}`,                                                            // 表单受限输入,类必填
-		`{"title":"空标识","assets":[{"class":"host","title":" "}]}`,                                                       // 空标识
-		`{"title":"父不存在","assets":[{"class":"host","title":"x","parent":"无"}]}`,                                         // 父不在表单内
-		`{"title":"自引","assets":[{"class":"host","title":"x","parent":"x"}]}`,                                           // 父=自身
-		`{"title":"成环","assets":[{"class":"host","title":"a","parent":"b"},{"class":"host","title":"b","parent":"a"}]}`, // 父链成环
-		`{"title":"重复标识","assets":[{"class":"host","title":"a"},{"class":"host","title":"a"}]}`,                         // 标识重复
-		`{"title":"  "}`, // 空标题
+		`{"title":"坏类","goals":["种子目标"],"assets":[{"class":"planet","title":"x"}]}`,                                                      // 未知类
+		`{"title":"空类","goals":["种子目标"],"assets":[{"class":"","title":"x"}]}`,                                                            // 表单受限输入,类必填
+		`{"title":"空标识","goals":["种子目标"],"assets":[{"class":"host","title":" "}]}`,                                                       // 空标识
+		`{"title":"父不存在","goals":["种子目标"],"assets":[{"class":"host","title":"x","parent":"无"}]}`,                                         // 父不在表单内
+		`{"title":"自引","goals":["种子目标"],"assets":[{"class":"host","title":"x","parent":"x"}]}`,                                           // 父=自身
+		`{"title":"成环","goals":["种子目标"],"assets":[{"class":"host","title":"a","parent":"b"},{"class":"host","title":"b","parent":"a"}]}`, // 父链成环
+		`{"title":"重复标识","goals":["种子目标"],"assets":[{"class":"host","title":"a"},{"class":"host","title":"a"}]}`,                         // 标识重复
+		`{"title":"缺目标","assets":[{"class":"host","title":"10.0.0.1"}]}`,                                                                 // 目标必填(P4-16)
+		`{"title":"缺资产","goals":["种子目标"]}`,                                                                                               // 资产必填(P4-16)
 	}
 	var errBody map[string]string
 	for _, body := range bad {
@@ -175,6 +177,27 @@ func TestServerTaskSeedFormAndAssetTree(t *testing.T) {
 	rows, _ := store.Tasks(ctx)
 	if len(rows) != 1 {
 		t.Fatalf("坏输入不得残留任务: %d", len(rows))
+	}
+
+	// P4-16:任务名可选——空标题 + 齐全目标资产照建,列表以任务 ID 呈现。
+	post(t, h, http.MethodPost, "/api/tasks",
+		`{"title":"  ","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.2"}]}`,
+		http.StatusOK, &created)
+	if created["id"] == "" {
+		t.Fatalf("空标题应照常建任务: %+v", created)
+	}
+	rows, _ = store.Tasks(ctx)
+	if len(rows) != 2 {
+		t.Fatalf("空标题任务应入库: %d", len(rows))
+	}
+	untitled := ""
+	for _, r := range rows {
+		if r.ID != "seed-form" {
+			untitled = r.Title
+		}
+	}
+	if untitled != "" {
+		t.Fatalf("空标题任务入库标题应为空: %q", untitled)
 	}
 }
 
@@ -197,7 +220,7 @@ func TestServerTaskStopLedger(t *testing.T) {
 	ctx := context.Background()
 
 	var created map[string]any
-	post(t, h, http.MethodPost, "/api/tasks", `{"id":"fuse-ledger","title":"熔断审计"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"id":"fuse-ledger","title":"熔断审计","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}]}`, http.StatusOK, &created)
 
 	// 不存在的任务 404。
 	var errBody map[string]string
@@ -301,7 +324,7 @@ func TestServerTaskFuseIsolationE2E(t *testing.T) {
 			return sreply{ToolCalls: []struct {
 				ID, Name, Args string
 			}{{ID: "p1", Name: "port_probe", Args: fmt.Sprintf(`{"host":%q,"port":%s}`, host, port)}}}
-		case !sSeenToolResult(rr, "submit_candidate_fact", "已入候选事实"):
+		case !sSeenToolResult(rr, "submit_candidate_fact", "已提交待确认事实"):
 			return sreply{ToolCalls: []struct {
 				ID, Name, Args string
 			}{{ID: "c1", Name: "submit_candidate_fact", Args: fmt.Sprintf(
@@ -346,10 +369,10 @@ func TestServerTaskFuseIsolationE2E(t *testing.T) {
 	// 默认并发上限 2,两任务同时拉起。
 	var created map[string]any
 	post(t, h, http.MethodPost, "/api/tasks", fmt.Sprintf(
-		`{"id":"fuse-a","title":"任务 A(将被熔断)","assets":[{"class":"service","title":%q}]}`, urlA),
+		`{"id":"fuse-a","title":"任务 A(将被熔断)","goals":["种子目标"],"assets":[{"class":"service","title":%q}]}`, urlA),
 		http.StatusOK, &created)
 	post(t, h, http.MethodPost, "/api/tasks", fmt.Sprintf(
-		`{"id":"fuse-b","title":"任务 B(须不受影响)","assets":[{"class":"service","title":%q}]}`, urlB),
+		`{"id":"fuse-b","title":"任务 B(须不受影响)","goals":["种子目标"],"assets":[{"class":"service","title":%q}]}`, urlB),
 		http.StatusOK, &created)
 
 	// 各自补一个带谓词目标(硬终止):该资产上有 confirmed 事实即达成。
@@ -411,10 +434,28 @@ func TestServerTaskFuseIsolationE2E(t *testing.T) {
 	close(model.unitGate)
 
 	// B 不受影响,跑完全链路:步骤 done → 候选收割 confirmed → 目标达成。
-	waitUntil(t, 60*time.Second, "任务 B 目标经仲裁者判定达成", func() bool {
+	// P4-16:建任务必带目标,图上 = 建单种子目标 + 谓词目标共 2 个;
+	// 谓词目标由仲裁者判定达成,种子目标(无谓词,机器不可判)随后经
+	// 面板人工标记达成(既有通道),两目标齐达成后任务自然收场。
+	waitUntil(t, 60*time.Second, "任务 B 谓词目标经仲裁者判定达成", func() bool {
 		goals, err := store.NodesByType(ctx, "fuse-b", rings.NodeGoal, "")
-		return err == nil && len(goals) == 1 && goals[0].Status == "achieved"
+		if err != nil || len(goals) != 2 {
+			return false
+		}
+		for _, g := range goals {
+			if strings.Contains(g.Title, "摸清服务存活") && g.Status == "achieved" {
+				return true
+			}
+		}
+		return false
 	})
+	seedGoals, _ := store.NodesByType(ctx, "fuse-b", rings.NodeGoal, "")
+	for _, g := range seedGoals {
+		if g.Title == "种子目标" {
+			post(t, h, http.MethodPost, "/api/tasks/fuse-b/goals/"+g.ID+"/achieve",
+				`{"reason":"演练目标随谓词目标一同收场"}`, http.StatusOK, &created)
+		}
+	}
 	steps, _ := store.NodesByType(ctx, "fuse-b", rings.NodeStep, "")
 	if len(steps) == 0 || steps[0].Status != "done" {
 		t.Fatalf("B 的步骤应完成: %+v", steps)
@@ -442,8 +483,13 @@ func TestServerTaskFuseIsolationE2E(t *testing.T) {
 		t.Fatalf("被熔断任务不得再产出 confirmed 事实: %+v", factsA)
 	}
 	goalsA, _ := store.NodesByType(ctx, "fuse-a", rings.NodeGoal, "")
-	if len(goalsA) != 1 || goalsA[0].Status != "active" {
-		t.Fatalf("被熔断任务的目标应保持 active: %+v", goalsA)
+	if len(goalsA) != 2 {
+		t.Fatalf("被熔断任务的种子与谓词目标应各 1: %+v", goalsA)
+	}
+	for _, g := range goalsA {
+		if g.Status != "active" {
+			t.Fatalf("被熔断任务的目标应保持 active: %+v", goalsA)
+		}
 	}
 	before := decomposeOf(urlA)
 	time.Sleep(1 * time.Second)

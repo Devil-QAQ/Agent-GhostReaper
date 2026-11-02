@@ -836,14 +836,14 @@ func (s *Store) SearchClaims(ctx context.Context, like string, limit int) ([]Cla
 		LIMIT ?`,
 		string(NodeTestClaim), like, like, limit)
 	if err != nil {
-		return nil, fmt.Errorf("rings: 搜索声明: %w", err)
+		return nil, fmt.Errorf("rings: 搜索判断: %w", err)
 	}
 	defer rows.Close()
 	var out []ClaimSearchRow
 	for rows.Next() {
 		var r ClaimSearchRow
 		if err := rows.Scan(&r.TaskID, &r.ClaimID, &r.Title, &r.Status, &r.TaskTitle); err != nil {
-			return nil, fmt.Errorf("rings: 扫描声明搜索行: %w", err)
+			return nil, fmt.Errorf("rings: 扫描判断搜索行: %w", err)
 		}
 		out = append(out, r)
 	}

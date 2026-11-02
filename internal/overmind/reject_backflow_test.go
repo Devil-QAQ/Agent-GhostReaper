@@ -110,7 +110,7 @@ func TestGuardRejectBackflowE2E(t *testing.T) {
 			return scriptedReply{Text: `{"new_intents":[{"intent":"探测幽灵资产","expected_observation":"证据","action_level":"只读探测","covers":["ghost1"]}]}`, Finish: "stop"}
 		}
 		// 虫群单位:提交候选事实后收口。
-		if !seenToolResult(rr, "submit_candidate_fact", "已入候选事实") {
+		if !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实") {
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
 				ID: "f1", Name: "submit_candidate_fact",
 				Args: `{"statement":"靶标暴露面已确认","evidence":"实测","asset_id":"a1"}`,
@@ -138,7 +138,12 @@ func TestGuardRejectBackflowE2E(t *testing.T) {
 	if steps, _ := store.NodesByType(ctx, task, rings.NodeStep, ""); len(steps) != 0 {
 		t.Fatalf("幽灵意图不得入图,实际 %d 步", len(steps))
 	}
-	// 下一次唤醒:拒因回流进快照,主宰换真实资产重派,任务经机器判定完成。
+	// P4-29：拒因保留到下一次真实触发，不以空唤醒连续重试。
+	if _, err := store.Append(ctx, task, rings.Event{Kind: rings.EventRoeUpdated, Actor: "creator", Payload: rings.RoeUpdated{}}); err != nil {
+		t.Fatal(err)
+	}
+	loop.cycle(ctx)
+	loop.unitsWG.Wait() // 调度启动即返；收拢真实单位，再消费落地结果。
 	if !loop.cycle(ctx) {
 		t.Fatalf("拒收—回流—纠偏后任务应经机器判定完成(lastErr=%v)", loop.LastErr())
 	}

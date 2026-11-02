@@ -75,7 +75,7 @@ export function AssetAddDialog({ open, onOpenChange, taskID, assets, onAdded }) 
       return;
     }
     onOpenChange(false);
-    toast.success(`已入账 ${body.added} 个资产,已唤醒主宰`);
+    toast.success(`已记录 ${body.added} 个资产,已唤醒主宰`);
     if (onAdded) onAdded();
   };
 
@@ -104,7 +104,7 @@ export function AssetAddDialog({ open, onOpenChange, taskID, assets, onAdded }) 
             id="aa-paste"
             rows={3}
             placeholder={"每行一个标识,自动识别:\nhttp://10.10.0.9:8080 → 服务\n10.10.0.10 → 主机\napi.example.com → 子域名"}
-            className="font-mono text-xs"
+            className="num text-xs"
             value={paste}
             onChange={(e) => setPaste(e.target.value)}
           />
@@ -138,14 +138,14 @@ export function AssetAddDialog({ open, onOpenChange, taskID, assets, onAdded }) 
                   </Select>
                 </div>
                 <Input
-                  className="font-mono text-xs"
+                  className="num text-xs"
                   placeholder="资产标识(如 http://10.10.0.9:8080)"
                   value={row.title}
                   onChange={(e) => setRow(i, { title: e.target.value })}
                 />
                 <Input
                   list="aa-parent-ids"
-                  className="w-40 shrink-0 font-mono text-xs"
+                  className="w-40 shrink-0 num text-xs"
                   placeholder="父标识(可选)"
                   value={row.parent}
                   onChange={(e) => setRow(i, { parent: e.target.value })}
@@ -183,7 +183,7 @@ export function AssetAddDialog({ open, onOpenChange, taskID, assets, onAdded }) 
             取消
           </Button>
           <Button onClick={submit} disabled={busy}>
-            入账并唤醒主宰
+            记录并唤醒主宰
           </Button>
         </DialogFooter>
       </DialogContent>

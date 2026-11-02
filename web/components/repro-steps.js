@@ -25,13 +25,16 @@ export function ReproStepsList({ tid, steps, variants = 0 }) {
   return (
     <ol className="flex flex-col gap-3">
       {steps.map((st) => (
-        <li key={st.seq} className="flex flex-col gap-2 rounded-md border bg-card p-3">
+        <li key={st.seq} className="flex flex-col gap-2 rounded-md border border-border/55 bg-card p-3">
           <div className="flex flex-wrap items-center gap-2 text-xs">
             <Badge variant="outline">步骤 {st.seq}</Badge>
             {st.round > 0 && <Badge variant="info">第 {st.round} 轮</Badge>}
             {st.status ? <Badge variant={statusVariant(st.status)}>{st.status}</Badge> : null}
           </div>
           {st.desc && <div className="text-[13px] leading-relaxed">{st.desc}</div>}
+          {st.unpolished && (
+            <div className="text-xs text-muted-foreground">文字未过文风校验，按原文保留</div>
+          )}
           {st.note && <div className="text-xs text-status-warning">{st.note}</div>}
           {st.exchange_id && tid ? (
             <ExchangeRaw tid={tid} exID={st.exchange_id} bare />
@@ -46,11 +49,11 @@ export function ReproStepsList({ tid, steps, variants = 0 }) {
               {st.tls_word && (
                 <div className="text-xs text-muted-foreground">目标证书:{st.tls_word}</div>
               )}
-              <pre className="max-h-72 overflow-auto rounded-md bg-muted/50 p-2 font-mono text-xs leading-relaxed whitespace-pre-wrap break-all">
+              <pre className="max-h-72 overflow-auto rounded-md bg-muted/50 p-2 num text-xs leading-relaxed whitespace-pre-wrap break-all">
                 {st.raw}
               </pre>
               {/* P3-11a ③:hash 收悬停,主视觉只留"原始数据"一行 */}
-              <div className="font-mono text-[10px] text-muted-foreground" title={st.blob_ref}>
+              <div className="num text-[10px] text-muted-foreground" title={st.blob_ref}>
                 原始数据
               </div>
             </div>

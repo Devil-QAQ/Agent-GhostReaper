@@ -288,12 +288,12 @@ func (s *Server) claimFollowupPrelude(ctx context.Context, taskID string, node *
 		if node.Status == rings.TestClaimConfirmed {
 			fmt.Fprintf(&b, "确认时刻:%s\n", timing.TerminalAt)
 		} else {
-			fmt.Fprintf(&b, "终态时刻:%s\n", timing.TerminalAt)
+			fmt.Fprintf(&b, "结束时刻:%s\n", timing.TerminalAt)
 		}
 	} else {
-		fmt.Fprintf(&b, "终态时刻:进行中(落地 %s)\n", timing.LandedAt)
+		fmt.Fprintf(&b, "结束时刻:进行中(开始 %s)\n", timing.LandedAt)
 	}
-	fmt.Fprintf(&b, "声明当前状态:%s\n", node.Status)
+	fmt.Fprintf(&b, "判断当前状态:%s\n", node.Status)
 	b.WriteString("应答纪律:围绕该成果回答造物主的追问;事实先查账本(read_findings / read_progress),人话陈述、数字精确;引用图上节点带编号(如 claim:ID、step:ID、fact:ID、asset:ID),造物主可点击核对;账本里没有的不编造。")
 	return b.String()
 }

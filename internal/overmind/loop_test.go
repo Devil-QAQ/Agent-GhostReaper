@@ -79,7 +79,8 @@ func seedAssets(t *testing.T, store *rings.Store, task string, ids []string, hos
 //     完成,再回静默;新事件 + 唤醒开启新一轮。
 //  2. 连续派发 3+ 意图:首轮一次拆解派 5 条、二轮再派 1 条,全部经
 //     actor=overmind 的派发事件入图并执行到 done。
-//  3. 并发受限(默认 3):闸门挂起恰 3 只单位的首轮请求时,第 4/5
+//  3. 并发受限(显式 3,机制与默认值解耦——默认值另有断言;默认随
+//     P4-29 调优为 5):闸门挂起恰 3 只单位的首轮请求时,第 4/5
 //     步保持 dispatched;全程并发峰值恰为 3。
 func TestOvermindLoopE2E(t *testing.T) {
 	dir := t.TempDir()
@@ -120,7 +121,7 @@ func TestOvermindLoopE2E(t *testing.T) {
 				ID: "p" + strconv.Itoa(rr.Index), Name: "port_probe",
 				Args: fmt.Sprintf(`{"host":%q,"port":%s}`, host, portStr),
 			}}, Finish: "tool_calls"}
-		case !seenToolResult(rr, "submit_candidate_fact", "已入候选事实"):
+		case !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实"):
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
 				ID: "s" + strconv.Itoa(rr.Index), Name: "submit_candidate_fact",
 				Args: fmt.Sprintf(`{"statement":"%s 端口开放,服务 banner 已确认","evidence":"port_probe 实测 state=open","asset_id":"%s"}`, hostPort, assetID),
@@ -137,10 +138,11 @@ func TestOvermindLoopE2E(t *testing.T) {
 	root := filepath.Join(dir, "tasks")
 	ex := swarm.NewExecutor(store, prov, root, swarm.Budget{})
 
-	loop := &Loop{TaskID: task, Store: store, Swarm: ex, Provider: prov}
-	if loop.unitLimit() != DefaultMaxConcurrentUnits || DefaultMaxConcurrentUnits != 3 {
-		t.Fatalf("虫群并发上限默认应为 3,实际 %d", loop.unitLimit())
+	// 默认值断言用零值实例(显式装配值优先,会盖住默认);机制验证用显式 3。
+	if (&Loop{}).unitLimit() != DefaultMaxConcurrentUnits || DefaultMaxConcurrentUnits != 5 {
+		t.Fatalf("虫群并发上限默认应为 5,实际 %d", (&Loop{}).unitLimit())
 	}
+	loop := &Loop{TaskID: task, Store: store, Swarm: ex, Provider: prov, MaxConcurrentUnits: 3}
 	m, err := manager.New(manager.Config{
 		Store: store, RootDir: root, MaxConcurrentTasks: 2,
 		OnTaskRun: func(tctx context.Context, taskID string, wake <-chan struct{}) {
@@ -172,7 +174,7 @@ func TestOvermindLoopE2E(t *testing.T) {
 	seedAssets(t, store, task, []string{"a1", "a2", "a3", "a4", "a5"}, hostPorts)
 	tk.Wake()
 
-	// ---- ② 并发受限(默认 3):恰 3 只单位在飞,第 4/5 步不得起飞 ----
+	// ---- ② 并发受限(显式 3):恰 3 只单位在飞,第 4/5 步不得起飞 ----
 	waitFor(t, 30*time.Second, "3 只虫群单位并发在飞(首轮请求被闸门挂起)",
 		func() bool { return model.maxInflight.Load() == 3 })
 	if running := countNodes(t, store, task, rings.NodeStep, "running"); running != 3 {
@@ -767,7 +769,7 @@ func TestSnapshotShowsApprovalDenials(t *testing.T) {
 		"审批拒绝",
 		"s1 销毁演练 | 工具 bash",
 		"数据销毁动作直接拒绝",
-		"造物主已研判后放行",
+		"造物主已规划后放行",
 		"s2 修改配置",
 		"目标环境不允许修改",
 	} {

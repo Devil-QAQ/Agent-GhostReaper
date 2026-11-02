@@ -1,0 +1,157 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20261026T094911163Z-71537-1928e94b1488",
+  "runId": "20261026T094911163Z-71537-1928e94b1488",
+  "runStatus": "inconclusive",
+  "coverage": {
+    "status": "partial",
+    "reasons": [
+      {
+        "code": "changed_file_unreadable",
+        "stage": "candidate-select",
+        "target": "cmd/_p430seed/main.go",
+        "detail": "observed changed file no longer exists or cannot be read",
+        "affectsCompletion": true
+      },
+      {
+        "code": "baseline_partial",
+        "stage": "baseline",
+        "target": ".",
+        "detail": "baseline capture had enumeration or snapshot errors",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "candidate-select",
+        "target": "cmd/_p430seed/main.go",
+        "detail": "changed_file_unreadable: observed changed file no longer exists or cannot be read",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline",
+        "target": ".",
+        "detail": "baseline_partial: baseline capture had enumeration or snapshot errors",
+        "affectsCompletion": true
+      }
+    ]
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "a83b50a6d377c9ef5644abcb681962c62f6c2133",
+  "diffHash": "0d9e35fedb213fbdc958660b2ca375f3c70b51bef6b3984047082e004708e820",
+  "rulesVersion": "unavailable",
+  "sessionHash": "5b894dce9f36aee0f6691c8bb5758dd6ddf96478ab11b09ad9d204264367f3af",
+  "reportRef": ".mimosa/reports/task-review-session_e9a20b060b19e4ba9417158541c634f2-20261026T094911163Z-71537-1928e94b1488.json",
+  "events": [],
+  "observedFindingIds": [
+    "mimosa-72915dc0bc5fd0cafcd4c90e",
+    "mimosa-1d075b884c3302197fe2d171",
+    "mimosa-968ab2877632077e3c307159"
+  ],
+  "verifiedFiles": [
+    {
+      "file": "internal/rings/event.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/rings/store.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/rings/project.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/swarm/promptspec.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/swarm/tools.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/swarm/prompt.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/overmind/loop.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/overmind/harvest.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/report/claim.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/report/report.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/report/export.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/server/server.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/server/server_claims.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "web/views/findings-page.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "web/views/node-sheets.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/swarm/p430_test.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/overmind/p430_test.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/rings/p430_test.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/report/p430_test.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/server/server_p430_test.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-10-26T09:49:11.466Z"
+}

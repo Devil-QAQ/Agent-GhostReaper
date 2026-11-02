@@ -58,14 +58,25 @@ type agentIntParam struct {
 
 // agentParamsView 运行参数生效视图(装配默认 + 全局覆盖 + 审计)。
 // 停滞窗口与消耗异常阈是心跳预筛的判定阈值,随心跳展示(只读,装配值)。
+// 收口信号双阈值(P4-18)随主宰展示:连续零新发现轮数 + 距上次新发现
+// 间隔(分钟),双条件同时满足才弹提醒。
 type agentParamsView struct {
-	Budget    BudgetView    `json:"budget"`    // 执行预算(轮次/时长/收尾)
-	Units     agentIntParam `json:"units"`     // 虫群并发上限(个单位)
-	Reanchor  agentIntParam `json:"reanchor"`  // 重锚定默认间隔(步)
-	Heartbeat agentIntParam `json:"heartbeat"` // 心跳巡检间隔(秒)
+	Budget      BudgetView    `json:"budget"` // 执行预算(轮次/时长/收尾)
+	Queue       agentIntParam `json:"queue"`
+	Units       agentIntParam `json:"units"`        // 虫群并发上限(个单位)
+	Reanchor    agentIntParam `json:"reanchor"`     // 重锚定默认间隔(步)
+	Heartbeat   agentIntParam `json:"heartbeat"`    // 心跳巡检间隔(秒)
+	BlockedDeep agentIntParam `json:"blocked_deep"` // 受阻判定时长(分钟,P4-27 ①:模型连续失败跨线才受阻)
+	Closure     ClosureParams `json:"closure"`      // 收口信号阈值(P4-18)
 	// 心跳预筛判定阈值(只读呈现,不开放写)。
 	StallWindowSeconds int `json:"stall_window_seconds"`
 	BurnAnomalyTokens  int `json:"burn_anomaly_tokens"`
+}
+
+// ClosureParams 收口信号双阈值(P4-18):轮数与分钟数。
+type ClosureParams struct {
+	Rounds  agentIntParam `json:"rounds"`  // 连续零新发现研判轮数阈值(轮)
+	Minutes agentIntParam `json:"minutes"` // 距上次新发现间隔阈值(分钟)
 }
 
 // agentsReply GET /api/agents 的回复。
@@ -101,8 +112,8 @@ func agentRoleSpecs() map[string]agentRoleSpec {
 		"overmind": {
 			spec:        overmind.OvermindPromptSpec,
 			title:       "主宰",
-			summary:     "拆解与派发。把目标拆成意图交给虫群,收割发现并研判",
-			fixedLabels: []string{"研判与拆解纪律", "输出规约"},
+			summary:     "拆解与派发。把目标拆成意图交给虫群,检查归纳发现并规划",
+			fixedLabels: []string{"规划与拆解纪律", "输出规约"},
 			note:        "每轮拆解前组装;固定段由代码持有,编辑不可删。",
 		},
 		"swarm": {
@@ -173,10 +184,16 @@ func (s *Server) agentIntEffective(ctx context.Context, key string, def int) age
 // effectiveAgentParams 运行参数生效视图(与各消费点同一默认值来源)。
 func (s *Server) effectiveAgentParams(ctx context.Context) agentParamsView {
 	return agentParamsView{
-		Budget:             s.effectiveBudget(ctx),
-		Units:              s.agentIntEffective(ctx, overmind.SettingKeyUnitsLimit, overmind.DefaultMaxConcurrentUnits),
-		Reanchor:           s.agentIntEffective(ctx, swarm.SettingKeyReanchorSteps, swarm.DefaultAnchorEverySteps),
-		Heartbeat:          s.agentIntEffective(ctx, overmind.SettingKeyHeartbeatSeconds, int(overmind.DefaultHeartbeatInterval.Seconds())),
+		Budget:      s.effectiveBudget(ctx),
+		Queue:       s.agentIntEffective(ctx, overmind.SettingKeyQueueLimit, overmind.DefaultQueueLimit),
+		Units:       s.agentIntEffective(ctx, overmind.SettingKeyUnitsLimit, overmind.DefaultMaxConcurrentUnits),
+		Reanchor:    s.agentIntEffective(ctx, swarm.SettingKeyReanchorSteps, swarm.DefaultAnchorEverySteps),
+		Heartbeat:   s.agentIntEffective(ctx, overmind.SettingKeyHeartbeatSeconds, int(overmind.DefaultHeartbeatInterval.Seconds())),
+		BlockedDeep: s.agentIntEffective(ctx, swarm.SettingKeyBlockedDeepMinutes, swarm.DefaultBlockedDeepMinutes),
+		Closure: ClosureParams{
+			Rounds:  s.agentIntEffective(ctx, overmind.SettingKeyClosureRounds, overmind.DefaultClosureRounds),
+			Minutes: s.agentIntEffective(ctx, overmind.SettingKeyClosureMinutes, overmind.DefaultClosureMinutes),
+		},
 		StallWindowSeconds: overmind.DefaultStallSeconds,
 		BurnAnomalyTokens:  overmind.DefaultBurnAnomalyTokens,
 	}
@@ -263,13 +280,17 @@ func (s *Server) handleAgentPromptReset(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, s.agentsStateReply(r.Context()))
 }
 
-// agentParamsBody POST params 的请求体:五项可调,字段缺省 = 不改该项。
+// agentParamsBody POST params 的请求体:各项可调,字段缺省 = 不改该项。
 type agentParamsBody struct {
+	QueueLimit         *int `json:"queue_limit"`
 	MaxTurns           *int `json:"max_turns"`
 	RunSeconds         *int `json:"run_seconds"`
 	MaxConcurrentUnits *int `json:"max_concurrent_units"`
 	AnchorEverySteps   *int `json:"anchor_every_steps"`
 	HeartbeatSeconds   *int `json:"heartbeat_seconds"`
+	ClosureRounds      *int `json:"closure_rounds"`       // P4-18 收口信号轮数阈值
+	ClosureMinutes     *int `json:"closure_minutes"`      // P4-18 收口信号间隔阈值(分钟)
+	BlockedDeepMinutes *int `json:"blocked_deep_minutes"` // P4-27 ① 受阻判定时长(分钟)
 }
 
 // 运行参数取值范围(受控校验)。并发上限上限取 64(单任务同时单位数
@@ -280,6 +301,10 @@ const (
 	agentUnitsLimitMax   = 64
 	agentHeartbeatMinSec = 10
 	agentAnchorLimitMax  = 1000
+	// 收口信号阈值取值范围(P4-18):轮数 1–100(长跑任务也用不着更多
+	// 轮的确认);间隔 1 分钟–24 小时(分钟粒度)。
+	agentClosureRoundsMax  = 100
+	agentClosureMinutesMax = 1440
 )
 
 // handleAgentParamsUpdate 运行参数写(P2-08d 自系统设置迁入):写通用
@@ -293,7 +318,9 @@ func (s *Server) handleAgentParamsUpdate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if body.MaxTurns == nil && body.RunSeconds == nil && body.MaxConcurrentUnits == nil &&
-		body.AnchorEverySteps == nil && body.HeartbeatSeconds == nil {
+		body.AnchorEverySteps == nil && body.HeartbeatSeconds == nil &&
+		body.ClosureRounds == nil && body.ClosureMinutes == nil &&
+		body.BlockedDeepMinutes == nil && body.QueueLimit == nil {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("未提交任何修改项"))
 		return
 	}
@@ -307,9 +334,13 @@ func (s *Server) handleAgentParamsUpdate(w http.ResponseWriter, r *http.Request)
 	}{
 		{swarm.SettingKeyMaxTurns, body.MaxTurns, 0, budgetMaxTurnsLimit, "轮次上限(轮)", true},
 		{swarm.SettingKeyRunSeconds, body.RunSeconds, 0, budgetRunSecondsLimit, "时长上限(秒)", true},
+		{overmind.SettingKeyQueueLimit, body.QueueLimit, 1, 1000, "派发上限(步)", false},
 		{overmind.SettingKeyUnitsLimit, body.MaxConcurrentUnits, 1, agentUnitsLimitMax, "并发上限(个单位)", false},
 		{swarm.SettingKeyReanchorSteps, body.AnchorEverySteps, 1, agentAnchorLimitMax, "重锚定步数(步)", false},
 		{overmind.SettingKeyHeartbeatSeconds, body.HeartbeatSeconds, agentHeartbeatMinSec, budgetRunSecondsLimit, "心跳巡检间隔(秒)", false},
+		{overmind.SettingKeyClosureRounds, body.ClosureRounds, 1, agentClosureRoundsMax, "收口信号轮数(轮)", false},
+		{overmind.SettingKeyClosureMinutes, body.ClosureMinutes, 1, agentClosureMinutesMax, "收口信号间隔(分钟)", false},
+		{swarm.SettingKeyBlockedDeepMinutes, body.BlockedDeepMinutes, 1, agentClosureMinutesMax, "受阻判定时长(分钟)", false},
 	}
 	// 先整批校验再落键(避免半批写入)。
 	for _, wv := range writes {

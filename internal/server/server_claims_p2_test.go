@@ -140,7 +140,7 @@ func TestServerClaimDetail(t *testing.T) {
 	_, h := newClaimTestServer(t, store, gate, dir)
 
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"title":"详情验证"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"详情验证"}`, http.StatusOK, &created)
 	task := created["id"]
 	seedFullClaim(t, store, task)
 
@@ -292,7 +292,7 @@ func TestServerClaimReopen(t *testing.T) {
 	ctx := context.Background()
 
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"title":"重开验证"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"重开验证"}`, http.StatusOK, &created)
 	task := created["id"]
 	seedFullClaim(t, store, task)
 	// 推到 Confirmed(裁决 + 定稿 + 状态迁移)。

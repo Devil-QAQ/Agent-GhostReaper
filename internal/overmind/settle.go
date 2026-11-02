@@ -68,14 +68,78 @@ func (l *Loop) graceSeconds() int {
 	return DefaultSettleGraceSeconds
 }
 
-// enterSettling 进入收尾(幂等,并发安全——收尾线定时器与循环顶部
-// 两路触发):黑匣子留痕 + 操控面翻转任务状态(收尾中到点即见,不等
-// cycle 归来)+ 唤醒循环进入 settle 流程。宽限硬停在 Run 启动时已独立
-// 布防(armHardStop)——收尾轮卡死也能被打断。收尾中熔断由 StopBy
-// 兜住(硬停优先,ctx 结束后 settle 流程不再定终态)。
+// enterSettling 进入收尾(任务总闸到点;幂等,并发安全——收尾线定时器
+// 与循环顶部两路触发):黑匣子留痕 + 操控面翻转任务状态(收尾中到点即
+// 见,不等 cycle 归来)+ 唤醒循环进入 settle 流程。宽限硬停在 Run 启动
+// 时已独立布防(armHardStop)——收尾轮卡死也能被打断。收尾中熔断由
+// StopBy 兜住(硬停优先,ctx 结束后 settle 流程不再定终态)。
 // P2-08:冬眠中不推进(任务总闸墙钟冻结)——唤醒后按顺延的收尾线
 // 复判,仍过线才收场。
 func (l *Loop) enterSettling(ctx context.Context) {
+	l.enterSettlingBy(ctx, rings.SettleByTaskGate)
+}
+
+// SettleNow 优雅收尾入口(P4-18 收口信号「结束」键):与任务总闸同一条
+// 收尾时序(停止派发 → 在跑单位优雅收尾 → 终局判定 → 定终态 + 终版
+// 报告),仅发起原因不同(终态 detail.settled_by=closure_prompt,面板
+// 与整体超时收尾同为「已收尾」呈现)。循环暂停闩开着会卡住收尾流程:
+// 结束优先,先放行(记账照常)。
+func (l *Loop) SettleNow(ctx context.Context) {
+	if l.LoopPaused() {
+		_ = l.ResumeLoop("creator")
+	}
+	l.enterSettlingBy(ctx, rings.SettleByClosurePrompt)
+}
+
+// armClosureGraceStop 收口结束的宽限硬停(P4-18):第四章 §6 的布防
+// 语义是"进入收尾即布防宽限定时器"——整体超时路径由 Run 启动时的
+// armHardStop(收尾线 + 宽限)承载;无整体超时的任务走「结束」时那道
+// 从未布防,在跑单位若不落地 settle 会无限等。这里按同一宽限语义补齐:
+// 进入收尾起宽限到点仍在飞的单位逐个 cancel(真中断,进度早已实时入
+// 账;范围限定本任务),黑匣子同款留痕。收尾流程已收场(runDone)即
+// 让位。
+func (l *Loop) armClosureGraceStop() {
+	if l.Swarm == nil {
+		return // 无执行器(直驱单测):无可硬停在飞单位
+	}
+	grace := time.Duration(l.graceSeconds()) * time.Second
+	go func() {
+		t := time.NewTimer(grace)
+		defer t.Stop()
+		select {
+		case <-t.C:
+		case <-l.doneCh():
+			return
+		}
+		if !l.isSettling() {
+			return
+		}
+		ids := l.Swarm.CancelUnitsOf(l.TaskID)
+		if len(ids) == 0 {
+			return
+		}
+		_ = blackbox.Record(context.Background(), l.Store, l.TaskID, ActorOvermind,
+			rings.BlackboxRecord{
+				Type: rings.BlackboxGraceHardStop,
+				Detail: map[string]any{
+					"units": ids, "grace_seconds": l.graceSeconds(),
+					"reason": "收尾宽限超时,对仍挂着的单位硬停(进度早已实时记录)",
+				},
+			})
+	}()
+}
+
+// doneCh 循环生命周期锚点快照(Run 起始在 l.mu 内建;未建时为 nil,
+// select 恒走其余分支)。
+func (l *Loop) doneCh() <-chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.runDone
+}
+
+// enterSettlingBy 进入收尾(带发起方)。by 随收尾定终态的 detail 透出,
+// 区分整体超时与收口提醒结束;黑匣子留痕携带各自的原因句。
+func (l *Loop) enterSettlingBy(ctx context.Context, by string) {
 	if l.Hiber != nil && l.Hiber.Active(l.TaskID) {
 		return
 	}
@@ -85,11 +149,23 @@ func (l *Loop) enterSettling(ctx context.Context) {
 		return
 	}
 	l.settling = true
+	l.settleBy = by
 	l.mu.Unlock()
+	if by == rings.SettleByClosurePrompt {
+		l.armClosureGraceStop()
+	}
 	detail := map[string]any{
 		"reason":        "任务整体超时,进入有序收尾(停止派发,在跑单位优雅收尾)",
 		"deadline":      l.deadline.Format(time.RFC3339),
 		"grace_seconds": l.graceSeconds(),
+		"settled_by":    by,
+	}
+	if by == rings.SettleByClosurePrompt {
+		detail = map[string]any{
+			"reason":        "收口提醒选择结束,进入有序收尾(停止派发,在跑单位优雅收尾)",
+			"grace_seconds": l.graceSeconds(),
+			"settled_by":    by,
+		}
 	}
 	if err := blackbox.Record(context.Background(), l.Store, l.TaskID, ActorOvermind,
 		rings.BlackboxRecord{Type: rings.BlackboxTaskSettling, Detail: detail}); err != nil {
@@ -108,6 +184,16 @@ func (l *Loop) enterSettling(ctx context.Context) {
 		default:
 		}
 	}
+}
+
+// settleByOf 收尾发起方快照(l.mu 保护;缺省 task_gate)。
+func (l *Loop) settleByOf() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.settleBy == "" {
+		return rings.SettleByTaskGate
+	}
+	return l.settleBy
 }
 
 // relayBriefs 预算耗尽(exhausted)步骤的执行轨迹简报(P2-04 接力依据,
@@ -231,7 +317,7 @@ func (l *Loop) armHardStop(ctx context.Context) {
 					Type: rings.BlackboxGraceHardStop,
 					Detail: map[string]any{
 						"units": ids, "grace_seconds": l.graceSeconds(),
-						"reason": "收尾宽限超时,对仍挂着的单位硬停(进度早已实时入账)",
+						"reason": "收尾宽限超时,对仍挂着的单位硬停(进度早已实时记录)",
 					},
 				})
 			return
@@ -285,14 +371,22 @@ func (l *Loop) settle(ctx context.Context) {
 		l.setErr(err)
 	}
 
-	// ③ 定终态:全达成 completed;否则 stopped(整体超时有序收尾)。
+	// ③ 定终态:全达成 completed;否则 stopped(有序收尾,发起方随
+	// detail 透出:整体超时 task_gate / 收口提醒结束 closure_prompt)。
+	by := l.settleByOf()
 	terminal := "stopped"
-	reason := "任务整体超时,有序收尾(目标未全部达成,进度已入账可恢复查看)"
+	reason := "任务整体超时,有序收尾(目标未全部达成,进度已记录可恢复查看)"
 	if achieved {
 		terminal = "completed"
 		reason = "任务整体超时,收尾终局判定:目标已全部达成"
 	}
-	detail := map[string]any{"reason": reason, "achieved": achieved, "settled_by": "task_gate"}
+	if by == rings.SettleByClosurePrompt {
+		reason = "收口结束,有序收尾(目标未全部达成,进度已记录可恢复查看)"
+		if achieved {
+			reason = "收口结束,收尾终局判定:目标已全部达成"
+		}
+	}
+	detail := map[string]any{"reason": reason, "achieved": achieved, "settled_by": by}
 	_ = blackbox.Record(context.Background(), l.Store, l.TaskID, ActorOvermind,
 		rings.BlackboxRecord{
 			Type: rings.BlackboxTaskSettled,

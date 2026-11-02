@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>方案二×三 融合 · 黑白同页对照</title>
+<style>
+:root {
+  --bg: #060607; --card: #0D0D0F; --float: #141417; --border: #232327; --line: #1B1B1E;
+  --fg: #E7E5E4; --fg2: #9B9A94; --fg3: #6E6D68;
+  --accent: #8FAE94; --accent-ink: #0A0A0B; --ok: #8FAE94; --warn: #C9A96E; --danger: #E5484D;
+  --mono: "SF Mono", ui-monospace, Menlo, "PingFang SC", monospace;
+  --sans: -apple-system, "PingFang SC", sans-serif;
+}
+.light {
+  --bg: #FCFCFD; --card: #F4F4F6; --float: #FFFFFF; --border: #E2E2E7; --line: #E8E8EC;
+  --fg: #2A2A30; --fg2: #4A4A52; --fg3: #75757D;
+  --accent: #3E6B4F; --accent-ink: #FCFCFD; --ok: #3E6B4F; --warn: #8A6D3B; --danger: #B23C34;
+}
+* { box-sizing: border-box; margin: 0; }
+body { background: #050506; color: #E7E5E4; font-family: var(--sans); padding: 32px; }
+.chooser { position: fixed; top: 14px; right: 16px; z-index: 9; display: flex; gap: 6px; }
+.chooser button { padding: 6px 14px; font-size: 12px; border-radius: 8px; border: 1px solid #3a3a40; background: #131315; color: #9ca3af; cursor: pointer; }
+.chooser button.on { background: #8FAE94; color: #0A0A0B; border-color: #8FAE94; font-weight: 600; }
+.duo { display: flex; gap: 18px; align-items: flex-start; }
+.panel { flex: 1; min-width: 0; border-radius: 16px; overflow: hidden; border: 1px solid #26262a; }
+.plabel { font-size: 11px; color: #6b7280; padding: 8px 2px 0; letter-spacing: 1px; }
+
+/* ====== 融合方案的页面本体（黑亮共用一套类，靠 .light 切 token） ====== */
+.page { background: var(--bg); color: var(--fg); padding: 28px 32px 36px; }
+.hd { display: flex; align-items: flex-end; justify-content: space-between; }
+.hd h2 { font-size: 22px; font-weight: 700; letter-spacing: .3px; }
+.hd .psub { font-size: 12px; color: var(--fg2); margin-top: 5px; }
+.btn { background: var(--accent); color: var(--accent-ink); border: none; font-size: 13px; font-weight: 600; padding: 9px 18px; border-radius: 8px; }
+.btn-ghost { background: transparent; color: var(--fg); border: 1px solid var(--border); font-size: 13px; padding: 9px 16px; border-radius: 8px; }
+
+/* KPI：卡片底（方案三）＋等宽数字与字距标签（方案二） */
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 22px 0 24px; }
+.card { background: var(--card); border-radius: 14px; padding: 16px 18px; border: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
+.card .k { font-family: var(--mono); font-size: 10px; color: var(--fg3); letter-spacing: 1.5px; }
+.card .v { font-family: var(--mono); font-size: 30px; font-weight: 600; margin-top: 6px; font-variant-numeric: tabular-nums; letter-spacing: -.5px; }
+.card .v.ok { color: var(--ok); }
+.card .d { font-size: 11px; color: var(--fg2); margin-top: 5px; font-family: var(--sans); }
+.card .bar { height: 5px; border-radius: 99px; background: color-mix(in srgb, var(--fg) 7%, transparent); margin-top: 12px; overflow: hidden; }
+.card .bar i { display: block; height: 100%; border-radius: 99px; background: var(--ok); }
+
+/* 列表：行即卡片（方案三的分组）＋行内等宽时间与徽标（方案二） */
+.list { display: flex; flex-direction: column; gap: 10px; }
+.item { display: flex; align-items: center; gap: 16px; background: var(--card); border-radius: 12px; padding: 13px 18px; border: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
+.item .id { font-family: var(--mono); font-size: 11px; color: var(--fg3); width: 52px; }
+.item .name { font-size: 14px; font-weight: 600; width: 168px; }
+.item .desc { font-size: 12px; color: var(--fg2); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item .meta { font-family: var(--mono); font-size: 11px; color: var(--fg2); font-variant-numeric: tabular-nums; }
+.pill { font-family: var(--sans); font-size: 11px; padding: 4px 11px; border-radius: 999px; }
+.pill.run { background: color-mix(in srgb, var(--ok) 13%, transparent); color: var(--ok); }
+.pill.zzz { background: color-mix(in srgb, var(--fg2) 10%, transparent); color: var(--fg2); }
+.pill.done { background: color-mix(in srgb, var(--ok) 9%, transparent); color: var(--ok); }
+.pill.stop { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+
+/* 会话行示例（第二种页面形态） */
+.sec-h { display: flex; align-items: center; gap: 10px; margin: 26px 0 12px; }
+.sec-h b { font-size: 13px; }
+.sec-h span { font-size: 11px; color: var(--fg3); }
+.sec-h .rule { flex: 1; height: 1px; background: var(--line); }
+.msgs { display: flex; flex-direction: column; gap: 8px; }
+.msg { display: flex; gap: 12px; background: var(--card); border-radius: 12px; padding: 12px 16px; border: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
+.msg .who { font-family: var(--mono); font-size: 10px; color: var(--fg3); width: 64px; padding-top: 3px; letter-spacing: .5px; }
+.msg .body { font-size: 12.5px; line-height: 1.65; }
+.msg .body .t { color: var(--fg2); }
+</style>
+</head>
+<body>
+
+<div class="chooser">
+  <button class="on" onclick="document.querySelectorAll('.panel').forEach(p=>{p.classList.add('light')})">亮色一并看</button>
+  <button onclick="document.querySelectorAll('.panel').forEach(p=>{p.classList.remove('light')})">全部暗色</button>
+</div>
+
+<div class="duo">
+
+<!-- ============ 暗色（碳黑＋鼠尾草绿） ============ -->
+<div>
+<div class="plabel">暗色主题 · 碳黑 ＋ 鼠尾草绿</div>
+<div class="panel" style="margin-top:8px"><div class="page">
+
+  <div class="hd">
+    <div><h2>任务</h2><div class="psub">年轮账本内的全部任务 · 主宰规划、虫群单位执行</div></div>
+    <div style="display:flex;gap:8px"><button class="btn-ghost">并发设置</button><button class="btn">新建任务</button></div>
+  </div>
+
+  <div class="cards">
+    <div class="card"><div class="k">TASKS · 任务</div><div class="v">6</div><div class="d">运行中 2 · 已完成 3 · 已停止 1</div><div class="bar"><i style="width:50%"></i></div></div>
+    <div class="card"><div class="k">ASSETS · 资产</div><div class="v">48</div><div class="d">范围内 44 · 范围外 4</div><div class="bar"><i style="width:92%"></i></div></div>
+    <div class="card"><div class="k">FINDINGS · 已确认发现</div><div class="v ok">5</div><div class="d">高危 1 · 中危 3 · 低危 1</div><div class="bar"><i style="width:36%"></i></div></div>
+  </div>
+
+  <div class="list">
+    <div class="item"><span class="id">t-01</span><span class="name">czgs1024 教育站</span><span class="desc">若依定制站全量渗透 · 目标：取 shell</span><span class="meta">2/3 · 17:22</span><span class="pill run">运行中</span></div>
+    <div class="item"><span class="id">t-02</span><span class="name">sxu 门户体检</span><span class="desc">暴露面梳理与弱口令核查</span><span class="meta">0/1 · 16:40</span><span class="pill zzz">冬眠中</span></div>
+    <div class="item"><span class="id">t-03</span><span class="name">内部平台复测</span><span class="desc">上轮发现的修复验证</span><span class="meta">4/4 · 10-21</span><span class="pill done">已完成</span></div>
+    <div class="item"><span class="id">t-04</span><span class="name">朋友演示环境</span><span class="desc">DVWA 联调</span><span class="meta">— · 10-18</span><span class="pill stop">已停止</span></div>
+  </div>
+
+  <div class="sec-h"><b>主宰 · 规划轨迹</b><span>最近一轮</span><div class="rule"></div><span class="meta" style="font-family:var(--mono);font-size:11px;color:var(--fg2)">17:22:38</span></div>
+  <div class="msgs">
+    <div class="msg"><span class="who">OVERMIND</span><div class="body">滑块自动通过、RSA 解密可区分与全局鉴权三点已连成脚本化口令猜测线；<span class="t">在跑 3 条、排队 2 条，本轮不再新增探索方向。</span></div></div>
+    <div class="msg"><span class="who">OVERMIND</span><div class="body">s52 单拍消耗 69.5 万 token，口令喷洒线收敛粒度；<span class="t">反证步骤优先领取空位。</span></div></div>
+  </div>
+
+</div></div>
+</div>
+
+<!-- ============ 亮色（冷雪白＋碳黑） ============ -->
+<div>
+<div class="plabel">亮色主题 · 冷雪白 ＋ 碳黑</div>
+<div class="panel light" style="margin-top:8px"><div class="page">
+
+  <div class="hd">
+    <div><h2>任务</h2><div class="psub">年轮账本内的全部任务 · 主宰规划、虫群单位执行</div></div>
+    <div style="display:flex;gap:8px"><button class="btn-ghost">并发设置</button><button class="btn">新建任务</button></div>
+  </div>
+
+  <div class="cards">
+    <div class="card"><div class="k">TASKS · 任务</div><div class="v">6</div><div class="d">运行中 2 · 已完成 3 · 已停止 1</div><div class="bar"><i style="width:50%"></i></div></div>
+    <div class="card"><div class="k">ASSETS · 资产</div><div class="v">48</div><div class="d">范围内 44 · 范围外 4</div><div class="bar"><i style="width:92%"></i></div></div>
+    <div class="card"><div class="k">FINDINGS · 已确认发现</div><div class="v ok">5</div><div class="d">高危 1 · 中危 3 · 低危 1</div><div class="bar"><i style="width:36%"></i></div></div>
+  </div>
+
+  <div class="list">
+    <div class="item"><span class="id">t-01</span><span class="name">czgs1024 教育站</span><span class="desc">若依定制站全量渗透 · 目标：取 shell</span><span class="meta">2/3 · 17:22</span><span class="pill run">运行中</span></div>
+    <div class="item"><span class="id">t-02</span><span class="name">sxu 门户体检</span><span class="desc">暴露面梳理与弱口令核查</span><span class="meta">0/1 · 16:40</span><span class="pill zzz">冬眠中</span></div>
+    <div class="item"><span class="id">t-03</span><span class="name">内部平台复测</span><span class="desc">上轮发现的修复验证</span><span class="meta">4/4 · 10-21</span><span class="pill done">已完成</span></div>
+    <div class="item"><span class="id">t-04</span><span class="name">朋友演示环境</span><span class="desc">DVWA 联调</span><span class="meta">— · 10-18</span><span class="pill stop">已停止</span></div>
+  </div>
+
+  <div class="sec-h"><b>主宰 · 规划轨迹</b><span>最近一轮</span><div class="rule"></div><span style="font-family:var(--mono);font-size:11px;color:var(--fg2)">17:22:38</span></div>
+  <div class="msgs">
+    <div class="msg"><span class="who">OVERMIND</span><div class="body">滑块自动通过、RSA 解密可区分与全局鉴权三点已连成脚本化口令猜测线；<span class="t">在跑 3 条、排队 2 条，本轮不再新增探索方向。</span></div></div>
+    <div class="msg"><span class="who">OVERMIND</div><div class="body">s52 单拍消耗 69.5 万 token，口令喷洒线收敛粒度；<span class="t">反证步骤优先领取空位。</span></div></div>
+  </div>
+
+</div></div>
+</div>
+
+</div>
+</body>
+</html>

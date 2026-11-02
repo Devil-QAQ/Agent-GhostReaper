@@ -225,10 +225,8 @@ func TestHeartbeatMarksStallAndWakes(t *testing.T) {
 	})
 }
 
-// TestHeartbeatWakesOnSchedule 到点必醒(P3-14a B):健康任务(无在跑
-// 步骤、预筛零发现)心跳照拍(看门狗活性可见)且每拍无条件唤醒主宰——
-// 拆解会话发生。旧语义"无事跳过省成本"废止(目标未完成不算任务结束,
-// 空闲心跳成本造物主已确认接受)。
+// TestHeartbeatWakesOnSchedule P4-29：心跳仍巡检并唤醒机器处理，
+// 首轮后无新结果/指令/图变化时不持续规划。
 func TestHeartbeatWakesOnSchedule(t *testing.T) {
 	store := openLoopStore(t)
 	const task = "hb-clean-wake"
@@ -260,11 +258,22 @@ func TestHeartbeatWakesOnSchedule(t *testing.T) {
 	waitFor(t, 5*time.Second, "心跳拍入黑匣子", func() bool {
 		return hasType(blackboxRecords(t, store, task), rings.BlackboxHeartbeat)
 	})
-	// 到点必醒:零发现也唤醒——拆解发生且随拍持续(多拍多次)。
-	first := len(model.decomposeRequests())
-	waitFor(t, 5*time.Second, "到点必醒(拆解发生)", func() bool {
-		return len(model.decomposeRequests()) > first
-	})
+
+	waitFor(t, 5*time.Second, "心跳启动首轮规划", func() bool { return len(model.decomposeRequests()) == 1 })
+	time.Sleep(300 * time.Millisecond)
+	if got := len(model.decomposeRequests()); got != 1 {
+		t.Fatalf("无新事件不得随心跳反复规划，实际 %d", got)
+	}
+	beats := 0
+	for _, r := range blackboxRecords(t, store, task) {
+		if r.Type == rings.BlackboxHeartbeat {
+			beats++
+		}
+	}
+	if beats < 3 {
+		t.Fatalf("规划静默时心跳应继续巡检，实际 %d 拍", beats)
+	}
+
 }
 
 // TestHeartbeatWakesDeadWait P3-14 死等形态修复实测:目标未达成 + 零在跑/

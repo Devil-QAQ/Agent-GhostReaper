@@ -1,0 +1,34 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20261026T102715639Z-73494-5d77d1095445",
+  "runId": "20261026T102715639Z-73494-5d77d1095445",
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": []
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "a83b50a6d377c9ef5644abcb681962c62f6c2133",
+  "diffHash": "2a8917da7d155df7cd061467ef1abc9592a1ceed63b57ac5f60b0c59b71ff309",
+  "rulesVersion": "unavailable",
+  "sessionHash": "5b894dce9f36aee0f6691c8bb5758dd6ddf96478ab11b09ad9d204264367f3af",
+  "reportRef": ".mimosa/reports/task-review-session_e9a20b060b19e4ba9417158541c634f2-20261026T102715639Z-73494-5d77d1095445.json",
+  "events": [],
+  "observedFindingIds": [],
+  "verifiedFiles": [
+    {
+      "file": "internal/overmind/loop.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/overmind/p430_test.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-10-26T10:27:15.971Z"
+}

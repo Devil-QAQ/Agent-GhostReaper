@@ -8,11 +8,11 @@ import * as React from "react";
 // 单一实现防平行)。
 export function NodeRefButton({ meta, label, onSelectNode, children }) {
   if (!onSelectNode || !meta?.id) {
-    return <span className="font-mono text-xs text-muted-foreground">{label ?? meta?.id}</span>;
+    return <span className="num text-xs text-muted-foreground">{label ?? meta?.id}</span>;
   }
   return (
     <button
-      className="rounded border border-border bg-card px-2 py-0.5 font-mono text-xs text-muted-foreground transition-colors duration-150 hover:bg-hover-lift hover:text-foreground cursor-pointer"
+      className="rounded border border-border/55 bg-card px-2 py-0.5 num text-xs text-muted-foreground transition-colors duration-150 hover:bg-hover-lift hover:text-foreground cursor-pointer"
       title={`查看${meta.typeLabel ?? ""} ${meta.id}`}
       onClick={() => onSelectNode(meta)}
     >

@@ -106,10 +106,11 @@ var narrativeCondWords = map[string]string{
 // 拼句(同 P4-08 ④ 组装时先落确定性描述的规矩),模型成功则改写为人话
 // 叙述并冻结;失败如实 WARN 回退拼句,不阻塞确认裁决。零 Provider 保留
 // 拼句(单测与未配模型路径,零外呼)。
+// P4-24:生成后接定稿校对+模式闸门(同会话,见 proofread.go)。
 func (l *Loop) genClaimNarrative(ctx context.Context, claimID string, j *arbiter.ClaimJudgement, rec *rings.TestClaimRecord) {
 	pack, err := l.narrativePack(ctx, claimID, j)
 	if err != nil {
-		runlog.Warnf("来龙去脉生成失败: 任务 %s 声明 %s 原因 %s(链上事实包装配失败,无叙述)",
+		runlog.Warnf("来龙去脉生成失败: 任务 %s 判断 %s 原因 %s(链上事实包装配失败,无叙述)",
 			l.TaskID, claimID, clipEval(err.Error()))
 		return
 	}
@@ -117,15 +118,18 @@ func (l *Loop) genClaimNarrative(ctx context.Context, claimID string, j *arbiter
 	if l.Provider == nil {
 		return
 	}
-	text, err := l.askClaimNarrative(ctx, pack)
+	gs := l.newGenSession(narrativeSystem)
+	defer gs.close()
+	text, err := l.askClaimNarrative(ctx, gs, pack)
 	if err != nil {
-		runlog.Warnf("来龙去脉生成失败: 任务 %s 声明 %s 原因 %s(回退确定性拼句)",
+		runlog.Warnf("来龙去脉生成失败: 任务 %s 判断 %s 原因 %s(回退确定性拼句)",
 			l.TaskID, claimID, clipEval(err.Error()))
 		return
 	}
 	if t := strings.TrimSpace(text); t != "" {
 		rec.Narrative = clipLine(t, narrativeClip)
 	}
+	l.polishNarrative(ctx, claimID, gs, rec)
 }
 
 // narrativePack 链上事实包装配(只读账本):声明两维与组合标记、发现
@@ -134,7 +138,7 @@ func (l *Loop) genClaimNarrative(ctx context.Context, claimID string, j *arbiter
 func (l *Loop) narrativePack(ctx context.Context, claimID string, j *arbiter.ClaimJudgement) (*narrativePack, error) {
 	claim, err := l.Store.Node(ctx, l.TaskID, claimID)
 	if err != nil {
-		return nil, fmt.Errorf("查声明: %w", err)
+		return nil, fmt.Errorf("查判断: %w", err)
 	}
 	derived, err := l.Store.Edges(ctx, l.TaskID, rings.EdgeDerivedFrom)
 	if err != nil {
@@ -346,7 +350,7 @@ func deterministicNarrative(p *narrativePack) string {
 	var b strings.Builder
 	switch {
 	case p.Claim.Combined:
-		fmt.Fprintf(&b, "主宰组合链上 %d 条事实提出声明", len(p.Discoveries))
+		fmt.Fprintf(&b, "主宰组合链上 %d 条事实提出判断", len(p.Discoveries))
 	case len(p.Discoveries) > 0 && p.Discoveries[0].StepID != "":
 		d := p.Discoveries[0]
 		b.WriteString("单位 " + d.UnitID)
@@ -379,13 +383,13 @@ func deterministicNarrative(p *narrativePack) string {
 }
 
 // askClaimNarrative 一次无工具单轮会话:链上事实包 → 叙述 JSON(引擎
-// 链路与转录/用量记账同拆解会话,与描述生成共用 runNoToolSession)。
-func (l *Loop) askClaimNarrative(ctx context.Context, pack *narrativePack) (string, error) {
+// 链路与转录/用量记账同拆解会话,与描述生成共用 genSession)。
+func (l *Loop) askClaimNarrative(ctx context.Context, gs *genSession, pack *narrativePack) (string, error) {
 	payload, err := json.Marshal(pack)
 	if err != nil {
 		return "", err
 	}
-	text, err := l.runNoToolSession(ctx, l.nextSessionID("r"), narrativeSystem, string(payload))
+	text, err := gs.ask(ctx, string(payload))
 	if err != nil {
 		return "", err
 	}
@@ -426,6 +430,6 @@ const narrativeSystem = `为渗透测试发现写"来龙去脉"叙述。基于�
 规则:
 1. 只用给出的事实,不编造;链上没有的信息不写(如无来源载体线索就不猜载体)。
 2. 数字精确(轮次、状态码、字节数);无 emoji;不写工具名与实现细节;陈述事实不解说。
-3. 组合声明按链上各事实顺序叙述各环节的发现。
+3. 组合判断按链上各事实顺序叙述各环节的发现。
 
 只输出 JSON:{"narrative":"…"}。`

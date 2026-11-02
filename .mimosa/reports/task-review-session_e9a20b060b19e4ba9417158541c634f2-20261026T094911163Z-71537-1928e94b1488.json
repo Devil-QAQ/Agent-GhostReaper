@@ -1,0 +1,498 @@
+{
+  "schema_version": "mimosa-task-review/v2",
+  "run_id": "20261026T094911163Z-71537-1928e94b1488",
+  "run_status": "inconclusive",
+  "errors": [
+    {
+      "stage": "candidate-select",
+      "target": "cmd/_p430seed/main.go",
+      "reason": "changed_file_unreadable: observed changed file no longer exists or cannot be read"
+    },
+    {
+      "stage": "baseline",
+      "target": ".",
+      "reason": "baseline_partial: baseline capture had enumeration or snapshot errors"
+    }
+  ],
+  "coverage": {
+    "schema_version": "mimosa-hook-coverage/v1",
+    "status": "partial",
+    "scope": "hook_observed_diff",
+    "baseline": {
+      "complete": false,
+      "captured_files": 353,
+      "candidate_limit": 5000,
+      "truncated": false,
+      "enumeration_error_count": 0,
+      "snapshot_error_count": 3,
+      "compensated_target_count": 20
+    },
+    "change_tracking": {
+      "touched_observed": 21,
+      "touched_retained": 21,
+      "truncated": false,
+      "bash_mutation": true,
+      "bash_discovered": 20,
+      "bash_discovery_limit": 80,
+      "bash_discovery_truncated": false
+    },
+    "candidates": {
+      "eligible_files": 20,
+      "selected_files": 20,
+      "limit": 20,
+      "truncated": false
+    },
+    "scanning": {
+      "required_files": 20,
+      "scanned_files": 20,
+      "skipped_files": 0,
+      "failed_files": 0,
+      "project_checks_required": 0,
+      "project_checks_completed": 0
+    },
+    "notification": {
+      "eligible_findings": 0,
+      "detailed_findings": 0,
+      "detail_limit": 3,
+      "truncated": false
+    },
+    "reason_counts": {
+      "changed_file_unreadable": 1,
+      "baseline_partial": 1,
+      "project_check_failed": 2
+    },
+    "reasons": [
+      {
+        "code": "changed_file_unreadable",
+        "stage": "candidate-select",
+        "target": "cmd/_p430seed/main.go",
+        "detail": "observed changed file no longer exists or cannot be read",
+        "affects_completion": true
+      },
+      {
+        "code": "baseline_partial",
+        "stage": "baseline",
+        "target": ".",
+        "detail": "baseline capture had enumeration or snapshot errors",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "candidate-select",
+        "target": "cmd/_p430seed/main.go",
+        "detail": "changed_file_unreadable: observed changed file no longer exists or cannot be read",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline",
+        "target": ".",
+        "detail": "baseline_partial: baseline capture had enumeration or snapshot errors",
+        "affects_completion": true
+      }
+    ],
+    "reasons_truncated": false
+  },
+  "generated_at": "2026-10-26T09:49:11.163Z",
+  "session_id": "session_e9a20b060b19e4ba9417158541c634f2",
+  "target": ".",
+  "revision": "a83b50a6d377c9ef5644abcb681962c62f6c2133",
+  "rules_version": "unavailable",
+  "diff_hash": "0d9e35fedb213fbdc958660b2ca375f3c70b51bef6b3984047082e004708e820",
+  "diff": {
+    "algorithm": "sha256",
+    "changed_file_count": 20,
+    "changed_files": [
+      {
+        "file": "internal/overmind/harvest.go",
+        "ranges": [
+          {
+            "start": 1033,
+            "end": 1070
+          }
+        ],
+        "before_hash": "58cc585a4dbc2065662cc39fc89d89621886d2a9ad1a4f3e0c07ae6eaa8a1611",
+        "after_hash": "056cf628b9eb7db966c2567f93fbd5b0112178badba6dedfa15e3d1e887b4040"
+      },
+      {
+        "file": "internal/overmind/loop.go",
+        "ranges": [
+          {
+            "start": 597,
+            "end": 604
+          },
+          {
+            "start": 873,
+            "end": 877
+          },
+          {
+            "start": 922,
+            "end": 923
+          },
+          {
+            "start": 930,
+            "end": 930
+          },
+          {
+            "start": 1085,
+            "end": 1086
+          },
+          {
+            "start": 1362,
+            "end": 1365
+          },
+          {
+            "start": 1370,
+            "end": 1380
+          },
+          {
+            "start": 1403,
+            "end": 1428
+          }
+        ],
+        "before_hash": "9970081b6566191c4e95a9599d984628db7ea27018df906ec2856c7f8b57f09c",
+        "after_hash": "528e193b9489a040de475dfd6976e0b0238325767386fc1119c142c8b138161e"
+      },
+      {
+        "file": "internal/overmind/p430_test.go",
+        "ranges": [
+          {
+            "start": 1,
+            "end": 167
+          }
+        ],
+        "before_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_hash": "95df171fff035a42e19677fb7383bcb75982b409004297606efcc17c4f6973b1"
+      },
+      {
+        "file": "internal/report/claim.go",
+        "ranges": [
+          {
+            "start": 106,
+            "end": 109
+          },
+          {
+            "start": 154,
+            "end": 155
+          },
+          {
+            "start": 159,
+            "end": 163
+          }
+        ],
+        "before_hash": "71f03bf07cf39da10ea6e5d219d0d3c72d9f482a6e368715f811d6516e2d81d0",
+        "after_hash": "78aa4dda32b288ba1f7b12729340200fa70b59a21b8ada4707cd3c9107ce6d2d"
+      },
+      {
+        "file": "internal/report/export.go",
+        "ranges": [
+          {
+            "start": 229,
+            "end": 233
+          },
+          {
+            "start": 405,
+            "end": 413
+          },
+          {
+            "start": 488,
+            "end": 492
+          }
+        ],
+        "before_hash": "348891fe625b4a2088e3eaf40c99ca287ca4e24aed4d2d22abb0cacb7f8985ab",
+        "after_hash": "faae559adc855003afcc2b7fcb5220dda001195b3d3745101088b9a347a6a1f0"
+      },
+      {
+        "file": "internal/report/p430_test.go",
+        "ranges": [
+          {
+            "start": 1,
+            "end": 165
+          }
+        ],
+        "before_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_hash": "b2ca24d8b9bf4bdf00e0c5f59b65b84547e7033decce78d17dda0bc8ac0f2c5c"
+      },
+      {
+        "file": "internal/report/report.go",
+        "ranges": [
+          {
+            "start": 209,
+            "end": 211
+          },
+          {
+            "start": 214,
+            "end": 217
+          },
+          {
+            "start": 256,
+            "end": 258
+          },
+          {
+            "start": 307,
+            "end": 307
+          },
+          {
+            "start": 314,
+            "end": 316
+          },
+          {
+            "start": 331,
+            "end": 333
+          }
+        ],
+        "before_hash": "75ba80d38b718046d3fb2d2ab2f79007ddd6f64528b1e7c0d65937ee4e9d442b",
+        "after_hash": "4d5e87fdd907c8f6731a844ff96bf72ba5b690908e4afa0c523f0bd6d9f2d519"
+      },
+      {
+        "file": "internal/rings/event.go",
+        "ranges": [
+          {
+            "start": 668,
+            "end": 668
+          },
+          {
+            "start": 679,
+            "end": 679
+          },
+          {
+            "start": 839,
+            "end": 842
+          },
+          {
+            "start": 867,
+            "end": 867
+          }
+        ],
+        "before_hash": "18120b741c148901b6dff4276b11e155babfdddf2c59c8e07896211c693335c9",
+        "after_hash": "624830e0bf5d547ac1b648c09cd223b02df5dc8a12e9be0ed4ac5fa2bc2d0e5c"
+      },
+      {
+        "file": "internal/rings/p430_test.go",
+        "ranges": [
+          {
+            "start": 1,
+            "end": 51
+          }
+        ],
+        "before_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_hash": "a45439dbcbcdd98773a6cfdcd9cf90096fd30f64bb5c7df7d996edbfa9fb2dff"
+      },
+      {
+        "file": "internal/rings/project.go",
+        "ranges": [
+          {
+            "start": 463,
+            "end": 466
+          },
+          {
+            "start": 539,
+            "end": 553
+          }
+        ],
+        "before_hash": "e909a749c8b4e45572fc9e00c70df731f1bdbe277abd6857863e81eacd7804d8",
+        "after_hash": "46041e6a2d50a69d3c5a7ecedc0e5f750e79305a4c4e4cb0a5eb019fe5d52cb1"
+      },
+      {
+        "file": "internal/rings/store.go",
+        "ranges": [
+          {
+            "start": 93,
+            "end": 93
+          }
+        ],
+        "before_hash": "4f44bc1bad2d03687f1d69aa5c8f6ffaaadb552fdb3743d14b6ad2cda8e6ed38",
+        "after_hash": "6e112930ba61bf09a7cc735ce5b41b17acaecc6142fed15ac1daf6b9ef6235b1"
+      },
+      {
+        "file": "internal/server/server_claims.go",
+        "ranges": [
+          {
+            "start": 340,
+            "end": 340
+          }
+        ],
+        "before_hash": "f235e01ea85dbc93d6b7fac74c5ecbb3af8d13a934870e18b93aaf1603ade781",
+        "after_hash": "eb162ebfcc467dde01a69a34a9658d8668e3521d24d7bc7471aba8b85b8cc20e"
+      },
+      {
+        "file": "internal/server/server_p430_test.go",
+        "ranges": [
+          {
+            "start": 1,
+            "end": 71
+          }
+        ],
+        "before_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_hash": "7cd32b49949822261c83ff039d5d42ccefbbc0ac45040d23680b45b4b11b8c7e"
+      },
+      {
+        "file": "internal/server/server.go",
+        "ranges": [
+          {
+            "start": 1549,
+            "end": 1552
+          },
+          {
+            "start": 1605,
+            "end": 1605
+          },
+          {
+            "start": 1633,
+            "end": 1634
+          },
+          {
+            "start": 1698,
+            "end": 1700
+          }
+        ],
+        "before_hash": "380e6f84bba7f7a3f6ee3d0966c4ecb5c0ae49e8fc780263046b71115bfcc780",
+        "after_hash": "1fedb7a5654acdad2a5c402a3ec892418e3f2a4eca3c69c5d0502198c15251a5"
+      },
+      {
+        "file": "internal/swarm/p430_test.go",
+        "ranges": [
+          {
+            "start": 1,
+            "end": 57
+          }
+        ],
+        "before_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_hash": "e01adb39fd0dac57d6b1daa3fc97aa097a197cc0554933f71f05e6b947454e28"
+      },
+      {
+        "file": "internal/swarm/prompt.go",
+        "ranges": [
+          {
+            "start": 313,
+            "end": 313
+          }
+        ],
+        "before_hash": "19fee8eb9452ddbebd4d16c1a6559b1e9383cc590fddaaf4ec20939d6506d07e",
+        "after_hash": "b2772a85d51da7b2b1879676150d6e698dd656854b4d89ec71e224463e6cc068"
+      },
+      {
+        "file": "internal/swarm/promptspec.go",
+        "ranges": [
+          {
+            "start": 43,
+            "end": 43
+          },
+          {
+            "start": 85,
+            "end": 98
+          }
+        ],
+        "before_hash": "d8d6fcfa911055d8f917603a6ae2e9f4776b9f46d8544e470812a16909cee525",
+        "after_hash": "22a1d5c154806837daa923f6f2e08d0f0a10e6f70692b6fc2e655fcb524b6b1f"
+      },
+      {
+        "file": "internal/swarm/tools.go",
+        "ranges": [
+          {
+            "start": 544,
+            "end": 545
+          },
+          {
+            "start": 1222,
+            "end": 1222
+          }
+        ],
+        "before_hash": "da533942e2141b4e1ffd91ac18e9e9f6dd2aac8017f3daf86cbe6ec9c2e92dec",
+        "after_hash": "38465e425031c839be578a6a368a7e333f8d64f9e6264bc913858e8e5115b556"
+      },
+      {
+        "file": "web/views/findings-page.js",
+        "ranges": [
+          {
+            "start": 470,
+            "end": 474
+          }
+        ],
+        "before_hash": "ccd20ae58b54c23eb2f7ee0e810e2a9ea4e04409da966a5d8636645123451877",
+        "after_hash": "9ca96b42d13bb9a331046954b16c3de5c5131dcb6e3446eaafc330b82fad51f8"
+      },
+      {
+        "file": "web/views/node-sheets.js",
+        "ranges": [
+          {
+            "start": 581,
+            "end": 585
+          }
+        ],
+        "before_hash": "2bc614b1407894ddc513d2b45b4247daf9b64e633efb3c0db5142d6818e8f31c",
+        "after_hash": "4b126fd6ebd3bbf8b78568e6bb72c270fb08a25437ed4995308e546a015713ba"
+      }
+    ]
+  },
+  "timing": {
+    "started_at": "2026-10-26T09:49:09.734Z",
+    "completed_at": "2026-10-26T09:49:11.163Z",
+    "duration_ms": 1429,
+    "measurement": "hook_wall_clock"
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "model_calls": 0,
+    "measurement": "known-zero"
+  },
+  "telemetry": {
+    "schemaVersion": "mimosa-gate-telemetry/v1",
+    "profile": "gate",
+    "operation": "Stop",
+    "outcome": "partial/INCONCLUSIVE",
+    "latencyMs": 1429,
+    "peakMemoryBytes": 233586688,
+    "memoryMeasurement": "max-observed-process-rss",
+    "scannedFiles": 20,
+    "cache": {
+      "hits": 0,
+      "misses": 0,
+      "measurement": "not-applicable"
+    },
+    "denyCount": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "total": 0,
+      "modelCalls": 0,
+      "measurement": "known-zero"
+    }
+  },
+  "finding_count": 0,
+  "rewake_finding_count": 0,
+  "evidence_boundary": {
+    "scan": "candidate",
+    "static_fix_verification": "observed_static_only",
+    "runtime_verification": "not_performed"
+  },
+  "finding_events": [
+    {
+      "finding_id": "mimosa-fc8346b10c4522e0edb3ab3b",
+      "file": "",
+      "line": 9,
+      "rule_id": "security",
+      "severity": "medium",
+      "category": "临时文件不安全",
+      "status": "candidate",
+      "decision": "advisory",
+      "at": "2026-10-26T09:19:30.544Z",
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "source": "semgrep",
+        "evidence_hash": "22e6515e12b0a05a61346fbfd317f155e3ba4a076fe2aff6ee450bfb7e549f40",
+        "runtime_oracle": false
+      }
+    }
+  ],
+  "findings": [],
+  "artifacts": {
+    "immutable_report": ".mimosa/reports/task-review-session_e9a20b060b19e4ba9417158541c634f2-20261026T094911163Z-71537-1928e94b1488.json",
+    "latest_report": ".mimosa/reports/task-review-session_e9a20b060b19e4ba9417158541c634f2.json",
+    "history_summary": ".mimosa/history/run-20261026T094911163Z-71537-1928e94b1488.json"
+  }
+}

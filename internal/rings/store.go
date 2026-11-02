@@ -18,6 +18,7 @@ import (
 )
 
 var (
+	ErrStaleRevision              = errors.New("rings: task changed before append")
 	ErrClosed                     = errors.New("rings: store closed")
 	ErrEmptyTaskID                = errors.New("rings: task id is empty")
 	ErrUnknownKind                = errors.New("rings: unknown event kind")
@@ -89,8 +90,11 @@ var (
 	ErrUnknownRetestVerdict       = errors.New("rings: unknown retest verdict")
 	ErrUnknownReplayVerdict       = errors.New("rings: unknown replay verdict")
 	ErrReplayRecordInvalid        = errors.New("rings: invalid replay record")
+	ErrReportReviewInvalid        = errors.New("rings: invalid report review record")
 	ErrUnknownReportRecType       = errors.New("rings: unknown report record type")
 	ErrReportRecMissingField      = errors.New("rings: report record missing required field")
+	ErrUnknownClosureRecType      = errors.New("rings: unknown closure record type")
+	ErrInvalidClosureRecord       = errors.New("rings: invalid closure record")
 )
 
 // Store 年轮账本存储:单写者排队 + WAL 并发读。
@@ -127,12 +131,13 @@ func (s *Store) SetOnCommit(fn func(taskID string, events []Event)) {
 }
 
 type writeRequest struct {
-	taskID  string
-	events  []Event
-	tokens  []TokenUsage
-	rebuild bool
-	setting *settingWrite
-	resp    chan writeResult
+	expectedRevision *int64
+	taskID           string
+	events           []Event
+	tokens           []TokenUsage
+	rebuild          bool
+	setting          *settingWrite
+	resp             chan writeResult
 }
 
 // settingWrite 一次通用配置写入(v6 键值表):upsert 或删除(key 为空
@@ -189,10 +194,19 @@ func Open(path string) (*Store, error) {
 // 排队语义:ctx 只影响排队等待,已入队的写入必然执行到提交为止——
 // 账本写入不可凭取消消失。
 func (s *Store) Append(ctx context.Context, taskID string, events ...Event) ([]int64, error) {
+	return s.appendChecked(ctx, taskID, nil, events...)
+}
+
+// AppendAtRevision 在同一写事务中复检读取版本，避免准入与队列取消的读写竞态。
+func (s *Store) AppendAtRevision(ctx context.Context, taskID string, revision int64, events ...Event) ([]int64, error) {
+	return s.appendChecked(ctx, taskID, &revision, events...)
+}
+
+func (s *Store) appendChecked(ctx context.Context, taskID string, expected *int64, events ...Event) ([]int64, error) {
 	if taskID == "" {
 		return nil, ErrEmptyTaskID
 	}
-	req := writeRequest{taskID: taskID, events: events, resp: make(chan writeResult, 1)}
+	req := writeRequest{taskID: taskID, events: events, expectedRevision: expected, resp: make(chan writeResult, 1)}
 	select {
 	case s.writes <- req:
 	case <-ctx.Done():
@@ -352,6 +366,16 @@ func (s *Store) EnableAtRest(ctx context.Context, c *secrets.Cipher) (int, error
 	return len(queue), nil
 }
 
+// SnapshotTo 把账本一致性快照写到目标文件(VACUUM INTO;P4-32 诊断包
+// 账本库进包用)。WAL 下与写者并发安全(快照取单一时刻的一致视图);
+// 目标文件须不存在,删除由调用方负责。
+func (s *Store) SnapshotTo(ctx context.Context, path string) error {
+	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, path); err != nil {
+		return fmt.Errorf("rings: 账本快照: %w", err)
+	}
+	return nil
+}
+
 // DeleteSetting 删除一条全局配置(恢复装配默认的消费语义)。经单写者
 // 排队;键不存在幂等成功。
 func (s *Store) DeleteSetting(ctx context.Context, key string) error {
@@ -480,7 +504,7 @@ func (s *Store) handle(req writeRequest) writeResult {
 	case req.setting != nil:
 		return writeResult{err: s.withTx(func(tx *sql.Tx) error { return applySetting(tx, req.setting) })}
 	default:
-		revs, err := s.appendTx(req.taskID, req.events)
+		revs, err := s.appendTx(req.taskID, req.events, req.expectedRevision)
 		return writeResult{revisions: revs, err: err}
 	}
 }
@@ -541,7 +565,7 @@ func insertTokenRows(tx *sql.Tx, rows []TokenUsage) error {
 // appendTx 单事务追加一批事件并同步维护投影。
 // revision 分配:任务内取当前最大值;显式指定的必须严格大于当前值
 // (单调递增),重复或回退一律拒绝,UNIQUE(task_id, revision) 为物理兜底。
-func (s *Store) appendTx(taskID string, events []Event) ([]int64, error) {
+func (s *Store) appendTx(taskID string, events []Event, expected *int64) ([]int64, error) {
 	var revisions []int64
 	err := s.withTx(func(tx *sql.Tx) error {
 		revisions = nil
@@ -550,6 +574,9 @@ func (s *Store) appendTx(taskID string, events []Event) ([]int64, error) {
 			`SELECT COALESCE(MAX(revision), 0) FROM events WHERE task_id = ?`, taskID,
 		).Scan(&next); err != nil {
 			return fmt.Errorf("rings: 读取任务 %s 当前 revision: %w", taskID, err)
+		}
+		if expected != nil && next != *expected {
+			return ErrStaleRevision
 		}
 		for i, ev := range events {
 			rev := ev.Revision

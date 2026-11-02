@@ -337,7 +337,7 @@ func (s *Server) handleTaskBatch(w http.ResponseWriter, r *http.Request) {
 		switch req.Action {
 		case "stop":
 			err = s.Manager.StopBy(id, map[string]any{
-				"operator": "creator", "reason": "批量熔断: " + reason,
+				"operator": "creator", "reason": "批量终止: " + reason,
 			})
 		case "delete":
 			err = s.deleteTask(r.Context(), id, "批量删除: "+reason)

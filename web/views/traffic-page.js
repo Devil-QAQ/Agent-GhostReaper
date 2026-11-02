@@ -181,14 +181,14 @@ export function TrafficPage({ tasks }) {
         </div>
         <input
           type="datetime-local"
-          className="h-9 rounded-md border border-border bg-input-surface px-2 text-sm text-foreground"
+          className="h-9 rounded-md border border-border/55 bg-input-surface px-2 text-sm text-foreground"
           value={fSince}
           onChange={(e) => setFSince(e.target.value)}
           title="起始时间(含)"
         />
         <input
           type="datetime-local"
-          className="h-9 rounded-md border border-border bg-input-surface px-2 text-sm text-foreground"
+          className="h-9 rounded-md border border-border/55 bg-input-surface px-2 text-sm text-foreground"
           value={fUntil}
           onChange={(e) => setFUntil(e.target.value)}
           title="截止时间(含)"
@@ -202,7 +202,7 @@ export function TrafficPage({ tasks }) {
       ) : rows.length === 0 ? (
         <EmptyState icon="waves" title="暂无流量" hint="当前筛选内无镜留痕;任务执行中的工具流量会留痕在此呈现" />
       ) : (
-        <div className="rounded-xl border bg-card">
+        <div className="rounded-xl border border-border/55 bg-card">
           <Table>
             <TableHeader>
               <TableRow>
@@ -225,15 +225,15 @@ export function TrafficPage({ tasks }) {
                   className="cursor-pointer"
                   onClick={() => setDrill(row)}
                 >
-                  <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">
+                  <TableCell className="num text-xs text-muted-foreground">
                     {row.started_at}
                   </TableCell>
                   <TableCell className="max-w-36 truncate text-xs" title={titleOf(row.task_id)}>
                     {titleOf(row.task_id)}
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{row.method || "—"}</TableCell>
-                  <TableCell className="max-w-44 truncate font-mono text-xs" title={row.host}>{row.host || "—"}</TableCell>
-                  <TableCell className="max-w-72 truncate font-mono text-xs" title={row.url}>
+                  <TableCell className="num text-xs">{row.method || "—"}</TableCell>
+                  <TableCell className="max-w-44 truncate num text-xs" title={row.host}>{row.host || "—"}</TableCell>
+                  <TableCell className="max-w-72 truncate num text-xs" title={row.url}>
                     {urlPath(row.url) || "—"}
                   </TableCell>
                   <TableCell>
@@ -246,15 +246,15 @@ export function TrafficPage({ tasks }) {
                   <TableCell>
                     <TrafficTypeBadge type={row.type} tls={row.tls} />
                   </TableCell>
-                  <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">
+                  <TableCell className="num text-xs text-muted-foreground">
                     {row.type === "tunnel"
                       ? `${fmtBytes(row.req_bytes)} ↑ / ${fmtBytes(row.resp_bytes)} ↓`
                       : `${fmtBytes(row.req_bytes)} / ${fmtBytes(row.resp_bytes)}`}
                   </TableCell>
-                  <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">
+                  <TableCell className="num text-xs text-muted-foreground">
                     {row.elapsed_ms ? `${row.elapsed_ms} ms` : "—"}
                   </TableCell>
-                  <TableCell className="font-mono text-xs text-muted-foreground">
+                  <TableCell className="num text-xs text-muted-foreground">
                     {row.unit_id || "—"}
                   </TableCell>
                 </TableRow>
@@ -309,7 +309,7 @@ function PageBar({ page, pages, total, onPage, pageSize, onPageSize }) {
             <button
               key={i}
               className={
-                "min-w-7 rounded-md px-1.5 py-1 text-center font-mono tabular-nums transition-colors cursor-pointer " +
+                "min-w-7 rounded-md px-1.5 py-1 text-center num transition-colors cursor-pointer " +
                 (it === page
                   ? "bg-primary/15 text-primary"
                   : "hover:bg-hover-lift hover:text-foreground")
@@ -329,7 +329,7 @@ function PageBar({ page, pages, total, onPage, pageSize, onPageSize }) {
       )}
       <div className="ml-auto w-32">
         <Select value={pageSize} onValueChange={onPageSize}>
-          <SelectTrigger className="h-7 text-xs">
+          <SelectTrigger className="h-8 text-xs">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -345,26 +345,26 @@ function PageBar({ page, pages, total, onPage, pageSize, onPageSize }) {
   );
 }
 
-// TrafficDrawer 单条流量抽屉:原文分段回放 + 绑定为声明证据。
+// TrafficDrawer 单条流量抽屉:原文分段回放 + 绑定为判断证据。
 function TrafficDrawer({ row, onClose }) {
   if (!row) return null;
   return (
     <Sheet open onOpenChange={(o) => !o && onClose()}>
       <SheetContent className="overflow-y-auto">
         <SheetHeader>
-          <SheetTitle className="flex flex-wrap items-center gap-2 pr-16 font-mono text-sm">
+          <SheetTitle className="flex flex-wrap items-center gap-2 num">
             <TrafficTypeBadge type={row.type} tls={row.tls} />
             {row.method && <span className="font-medium">{row.method}</span>}
             <span className="truncate font-normal text-muted-foreground" title={row.url}>
               {row.url}
             </span>
           </SheetTitle>
-          <SheetDescription>
+          <SheetDescription className="num">
             {row.task_id} · {row.started_at}
-            {row.error ? ` · ${row.error}` : ""}
+            {row.error ? <span title={row.error}> · 该请求未完成</span> : ""}
           </SheetDescription>
         </SheetHeader>
-        <div className="flex flex-col gap-5 p-4">
+        <div className="flex flex-col gap-5 p-5">
           <ExchangeRaw tid={row.task_id} exID={row.exchange_id} />
           <BindPanel tid={row.task_id} row={row} />
         </div>
@@ -385,7 +385,7 @@ function BindPanel({ tid, row }) {
 
   const bind = async () => {
     if (!claimID) {
-      toast.error("先选择要绑定的声明");
+      toast.error("先选择要绑定的判断");
       return;
     }
     setBusy(true);
@@ -397,26 +397,26 @@ function BindPanel({ tid, row }) {
       toast.error(`绑定被拒:${body?.error || "原因未说明"}`);
       return;
     }
-    toast.success(`已绑定到 ${claimID}(声明证据版本 ${body.evidence_version})`);
+    toast.success(`绑定成功,证据版本 ${body.evidence_version}`);
   };
 
   return (
     <section className="flex flex-col gap-2">
       <div className="text-xs font-medium tracking-wide text-muted-foreground">
-        绑定为声明证据
+        绑定为判断证据
       </div>
       {claims.length === 0 ? (
-        <span className="text-xs text-muted-foreground">本任务暂无声明,无可绑定对象</span>
+        <span className="text-xs text-muted-foreground">本任务暂无判断,无可绑定对象</span>
       ) : (
         <div className="flex flex-wrap items-center gap-2">
           <div className="w-64">
             <Select value={claimID} onValueChange={setClaimID}>
               <SelectTrigger>
-                <SelectValue placeholder="选择声明" />
+                <SelectValue placeholder="选择判断" />
               </SelectTrigger>
               <SelectContent>
                 {claims.map((c) => (
-                  <SelectItem key={c.id} value={c.id}>
+                  <SelectItem key={c.id} value={c.id} title={CLAIM_STATUS[c.status]?.hint}>
                     {(c.statement || "").slice(0, 32)} · {CLAIM_STATUS[c.status]?.label || c.status} ·{" "}
                     {c.id}
                   </SelectItem>

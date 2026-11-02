@@ -1,0 +1,439 @@
+"use client";
+
+import * as React from "react";
+import { toast } from "sonner";
+
+import { EmptyState } from "@/components/empty-state";
+import { ExchangeRaw, TrafficTypeBadge, fmtBytes, statusVariant } from "@/components/exchange-raw";
+import { PageHeader } from "@/components/page-header";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { CLAIM_STATUS, postJSON, usePolling } from "@/lib/api";
+
+// 一级·流量(P3-02,8.3 [P3] 点亮):镜留痕的跨任务列表(Burp 风格——
+// 时间/方法/Host/URL/状态/大小)与原文回放(抽屉,分段读原文,大正文
+// 走原始数据)。筛选:任务/host/方法/状态/类型/时间。行内可把单条流量
+// 绑定为声明的证据(绑定/补绑,入账)。
+
+// 方法与状态的常用选项(筛选取值不受限于此:方法为精确等值)。
+const METHOD_OPTIONS = ["GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS", "PATCH"];
+const STATUS_OPTIONS = [
+  ["2", "2xx"],
+  ["3", "3xx"],
+  ["4", "4xx"],
+  ["5", "5xx"],
+];
+const TYPE_OPTIONS = [
+  ["http", "HTTP"],
+  ["https", "HTTPS"],
+  ["tunnel", "隧道"],
+];
+
+function urlPath(u) {
+  if (!u) return "";
+  try {
+    const p = new URL(u);
+    return p.pathname + p.search;
+  } catch {
+    return u; // tunnel 的 host:port 形态原样
+  }
+}
+
+export function TrafficPage({ tasks }) {
+  const taskList = Array.isArray(tasks) ? tasks : [];
+
+  const [fTask, setFTask] = React.useState("");
+  const [fMethod, setFMethod] = React.useState("");
+  const [fStatus, setFStatus] = React.useState("");
+  const [fType, setFType] = React.useState("");
+  const [pageSize, setPageSize] = React.useState("20"); // 每页条数(P3-05c ③)
+  const [page, setPage] = React.useState(1);
+  const [hostInput, setHostInput] = React.useState("");
+  const [fHost, setFHost] = React.useState("");
+  const [fSince, setFSince] = React.useState(""); // datetime-local
+  const [fUntil, setFUntil] = React.useState("");
+  const [drill, setDrill] = React.useState(null); // 选中行
+
+  // host 输入防抖(400ms 后生效)。
+  React.useEffect(() => {
+    const t = setTimeout(() => setFHost(hostInput.trim()), 400);
+    return () => clearTimeout(t);
+  }, [hostInput]);
+
+  // 筛选变更回第 1 页(新筛选结果的第 1 页才有意义)。
+  React.useEffect(() => {
+    setPage(1);
+  }, [fTask, fHost, fMethod, fStatus, fType, fSince, fUntil, pageSize]);
+
+  const listURL =
+    "/api/mirror/exchanges?" +
+    new URLSearchParams({
+      task: fTask,
+      host: fHost,
+      method: fMethod,
+      status: fStatus,
+      type: fType,
+      page: String(page),
+      limit: pageSize,
+      ...(fSince ? { since: new Date(fSince).toISOString() } : {}),
+      ...(fUntil ? { until: new Date(fUntil).toISOString() } : {}),
+    }).toString();
+  const { data, error } = usePolling(listURL, 8000);
+  const rows = Array.isArray(data?.rows) ? data.rows : [];
+  const total = data?.total ?? 0;
+  const pages = Math.max(1, Math.ceil(total / Number(pageSize)));
+  const titleOf = (id) => taskList.find((t) => t.id === id)?.title || id;
+
+  return (
+    <div className="flex flex-col gap-6">
+      <PageHeader title="流量" subtitle="镜的全程留痕 · 按任务 / host / 方法 / 状态筛选 · 原文分段回放" />
+
+      {/* 筛选栏(数据表规范 8.5:搜索 + 筛选;任务/host/方法/状态/类型/时间) */}
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="w-48">
+          <Select value={fTask} onValueChange={setFTask}>
+            <SelectTrigger>
+              <SelectValue placeholder="全部任务" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="">全部任务</SelectItem>
+              {taskList.map((t) => (
+                <SelectItem key={t.id} value={t.id}>
+                  {t.title || t.id}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <Input
+          className="w-44"
+          placeholder="host 筛选"
+          value={hostInput}
+          onChange={(e) => setHostInput(e.target.value)}
+        />
+        <div className="w-32">
+          <Select value={fMethod} onValueChange={setFMethod}>
+            <SelectTrigger>
+              <SelectValue placeholder="全部方法" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="">全部方法</SelectItem>
+              {METHOD_OPTIONS.map((m) => (
+                <SelectItem key={m} value={m}>
+                  {m}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="w-28">
+          <Select value={fStatus} onValueChange={setFStatus}>
+            <SelectTrigger>
+              <SelectValue placeholder="全部状态" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="">全部状态</SelectItem>
+              {STATUS_OPTIONS.map(([v, label]) => (
+                <SelectItem key={v} value={v}>
+                  {label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="w-28">
+          <Select value={fType} onValueChange={setFType}>
+            <SelectTrigger>
+              <SelectValue placeholder="全部类型" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="">全部类型</SelectItem>
+              {TYPE_OPTIONS.map(([v, label]) => (
+                <SelectItem key={v} value={v}>
+                  {label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <input
+          type="datetime-local"
+          className="h-9 rounded-md border border-border bg-input-surface px-2 text-sm text-foreground"
+          value={fSince}
+          onChange={(e) => setFSince(e.target.value)}
+          title="起始时间(含)"
+        />
+        <input
+          type="datetime-local"
+          className="h-9 rounded-md border border-border bg-input-surface px-2 text-sm text-foreground"
+          value={fUntil}
+          onChange={(e) => setFUntil(e.target.value)}
+          title="截止时间(含)"
+        />
+      </div>
+
+      {error ? (
+        <EmptyState icon="waves" title="读取失败" hint={error} />
+      ) : !data ? (
+        <EmptyState icon="waves" title="读取中" hint="镜留痕读取中…" />
+      ) : rows.length === 0 ? (
+        <EmptyState icon="waves" title="暂无流量" hint="当前筛选内无镜留痕;任务执行中的工具流量会留痕在此呈现" />
+      ) : (
+        <div className="rounded-xl border bg-card">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>时间</TableHead>
+                <TableHead>任务</TableHead>
+                <TableHead>方法</TableHead>
+                <TableHead>Host</TableHead>
+                <TableHead className="max-w-72">URL</TableHead>
+                <TableHead>状态</TableHead>
+                <TableHead>类型</TableHead>
+                <TableHead>大小</TableHead>
+                <TableHead>耗时</TableHead>
+                <TableHead>单位</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((row) => (
+                <TableRow
+                  key={row.task_id + row.exchange_id}
+                  className="cursor-pointer"
+                  onClick={() => setDrill(row)}
+                >
+                  <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">
+                    {row.started_at}
+                  </TableCell>
+                  <TableCell className="max-w-36 truncate text-xs" title={titleOf(row.task_id)}>
+                    {titleOf(row.task_id)}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs">{row.method || "—"}</TableCell>
+                  <TableCell className="max-w-44 truncate font-mono text-xs" title={row.host}>{row.host || "—"}</TableCell>
+                  <TableCell className="max-w-72 truncate font-mono text-xs" title={row.url}>
+                    {urlPath(row.url) || "—"}
+                  </TableCell>
+                  <TableCell>
+                    {row.status ? (
+                      <Badge variant={statusVariant(row.status)}>{row.status}</Badge>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <TrafficTypeBadge type={row.type} tls={row.tls} />
+                  </TableCell>
+                  <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">
+                    {row.type === "tunnel"
+                      ? `${fmtBytes(row.req_bytes)} ↑ / ${fmtBytes(row.resp_bytes)} ↓`
+                      : `${fmtBytes(row.req_bytes)} / ${fmtBytes(row.resp_bytes)}`}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">
+                    {row.elapsed_ms ? `${row.elapsed_ms} ms` : "—"}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs text-muted-foreground">
+                    {row.unit_id || "—"}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+          <div className="px-3 py-2">
+            <PageBar
+              page={page}
+              pages={pages}
+              total={total}
+              onPage={setPage}
+              pageSize={pageSize}
+              onPageSize={setPageSize}
+            />
+          </div>
+        </div>
+      )}
+
+      <TrafficDrawer row={drill} onClose={() => setDrill(null)} />
+    </div>
+  );
+}
+
+// PageBar 标准分页条(P3-05c ③;P3-11a ④:每页条数下拉挪入底部分页条,
+// 与页码并排):总数 + 页码跳转(首末与当前邻域,超界省略)+ 每页条数。
+// 数字精确(8.5),按钮 ≤4 字。
+function PageBar({ page, pages, total, onPage, pageSize, onPageSize }) {
+  // 页码窗口:首末页 + 当前页前后 2 页,间隙折叠为省略号。
+  const want = new Set([1, pages, page - 1, page, page + 1].filter((n) => n >= 1 && n <= pages));
+  const nums = [...want].sort((a, b) => a - b);
+  const items = [];
+  let prev = 0;
+  for (const n of nums) {
+    if (n - prev > 1) items.push("…");
+    items.push(n);
+    prev = n;
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+      <span className="mr-2">
+        共 {total} 条{pages > 1 ? ` · 第 ${page}/${pages} 页` : ""}
+      </span>
+      {pages > 1 && (
+        <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => onPage(page - 1)}>
+          上一页
+        </Button>
+      )}
+      {pages > 1 &&
+        items.map((it, i) =>
+          typeof it === "number" ? (
+            <button
+              key={i}
+              className={
+                "min-w-7 rounded-md px-1.5 py-1 text-center font-mono tabular-nums transition-colors cursor-pointer " +
+                (it === page
+                  ? "bg-primary/15 text-primary"
+                  : "hover:bg-hover-lift hover:text-foreground")
+              }
+              onClick={() => onPage(it)}
+            >
+              {it}
+            </button>
+          ) : (
+            <span key={i} className="px-1">…</span>
+          )
+        )}
+      {pages > 1 && (
+        <Button variant="outline" size="sm" disabled={page >= pages} onClick={() => onPage(page + 1)}>
+          下一页
+        </Button>
+      )}
+      <div className="ml-auto w-32">
+        <Select value={pageSize} onValueChange={onPageSize}>
+          <SelectTrigger className="h-7 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {["10", "20", "50", "100", "200"].map((n) => (
+              <SelectItem key={n} value={n}>
+                每页 {n} 条
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+    </div>
+  );
+}
+
+// TrafficDrawer 单条流量抽屉:原文分段回放 + 绑定为判断证据。
+function TrafficDrawer({ row, onClose }) {
+  if (!row) return null;
+  return (
+    <Sheet open onOpenChange={(o) => !o && onClose()}>
+      <SheetContent className="overflow-y-auto">
+        <SheetHeader>
+          <SheetTitle className="flex flex-wrap items-center gap-2 pr-16 font-mono text-sm">
+            <TrafficTypeBadge type={row.type} tls={row.tls} />
+            {row.method && <span className="font-medium">{row.method}</span>}
+            <span className="truncate font-normal text-muted-foreground" title={row.url}>
+              {row.url}
+            </span>
+          </SheetTitle>
+          <SheetDescription>
+            {row.task_id} · {row.started_at}
+            {row.error ? <span title={row.error}> · 该请求未完成</span> : ""}
+          </SheetDescription>
+        </SheetHeader>
+        <div className="flex flex-col gap-5 p-4">
+          <ExchangeRaw tid={row.task_id} exID={row.exchange_id} />
+          <BindPanel tid={row.task_id} row={row} />
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+// BindPanel 把当前流量绑定到声明(绑定/补绑同入口;补绑即声明已有证据
+// 再追加)。绑定入账,绑定事实与证据版本即时返回。
+function BindPanel({ tid, row }) {
+  const { data } = usePolling(tid ? `/api/tasks/${tid}/claims` : "/api/healthz", 10000, {
+    immediate: Boolean(tid),
+  });
+  const claims = Array.isArray(data) ? data : [];
+  const [claimID, setClaimID] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+
+  const bind = async () => {
+    if (!claimID) {
+      toast.error("先选择要绑定的判断");
+      return;
+    }
+    setBusy(true);
+    const { ok, body } = await postJSON(`/api/tasks/${tid}/claims/${claimID}/evidence`, {
+      exchange_ids: [row.exchange_id],
+    });
+    setBusy(false);
+    if (!ok) {
+      toast.error(`绑定被拒:${body?.error || "原因未说明"}`);
+      return;
+    }
+    toast.success(`绑定成功,证据版本 ${body.evidence_version}`);
+  };
+
+  return (
+    <section className="flex flex-col gap-2">
+      <div className="text-xs font-medium tracking-wide text-muted-foreground">
+        绑定为判断证据
+      </div>
+      {claims.length === 0 ? (
+        <span className="text-xs text-muted-foreground">本任务暂无判断,无可绑定对象</span>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="w-64">
+            <Select value={claimID} onValueChange={setClaimID}>
+              <SelectTrigger>
+                <SelectValue placeholder="选择判断" />
+              </SelectTrigger>
+              <SelectContent>
+                {claims.map((c) => (
+                  <SelectItem key={c.id} value={c.id}>
+                    {(c.statement || "").slice(0, 32)} · {CLAIM_STATUS[c.status]?.label || c.status} ·{" "}
+                    {c.id}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <Button size="sm" disabled={busy || !row.has_blob} onClick={bind}>
+            {busy ? "绑定中…" : "绑定"}
+          </Button>
+          {!row.has_blob && (
+            <span className="text-xs text-muted-foreground">
+              隧道记录无原文,不构成可验证证据,不可绑定
+            </span>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}

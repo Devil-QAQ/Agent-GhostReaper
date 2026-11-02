@@ -45,7 +45,7 @@ func newP405Server(t *testing.T) (http.Handler, *rings.Store) {
 // 带来源明细(全程记账可审计);坏输入 400 零残留。
 func TestManualAssetCreate(t *testing.T) {
 	h, store := newP405Server(t)
-	post(t, h, http.MethodPost, "/api/tasks", `{
+	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],
 		"id":"p405-a","title":"手动资产验证",
 		"assets":[{"class":"domain","title":"example.com"}]}`, http.StatusOK, nil)
 
@@ -146,7 +146,7 @@ func TestManualAssetCreate(t *testing.T) {
 // RoE 视图带清单、自动备注含摘除明细;纳入恢复;不在图上的 ID 400。
 func TestRoEAssetScope(t *testing.T) {
 	h, _ := newP405Server(t)
-	post(t, h, http.MethodPost, "/api/tasks", `{
+	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],
 		"id":"p405-b","title":"范围摘除验证",
 		"assets":[
 			{"class":"host","title":"10.10.0.5"},
@@ -238,7 +238,7 @@ func TestRoEAssetScope(t *testing.T) {
 // 摘除清单:省略字段不清空,显式提交同值不漂移。
 func TestRoEUpdateKeepsExcluded(t *testing.T) {
 	h, _ := newP405Server(t)
-	post(t, h, http.MethodPost, "/api/tasks", `{
+	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],
 		"id":"p405-c","title":"快照透传验证",
 		"assets":[{"class":"host","title":"10.10.0.7"}]}`, http.StatusOK, nil)
 
@@ -274,7 +274,7 @@ func TestRoEUpdateKeepsExcluded(t *testing.T) {
 // 资产是测试中途的授权扩大,不混入建任务目标。
 func TestTaskTargetsSkipManualAssets(t *testing.T) {
 	h, _ := newP405Server(t)
-	post(t, h, http.MethodPost, "/api/tasks", `{
+	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],
 		"id":"p405-d","title":"目标域验证",
 		"assets":[{"class":"domain","title":"seed.example.com"}]}`, http.StatusOK, nil)
 	post(t, h, http.MethodPost, "/api/tasks/p405-d/assets",

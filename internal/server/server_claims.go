@@ -337,6 +337,7 @@ func (s *Server) handleClaimDetail(w http.ResponseWriter, r *http.Request) {
 	v.Claim.FalsifyStep = cs.FalsifyStep()
 	v.Claim.PendingReason = cs.PendingReason()
 	v.Claim.VerdictRev = cs.VerdictRev()
+	v.Claim.ReportExcluded, v.Claim.ReportExcludedReason = cs.ReportExcluded, cs.ReportExcludedReason
 	v.Reopenable = node.Status == rings.TestClaimConfirmed || node.Status == rings.TestClaimPending
 	v.Remediation = report.Remediation(v.Claim.Vulnclass)
 	v.Evidence, v.EvidenceVersion = s.claimEvidenceOf(ctx, taskID, claimID)

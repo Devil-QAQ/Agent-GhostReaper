@@ -132,7 +132,7 @@ export function CategoryDialog({ open, onOpenChange, tasks, onChanged }) {
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && create()}
               />
-              <Button size="sm" variant="outline" disabled={busy} onClick={create}>
+              <Button variant="outline" disabled={busy} onClick={create}>
                 新建
               </Button>
             </div>
@@ -187,7 +187,7 @@ export function CategoryDialog({ open, onOpenChange, tasks, onChanged }) {
               {(tasks || []).map((t) => (
                 <div key={t.id} className="flex items-center gap-2 rounded-md px-2 py-2 transition-colors duration-150 hover:bg-hover-lift">
                   <span className="min-w-0 flex-1 truncate text-sm" title={t.title || t.id}>{t.title || t.id}</span>
-                  <span className="font-mono text-xs text-muted-foreground">{t.id}</span>
+                  <span className="num text-xs text-muted-foreground">{t.id}</span>
                   <div className="w-40 shrink-0">
                     <Select
                       value={t.category && catName(t.category) ? t.category : "none"}
@@ -228,7 +228,7 @@ export function CategoryDialog({ open, onOpenChange, tasks, onChanged }) {
           <DialogHeader>
             <DialogTitle>删除分类</DialogTitle>
             <DialogDescription>
-              {removing ? `${catName(removing)} 下有 ${counts[removing] || 0} 个任务,删除后这些任务移出该分类(入账可查)。` : ""}
+              {removing ? `${catName(removing)} 下有 ${counts[removing] || 0} 个任务,删除后这些任务移出该分类(记录可查)。` : ""}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

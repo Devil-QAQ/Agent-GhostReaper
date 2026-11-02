@@ -6,10 +6,13 @@ import { toast } from "sonner";
 import { iconOf } from "@/components/icons";
 import { ClaimFollowupDialog } from "@/components/claim-followup-dialog";
 import {
+  ChatStream,
   DELIVERY,
   InlineAdvice,
   MessageBlock,
   nowStamp,
+  tailGrowSig,
+  ThinkingCard,
 } from "@/components/chat-blocks";
 import { InterjectBlock, InterjectWindow } from "@/components/interject-window";
 import { LongText } from "@/components/long-text";
@@ -33,7 +36,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { denyStatusLabel, postJSON, usePolling } from "@/lib/api";
+import { CLAIM_STATUS, HYP_STATUS, STEP_STATUS, denyStatusLabel, postJSON, usePolling } from "@/lib/api";
 import { NodeSheetHost } from "@/views/node-sheets";
 import { cn } from "@/lib/utils";
 
@@ -49,10 +52,14 @@ import { cn } from "@/lib/utils";
 
 const GROUPS = [
   { id: "shepherd", title: "牧者", icon: "messageCircle", desc: "总对话", enabled: true, phase: "" },
-  { id: "overmind", title: "主宰", icon: "brain", desc: "研判轨迹与直连对话", enabled: true, phase: "" },
+  { id: "overmind", title: "主宰", icon: "brain", desc: "规划轨迹与直连对话", enabled: true, phase: "" },
   { id: "swarm", title: "虫群", icon: "bug", desc: "单位轨迹与控制", enabled: true, phase: "" },
   { id: "events", title: "系统事件", icon: "activity", desc: "黑匣子", enabled: true, phase: "" },
 ];
+
+// 在途全景折叠阈值(P4-25 ③,问题清单 #41):≤5 条直接全显,>5 条
+// 前 5 条 + 「还有 N 条」点击展开。
+const PANORAMA_FOLD = 5;
 
 // 黑匣子事件类型 → 操作者语言。
 const BLACKBOX_LABELS = {
@@ -61,16 +68,17 @@ const BLACKBOX_LABELS = {
   unit_budget_renew: "预算到线续跑",
   task_settling: "任务进入收尾",
   grace_hard_stop: "收尾宽限硬停",
-  task_settled: "收尾定终态",
+  task_settled: "任务结束",
   heartbeat: "心跳巡检",
   hb_stall: "进度停滞标记",
   hb_repeat: "重复动作标记",
   hb_burn_anomaly: "预算消耗异常",
-  unit_approval_deny: "审批拒绝熔断单位",
+  unit_approval_deny: "审批拒绝终止单位",
   unit_blocked: "单位受阻",
   task_blocked: "任务受阻",
   task_resumed: "任务恢复",
-  restart_adoption: "进程重启收养",
+  restart_adoption: "进程重启接管",
+  env_observation: "环境观察",
 };
 
 // 收养动作 → 操作者语言(restart_adoption 事件的 detail.action,P4-06 ④
@@ -78,7 +86,7 @@ const BLACKBOX_LABELS = {
 const ADOPT_ACTIONS = {
   keep: "保持原状",
   relaunch: "重新拉起",
-  adopt_paused: "收养为已暂停",
+  adopt_paused: "接管为已暂停",
   requeue: "重新排队",
 };
 
@@ -98,14 +106,14 @@ export function SessionsPage({ currentTask, unitFocus }) {
   return (
     <div className="flex h-[calc(100vh-168px)] min-h-[480px] flex-col gap-3">
       <div className="flex items-baseline gap-3 border-b pb-2">
-        <h1 className="text-base font-semibold tracking-tight">会话</h1>
+        <h1 className="t-sec">会话</h1>
         <span className="truncate text-xs text-muted-foreground">
           对话与执行轨迹按任务隔离
         </span>
       </div>
       <div className="grid min-h-0 flex-1 grid-cols-[176px_minmax(0,1fr)] items-stretch gap-3">
         {/* 左栏:会话分组(每任务自家四组) */}
-        <nav className="flex min-h-0 flex-col gap-1 overflow-y-auto rounded-xl border bg-card p-2">
+        <nav className="flex min-h-0 flex-col gap-1 overflow-y-auto rounded-xl border border-border/55 bg-card p-2">
           {GROUPS.map((g) => {
             const Icon = iconOf(g.icon);
             const active = group === g.id;
@@ -175,7 +183,7 @@ const FIVE_QUESTIONS = [
   ["q_privilege", "新权限是否改变其他漏洞的影响"],
   ["q_combination", "两条线索是否组合成新的边界问题"],
   ["q_unlock", "新的可达关系是否解锁受阻步骤"],
-  ["q_overturn", "新证据是否推翻旧判断"],
+  ["q_overturn", "新证据是否推翻旧结论"],
 ];
 
 function OvermindPane({ task, onInterject }) {
@@ -190,7 +198,6 @@ function OvermindPane({ task, onInterject }) {
   });
   const [node, setNode] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
-  const bottomRef = React.useRef(null);
 
   const badge = loopBadgeOf(data);
   const paused = Boolean(data?.paused) && Boolean(data?.running) && !data?.hibernated;
@@ -198,10 +205,8 @@ function OvermindPane({ task, onInterject }) {
   const rounds = data?.rounds || [];
   const messages = chat?.messages || [];
   const steers = chat?.steers || [];
-
-  React.useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [rounds.length, messages.length, messages[messages.length - 1]?.reply]);
+  // 流内容签名(P4-22):规划轮数 + 对话条数 + 末条内容量,贴底跟滚判据。
+  const sig = `${rounds.length}|${messages.length}|${tailGrowSig(messages[messages.length - 1])}`;
 
   const steerStateOf = (id) =>
     (steers.find((s) => s.steer_id === id) || {}).state || "queued";
@@ -248,14 +253,14 @@ function OvermindPane({ task, onInterject }) {
         />
         <Badge variant={badge.variant}>{badge.label}</Badge>
         <span className="text-xs text-muted-foreground">
-          每轮研判:五问 · 收割 · 派发决策;研判轮次之间可直连问话与提建议。
+          每轮规划:五问 · 检查归纳 · 派发决策;规划轮次之间可直连问话与提建议。
         </span>
       </div>
-      {/* 流:研判轨迹 + 直连对话 */}
-      <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto rounded-xl border bg-card px-3 py-3">
+      {/* 流:研判轨迹 + 直连对话(贴底跟滚,P4-22) */}
+      <ChatStream sig={sig} resetKey={taskID} className="space-y-3 rounded-xl border border-border/55 bg-card px-3 py-3">
         {stream.length === 0 && (
-          <div className="py-10 text-center text-[13px] text-muted-foreground">
-            尚无研判记录。主宰被唤醒研判后,每轮五问与派发在此呈现。
+          <div className="py-12 text-center text-[13px] text-muted-foreground">
+            尚无规划记录。主宰被唤醒后,每轮五问与派发在此呈现。
           </div>
         )}
         {stream.map((item) =>
@@ -265,8 +270,7 @@ function OvermindPane({ task, onInterject }) {
             <InterjectBlock key={item.key} msg={item.msg} steerStateOf={steerStateOf} />
           )
         )}
-        <div ref={bottomRef} />
-      </div>
+      </ChatStream>
       {/* 直连输入:问(默认)/改(建议)+ 循环控制 + 插话窗 */}
       <DirectInput
         taskID={taskID}
@@ -307,17 +311,21 @@ function OvermindPane({ task, onInterject }) {
 // 回复的原文)。
 function RoundCard({ round, taskID, onNode }) {
   const [openRaw, setOpenRaw] = React.useState(false);
+  // 在途全景自适应折叠(P4-25 ③,问题清单 #41):每卡默认收着,>5 条
+  // 只显示前 5 条,点「还有 N 条」展开全量、再点收起;≤5 条直接全显
+  //(当前轮与历史轮次同款)。
+  const [panoOpen, setPanoOpen] = React.useState(false);
   const hasHarvest =
     (round.facts_confirmed || []).length > 0 ||
     (round.claims_judged || []).length > 0 ||
     (round.hypotheses || []).length > 0;
   return (
-    <div className="rounded-lg border bg-background px-3 py-3 text-[12px]">
+    <div className="rounded-lg border border-border/55 bg-background px-3 py-3 text-xs">
       <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-        <Badge variant="outline">研判</Badge>
-        <span className="font-mono">{round.at?.slice(11)}</span>
+        <Badge variant="outline">规划</Badge>
+        <span className="num">{round.at?.slice(11)}</span>
         {round.dispatched > 0 && <span>派发 {round.dispatched} 条意图</span>}
-        {(round.combined || []).length > 0 && <span>组合声明 {(round.combined || []).length} 条</span>}
+        {(round.combined || []).length > 0 && <span>组合判断 {(round.combined || []).length} 条</span>}
         {round.session_id && (
           <button
             className="ml-auto cursor-pointer text-primary underline decoration-dotted underline-offset-2"
@@ -351,26 +359,34 @@ function RoundCard({ round, taskID, onNode }) {
       )}
       {hasHarvest && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <span className="text-muted-foreground">收割:</span>
+          <span className="text-muted-foreground">检查归纳:</span>
           {(round.facts_confirmed || []).map((f) => (
-            <NodeChip key={f} id={f} label="事实转正" status="confirmed" taskID={taskID} onNode={onNode} />
+            <NodeChip key={f} id={f} label="事实确认" status="confirmed" taskID={taskID} onNode={onNode} />
           ))}
           {(round.claims_judged || []).map((c) => (
-            <NodeChip key={c.id} id={c.id} label="声明裁决" status={c.status} taskID={taskID} onNode={onNode} />
+            <NodeChip key={c.id} id={c.id} label="判断" status={c.status} taskID={taskID} onNode={onNode} />
           ))}
           {(round.hypotheses || []).map((h) => (
             <NodeChip key={h.id} id={h.id} label="假设" status={h.status} taskID={taskID} onNode={onNode} />
           ))}
         </div>
       )}
+      {round.queue && (
+        <div className="mt-2 text-xs text-muted-foreground num" title="该轮规划时的队列水位；排队只计可领取步骤">
+          执行中 {round.queue.running} / 排队 {round.queue.queued} / 等前置 {round.queue.waiting} / 本轮还可新增 {round.queue.available} · 派发上限 {round.queue.limit}
+        </div>
+      )}
       {/* 在途全景(P4-11 ②):该轮研判时刻的在跑+排队步骤,按领取次序排;
           账本按版本号回放装配,零 LLM——表是机器的,上面五问叙述是模型的 */}
       <div className="mt-2 border-t pt-2">
-        <div className="text-[11px] text-muted-foreground" title="该轮研判时刻的在跑与排队步骤">
+        <div className="text-[11px] text-muted-foreground" title="该轮规划时刻的在跑与排队步骤">
           在途全景
         </div>
         <div className="mt-1 space-y-1">
-          {(round.panorama || []).map((p) => (
+          {(panoOpen || (round.panorama || []).length <= PANORAMA_FOLD
+            ? round.panorama || []
+            : (round.panorama || []).slice(0, PANORAMA_FOLD)
+          ).map((p) => (
             <div key={p.id} className="flex items-center gap-2">
               <Badge variant={p.status === "running" ? "running" : "info"}>{p.status === "running" ? "执行中" : "排队中"}</Badge>
               {p.waiting && <span className="shrink-0 text-[11px] text-muted-foreground">等前置</span>}
@@ -379,7 +395,7 @@ function RoundCard({ round, taskID, onNode }) {
                 title={`${p.id}${p.title ? " · " + p.title : ""}`}
                 onClick={() => openNode(taskID, p.id, onNode)}
               >
-                <span className="font-mono text-muted-foreground">{p.id}</span>
+                <span className="num text-muted-foreground">{p.id}</span>
                 {p.title && <span className="ml-1">{clip(p.title, 30)}</span>}
               </button>
               {(p.assets || []).length > 0 && (
@@ -395,6 +411,14 @@ function RoundCard({ round, taskID, onNode }) {
           {(round.panorama || []).length === 0 && (
             <div className="text-[11px] text-muted-foreground">该时刻无在跑或排队步骤</div>
           )}
+          {(round.panorama || []).length > PANORAMA_FOLD && (
+            <button
+              className="cursor-pointer text-[11px] text-primary underline decoration-dotted underline-offset-2"
+              onClick={() => setPanoOpen((o) => !o)}
+            >
+              {panoOpen ? "收起" : `还有 ${(round.panorama || []).length - PANORAMA_FOLD} 条`}
+            </button>
+          )}
         </div>
       </div>
       {openRaw && round.session_id && (
@@ -407,20 +431,24 @@ function RoundCard({ round, taskID, onNode }) {
 }
 
 // NodeChip 研判轮内的图上节点(步骤/事实/声明/假设):点击开节点核对面
-//(P4-06 ④ 并入全站节点抽屉宿主,与进度图/发现页同一呈现)。
+//(P4-06 ④ 并入全站节点抽屉宿主,与进度图/发现页同一呈现)。声明/假设
+// 状态词走 api.js 全站词表(P4-28 ⑥ 合并口径),不另立表。
 function NodeChip({ id, label, status, taskID, onNode }) {
-  const st = UNIT_STATUS[status] || CLAIM_STATUS_OF[status] || { label: status, variant: "info" };
+  const st =
+    UNIT_STATUS[status] || CLAIM_STATUS[status] || HYP_STATUS[status] || { label: STEP_STATUS[status] || status, variant: "info" };
   return (
     <button
-      className="flex max-w-full items-center gap-1 rounded-md border bg-card px-2 py-0.5 cursor-pointer hover:bg-hover-lift"
-      title={`${id}${label ? " · " + label : ""}`}
+      className="flex max-w-full items-center gap-1 rounded-md border border-border/55 bg-card px-2 py-0.5 cursor-pointer hover:bg-hover-lift"
+      title={st.hint ? `${id}${label ? " · " + label : ""}\n${st.hint}` : `${id}${label ? " · " + label : ""}`}
       onClick={() => openNode(taskID, id, onNode)}
     >
       <span className="truncate">
-        <span className="font-mono">{id}</span>
+        <span className="num">{id}</span>
         {label && <span className="ml-1 text-muted-foreground">{clip(label, 18)}</span>}
       </span>
-      <Badge variant={st.variant}>{st.label}</Badge>
+      <Badge variant={st.variant} className={st.live ? "gr-live" : undefined}>
+        {st.label}
+      </Badge>
     </button>
   );
 }
@@ -435,14 +463,6 @@ async function openNode(taskID, id, onNode) {
   const n = await r.json();
   onNode({ type: n.type, id: n.id });
 }
-
-const CLAIM_STATUS_OF = {
-  confirmed: { label: "已确认", variant: "success" },
-  pending: { label: "待确认", variant: "warning" },
-  awaiting_round: { label: "待下轮反证", variant: "info" },
-  testing: { label: "反证中", variant: "running" },
-  candidate: { label: "候选", variant: "paused" },
-};
 
 function clip(s, n) {
   return s && s.length > n ? s.slice(0, n) + "…" : s || "";
@@ -479,11 +499,12 @@ function RawTranscript({ taskID, sessionID }) {
 const UNIT_STATUS = {
   running: { label: "执行中", variant: "running" },
   dispatched: { label: "已派发", variant: "info" },
+  cancelled: { label: STEP_STATUS.cancelled, variant: "info" },
   paused: { label: "冬眠中", variant: "paused" },
   done: { label: "已完成", variant: "success" },
   exhausted: { label: "预算耗尽", variant: "warning" },
   failed: { label: "失败", variant: "danger" },
-  aborted: { label: "已熔断", variant: "info" },
+  aborted: { label: "已终止", variant: "info" },
   approval_denied: { label: "审批拒绝终止", variant: "danger" },
   blocked: { label: "受阻", variant: "warning" },
 };
@@ -510,14 +531,14 @@ const FINISH_WORDS = {
   max_turns: "轮次到线",
   checkpointed: "已存档",
   "pause_stale(R14)": "挂起复检",
-  aborted: "已熔断",
-  aborted_streaming: "已熔断",
-  aborted_tools: "已熔断",
+  aborted: "已终止",
+  aborted_streaming: "已终止",
+  aborted_tools: "已终止",
   model_error: "失败(模型错误)",
   stream_error: "失败(流式错误)",
   mirror_error: "失败(镜会话失败)",
   resume_error: "失败(续跑失败)",
-  no_terminal: "失败(无终态)",
+  no_terminal: "失败(未收尾)",
   prompt_too_long: "失败(上下文超限)",
   blocking_limit: "失败(上下文超限)",
   image_error: "失败(不支持的媒体)",
@@ -595,7 +616,7 @@ function SwarmPane({ task, unitFocus, onInterject }) {
       )}
       <div className="flex min-h-0 flex-1 gap-2">
         {/* 单位列表(会话锚去重,跨进程稳定)+ 排队中条目(派发即可见) */}
-        <div className="w-[232px] shrink-0 overflow-y-auto rounded-xl border bg-card">
+        <div className="w-[232px] shrink-0 overflow-y-auto rounded-xl border border-border/55 bg-card">
           {units.length === 0 && (
             <div className="px-3 py-8 text-center text-[13px] text-muted-foreground">
               尚无虫群单位。主宰派发意图后,排队与执行在此列示。
@@ -607,7 +628,7 @@ function SwarmPane({ task, unitFocus, onInterject }) {
               return (
                 <button
                   key={`q-${u.step_id}`}
-                  className="flex w-full flex-col gap-0.5 border-b border-dashed px-3 py-1 text-left text-[12px] cursor-pointer last:border-b-0 hover:bg-hover-lift"
+                  className="flex w-full flex-col gap-0.5 border-b border-dashed px-3 py-1 text-left text-xs cursor-pointer last:border-b-0 hover:bg-hover-lift"
                   title={`等待虫群领取 · ${u.step_title || u.step_id}`}
                   onClick={() => openStep(u.step_id)}
                 >
@@ -626,7 +647,7 @@ function SwarmPane({ task, unitFocus, onInterject }) {
                 role="button"
                 tabIndex={0}
                 className={cn(
-                  "flex w-full flex-col gap-0.5 border-b px-3 py-1 text-left text-[12px] cursor-pointer last:border-b-0 hover:bg-hover-lift",
+                  "flex w-full flex-col gap-0.5 border-b px-3 py-1 text-left text-xs cursor-pointer last:border-b-0 hover:bg-hover-lift",
                   selected === u.session_id && "bg-primary/15"
                 )}
                 onClick={() => setSelected(u.session_id)}
@@ -651,7 +672,7 @@ function SwarmPane({ task, unitFocus, onInterject }) {
                       {u.meta.title}
                     </span>
                   )}
-                  <span className="ml-auto font-mono text-[11px] text-muted-foreground">
+                  <span className="ml-auto num text-[11px] text-muted-foreground">
                     {u.started_at?.slice(11)}
                   </span>
                   <SessionMarkMenu
@@ -674,7 +695,7 @@ function SwarmPane({ task, unitFocus, onInterject }) {
         {unit ? (
           <UnitSessionPane task={task} unit={unit} onInterject={onInterject} />
         ) : (
-          <div className="flex min-h-0 flex-1 items-center justify-center rounded-xl border bg-card text-[13px] text-muted-foreground">
+          <div className="flex min-h-0 flex-1 items-center justify-center rounded-xl border border-border/55 bg-card text-[13px] text-muted-foreground">
             在左侧选择单位,查看其执行轨迹与直连对话。
           </div>
         )}
@@ -716,12 +737,12 @@ function SessionMarkMenu({ taskID, sessionID, defaultName, meta, pinnable, iconO
 
   return (
     <span className={cn("flex shrink-0 items-center", !iconOnly && "gap-2")} onClick={(e) => e.stopPropagation()}>
-      <DropdownMenu>
+      <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           <Button
             size="sm"
             variant="ghost"
-            className={cn("h-7 px-1.5 text-xs", iconOnly && "size-6 p-0")}
+            className={cn("h-8 px-1.5 text-xs", iconOnly && "size-6 p-0")}
             title="会话标记"
           >
             {React.createElement(iconOf("moreHorizontal"), { className: "size-4" })}
@@ -891,7 +912,6 @@ function UnitSessionPane({ task, unit, onInterject }) {
   const { data: chat, setData: setChat } = usePolling(chatURL, running ? 700 : 2000);
   const [busy, setBusy] = React.useState(false);
   const [confirmStop, setConfirmStop] = React.useState(false);
-  const bottomRef = React.useRef(null);
 
   const st = unitStatusMeta(unit);
   const finishLine = finishLineOf(unit);
@@ -899,10 +919,8 @@ function UnitSessionPane({ task, unit, onInterject }) {
   const steers = chat?.steers || [];
   const frozen = Boolean(chat?.frozen);
   const controllable = unit.running && !frozen;
-
-  React.useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [raw?.entries?.length, messages.length, messages[messages.length - 1]?.reply]);
+  // 流内容签名(P4-22):转录条数 + 对话条数 + 末条内容量,贴底跟滚判据。
+  const sig = `${(raw?.entries || []).length}|${messages.length}|${tailGrowSig(messages[messages.length - 1])}`;
 
   const steerStateOf = (id) =>
     (steers.find((s) => s.steer_id === id) || {}).state || "queued";
@@ -922,13 +940,13 @@ function UnitSessionPane({ task, unit, onInterject }) {
     setConfirmStop(false);
     const { ok, body } = await postJSON(`/api/tasks/${taskID}/kill-work`, {
       step_id: unit.step_id,
-      reason: "单位会话页熔断:操作者终止该单位",
+      reason: "单位会话页终止:操作者结束该单位",
     });
     if (!ok) {
-      toast.error(body?.error || "熔断失败");
+      toast.error(body?.error || "终止失败");
       return;
     }
-    toast.success("单位已熔断");
+    toast.success("单位已终止");
   };
 
   // 执行轨迹(会话原文)与直连对话按时间归并。
@@ -952,7 +970,7 @@ function UnitSessionPane({ task, unit, onInterject }) {
           <Badge variant={st.variant} className="shrink-0" title={st.deny ? st.label : undefined}>
             {st.deny ? <span className="max-w-64 truncate">{st.label}</span> : st.label}
           </Badge>
-          <span className="shrink-0 font-mono text-xs text-muted-foreground" title="单位 · 步骤">
+          <span className="shrink-0 num text-xs text-muted-foreground" title="单位 · 步骤">
             {unit.unit_id} · {unit.step_id}
           </span>
           {Boolean(unit.meta?.pinned) &&
@@ -979,10 +997,14 @@ function UnitSessionPane({ task, unit, onInterject }) {
         )}
         {finishLine && <div className="text-[11px] text-muted-foreground">{finishLine}</div>}
       </div>
-      {/* 流:执行轨迹 + 直连对话 */}
-      <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto rounded-xl border bg-card px-3 py-3">
+      {/* 流:执行轨迹 + 直连对话(贴底跟滚,P4-22) */}
+      <ChatStream
+        sig={sig}
+        resetKey={unit.session_id}
+        className="space-y-3 rounded-xl border border-border/55 bg-card px-3 py-3"
+      >
         {stream.length === 0 && (
-          <div className="py-10 text-center text-[13px] text-muted-foreground">
+          <div className="py-12 text-center text-[13px] text-muted-foreground">
             会话原文尚未保存。单位动工后,执行轨迹(输入/思考/工具调用/结果)在此呈现。
           </div>
         )}
@@ -993,8 +1015,7 @@ function UnitSessionPane({ task, unit, onInterject }) {
             <InterjectBlock key={item.key} msg={item.msg} steerStateOf={steerStateOf} />
           )
         )}
-        <div ref={bottomRef} />
-      </div>
+      </ChatStream>
       {/* 直连输入:问(默认)/改(舵杆注入)+ 单位控制 + 插话窗 */}
       <DirectInput
         taskID={taskID}
@@ -1037,8 +1058,8 @@ function UnitSessionPane({ task, unit, onInterject }) {
                   冬眠
                 </Button>
               )}
-              <Button size="sm" variant="outline" title="熔断该单位(不可恢复)" onClick={() => setConfirmStop(true)}>
-                熔断
+              <Button size="sm" variant="outline" title="终止该单位(不可恢复)" onClick={() => setConfirmStop(true)}>
+                终止
               </Button>
             </>
           ) : null
@@ -1103,11 +1124,11 @@ function DirectInput({ taskID, chat, setChat, target, frozen, finished, busy, on
   };
 
   return (
-    <div className="rounded-xl border bg-card p-3">
+    <div className="rounded-xl border border-border/55 bg-card p-3">
       <div className="mb-2 flex items-center gap-1">
         {[
-          ["ask", "问", isUnit ? "基于该单位会话历史回答,不改执行" : "问主宰当前研判相关问题"],
-          ["steer", "改", isUnit ? "舵杆注入,下一次工具调用前生效,带回执" : "建议进正式规划,裁决后改"],
+          ["ask", "问", isUnit ? "基于该单位会话历史回答,不改执行" : "问主宰当前规划相关问题"],
+          ["steer", "改", isUnit ? "发送纠偏,下一次工具调用前生效,带回执" : "建议进正式规划,判定后改"],
         ].map(([v, label, hint]) => (
           <button
             key={v}
@@ -1144,12 +1165,12 @@ function DirectInput({ taskID, chat, setChat, target, frozen, finished, busy, on
                   ? finished
                     ? "该单位已结束,问话基于其历史记录回答"
                     : "问这只单位相关问题(基于其会话历史回答)"
-                  : "问主宰当前研判相关问题"
+                  : "问主宰当前规划相关问题"
                 : isUnit
                   ? finished
                     ? "该单位已结束,改向不可用"
                     : "给这只单位改方向(下一次工具调用前生效)"
-                  : "给主宰提方向建议(裁决后改变规划)"
+                  : "给主宰提方向建议(判定后改变规划)"
           }
           className="min-h-[48px] text-[13px] resize-none"
           onChange={(e) => setText(e.target.value)}
@@ -1173,11 +1194,11 @@ function DirectInput({ taskID, chat, setChat, target, frozen, finished, busy, on
       {confirmStop && (
         <div className="mt-2 rounded-md border border-status-danger/40 bg-status-danger-soft px-3 py-2 text-xs">
           <div className="text-status-danger">
-            熔断将终止该单位(不可恢复),主宰收割可见原因。确认熔断?
+            终止该单位后不可恢复,主宰会看到原因。确认终止?
           </div>
           <div className="mt-2 flex gap-2">
             <Button size="sm" variant="danger" onClick={onStop}>
-              确认熔断
+              确认终止
             </Button>
             <Button size="sm" variant="outline" onClick={() => setConfirmStop(false)}>
               取消
@@ -1237,13 +1258,13 @@ function BodyText({ text, compact }) {
   const [open, setOpen] = React.useState(false);
   if (text.length <= bodyFoldThreshold) {
     return (
-      <div className="max-w-[90%] rounded-lg border bg-background px-3 py-2 text-[13px] whitespace-pre-wrap [overflow-wrap:anywhere]">
+      <div className="max-w-[90%] rounded-lg border border-border/55 bg-background px-3 py-2 text-[13px] whitespace-pre-wrap [overflow-wrap:anywhere]">
         {text}
       </div>
     );
   }
   return (
-    <div className="max-w-[85%] rounded-lg border bg-background">
+    <div className="max-w-[85%] rounded-lg border border-border/55 bg-background">
       <button
         className="flex w-full items-center gap-2 px-3 py-1 text-[11px] cursor-pointer"
         onClick={() => setOpen((o) => !o)}
@@ -1275,7 +1296,7 @@ function InputCard({ text, compact }) {
   const [open, setOpen] = React.useState(false);
   const head = clip(text.split("\n")[0] || "", 80);
   return (
-    <div className="max-w-[85%] rounded-lg border bg-background">
+    <div className="max-w-[85%] rounded-lg border border-border/55 bg-background">
       <button
         className="flex w-full items-center gap-2 px-3 py-1 text-[11px] text-muted-foreground cursor-pointer"
         onClick={() => setOpen((o) => !o)}
@@ -1289,7 +1310,7 @@ function InputCard({ text, compact }) {
       {open && (
         <pre
           className={cn(
-            "overflow-y-auto rounded-b-lg border-t bg-input-surface px-3 py-2 font-mono text-xs whitespace-pre-wrap break-all",
+            "overflow-y-auto rounded-b-lg border-t bg-input-surface px-3 py-2 num text-xs whitespace-pre-wrap break-all",
             compact ? "max-h-64" : "max-h-72"
           )}
         >
@@ -1304,19 +1325,19 @@ function InputCard({ text, compact }) {
 function CallCard({ tool }) {
   const [open, setOpen] = React.useState(false);
   return (
-    <div className="max-w-[85%] rounded-lg border bg-background">
+    <div className="max-w-[85%] rounded-lg border border-border/55 bg-background">
       <button
         className="flex w-full items-center gap-2 px-3 py-1 text-[11px] cursor-pointer"
         onClick={() => setOpen((o) => !o)}
       >
         <Badge variant="outline">工具调用</Badge>
-        <span className="truncate font-mono">{tool.name}</span>
+        <span className="truncate num">{tool.name}</span>
         {React.createElement(iconOf(open ? "chevronDown" : "chevronRight"), {
           className: "ml-auto size-3.5 shrink-0",
         })}
       </button>
       {open && (
-        <pre className="max-h-64 overflow-y-auto overflow-x-auto border-t bg-input-surface px-3 py-2 font-mono text-xs whitespace-pre-wrap break-all">
+        <pre className="max-h-64 overflow-y-auto overflow-x-auto border-t bg-input-surface px-3 py-2 num text-xs whitespace-pre-wrap break-all">
           {tool.input}
         </pre>
       )}
@@ -1330,7 +1351,7 @@ function ResultCard({ res }) {
   return (
     <div
       className={cn(
-        "max-w-[85%] rounded-lg border bg-background",
+        "max-w-[85%] rounded-lg border border-border/55 bg-background",
         res.is_error && "border-status-danger/60"
       )}
     >
@@ -1339,13 +1360,13 @@ function ResultCard({ res }) {
         onClick={() => setOpen((o) => !o)}
       >
         <Badge variant="outline">{res.is_error ? "工具出错" : "工具结果"}</Badge>
-        <span className="truncate font-mono">{res.id}</span>
+        <span className="truncate num">{res.id}</span>
         {React.createElement(iconOf(open ? "chevronDown" : "chevronRight"), {
           className: "ml-auto size-3.5 shrink-0",
         })}
       </button>
       {open && (
-        <pre className="max-h-56 overflow-y-auto border-t px-3 py-2 font-mono text-xs whitespace-pre-wrap break-all bg-input-surface">
+        <pre className="max-h-56 overflow-y-auto border-t px-3 py-2 num text-xs whitespace-pre-wrap break-all bg-input-surface">
           {res.text}
         </pre>
       )}
@@ -1376,8 +1397,8 @@ function ShepherdPane({ task }) {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 gap-2">
       {listOpen && followups.length > 0 && (
-        <div className="flex w-[200px] shrink-0 flex-col overflow-y-auto rounded-xl border bg-card">
-          <div className="flex flex-col gap-0.5 border-b px-2 py-1.5 text-left text-[12px]">
+        <div className="flex w-[200px] shrink-0 flex-col overflow-y-auto rounded-xl border border-border/55 bg-card">
+          <div className="flex flex-col gap-0.5 border-b px-2 py-1.5 text-left text-xs">
             <span className="flex items-center gap-1.5">
               {React.createElement(iconOf("messageCircle"), { className: "size-3.5 shrink-0 text-primary" })}
               <span className="font-medium">牧者 · 总对话</span>
@@ -1397,7 +1418,7 @@ function ShepherdPane({ task }) {
           {followups.map((f) => (
             <button
               key={`${f.claim_id}-${f.round}`}
-              className="flex flex-col gap-0.5 border-b px-3 py-1 text-left text-[12px] cursor-pointer last:border-b-0 hover:bg-hover-lift"
+              className="flex flex-col gap-0.5 border-b px-3 py-1 text-left text-xs cursor-pointer last:border-b-0 hover:bg-hover-lift"
               title={`成果追问 · ${f.statement || f.claim_id}`}
               onClick={() => setOpenClaim({ claim_id: f.claim_id, round: f.round })}
             >
@@ -1423,7 +1444,7 @@ function ShepherdPane({ task }) {
             <Button
               size="sm"
               variant="outline"
-              className="h-7 shrink-0 px-2 text-xs"
+              className="h-8 shrink-0 px-2 text-xs"
               title="本任务的成果追问会话"
               onClick={() => setListOpen(true)}
             >
@@ -1454,7 +1475,6 @@ function ShepherdMainPane({ task, data, error, setData, headerExtra }) {
   const [node, setNode] = React.useState(null); // 节点详情抽屉({type,id},fact# 等引用点击下钻)
   const [confirmFuse, setConfirmFuse] = React.useState(false);
   const [confirmHiber, setConfirmHiber] = React.useState(false);
-  const bottomRef = React.useRef(null);
 
   const messages = data?.messages || [];
   const advices = data?.advices || []; // 无锚定的旧建议(尾部呈现)
@@ -1462,11 +1482,9 @@ function ShepherdMainPane({ task, data, error, setData, headerExtra }) {
   const providerOn = data?.provider_on;
   const hibernated = Boolean(data?.hibernated);
   const pendingApprovals = data?.pending_approvals || 0;
-
-  // 新消息/回复到达时滚到底。
-  React.useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [messages.length, messages[messages.length - 1]?.reply]);
+  // 流内容签名(P4-22):对话条数 + 建议条数 + 末条内容量(思考卡/工具
+  // 卡随回答实时出现),贴底跟滚判据。
+  const sig = `${messages.length}|${advices.length}|${tailGrowSig(messages[messages.length - 1])}`;
 
   const send = async () => {
     const body = text.trim();
@@ -1501,7 +1519,7 @@ function ShepherdMainPane({ task, data, error, setData, headerExtra }) {
     }
     toast.success(
       body?.pending_approvals
-        ? `任务已冬眠;待裁决审批 ${body.pending_approvals} 笔已冻结`
+        ? `任务已冬眠;待审批 ${body.pending_approvals} 笔已冻结`
         : "任务已冬眠"
     );
   };
@@ -1517,14 +1535,14 @@ function ShepherdMainPane({ task, data, error, setData, headerExtra }) {
 
   const fuse = async () => {
     const { ok, body } = await postJSON(`/api/tasks/${taskID}/stop`, {
-      reason: "会话页熔断:操作者终止任务",
+      reason: "会话页终止:操作者结束任务",
     });
     setConfirmFuse(false);
     if (!ok) {
-      toast.error(body?.error || "熔断失败");
+      toast.error(body?.error || "终止失败");
       return;
     }
-    toast.success("任务已熔断");
+    toast.success("任务已终止");
   };
 
   return (
@@ -1552,13 +1570,13 @@ function ShepherdMainPane({ task, data, error, setData, headerExtra }) {
       )}
       {!providerOn && data && !hibernated && (
         <div className="rounded-md border border-status-warning/40 bg-status-warning-soft px-3 py-1 text-xs text-status-warning">
-          模型未配置:消息会入账并记为失败。在 LLM配置 页激活模型后重发。
+          模型未配置:消息会记录并记为失败。在 LLM配置 页激活模型后重发。
         </div>
       )}
-      {/* 对话流 */}
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto rounded-xl border bg-card px-3 py-3">
+      {/* 对话流(贴底跟滚,P4-22) */}
+      <ChatStream sig={sig} resetKey={taskID} className="space-y-3 rounded-xl border border-border/55 bg-card px-3 py-3">
         {messages.length === 0 && (
-          <div className="py-10 text-center text-[13px] text-muted-foreground">
+          <div className="py-12 text-center text-[13px] text-muted-foreground">
             会话为空。问进度、纠方向、插急活,牧者代你查图与传话。
           </div>
         )}
@@ -1568,10 +1586,9 @@ function ShepherdMainPane({ task, data, error, setData, headerExtra }) {
         {advices.map((a) => (
           <InlineAdvice key={a.id} advice={a} />
         ))}
-        <div ref={bottomRef} />
-      </div>
+      </ChatStream>
       {/* 输入框 */}
-      <div className="rounded-xl border bg-card p-3">
+      <div className="rounded-xl border border-border/55 bg-card p-3">
         <div className="mb-1 flex items-center justify-between text-[11px] text-muted-foreground">
           <span>
             {hibernated
@@ -1607,7 +1624,7 @@ function ShepherdMainPane({ task, data, error, setData, headerExtra }) {
               onClick={() => setConfirmFuse(true)}
             >
               {React.createElement(iconOf("unplug"), { className: "size-3.5" })}
-              熔断
+              终止
             </Button>
           </span>
         </div>
@@ -1633,7 +1650,7 @@ function ShepherdMainPane({ task, data, error, setData, headerExtra }) {
           <div className="mt-2 rounded-md border border-status-warning/40 bg-status-warning-soft px-3 py-2 text-xs">
             <div>
               冬眠:主宰与虫群挂起、本会话冻结、计时器停走;唤醒后原地继续。
-              {pendingApprovals > 0 && ` 当前待裁决审批 ${pendingApprovals} 笔将冻结为只读。`}
+              {pendingApprovals > 0 && ` 当前待审批 ${pendingApprovals} 笔将冻结为只读。`}
             </div>
             <div className="mt-2 flex gap-2">
               <Button size="sm" onClick={hibernate}>
@@ -1647,10 +1664,10 @@ function ShepherdMainPane({ task, data, error, setData, headerExtra }) {
         )}
         {confirmFuse && (
           <div className="mt-2 rounded-md border border-status-danger/40 bg-status-danger-soft px-3 py-2 text-xs">
-            <div className="text-status-danger">熔断终止任务,不可恢复。确认?</div>
+            <div className="text-status-danger">终止任务,不可恢复。确认?</div>
             <div className="mt-2 flex gap-2">
               <Button size="sm" variant="danger" onClick={fuse}>
-                确认熔断
+                确认终止
               </Button>
               <Button size="sm" variant="outline" onClick={() => setConfirmFuse(false)}>
                 取消
@@ -1678,7 +1695,7 @@ function SystemEventsPane({ taskID }) {
   const events = Array.isArray(data) ? data : [];
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div className="rounded-lg border bg-card px-3 py-2 text-[11px] text-muted-foreground">
+      <div className="rounded-lg border border-border/55 bg-card px-3 py-2 text-[11px] text-muted-foreground">
         系统级事件(黑匣子):预算状态变化、心跳巡检、故障与恢复 · 共 {events.length} 条
       </div>
       {error && (
@@ -1686,18 +1703,18 @@ function SystemEventsPane({ taskID }) {
           读取失败:{error}
         </div>
       )}
-      <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border bg-card">
+      <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-border/55 bg-card">
         {events.length === 0 && (
-          <div className="py-10 text-center text-[13px] text-muted-foreground">
+          <div className="py-12 text-center text-[13px] text-muted-foreground">
             暂无系统事件
           </div>
         )}
         {events.map((e, i) => (
           <div
             key={i}
-            className="flex items-start gap-3 border-b px-3 py-2 text-[12px] last:border-b-0"
+            className="flex items-start gap-3 border-b px-3 py-2 text-xs last:border-b-0"
           >
-            <span className="shrink-0 font-mono text-muted-foreground">
+            <span className="shrink-0 num text-muted-foreground">
               {e.at?.slice(11)}
             </span>
             <Badge variant="outline">{BLACKBOX_LABELS[e.type] || e.type}</Badge>
@@ -1705,7 +1722,7 @@ function SystemEventsPane({ taskID }) {
               {[e.step_id, e.unit_id].filter(Boolean).join(" ")}
               {e.detail?.note || e.detail?.reason ||
                 (e.detail?.action
-                  ? `收养动作:${ADOPT_ACTIONS[e.detail.action] || e.detail.action}`
+                  ? `接管动作:${ADOPT_ACTIONS[e.detail.action] || e.detail.action}`
                   : "")}
             </span>
           </div>

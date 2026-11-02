@@ -4,6 +4,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { iconOf } from "@/components/icons";
+import { ClosureDialog } from "@/components/closure-dialog";
 import { CommandPalette } from "@/components/command-palette";
 import { ThemeMenu } from "@/components/theme-menu";
 import { SettingsPage } from "@/views/settings-page";
@@ -18,8 +19,8 @@ import { TrafficPage } from "@/views/traffic-page";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  TASK_STATUS,
   TaskContextProvider,
+  taskStatusBadge,
   usePolling,
   useTaskContext,
 } from "@/lib/api";
@@ -120,6 +121,9 @@ function Shell() {
   const [collapsed, setCollapsed] = React.useState(false);
   // 命令面板开合(P3-10):⌘J / Ctrl+J 全局唤起,顶栏搜索按钮同入口。
   const [paletteOpen, setPaletteOpen] = React.useState(false);
+  // 收口提醒重开目标(P4-23):任务行搁置红点点开 → 弹窗按该任务重开;
+  // null = 自动态(未搁置的待决提醒到达即弹)。
+  const [closureTarget, setClosureTarget] = React.useState(null);
   const { taskID } = useTaskContext();
 
   React.useEffect(() => {
@@ -150,6 +154,9 @@ function Shell() {
   const { data: tasks } = usePolling("/api/tasks", 2000, { live: ["tasks"] });
   const list = Array.isArray(tasks) ? tasks : [];
   const current = list.find((t) => t.id === taskID) || null;
+  // 当前任务主状态徽标(P4-20:受阻优先于运行中,与任务列表行/工作台
+  // 同口径,取态见 taskStatusBadge)。
+  const currentBadge = taskStatusBadge(current);
 
   // 审批铃铛:当前任务待决计数(时效关键,点击跳 RoE 标签裁决)。
   const approvalsURL = taskID ? `/api/tasks/${taskID}/approvals` : null;
@@ -198,7 +205,7 @@ function Shell() {
         toast(`审批待决:${a.intent || a.tool_name}`, {
           description: a.tool_name || undefined,
           action: {
-            label: "去裁决",
+            label: "去审批",
             onClick: () => {
               location.hash = `/task/${taskID}/roe`;
             },
@@ -218,6 +225,16 @@ function Shell() {
   const { data: health } = usePolling("/api/healthz", 30000);
   const healthy = health?.status === "ok";
 
+  // 面板版本(P4-26 ④):一次性读 /api/version——与运行日志头、诊断包
+  // 同一来源(ldflags 注入);纯显示,排查混版本问题一眼可辨。
+  const [version, setVersion] = React.useState("");
+  React.useEffect(() => {
+    fetch("/api/version")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((b) => setVersion(b?.version || ""))
+      .catch(() => {});
+  }, []);
+
   const FlatPage = PAGE_OF[route.kind === "flat" ? route.id : "tasks"] || TasksPage;
 
   return (
@@ -234,7 +251,10 @@ function Shell() {
         <div className="flex items-center gap-2 px-4 py-5">
           {!collapsed && (
             <span className="flex items-center gap-2 font-semibold tracking-tight">
-              {React.createElement(iconOf("skull"), { className: "size-5 text-primary" })}
+              {/* 品牌徽标(P4-26 审核迭代 2):与 favicon 同源(public/icon.svg
+                  镰刀徽标),替代原通用骷髅线形图标 */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src="/icon.svg" alt="" className="size-5 rounded-[4px]" />
               GhostReaper
             </span>
           )}
@@ -258,6 +278,17 @@ function Shell() {
               // 任务空间属任务域:进入后「任务」保持高亮。
               const active =
                 route.kind === "task" ? item.id === "tasks" : route.id === item.id;
+              // 受阻任务红点(P4-27 ④,与待审批红点同款形态):受阻
+              //(待恢复)任务计数——只标需动作、处理即消;冻结/终态
+              // 任务不标(冻结态不可操作,终态无事可做)。
+              const blockedTasks =
+                item.id === "tasks"
+                  ? list.filter(
+                      (t) =>
+                        t.blocked &&
+                        !["paused", "hibernated", "checkpointed", "stopped", "completed"].includes(t.status)
+                    ).length
+                  : 0;
               return (
                 <button
                   key={item.id}
@@ -273,8 +304,28 @@ function Shell() {
                   {active && (
                     <span className="absolute top-1/2 left-0 h-4 w-0.5 -translate-y-1/2 rounded-full bg-primary" />
                   )}
-                  <Icon className="size-4 shrink-0" />
+                  <span className="relative shrink-0">
+                    <Icon className="size-4" />
+                    {/* 收起态文字隐藏,计数保留在图标角(信息不丢) */}
+                    {collapsed && blockedTasks > 0 && (
+                      <span
+                        className="absolute -top-1.5 -right-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold text-primary-foreground"
+                        title={`受阻任务 ${blockedTasks} 个`}
+                      >
+                        {blockedTasks}
+                      </span>
+                    )}
+                  </span>
                   {!collapsed && <span className="truncate">{item.title}</span>}
+                  {/* 受阻任务计数:紧跟词条之后(展开态) */}
+                  {!collapsed && blockedTasks > 0 && (
+                    <span
+                      className="-ml-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold text-primary-foreground"
+                      title={`受阻任务 ${blockedTasks} 个`}
+                    >
+                      {blockedTasks}
+                    </span>
+                  )}
                 </button>
               );
             })}
@@ -298,6 +349,9 @@ function Shell() {
               实时推送未连接
             </span>
           )}
+          {/* 版本号(P4-26 ④):小号次级色纯显示,不可点——与运行日志头、
+              诊断包同源(ldflags 注入) */}
+          {!collapsed && version && <span title="GhostReaper">版本 {version}</span>}
           {/* 退出登录(P3-09 面板认证):吊销本次会话并回登录页 */}
           <button
             className="flex items-center gap-2 pt-1 text-left cursor-pointer hover:text-foreground transition-colors duration-150"
@@ -323,8 +377,9 @@ function Shell() {
                 <span className="max-w-96 truncate font-medium" title={current.title || current.id}>
                   {current.title || current.id}
                 </span>
-                <Badge variant={TASK_STATUS[current.status]?.variant || "info"}>
-                  {TASK_STATUS[current.status]?.label || current.status}
+                {/* 任务空间头部主状态(P4-20) */}
+                <Badge variant={currentBadge.variant} title={currentBadge.title}>
+                  {currentBadge.label}
                 </Badge>
                 {/* P2-14b①:顶栏不再常显任务 ID,悬停标题可见完整标识 */}
               </>
@@ -343,7 +398,7 @@ function Shell() {
             <ThemeMenu />
             <button
               className="relative flex size-8 items-center justify-center rounded-md hover:bg-hover-lift cursor-pointer"
-              title={`审批弹门 · 当前任务待决 ${pendingCount} 条`}
+              title={`待审批 · 当前任务待决 ${pendingCount} 条`}
               onClick={() => {
                 location.hash = taskID ? `/task/${taskID}/roe` : "/tasks";
               }}
@@ -363,19 +418,23 @@ function Shell() {
             "mx-auto w-full flex-1 px-8 py-8",
             // 页面壳(8.4):平铺页内容区 1200px 居中,宽屏不满铺;任务
             // 空间整体铺满视口(每任务全家桶同宽)。
-            route.kind === "task" ? "max-w-none" : "max-w-[1200px]"
+            route.kind === "task" ? "max-w-none" : "max-w-[1440px]"
           )}
         >
           {route.kind === "task" ? (
             <TaskSpace tasks={tasks} taskID={route.taskID} tab={route.tab} focus={route.focus} unit={route.unit} />
           ) : (
-            <FlatPage tasks={list} currentTask={current} />
+            <FlatPage tasks={list} currentTask={current} onReopenClosure={setClosureTarget} />
           )}
         </main>
       </div>
 
       {/* 命令面板(P3-10):全页面层,⌘J 唤起 */}
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} tasks={list} />
+
+      {/* 收口提醒弹窗(P4-18):全页面层,未搁置的待决提醒即弹;
+          P4-23 可直接关闭(搁置落红点),任务行红点经 target 重开 */}
+      <ClosureDialog tasks={list} target={closureTarget} onTargetDone={() => setClosureTarget(null)} />
     </div>
   );
 }

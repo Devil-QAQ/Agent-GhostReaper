@@ -112,7 +112,7 @@ func (s *Service) readProgressTool(taskID string) tool.CoreTool {
 				}
 				th := roe.ApprovalThreshold
 				if th == "" {
-					th = "修改与持久化(默认:仅增删改弹门)"
+					th = "修改与持久化(默认:仅增删改需批准)"
 				}
 				fmt.Fprintf(&b, "  审批门槛: %s\n", string(th))
 				if roe.Note != "" {
@@ -130,7 +130,7 @@ func (s *Service) readProgressTool(taskID string) tool.CoreTool {
 func (s *Service) readFindingsTool(taskID string) tool.CoreTool {
 	return tool.Build(tool.Spec{
 		Name:        "read_findings",
-		Description: "读当前发现、事实与假设:漏洞声明(状态/存在性声明/严重级别)、已确认事实、虫群直觉回流(假设状态)。回答发现/事实类问题前先调用本工具;引用事实给编号(如 fact:f-xxxx)。",
+		Description: "读当前发现、事实与假设:漏洞判断(状态/存在性判断/严重级别)、已确认事实、虫群直觉回传(假设状态)。回答发现/事实类问题前先调用本工具;引用事实给编号(如 fact:f-xxxx)。",
 		Schema: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
@@ -141,12 +141,12 @@ func (s *Service) readFindingsTool(taskID string) tool.CoreTool {
 		Run: func(ctx context.Context, _ json.RawMessage, _ *tool.ToolContext) (tool.Result, error) {
 			var b strings.Builder
 			claims, _ := s.Store.NodesByType(ctx, taskID, rings.NodeTestClaim, "")
-			b.WriteString("发现(漏洞声明):\n")
+			b.WriteString("发现(漏洞判断):\n")
 			if len(claims) == 0 {
 				b.WriteString("  (无)\n")
 			}
 			for _, c := range claims {
-				fmt.Fprintf(&b, "  - %s [%s] %s\n", c.ID, c.Status, c.Title)
+				fmt.Fprintf(&b, "  - %s [%s] %s\n", c.ID, rings.ClaimStatusWord(c.Status), c.Title)
 				if sev, _ := c.Detail["severity"].(string); sev != "" {
 					fmt.Fprintf(&b, "    严重级别: %s\n", sev)
 				}
@@ -160,12 +160,12 @@ func (s *Service) readFindingsTool(taskID string) tool.CoreTool {
 				fmt.Fprintf(&b, "  - %s: %s\n", f.ID, f.Title)
 			}
 			hyps, _ := s.Store.NodesByType(ctx, taskID, rings.NodeHypothesis, "")
-			b.WriteString("假设(虫群直觉回流):\n")
+			b.WriteString("假设(虫群直觉回传):\n")
 			if len(hyps) == 0 {
 				b.WriteString("  (无)\n")
 			}
 			for _, h := range hyps {
-				fmt.Fprintf(&b, "  - %s [%s] %s\n", h.ID, h.Status, h.Title)
+				fmt.Fprintf(&b, "  - %s [%s] %s\n", h.ID, rings.HypStatusWord(h.Status), h.Title)
 			}
 			return tool.Text(strings.TrimRight(b.String(), "\n")), nil
 		},
@@ -259,11 +259,11 @@ func toolCallBrief(args json.RawMessage) string {
 func (s *Service) adviseTool(taskID, messageID string) tool.CoreTool {
 	return tool.Build(tool.Spec{
 		Name:        "advise_overmind",
-		Description: "向主宰提交规划建议(纳谏:入账后由主宰在下一轮研判裁决,采纳与否都带理由回写,不由牧者代决)。造物主表达方向性意见(纠方向)时用本工具,不用于登记要立即执行的具体意图(那用 urgent_intent)。",
+		Description: "向主宰提交规划建议(纳谏:记录后由主宰在下一轮规划判定,采纳与否都带理由回写,不由牧者代决)。造物主表达方向性意见(纠方向)时用本工具,不用于登记要立即执行的具体意图(那用 urgent_intent)。",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"advice": map[string]any{"type": "string", "description": "建议正文:改什么方向、为什么。一句到三句,给主宰的研判输入,不是命令"},
+				"advice": map[string]any{"type": "string", "description": "建议正文:改什么方向、为什么。一句到三句,给主宰的规划输入,不是命令"},
 			},
 			"required": []string{"advice"},
 		},
@@ -286,10 +286,10 @@ func (s *Service) adviseTool(taskID, messageID string) tool.CoreTool {
 					AdviceID: id, Text: strings.TrimSpace(args.Advice),
 				},
 			}); err != nil {
-				return tool.Errorf("建议入账失败: " + err.Error()), nil
+				return tool.Errorf("建议记录失败: " + err.Error()), nil
 			}
 			s.wake(taskID)
-			return tool.Text(fmt.Sprintf("建议 %s 已入账(待裁决)。主宰在下一轮研判时裁决:采纳则规划随之改变,不采纳会带回理由。", id)), nil
+			return tool.Text(fmt.Sprintf("建议 %s 已记录(待判定)。主宰在下一轮规划时判定:采纳则规划随之改变,不采纳会带回理由。", id)), nil
 		},
 	})
 }
@@ -299,7 +299,7 @@ func (s *Service) adviseTool(taskID, messageID string) tool.CoreTool {
 func (s *Service) urgentIntentTool(taskID string) tool.CoreTool {
 	return tool.Build(tool.Spec{
 		Name:        "urgent_intent",
-		Description: "登记高优先级意图(插急活):立即以 high 优先级派发为 Step,虫群单位照常从图上领取执行,主宰下一轮可见。造物主要求「先去做 X」时用本工具。动作分级如实声明——分级决定审批强度,不许压低。",
+		Description: "登记高优先级意图(插急活):立即以 high 优先级派发为 Step,虫群单位照常从图上领取执行,主宰下一轮可见。造物主要求「先去做 X」时用本工具。动作分级如实申报——分级决定审批强度,不许压低。",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -342,7 +342,7 @@ func (s *Service) urgentIntentTool(taskID string) tool.CoreTool {
 func (s *Service) addGoalTool(taskID string) tool.CoreTool {
 	return tool.Build(tool.Spec{
 		Name:        "add_goal",
-		Description: "登记新目标(任务的最终可核验目标)。目标入账并通知主宰;需要机器判定达成时,由主宰后续拆解补完成谓词。",
+		Description: "登记新目标(任务的最终可核验目标)。目标记录并通知主宰;需要机器判定达成时,由主宰后续拆解补完成谓词。",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -363,7 +363,7 @@ func (s *Service) addGoalTool(taskID string) tool.CoreTool {
 			}
 			id := shortID("g")
 			if err := overmind.SeedGoal(ctx, s.Store, taskID, id, strings.TrimSpace(args.Title), map[string]any{}); err != nil {
-				return tool.Errorf("目标入账失败: " + err.Error()), nil
+				return tool.Errorf("目标记录失败: " + err.Error()), nil
 			}
 			s.wake(taskID)
 			return tool.Text(fmt.Sprintf("目标 %s 已登记(进行中),主宰已被通知。", id)), nil
@@ -382,7 +382,7 @@ func (s *Service) addConstraintTool(taskID string) tool.CoreTool {
 			"properties": map[string]any{
 				"deny_tools": map[string]any{"type": "array", "items": map[string]any{"type": "string"},
 					"description": "要禁用的工具名清单(追加,不覆盖既有禁用)"},
-				"note": map[string]any{"type": "string", "description": "约束说明:谁、为何收紧(入账留痕)"},
+				"note": map[string]any{"type": "string", "description": "约束说明:谁、为何收紧(记录留痕)"},
 			},
 			"required": []string{"deny_tools"},
 		},
@@ -422,10 +422,10 @@ func (s *Service) addConstraintTool(taskID string) tool.CoreTool {
 					ApprovalThreshold: roe.ApprovalThreshold, Note: note,
 				},
 			}); err != nil {
-				return tool.Errorf("约束入账失败: " + err.Error()), nil
+				return tool.Errorf("约束记录失败: " + err.Error()), nil
 			}
 			s.wake(taskID)
-			return tool.Text(fmt.Sprintf("约束已入账:禁用 %v(下一轮生效)。", args.DenyTools)), nil
+			return tool.Text(fmt.Sprintf("约束已记录:禁用 %v(下一轮生效)。", args.DenyTools)), nil
 		},
 	})
 }

@@ -77,7 +77,7 @@ func TestServerHypotheses(t *testing.T) {
 	_, h := newClaimTestServer(t, store, gate, dir)
 
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"title":"假设验证"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"假设验证"}`, http.StatusOK, &created)
 	task := created["id"]
 	seedHypotheses(t, store, task)
 

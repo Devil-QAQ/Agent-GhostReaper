@@ -71,7 +71,7 @@ func TestServerReportAPI(t *testing.T) {
 	for _, want := range []string{
 		"# 渗透测试报告 · 报告 API 验证",
 		"任务状态:已完成(completed)",
-		"### C-1 `tc-1` · 信息暴露",
+		"### C-1 备份目录匿名可读 · 信息暴露",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("报告缺 %q:\n%s", want, body)
@@ -117,8 +117,8 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 	//   审计包:port_probe → robots/备份/版本 → 两条 submit_test_claim
 	//     → submit_candidate_fact → 收口。
 	ownIntentRe := regexp.MustCompile(`(?m)^二、本步骤意图[^\n]*\n\s+([^\n]+)`)
-	claimIDRe := regexp.MustCompile(`声明 (tc-[0-9a-f]+)`)
-	stmtBackupRe := regexp.MustCompile(`(?m)^\s*存在性声明: .*备份目录`)
+	claimIDRe := regexp.MustCompile(`判断 (tc-[0-9a-f]+)`)
+	stmtBackupRe := regexp.MustCompile(`(?m)^\s*存在性判断: .*备份目录`)
 	model := newSModel(func(rr *srecorded) sreply {
 		// P4-13 来龙去脉叙述会话(零工具,系统段带"来龙去脉"):
 		// 回一段叙述 JSON(坏回复路径由 overmind 单测覆盖)。
@@ -140,7 +140,7 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 		if strings.Contains(rr.LastUser, "八、反证任务") {
 			m := claimIDRe.FindStringSubmatch(rr.LastUser)
 			if m == nil {
-				return sreply{Text: "反证任务包缺声明 ID。"}
+				return sreply{Text: "反证任务包缺判断 ID。"}
 			}
 			claimID := m[1]
 			if stmtBackupRe.MatchString(rr.LastUser) {
@@ -148,7 +148,7 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 				case !sSeenToolResult(rr, "bash", "mock backup archive listing"):
 					return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
 						ID: "fb", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/old-backup/"}`, mainURL)}}}
-				case !sSeenToolResult(rr, "submit_falsify_result", "已入账"):
+				case !sSeenToolResult(rr, "submit_falsify_result", "已记录"):
 					return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
 						ID: "fr1", Name: "submit_falsify_result",
 						Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":true},{"id":"alt2","refuted":true},{"id":"alt3","refuted":true},{"id":"alt4","refuted":true}],"evidence":"独立重放 /old-backup/ 仍返回备份文件列举,影响面成立"}`, claimID)}}}
@@ -160,7 +160,7 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 			case !sSeenToolResult(rr, "bash", `"version":"2.4.1"`):
 				return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
 					ID: "fv", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/api/version"}`, mainURL)}}}
-			case !sSeenToolResult(rr, "submit_falsify_result", "已入账"):
+			case !sSeenToolResult(rr, "submit_falsify_result", "已记录"):
 				return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
 					ID: "fr2", Name: "submit_falsify_result",
 					Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":false,"alternatives":[{"id":"alt1","refuted":true},{"id":"alt2","refuted":true},{"id":"alt3","refuted":true},{"id":"alt4","refuted":true}],"evidence":"独立重放仅返回版本号,影响面证据不足"}`, claimID)}}}
@@ -213,7 +213,7 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 			return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
 				ID: "d5", Name: "submit_test_claim",
 				Args: fmt.Sprintf(`{"statement":"/api/version 公开暴露服务版本号","impact":"版本号可支撑定向利用","evidence":"curl 实测返回 2.4.1","asset_id":%q,"vulnclass":"信息暴露"}`, assetArg(t, rr.LastUser))}}}
-		case !sSeenToolResult(rr, "submit_candidate_fact", "已入候选事实"):
+		case !sSeenToolResult(rr, "submit_candidate_fact", "已提交待确认事实"):
 			return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
 				ID: "d6", Name: "submit_candidate_fact",
 				Args: fmt.Sprintf(`{"statement":"主站服务在线,HTTP 指纹已确认","evidence":"port_probe state=open;robots 已实测","asset_id":%q}`, assetArg(t, rr.LastUser))}}}
@@ -252,7 +252,7 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 	// ---- 经面板建任务(种子表单,service 资产)+ 补谓词目标 ----
 	var created map[string]any
 	post(t, h, http.MethodPost, "/api/tasks", fmt.Sprintf(
-		`{"id":%q,"title":"P1 总验收试跑","assets":[{"class":"service","title":%q}]}`, task, mainURL),
+		`{"goals":["种子目标"],"id":%q,"title":"P1 总验收试跑","assets":[{"class":"service","title":%q}]}`, task, mainURL),
 		http.StatusOK, &created)
 	var tree struct {
 		Assets []struct {
@@ -308,6 +308,22 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 	})
 
 	// ---- ⑤ 任务进入完成终态(反证轮收尾后) ----
+	// P4-16:建任务必带目标——谓词目标由仲裁者判定达成后,种子目标
+	//(无谓词,机器不可判)经面板人工标记达成,两目标齐达成后收场。
+	waitUntil(t, 60*time.Second, "谓词目标经仲裁者判定达成", func() bool {
+		for _, g := range goalNodes(t, store, task) {
+			if strings.Contains(g.Title, "摸清主站暴露面") && g.Status == "achieved" {
+				return true
+			}
+		}
+		return false
+	})
+	for _, g := range goalNodes(t, store, task) {
+		if g.Title == "种子目标" {
+			post(t, h, http.MethodPost, "/api/tasks/"+task+"/goals/"+g.ID+"/achieve",
+				`{"reason":"总验收目标随谓词目标一同收场"}`, http.StatusOK, &created)
+		}
+	}
 	waitUntil(t, 90*time.Second, "任务进入完成终态", func() bool {
 		var tasks []map[string]any
 		get(t, h, "/api/tasks", http.StatusOK, &tasks)
@@ -338,7 +354,7 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 			confirmedN++
 		case "pending":
 			pendingN++
-			if !strings.Contains(fmt.Sprint(c["pending_reason"]), "影响面") {
+			if !strings.Contains(fmt.Sprint(c["pending_reason"]), "证据不足以支撑申报的影响") {
 				t.Fatalf("待确认必须带搁置理由(R4): %+v", c)
 			}
 		}
@@ -388,12 +404,12 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 	for _, want := range []string{
 		"# 渗透测试报告 · P1 总验收试跑",
 		"任务状态:已完成(completed)",
-		"Confirmed 发现:**1** 条;待确认:1 条",
-		"### C-1 `tc-",
-		"### P-1 `tc-",
+		"已确认发现:**1** 条;待确认:1 条",
+		"### C-1 /old-backup/ 备份目录可公开匿名列举",
+		"### P-1 /api/version 公开暴露服务版本号",
 		"搁置理由:",
 		"资产锚点:`" + assetID,
-		"审批弹门:请求 1 · 批准 1 · 拒绝 0 · 研判后放行 0",
+		"需批准:请求 1 · 批准 1 · 拒绝 0 · 规划后放行 0",
 	} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("导出报告缺 %q:\n%s", want, md)
@@ -493,7 +509,7 @@ func TestServerReportExportAPI(t *testing.T) {
 	cases := []struct {
 		format, ctype, name, want string
 	}{
-		{"md", "text/markdown", "report-exp-a.md", "复现步骤(收割定稿"},
+		{"md", "text/markdown", "report-exp-a.md", "复现步骤(检查归纳定稿"},
 		{"zip", "application/zip", "report-exp-a.zip", "PK"},
 		{"csv", "text/csv", "findings-exp-a.csv", "tc-1"},
 		{"json", "application/json", "report-exp-a.json", "\"repro\""},
@@ -527,7 +543,7 @@ func TestServerReportExportAPI(t *testing.T) {
 	// 漏洞级导出:md 与 zip(证据包)。
 	rec = doReq(t, h, http.MethodGet, "/api/tasks/exp-a/claims/tc-1/export?format=md", "")
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Content-Disposition"), "finding-tc-1.md") ||
-		!strings.Contains(rec.Body.String(), "# 漏洞报告 · `tc-1`") {
+		!strings.Contains(rec.Body.String(), "# 漏洞报告 · 备份目录匿名可读") {
 		t.Fatalf("漏洞级 md 不符: %d %s", rec.Code, rec.Body.String())
 	}
 	rec = doReq(t, h, http.MethodGet, "/api/tasks/exp-a/claims/tc-1/export?format=zip", "")
@@ -586,4 +602,14 @@ func sReissueLastToolCall(rr *srecorded, tool string) (args, id string, ok bool)
 		return "", "", false
 	}
 	return last.Args, last.ID + "r", true
+}
+
+// goalNodes 任务的目标节点清单(P4-16 建任务必带目标,完成终态断言用)。
+func goalNodes(t *testing.T, store *rings.Store, taskID string) []rings.NodeFull {
+	t.Helper()
+	goals, err := store.NodesByType(context.Background(), taskID, rings.NodeGoal, "")
+	if err != nil {
+		t.Fatalf("读目标清单: %v", err)
+	}
+	return goals
 }

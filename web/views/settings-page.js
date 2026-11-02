@@ -9,7 +9,6 @@ import { Field, Fold, INPUT } from "@/components/form-bits";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -50,21 +49,20 @@ export function SettingsPage() {
         </div>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <SettingCard title="系统参数" subtitle="启动时指定的参数,面板只读">
-          <Kv k="监听地址" v={sys?.addr || "—"} mono />
-          <Kv k="账本路径" v={sys?.db_path || "—"} mono />
-          <Kv k="任务目录" v={sys?.tasks_dir || "—"} mono />
-        </SettingCard>
-
-        <SettingCard title="年轮账本" subtitle="账本是唯一事实来源">
-          <Kv k="存储" v="SQLite,历史全保留" />
-          <Kv k="写入" v="只增不改" />
-        </SettingCard>
-
-        <GuardRulesCard />
+      {/* 设置行卡列表(与任务列表同款形态):每行固定两行内容,八行天然
+          同高——信息量差异收进右侧关键值与二级弹窗,卡面不再有高度差 */}
+      <div className="flex flex-col gap-3">
+        <SystemParamsRow sys={sys} />
 
         <SearchConfigCard search={data?.search} />
+
+        <SettingRow
+          title="年轮账本"
+          summary="账本是唯一事实来源,历史全保留"
+          value="SQLite · 只增不改"
+        />
+
+        <GuardRulesCard />
 
         <UAConfigCard ua={data?.ua} />
 
@@ -83,39 +81,100 @@ export function SettingsPage() {
   );
 }
 
-// SettingCard 概览卡(系统参数/年轮账本为基准形态):onOpen 缺省为纯展示
-// 卡;携带 onOpen 时整卡可点(hover 所在层提亮 + 右上箭头),弹出二级界面。
-function SettingCard({ title, subtitle, onOpen, children }) {
+// SettingRow 设置行卡(P4-31 返工:概览卡网格 → 行卡列表,与任务列表
+// 同款形态):左侧标题+摘要,右侧关键值,可点行带箭头弹二级界面;
+// 每行固定两行内容,八行天然同高。
+function SettingRow({ title, summary, value, valueMono, onOpen }) {
   return (
-    <Card
+    <div
+      role={onOpen ? "button" : undefined}
+      tabIndex={onOpen ? 0 : undefined}
       onClick={onOpen}
+      onKeyDown={
+        onOpen
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onOpen();
+              }
+            }
+          : undefined
+      }
       className={cn(
-        "gap-3 transition-colors duration-150",
+        "flex min-h-14 items-center gap-4 rounded-xl border border-border/55 bg-card px-4 py-3 transition-colors duration-150",
         onOpen && "cursor-pointer hover:bg-hover-lift"
       )}
     >
-      <CardContent className="flex flex-col gap-3 p-6">
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0">
-            <div className="text-[15px] font-semibold">{title}</div>
-            <p className="mt-1 text-xs text-muted-foreground">{subtitle}</p>
-          </div>
-          {onOpen &&
-            React.createElement(iconOf("chevronRight"), {
-              className: "mt-0.5 size-4 shrink-0 text-muted-foreground",
-            })}
-        </div>
-        {children}
-      </CardContent>
-    </Card>
+      <div className="min-w-0 flex-1">
+        <div className="t-sec">{title}</div>
+        <p className="mt-0.5 truncate text-xs text-muted-foreground">{summary}</p>
+      </div>
+      {value != null && value !== "" && (
+        <span
+          className={cn(
+            "max-w-72 shrink-0 truncate text-[13px] text-muted-foreground",
+            valueMono && "num"
+          )}
+          title={String(value)}
+        >
+          {value}
+        </span>
+      )}
+      {onOpen &&
+        React.createElement(iconOf("chevronRight"), {
+          className: "size-4 shrink-0 text-muted-foreground",
+        })}
+    </div>
   );
 }
 
+// SystemParamsRow 系统参数行:卡面只显监听地址,路径细节进只读弹窗。
+function SystemParamsRow({ sys }) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <>
+      <SettingRow
+        title="系统参数"
+        summary="启动时指定的参数,面板只读"
+        value={sys?.addr || "—"}
+        valueMono
+        onOpen={() => setOpen(true)}
+      />
+      <SystemParamsDialog open={open} onOpenChange={setOpen} sys={sys} />
+    </>
+  );
+}
+
+function SystemParamsDialog({ open, onOpenChange, sys }) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="w-[min(520px,94vw)] max-w-none gap-4 p-6">
+        <DialogHeader>
+          <DialogTitle>系统参数</DialogTitle>
+          <DialogDescription>启动时指定的参数,面板只读</DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-col gap-3">
+          <Kv k="监听地址" v={sys?.addr || "—"} mono />
+          <Kv k="账本路径" v={sys?.db_path || "—"} mono />
+          <Kv k="任务目录" v={sys?.tasks_dir || "—"} mono />
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            关闭
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// Kv 详情信息行(系统参数弹窗等):标签 13px 次级色定宽,值 13px 正文档
+//(mono 数据位等宽),与 Field 表单行同档。
 function Kv({ k, v, mono }) {
   return (
     <div className="flex items-center gap-3">
-      <span className="w-20 shrink-0 text-muted-foreground">{k}</span>
-      <span className={mono ? "font-mono text-xs" : ""}>{v}</span>
+      <span className="w-20 shrink-0 text-[13px] text-muted-foreground">{k}</span>
+      <span className={cn("min-w-0 truncate text-[13px]", mono && "num")}>{v}</span>
     </div>
   );
 }
@@ -142,30 +201,24 @@ function GuardRulesCard() {
 
   return (
     <>
-      <SettingCard
+      <SettingRow
         title="拦截规则"
-        subtitle="全局命令底线,全部任务生效"
+        summary="全局命令底线,全部任务生效"
+        value={error ? "读取失败" : `${rules.length} 条 · 启用 ${enabled}`}
         onOpen={() => setOpen(true)}
-      >
-        {error ? (
-          <div className="text-xs text-status-danger">读取失败:{error}</div>
-        ) : (
-          <>
-            <Kv k="规则" v={`${rules.length} 条`} />
-            <Kv k="已启用" v={`${enabled} 条`} />
-          </>
-        )}
-      </SettingCard>
+      />
       <GuardRulesDialog open={open} onOpenChange={setOpen} rules={rules} error={error} />
     </>
   );
 }
 
-// GuardRulesDialog 拦截规则管理界面:分组列表 + 行卡启停/编辑/删除 + 新增。
+// GuardRulesDialog 拦截规则管理界面:分组列表 + 行卡启停/编辑/删除 + 新增;
+// 代理旁路组默认禁用(P4-21),组头带一键启用。
 function GuardRulesDialog({ open, onOpenChange, rules, error }) {
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [editing, setEditing] = React.useState(null); // null=新建
   const [deleting, setDeleting] = React.useState(null);
+  const [enabling, setEnabling] = React.useState(false);
 
   // 组序:词表组在前,库内新组(服务端扩词表)按字母序续后。
   const seen = new Map();
@@ -175,20 +228,45 @@ function GuardRulesDialog({ open, onOpenChange, rules, error }) {
     ...[...seen.keys()].filter((g) => !HARD_RULE_GROUPS.includes(g)).sort(),
   ];
 
+  // 一键启用代理旁路组:把组内禁用的条目逐条启用(严审计部署自行开启)。
+  const enableProxyGroup = async () => {
+    const disabled = rules.filter((r) => r.group === "代理旁路" && !r.enabled);
+    if (disabled.length === 0) return;
+    setEnabling(true);
+    let n = 0;
+    for (const rule of disabled) {
+      const { ok, body } = await postJSON("/api/guard/rules", {
+        id: rule.id,
+        group: rule.group,
+        name: rule.name,
+        pattern: rule.pattern,
+        tool_scope: rule.tool_scope || "",
+        action: rule.action || "",
+        enabled: true,
+        note: rule.note || "",
+      });
+      if (!ok) {
+        toast.error(`启用失败:${body.error || "原因未说明"}`);
+        setEnabling(false);
+        return;
+      }
+      n++;
+    }
+    setEnabling(false);
+    toast.success(`已启用 ${n} 条,对下一次判定生效`);
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[88vh] w-[min(760px,94vw)] max-w-none flex-col gap-4 overflow-y-auto p-6">
         <DialogHeader>
-          <DialogTitle className="text-base">拦截规则</DialogTitle>
+          <DialogTitle>拦截规则</DialogTitle>
           <DialogDescription>
-            全局命令底线,全部任务生效;拒绝即终止该单位,弹门则人工裁决
+            全局命令底线,全部任务生效;拒绝即终止该单位,需批准的等人工审批
           </DialogDescription>
         </DialogHeader>
         <div className="flex items-center justify-end">
           <Button
-            size="sm"
-            variant="outline"
-            className="h-9"
             onClick={() => {
               setEditing(null);
               setDialogOpen(true);
@@ -199,7 +277,7 @@ function GuardRulesDialog({ open, onOpenChange, rules, error }) {
         </div>
         {error && <div className="text-xs text-status-danger">读取失败:{error}</div>}
         {rules.length === 0 && !error && (
-          <div className="rounded-lg border border-dashed py-6 text-center text-sm text-muted-foreground">
+          <div className="rounded-lg border border-dashed py-6 text-center text-[13px] text-muted-foreground">
             无规则
           </div>
         )}
@@ -213,9 +291,22 @@ function GuardRulesDialog({ open, onOpenChange, rules, error }) {
                 </span>
               )}
               {g === "代理旁路" && (
-                <span className="text-xs text-muted-foreground">
-                  默认启用,命中弹门人工裁决:绕过代理即绕过流量审计
-                </span>
+                <>
+                  <span className="text-xs text-muted-foreground">
+                    默认禁用:直连命令直接执行,流量不经镜
+                  </span>
+                  {rules.some((r) => r.group === g && !r.enabled) && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="ml-auto h-8 px-2 text-xs"
+                      disabled={enabling}
+                      onClick={enableProxyGroup}
+                    >
+                      一键启用
+                    </Button>
+                  )}
+                </>
               )}
             </div>
             <div className="flex flex-col gap-2">
@@ -272,7 +363,7 @@ function GuardRuleRow({ rule, onEdit, onDelete }) {
   const builtin = rule.name.startsWith("[内置]");
   return (
     <div
-      className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors duration-150 hover:bg-hover-lift ${
+      className={`flex items-center gap-2 rounded-lg border border-border/55 bg-card px-3 py-2 text-[13px] transition-colors duration-150 hover:bg-hover-lift ${
         rule.enabled ? "" : "opacity-60"
       }`}
     >
@@ -283,23 +374,23 @@ function GuardRuleRow({ rule, onEdit, onDelete }) {
         title={rule.enabled ? "启用中" : "已禁用"}
       />
       {builtin && <Badge variant="outline">内置</Badge>}
-      {rule.action === "gate" && <Badge variant="warning">弹门</Badge>}
+      {rule.action === "gate" && <Badge variant="warning">需批准</Badge>}
       <span className="min-w-0 truncate font-medium" title={rule.name}>
         {builtin ? rule.name.replace(/^\[内置\]\s*/, "") : rule.name}
       </span>
-      <span className="ml-auto hidden truncate font-mono text-xs text-muted-foreground md:block md:max-w-56" title={rule.pattern}>
+      <span className="ml-auto hidden truncate num text-xs text-muted-foreground md:block md:max-w-56" title={rule.pattern}>
         {rule.pattern}
       </span>
       <span className="shrink-0 text-xs text-muted-foreground">
         {rule.tool_scope || "全部工具"}
       </span>
-      <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={onEdit}>
+      <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={onEdit}>
         编辑
       </Button>
       <Button
         size="sm"
         variant="ghost"
-        className="h-7 px-2 text-xs text-status-danger"
+        className="h-8 px-2 text-xs text-status-danger"
         onClick={onDelete}
       >
         删除
@@ -372,11 +463,11 @@ function GuardRuleDialog({ open, onOpenChange, rule }) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[88vh] w-[min(620px,94vw)] max-w-none gap-4 overflow-y-auto p-6">
         <DialogHeader>
-          <DialogTitle className="text-base">
+          <DialogTitle>
             {isBuiltin ? "编辑内置规则" : rule ? "编辑规则" : "新增规则"}
           </DialogTitle>
           <DialogDescription>
-            对工具参数文本做匹配;拒绝即终止该单位,弹门则人工裁决
+            对工具参数文本做匹配;拒绝即终止该单位,需批准的等人工审批
           </DialogDescription>
         </DialogHeader>
         {!form ? (
@@ -394,7 +485,7 @@ function GuardRuleDialog({ open, onOpenChange, rule }) {
             <Field label="匹配模式" className="items-start" labelClassName="mt-2">
               <Textarea
                 rows={3}
-                className="min-w-0 flex-1 resize-none bg-input-surface font-mono text-xs"
+                className="min-w-0 flex-1 resize-none bg-input-surface num text-xs"
                 value={form.pattern}
                 onChange={(e) => setForm({ ...form, pattern: e.target.value })}
                 placeholder={"匹配参数文本,如 \\bshred\\b"}
@@ -451,11 +542,11 @@ function GuardRuleDialog({ open, onOpenChange, rule }) {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="deny">拒绝</SelectItem>
-                      <SelectItem value="gate">弹门</SelectItem>
+                      <SelectItem value="gate">需批准</SelectItem>
                     </SelectContent>
                   </Select>
                   <span className="text-xs text-muted-foreground">
-                    弹门:命中提交面板裁决,批准执行原文命令
+                    需批准:命中提交面板审批,批准后执行原文命令
                   </span>
                 </Field>
                 <Field label="说明">
@@ -548,16 +639,12 @@ function SearchConfigCard({ search }) {
 
   return (
     <>
-      <SettingCard
+      <SettingRow
         title="搜索配置"
-        subtitle="web_search 工具的搜索后端、key 与独立出口代理"
+        summary="web_search 工具的搜索后端、key 与独立出口代理"
+        value={backendLabel(view?.backend)}
         onOpen={() => setOpen(true)}
-      >
-        <Kv k="后端" v={backendLabel(view?.backend)} />
-        <Kv k="Brave key" v={view?.brave_has_key ? "已配置" : "未配置"} />
-        <Kv k="Tavily key" v={view?.tavily_has_key ? "已配置" : "未配置"} />
-        <Kv k="出口代理" v={view?.proxy_set ? view.proxy_mask : "直连"} mono={!!view?.proxy_set} />
-      </SettingCard>
+      />
       <SearchConfigDialog open={open} onOpenChange={setOpen} view={view} onSaved={setOverride} />
     </>
   );
@@ -588,7 +675,7 @@ function SearchConfigDialog({ open, onOpenChange, view, onSaved }) {
       <Input
         type="password"
         autoComplete="off"
-        className={`min-w-0 flex-1 font-mono text-xs ${INPUT}`}
+        className={`min-w-0 flex-1 num text-xs ${INPUT}`}
         value={marked[which] ? "" : keys[which]}
         disabled={marked[which]}
         onChange={(e) => setKeys({ ...keys, [which]: e.target.value })}
@@ -639,7 +726,7 @@ function SearchConfigDialog({ open, onOpenChange, view, onSaved }) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="w-[min(480px,94vw)] max-w-none gap-4 p-6">
         <DialogHeader>
-          <DialogTitle className="text-base">搜索配置</DialogTitle>
+          <DialogTitle>搜索配置</DialogTitle>
           <DialogDescription>
             web_search 工具的后端与出口;保存后对下一次搜索生效
           </DialogDescription>
@@ -662,7 +749,7 @@ function SearchConfigDialog({ open, onOpenChange, view, onSaved }) {
         {keyField("tavily", "Tavily key", view?.tavily_key_mask, view?.tavily_has_key)}
         <Field label="出口代理">
           <Input
-            className={`min-w-0 flex-1 font-mono text-xs ${INPUT}`}
+            className={`min-w-0 flex-1 num text-xs ${INPUT}`}
             value={marked.proxy ? "" : proxy}
             disabled={marked.proxy}
             onChange={(e) => setProxy(e.target.value)}
@@ -723,14 +810,12 @@ function UAConfigCard({ ua }) {
 
   return (
     <>
-      <SettingCard
+      <SettingRow
         title="UA 策略"
-        subtitle="http_probe 与 web_fetch 请求的 User-Agent"
+        summary="http_probe 与 web_fetch 请求的 User-Agent"
+        value={uaModeLabel(view?.mode)}
         onOpen={() => setOpen(true)}
-      >
-        <Kv k="模式" v={uaModeLabel(view?.mode)} />
-        {view?.mode === "fixed" && <Kv k="固定值" v={view?.fixed || "—"} mono />}
-      </SettingCard>
+      />
       <UAConfigDialog open={open} onOpenChange={setOpen} view={view} onSaved={setOverride} />
     </>
   );
@@ -773,7 +858,7 @@ function UAConfigDialog({ open, onOpenChange, view, onSaved }) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="w-[min(480px,94vw)] max-w-none gap-4 p-6">
         <DialogHeader>
-          <DialogTitle className="text-base">UA 策略</DialogTitle>
+          <DialogTitle>UA 策略</DialogTitle>
           <DialogDescription>
             http_probe 与 web_fetch 请求的 User-Agent;保存后对下一次请求生效
           </DialogDescription>
@@ -795,7 +880,7 @@ function UAConfigDialog({ open, onOpenChange, view, onSaved }) {
         {mode === "fixed" && (
           <Field label="固定值">
             <Input
-              className={`min-w-0 flex-1 font-mono text-xs ${INPUT}`}
+              className={`min-w-0 flex-1 num text-xs ${INPUT}`}
               value={fixed}
               onChange={(e) => setFixed(e.target.value)}
               placeholder="Mozilla/5.0 (自定义 User-Agent 原文)"
@@ -831,17 +916,12 @@ function CredentialsCard() {
 
   return (
     <>
-      <SettingCard
+      <SettingRow
         title="目标凭据"
-        subtitle="授权目标的测试凭据;执行单位经环境变量调用"
+        summary="授权目标的测试凭据;执行单位经环境变量调用"
+        value={error ? "读取失败" : creds ? `${creds.length} 条` : "…"}
         onOpen={() => setOpen(true)}
-      >
-        {error ? (
-          <div className="text-xs text-status-danger">读取失败:{error}</div>
-        ) : (
-          <Kv k="凭据" v={creds ? `${creds.length} 条` : "…"} />
-        )}
-      </SettingCard>
+      />
       <CredentialsDialog open={open} onOpenChange={setOpen} creds={creds} error={error} onRefresh={setOverride} />
     </>
   );
@@ -858,16 +938,13 @@ function CredentialsDialog({ open, onOpenChange, creds, error, onRefresh }) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[88vh] w-[min(680px,94vw)] max-w-none flex-col gap-4 overflow-y-auto p-6">
         <DialogHeader>
-          <DialogTitle className="text-base">目标凭据</DialogTitle>
+          <DialogTitle>目标凭据</DialogTitle>
           <DialogDescription>
             授权目标的测试凭据;秘密只存服务端,执行单位经环境变量引用
           </DialogDescription>
         </DialogHeader>
         <div className="flex items-center justify-end">
           <Button
-            size="sm"
-            variant="outline"
-            className="h-9"
             onClick={() => {
               setEditing(null);
               setDialogOpen(true);
@@ -878,7 +955,7 @@ function CredentialsDialog({ open, onOpenChange, creds, error, onRefresh }) {
         </div>
         {error && <div className="text-xs text-status-danger">读取失败:{error}</div>}
         {creds && creds.length === 0 && (
-          <div className="rounded-lg border border-dashed py-6 text-center text-sm text-muted-foreground">
+          <div className="rounded-lg border border-dashed py-6 text-center text-[13px] text-muted-foreground">
             无凭据
           </div>
         )}
@@ -886,7 +963,7 @@ function CredentialsDialog({ open, onOpenChange, creds, error, onRefresh }) {
           creds.map((c) => (
             <div
               key={c.id}
-              className="flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors duration-150 hover:bg-hover-lift"
+              className="flex flex-wrap items-center gap-2 rounded-lg border border-border/55 bg-card px-3 py-2 text-[13px] transition-colors duration-150 hover:bg-hover-lift"
             >
               <span className="min-w-0 truncate font-medium" title={c.name}>
                 {c.name}
@@ -899,13 +976,13 @@ function CredentialsDialog({ open, onOpenChange, creds, error, onRefresh }) {
               <span className="shrink-0 text-xs text-muted-foreground">
                 {c.has_secret ? `密码 ${c.secret_mask}` : "无密码"}
               </span>
-              <code className="ml-auto hidden shrink-0 font-mono text-xs text-muted-foreground md:inline">
+              <code className="ml-auto hidden shrink-0 num text-xs text-muted-foreground md:inline">
                 ${c.env_var}
               </code>
               <Button
                 size="sm"
                 variant="ghost"
-                className="h-7 px-2 text-xs"
+                className="h-8 px-2 text-xs"
                 onClick={() => {
                   setEditing(c);
                   setDialogOpen(true);
@@ -916,7 +993,7 @@ function CredentialsDialog({ open, onOpenChange, creds, error, onRefresh }) {
               <Button
                 size="sm"
                 variant="ghost"
-                className="h-7 px-2 text-xs text-status-danger"
+                className="h-8 px-2 text-xs text-status-danger"
                 onClick={() => setDeleting(c)}
               >
                 删除
@@ -985,7 +1062,7 @@ function CredentialDialog({ open, onOpenChange, cred, onSaved }) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="w-[min(480px,94vw)] max-w-none gap-4 p-6">
         <DialogHeader>
-          <DialogTitle className="text-base">{cred ? "编辑凭据" : "新增凭据"}</DialogTitle>
+          <DialogTitle>{cred ? "编辑凭据" : "新增凭据"}</DialogTitle>
           <DialogDescription>秘密只存服务端;界面不回明文</DialogDescription>
         </DialogHeader>
         {!form ? (
@@ -1012,7 +1089,7 @@ function CredentialDialog({ open, onOpenChange, cred, onSaved }) {
               <Input
                 type="password"
                 autoComplete="new-password"
-                className={`min-w-0 flex-1 font-mono text-xs ${INPUT}`}
+                className={`min-w-0 flex-1 num text-xs ${INPUT}`}
                 value={form.secret}
                 onChange={(e) => setForm({ ...form, secret: e.target.value })}
                 placeholder={
@@ -1089,14 +1166,12 @@ function PanelPasswordCard() {
 
   return (
     <>
-      <SettingCard
+      <SettingRow
         title="面板密码"
-        subtitle="登录面板的密码,本机单用户"
+        summary="登录面板的密码,本机单用户;修改后其他登录退出"
+        value="已设置"
         onOpen={() => setOpen(true)}
-      >
-        <Kv k="状态" v="已设置" />
-        <Kv k="修改后" v="其他登录退出" />
-      </SettingCard>
+      />
       <PanelPasswordDialog open={open} onOpenChange={setOpen} />
     </>
   );
@@ -1135,7 +1210,7 @@ function PanelPasswordDialog({ open, onOpenChange }) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="w-[min(480px,94vw)] max-w-none gap-4 p-6">
         <DialogHeader>
-          <DialogTitle className="text-base">面板密码</DialogTitle>
+          <DialogTitle>面板密码</DialogTitle>
           <DialogDescription>本机单用户;修改后其他登录退出</DialogDescription>
         </DialogHeader>
         <Field label="当前密码">
@@ -1179,51 +1254,65 @@ function PanelPasswordDialog({ open, onOpenChange }) {
   );
 }
 
-// ---- 导出诊断包(P3-13b ④) ----
+// ---- 导出诊断包(P3-13b ④ + P4-32 增强) ----
 
-// LOG_LEVELS 日志级别选项(P3-13b ③ 级别可配:排查期开 DEBUG)。
-const LOG_LEVELS = [
-  ["debug", "DEBUG(排查)"],
-  ["info", "INFO(常规)"],
-  ["warn", "WARN(仅警告)"],
-  ["error", "ERROR(仅错误)"],
+// LOG_KINDS 日志类型选项(P4-32 ②:按日志行既有类型字样在导出时
+// 过滤,写入侧不动;id 与后端 logKinds 一致)。
+const LOG_KINDS = [
+  ["error", "错误", "失败与异常的日志行"],
+  ["blocked", "受阻与恢复", "任务卡住与自动恢复的记录"],
+  ["approval", "审批与拦截", "需批准的命令与被拦截的命令"],
+  ["units", "单位起落", "虫群单位的开始与结束"],
 ];
 
-// DiagnosticsCard 诊断包卡:一键打包最近日志 + 版本 + 平台 + 脱敏配置
-// 为 zip;可按任务筛选或全选(勾选任务的账本摘要进包)。附日志级别
-// 配置(保存即生效)。
+// DiagnosticsCard 诊断包行:一键打包日志 + 版本 + 平台 + 脱敏配置为
+// zip;可按任务筛选或全选,日志可按类型过滤,账本库与会话转录按需
+// 加勾(P4-32)。日志级别设置已删,日志固定全量记录。
 function DiagnosticsCard() {
   const [open, setOpen] = React.useState(false);
-  const { data: levelData } = usePolling("/api/config/log-level", 15000, { immediate: true });
   // /api/tasks 返回行数组;deleted 为墓碑标记,不进勾选清单。
   const { data: tasksData } = usePolling("/api/tasks", 15000, { immediate: true });
   const allTasks = Array.isArray(tasksData) ? tasksData : tasksData?.tasks || [];
-  const level = (levelData?.level || "INFO").toLowerCase();
   const tasks = allTasks.filter((t) => !t.deleted);
 
   return (
     <>
-      <SettingCard title="导出诊断包" subtitle="打包日志与配置摘要,发给维护者远程排查" onOpen={() => setOpen(true)}>
-        <Kv k="日志级别" v={level.toUpperCase()} />
-        <Kv k="日志位置" v="logs/ 目录,按大小与日期滚动" />
-      </SettingCard>
-      <DiagnosticsDialog open={open} onOpenChange={setOpen} tasks={tasks} level={level} />
+      <SettingRow
+        title="导出诊断包"
+        summary="打包日志与配置摘要,发给维护者远程排查"
+        onOpen={() => setOpen(true)}
+      />
+      <DiagnosticsDialog open={open} onOpenChange={setOpen} tasks={tasks} />
     </>
   );
 }
 
-// DiagnosticsDialog 诊断包二级界面:任务勾选(全选 / 按任务筛选)+
-// 日志级别选择(保存即生效)+ 一键导出。
-function DiagnosticsDialog({ open, onOpenChange, tasks, level }) {
+// DiagnosticsDialog 诊断包二级界面(P4-32):导出内容勾选(运行日志
+// 默认勾,账本库与会话转录按需加勾)+ 日志范围(全部 / 按类型多选)
+// + 任务勾选(全选 / 按任务筛选)+ 一键导出。
+function DiagnosticsDialog({ open, onOpenChange, tasks }) {
   const [picked, setPicked] = React.useState(null); // null = 全选模式
   const [busy, setBusy] = React.useState(false);
-  const [lv, setLv] = React.useState(level);
+  // 导出内容:运行日志默认勾(P4-32 ③ 默认最小包)。
+  const [withLogs, setWithLogs] = React.useState(true);
+  const [withDB, setWithDB] = React.useState(false);
+  const [withTranscripts, setWithTranscripts] = React.useState(false);
+  // 日志范围:all = 全部日志;pick = 按类型多选。
+  const [scope, setScope] = React.useState("all");
+  const [kinds, setKinds] = React.useState(() => new Set());
   const allPicked = picked === null;
   const pickedCount = allPicked ? tasks.length : picked.size;
+  const kindsEmpty = scope === "pick" && kinds.size === 0;
 
   React.useEffect(() => {
-    if (open) setLv(level);
-  }, [open, level]);
+    if (open) {
+      setWithLogs(true);
+      setWithDB(false);
+      setWithTranscripts(false);
+      setScope("all");
+      setKinds(new Set());
+    }
+  }, [open]);
 
   const toggleAll = () => {
     // 全选←→逐选清空;逐选补齐→回全选模式(缺省 tasks 参数即全部)。
@@ -1237,22 +1326,29 @@ function DiagnosticsDialog({ open, onOpenChange, tasks, level }) {
     else next.add(id);
     setPicked(next.size === tasks.length ? null : next);
   };
-
-  const saveLevel = async (v) => {
-    setLv(v);
-    const { ok, body } = await postJSON("/api/config/log-level", { level: v });
-    if (!ok) {
-      toast.error(body?.error || "保存失败");
-      return;
-    }
-    toast.success(`日志级别已设为 ${String(body.level || v).toUpperCase()}`);
+  const toggleKind = (id) => {
+    const next = new Set(kinds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setKinds(next);
   };
 
   const exportZip = async () => {
     setBusy(true);
     try {
-      const qs = allPicked ? "" : `?tasks=${encodeURIComponent([...picked].join(","))}`;
-      const name = await downloadExport(`/api/diagnostics${qs}`, "ghostreaper-diagnostics.zip");
+      const params = [];
+      if (!allPicked) params.push(`tasks=${encodeURIComponent([...picked].join(","))}`);
+      if (scope === "pick") params.push(`kinds=${encodeURIComponent([...kinds].join(","))}`);
+      const content = [
+        withLogs && "logs",
+        withDB && "db",
+        withTranscripts && "transcripts",
+      ].filter(Boolean);
+      params.push(`content=${content.join(",")}`);
+      const name = await downloadExport(
+        `/api/diagnostics?${params.join("&")}`,
+        "ghostreaper-diagnostics.zip",
+      );
       toast.success(`已导出 ${name}`);
       onOpenChange(false);
     } catch (e) {
@@ -1267,41 +1363,104 @@ function DiagnosticsDialog({ open, onOpenChange, tasks, level }) {
         <DialogHeader>
           <DialogTitle>导出诊断包</DialogTitle>
           <DialogDescription>
-            包含运行日志、版本与平台、脱敏配置摘要;勾选任务的账本摘要一并打包
+            打包成 zip 发给维护者;默认只含运行日志与任务摘要
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-4">
-          <div className="flex items-center gap-3">
-            <span className="w-20 shrink-0 text-muted-foreground">日志级别</span>
+          <div className="flex flex-col gap-2">
+            <div className="text-[13px] font-medium">导出内容</div>
+            <div className="flex flex-col gap-1 rounded-md border border-border/55 bg-card p-2">
+              <label className="flex cursor-pointer items-start gap-2 rounded px-1 py-1 text-[13px]">
+                <Checkbox
+                  className="mt-0.5"
+                  checked={withLogs}
+                  onCheckedChange={(v) => setWithLogs(v === true)}
+                />
+                <span className="min-w-0 flex-1">
+                  运行日志
+                  <span className="block text-xs text-muted-foreground">
+                    系统运行的流水记录,排查基础材料
+                  </span>
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-2 rounded px-1 py-1 text-[13px]">
+                <Checkbox
+                  className="mt-0.5"
+                  checked={withDB}
+                  onCheckedChange={(v) => setWithDB(v === true)}
+                />
+                <span className="min-w-0 flex-1">
+                  账本数据库
+                  <span className="block text-xs text-muted-foreground">
+                    任务与结论的完整数据库,模型 key 与凭据已脱敏
+                  </span>
+                </span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-2 rounded px-1 py-1 text-[13px]">
+                <Checkbox
+                  className="mt-0.5"
+                  checked={withTranscripts}
+                  onCheckedChange={(v) => setWithTranscripts(v === true)}
+                />
+                <span className="min-w-0 flex-1">
+                  会话转录
+                  <span className="block text-xs text-muted-foreground">
+                    已勾任务里每个单位的对话原文,体积大
+                  </span>
+                </span>
+              </label>
+            </div>
+          </div>
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-2 text-[13px]">
+              <span className="font-medium">日志范围</span>
+              <span className="text-xs text-muted-foreground">只影响日志部分</span>
+            </div>
             <div className="w-44">
-              <Select value={lv} onValueChange={saveLevel}>
+              <Select value={scope} onValueChange={setScope}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {LOG_LEVELS.map(([v, label]) => (
-                    <SelectItem key={v} value={v}>
-                      {label}
-                    </SelectItem>
-                  ))}
+                  <SelectItem value="all">全部日志</SelectItem>
+                  <SelectItem value="pick">按类型筛选</SelectItem>
                 </SelectContent>
               </Select>
             </div>
-            <span className="text-xs text-muted-foreground">保存即生效</span>
+            {scope === "pick" && (
+              <div className="flex flex-col gap-1 rounded-md border border-border/55 bg-card p-2">
+                {LOG_KINDS.map(([v, label, hint]) => (
+                  <label
+                    key={v}
+                    className="flex cursor-pointer items-start gap-2 rounded px-1 py-1 text-[13px]"
+                  >
+                    <Checkbox
+                      className="mt-0.5"
+                      checked={kinds.has(v)}
+                      onCheckedChange={() => toggleKind(v)}
+                    />
+                    <span className="min-w-0 flex-1">
+                      {label}
+                      <span className="block text-xs text-muted-foreground">{hint}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            )}
           </div>
           <div className="flex flex-col gap-2">
-            <div className="flex items-center gap-2">
-              <span className="text-muted-foreground">任务范围</span>
+            <div className="flex items-center gap-2 text-[13px]">
+              <span className="font-medium">任务范围</span>
               <span className="text-xs text-muted-foreground">
                 {allPicked ? `全选 ${tasks.length} 个任务` : `已选 ${pickedCount} 个任务`}
               </span>
             </div>
-            <div className="flex max-h-56 flex-col gap-1 overflow-y-auto rounded-md border bg-card p-2">
+            <div className="flex max-h-56 flex-col gap-1 overflow-y-auto rounded-md border border-border/55 bg-card p-2">
               <label className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-[13px] font-medium">
                 <Checkbox
                 checked={allPicked || picked.size === tasks.length}
                 onCheckedChange={toggleAll}
-              />
+                />
                 全选(全部任务的摘要进包)
               </label>
               {tasks.length === 0 && (
@@ -1310,11 +1469,11 @@ function DiagnosticsDialog({ open, onOpenChange, tasks, level }) {
               {tasks.map((t) => (
                 <label key={t.id} className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-[13px]">
                   <Checkbox
-                    checked={allPicked || picked.has(t.id)}
-                    onCheckedChange={() => toggleTask(t.id)}
+                  checked={allPicked || picked.has(t.id)}
+                  onCheckedChange={() => toggleTask(t.id)}
                   />
                   <span className="min-w-0 flex-1 truncate" title={t.title || t.id}>{t.title || t.id}</span>
-                  <span className="font-mono text-[10px] text-muted-foreground">{t.id}</span>
+                  <span className="num text-[10px] text-muted-foreground">{t.id}</span>
                 </label>
               ))}
             </div>
@@ -1327,8 +1486,8 @@ function DiagnosticsDialog({ open, onOpenChange, tasks, level }) {
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             关闭
           </Button>
-          <Button onClick={exportZip} disabled={busy || pickedCount === 0}>
-            {busy ? "导出中…" : "导出 zip"}
+          <Button onClick={exportZip} disabled={busy || pickedCount === 0 || kindsEmpty}>
+            {busy ? "导出中…" : "导出"}
           </Button>
         </DialogFooter>
       </DialogContent>

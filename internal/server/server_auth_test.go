@@ -150,6 +150,27 @@ func TestWrapAuthGate(t *testing.T) {
 	if strings.Contains(body, "__next") {
 		t.Fatal("未登录不得下发面板应用资源")
 	}
+	// 登录页(P4-26 审核迭代):title 与 favicon 声明与面板同值——
+	// 隐私窗口首访标签页即显示图标。
+	if !strings.Contains(body, "<title>Agent GhostReaper</title>") {
+		t.Fatal("登录页 title 应为 Agent GhostReaper")
+	}
+	for _, icon := range []string{`/favicon.ico`, `/icon.svg`, `/favicon-64.png`} {
+		if !strings.Contains(body, `href="`+icon+`"`) {
+			t.Fatalf("登录页缺 favicon 声明 %s", icon)
+		}
+	}
+	// favicon 三件套豁免认证门(P4-26 审核迭代):未登录不回登录页
+	//(直通内层静态服务;测试装配无静态文件,404 即证未拦)。
+	for _, p := range []string{"/favicon.ico", "/icon.svg", "/favicon-64.png"} {
+		code, body, _ := authGet(t, ts.URL+p, "")
+		if strings.Contains(body, "面板密码") {
+			t.Fatalf("未登录 %s 不应回登录页", p)
+		}
+		if code != 200 && code != 404 {
+			t.Fatalf("未登录 %s 放行后状态异常 %d", p, code)
+		}
+	}
 
 	token := authSetup(t, ts)
 

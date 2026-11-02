@@ -454,8 +454,8 @@ func TestJudgeClaimVerdicts(t *testing.T) {
 	if jb.Status != rings.TestClaimPending || jb.Verdict.Satisfied {
 		t.Fatalf("影响面证据不足应判待确认: %+v", jb.Verdict)
 	}
-	if !strings.Contains(jb.Verdict.PendingReason, "影响面") {
-		t.Fatalf("搁置理由须言明影响面证据不足: %q", jb.Verdict.PendingReason)
+	if !strings.Contains(jb.Verdict.PendingReason, "证据不足以支撑申报的影响") {
+		t.Fatalf("搁置理由须言明证据不足: %q", jb.Verdict.PendingReason)
 	}
 
 	// 声明 C:存在性被推翻 → 待确认,理由言明被推翻。
@@ -553,7 +553,7 @@ func TestJudgeClaimLLMTextIsNotEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("求值失败: %v", err)
 	}
-	if j.Status != rings.TestClaimPending || !strings.Contains(j.Verdict.PendingReason, "影响面") {
+	if j.Status != rings.TestClaimPending || !strings.Contains(j.Verdict.PendingReason, "证据不足以支撑申报的影响") {
 		t.Fatalf("LLM 文本不得代替结构化证据: %+v", j.Verdict)
 	}
 }
@@ -661,7 +661,7 @@ func TestJudgeClaimFullFalsifyRounds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("轮耗尽求值失败: %v", err)
 	}
-	if je.Status != rings.TestClaimPending || !strings.Contains(je.Verdict.PendingReason, "1 条竞争性替代解释未能") {
+	if je.Status != rings.TestClaimPending || !strings.Contains(je.Verdict.PendingReason, "还有 1 个疑点没排除") {
 		t.Fatalf("轮耗尽应诚实待确认且理由言明: %+v", je.Verdict)
 	}
 
@@ -682,7 +682,7 @@ func TestJudgeClaimFullFalsifyRounds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("末轮影响面求值失败: %v", err)
 	}
-	if ji.Status != rings.TestClaimPending || !strings.Contains(ji.Verdict.PendingReason, "影响面") {
+	if ji.Status != rings.TestClaimPending || !strings.Contains(ji.Verdict.PendingReason, "证据不足以支撑申报的影响") {
 		t.Fatalf("末轮影响面不成立不得确认: %+v", ji.Verdict)
 	}
 

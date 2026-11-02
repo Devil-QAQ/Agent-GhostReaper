@@ -172,7 +172,7 @@ func (m *researchScriptedModel) handle(w http.ResponseWriter, r *http.Request) {
 		case !seen("bash", "logged in as admin"):
 			tool("rc3", "bash", fmt.Sprintf(`{"command":"curl -sS -m 5 -u admin:s3cret -i %s/"}`, m.admin))
 		default:
-			claimIDRe := regexp.MustCompile(`声明 (tc-[0-9a-z-]+)`)
+			claimIDRe := regexp.MustCompile(`判断 (tc-[0-9a-z-]+)`)
 			cm := claimIDRe.FindStringSubmatch(lastUser)
 			claimID := ""
 			if cm != nil {

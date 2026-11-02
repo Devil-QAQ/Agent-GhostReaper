@@ -27,7 +27,10 @@ type ApprovalRequest struct {
 	ToolName    string
 	ToolArgs    string // 原始 JSON 参数
 	Note        string // 弹门上下文(空 = 常规门槛弹门,无附加说明)
-	CreatedAt   time.Time
+	// GateGroup 弹门来源的拦截规则组(硬规则弹门处置时携带;空 = 审批
+	// 门槛弹门)。P4-17:代理旁路组的批准据此武装该单位的组级放行。
+	GateGroup string
+	CreatedAt time.Time
 }
 
 // GateDecision 面板(或收尾路径)对弹门请求的裁决。
@@ -97,10 +100,10 @@ func NewLedgerGate(store *rings.Store) *LedgerGate {
 }
 
 // ErrGateRequestNotFound 裁决目标不存在(未知 ID 或已裁决)。
-var ErrGateRequestNotFound = errors.New("swarm: 审批请求不存在或已裁决")
+var ErrGateRequestNotFound = errors.New("swarm: 审批请求不存在或已处理")
 
 // ErrGateFrozen 任务冬眠中审批单冻结(P2-08:只读展示,唤醒恢复可裁决)。
-var ErrGateFrozen = errors.New("swarm: 任务冬眠中,审批单已冻结为只读(唤醒后恢复可裁决)")
+var ErrGateFrozen = errors.New("swarm: 任务冬眠中,审批单已冻结为只读(唤醒后恢复可审批)")
 
 // ledgerCtx 账本入账专用 ctx(与 executor 同款):收尾/熔断路径的审批
 // 记录不可因任务 ctx 取消而断账。
@@ -120,7 +123,7 @@ func (g *LedgerGate) record(taskID string, actor string, rec rings.ApprovalRecor
 		Kind: rings.EventApprovalRecord, Actor: actor, Payload: rec,
 	})
 	if err != nil {
-		return fmt.Errorf("swarm: 审批记录入账: %w", err)
+		return fmt.Errorf("swarm: 审批记录写入: %w", err)
 	}
 	return nil
 }

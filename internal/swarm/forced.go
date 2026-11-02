@@ -41,7 +41,7 @@ func (e *Executor) ExecuteForcedRelease(ctx context.Context, taskID string, rec 
 			UnitID: env.UnitID, TranscriptID: "forced-" + env.UnitID,
 		})
 		if err != nil {
-			return "", fmt.Errorf("swarm: 研判后放行起镜会话: %w", err)
+			return "", fmt.Errorf("swarm: 规划后放行起镜会话: %w", err)
 		}
 		defer sess.Close()
 		env.mirror = sess
@@ -60,11 +60,11 @@ func (e *Executor) ExecuteForcedRelease(ctx context.Context, taskID string, rec 
 		}
 	}
 	if target == nil {
-		return "", fmt.Errorf("swarm: 研判后放行:工具 %s 不在工具集内", rec.ToolName)
+		return "", fmt.Errorf("swarm: 规划后放行:工具 %s 不在工具集内", rec.ToolName)
 	}
 	res, err := target.Call(cctx, json.RawMessage(rec.ToolArgs), nil)
 	if err != nil {
-		return "", fmt.Errorf("swarm: 研判后放行执行 %s: %w", rec.ToolName, err)
+		return "", fmt.Errorf("swarm: 规划后放行执行 %s: %w", rec.ToolName, err)
 	}
 	var b strings.Builder
 	for _, blk := range res.Content {
@@ -79,7 +79,7 @@ func (e *Executor) ExecuteForcedRelease(ctx context.Context, taskID string, rec 
 		StepID: rec.StepID, UnitID: env.UnitID,
 		Type: rings.SwarmRecToolCall, ToolName: rec.ToolName,
 		ToolArgs: rec.ToolArgs, IsError: res.IsError,
-		Note: "研判后放行执行(审批请求 " + rec.RequestID + ",造物主强制放行)",
+		Note: "规划后放行执行(审批请求 " + rec.RequestID + ",造物主强制放行)",
 	}
 	if ref := extractBlobRef(resultText); ref != "" && e.Blobs.Exists(ref) {
 		srec.ResultRef, srec.ResultHead = ref, clipLine(resultText, 512)
@@ -91,7 +91,7 @@ func (e *Executor) ExecuteForcedRelease(ctx context.Context, taskID string, rec 
 	if _, err := e.Store.Append(ledgerCtx, taskID, rings.Event{
 		Kind: rings.EventSwarmRecord, Actor: "swarm:" + env.UnitID, Payload: srec,
 	}); err != nil {
-		return resultText, fmt.Errorf("swarm: 研判后放行执行入账: %w", err)
+		return resultText, fmt.Errorf("swarm: 规划后放行执行写入: %w", err)
 	}
 	return resultText, nil
 }

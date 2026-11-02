@@ -37,7 +37,7 @@ const NODE_STYLE = {
   goal: { shape: "gr-shape-goal", tone: "running", width: 208, label: "目标" },
   step: { shape: "gr-shape-step", tone: "high", width: 192, label: "步骤" },
   fact: { shape: "gr-shape-fact", tone: "success", width: 184, label: "事实" },
-  testclaim: { shape: "gr-shape-claim", tone: "critical", width: 204, label: "声明" },
+  testclaim: { shape: "gr-shape-claim", tone: "critical", width: 204, label: "判断" },
   hypothesis: { shape: "gr-shape-hypo", tone: "warning", width: 188, label: "假设", dashed: true },
   asset: { shape: "gr-shape-asset", tone: "info", width: 172, label: "资产" },
 };
@@ -161,13 +161,13 @@ function GrNode({ data }) {
   return (
     <div
       className={cn(
-        "group relative flex flex-col gap-1 rounded-xl border bg-card px-3 py-2 shadow-xs transition-shadow duration-150 hover:shadow-card",
+        "group relative flex flex-col gap-1 rounded-xl border border-border/55 bg-card px-3 py-2 shadow-xs transition-shadow duration-150 hover:shadow-card",
         dead && "opacity-40 saturate-50",
         data.focused && "border-primary ring-2 ring-primary",
         data.newborn && "gr-node-newborn border-primary/70 ring-2 ring-primary/70",
       )}
       style={{ width: style.width }}
-      title={`${style.label} ${node.id}${st ? ` · ${st.label}` : ""}`}
+      title={`${style.label} ${node.id}${st ? ` · ${st.label}${st.hint ? `\n${st.hint}` : ""}` : ""}`}
     >
       <Handle type="target" position={Position.Left} isConnectable={false} className="!invisible" />
       <Handle type="source" position={Position.Right} isConnectable={false} className="!invisible" />
@@ -187,13 +187,13 @@ function GrNode({ data }) {
         />
         <span className="text-[10px] tracking-wide text-muted-foreground">{style.label}</span>
         {st && (
-          <Badge variant={st.variant} className="ml-auto">
+          <Badge variant={st.variant} className={cn("ml-auto", st.live && "gr-live")}>
             {st.label}
           </Badge>
         )}
       </div>
       <div className="line-clamp-2 text-[13px] leading-snug">{node.title || node.id}</div>
-      <div className="font-mono text-[10px] text-muted-foreground">{node.id}</div>
+      <div className="num text-[10px] text-muted-foreground">{node.id}</div>
     </div>
   );
 }
@@ -295,12 +295,9 @@ function GrEdge({
               }px)`,
               color: labelColor,
               background: labelBg,
-              borderRadius: 4,
-              padding: "1px 4px",
-              fontSize: 10,
               pointerEvents: "none",
             }}
-            className="nodrag nopan"
+            className="nodrag nopan rounded-[4px] px-1 py-0.5 text-[10px]"
           >
             {label}
           </div>
@@ -439,7 +436,7 @@ export function GraphCanvas({ data, focus, heightClass, sheet, onSheetChange }) 
     <>
       <div
         className={cn(
-          "overflow-hidden rounded-xl border bg-card",
+          "overflow-hidden rounded-xl border border-border/55 bg-card",
           heightClass || "h-[calc(100vh-236px)] min-h-[420px]",
         )}
       >
@@ -502,7 +499,7 @@ export function ProgressPage({ currentTask, focus }) {
           hint={
             error
               ? `读取失败:${error}`
-              : "主宰派发步骤、虫群回流事实与声明后,血缘链在此生长"
+              : "主宰派发步骤、虫群回传事实与判断后,血缘链在此生长"
           }
           action={{ label: "去会话", href: `/task/${tid}/sessions` }}
         />

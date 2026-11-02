@@ -18,7 +18,8 @@ import (
 // 唤醒主宰——目标未完成不算任务结束,唤醒不依赖预筛发现;空闲心跳成本
 // 造物主已确认接受)。预筛保留但职责收窄:对图上在跑意图做确定性检查
 // (进度停滞/重复动作/预算消耗异常),发现只作黑匣子标记供主宰复查,
-// 不再承担唤醒判定。巡检本身与每条发现都记入黑匣子(机器可扫的确定性
+// P4-29：心跳照常唤醒机器处理，仅有新结果/新指令/图变化才规划。
+// 巡检本身与每条发现都记入黑匣子(机器可扫的确定性
 // 通道)。
 
 const (
@@ -118,7 +119,8 @@ func (l *Loop) heartbeatLoop(ctx context.Context) {
 				l.setErr(berr)
 			}
 		}
-		// 到点必醒(P3-14a B):每拍无条件唤醒主宰研判——零在跑步骤+
+		// 到点必醒机器循环；P4-29 由规划触发筛选避免无新事件的模型调用。
+		// 零在跑步骤+
 		// 声明待派的死等形态不再有(旧语义"有发现才唤醒"对它永不触发);
 		// 拆解提示词硬底线保证被唤醒的主宰必须产出新方向。
 		select {
@@ -216,7 +218,7 @@ func (l *Loop) prescreen(ctx context.Context) ([]rings.BlackboxRecord, error) {
 					"silent_seconds": int(now.Sub(tr.lastUpdatedAt).Seconds()),
 					"tool_calls":     len(tr.toolCalls),
 					"stall_window":   l.hbStallSeconds(),
-					"note":           "进度停滞:超过判定窗口无任何工具调用入账",
+					"note":           "进度停滞:超过判定窗口无任何工具调用记录",
 				},
 			})
 		}
@@ -285,7 +287,7 @@ func (l *Loop) heartbeatMarks(ctx context.Context) []string {
 		var line string
 		switch rec.Type {
 		case rings.BlackboxHbStall:
-			line = fmt.Sprintf("%s [%s] 进度停滞: %v 秒无工具调用入账",
+			line = fmt.Sprintf("%s [%s] 进度停滞: %v 秒无工具调用记录",
 				rec.StepID, markRunning, rec.Detail["silent_seconds"])
 		case rings.BlackboxHbRepeat:
 			line = fmt.Sprintf("%s [%s] 重复动作: 连续 %v 次相同调用 %v%v",

@@ -64,7 +64,7 @@ export function CommandPalette({ open, onOpenChange, tasks }) {
           className="fixed inset-0 z-50 bg-black/60 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0"
         />
         <DialogPrimitive.Content
-          className="fixed top-[15%] left-1/2 z-50 w-[min(560px,92vw)] -translate-x-1/2 overflow-hidden rounded-xl border border-border/60 bg-popover shadow-float duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95"
+          className="fixed top-[15%] left-1/2 z-50 w-[min(560px,92vw)] -translate-x-1/2 overflow-hidden rounded-2xl border border-border/55 bg-popover shadow-float duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95"
         >
           <DialogPrimitive.Title className="sr-only">命令面板</DialogPrimitive.Title>
           <Command label="命令面板">
@@ -152,7 +152,7 @@ export function CommandPalette({ open, onOpenChange, tasks }) {
               )}
             </CommandList>
             {/* 键位提示:一行陈述(8.5 能短则短) */}
-            <div className="flex items-center gap-3 border-t border-border/60 px-4 py-2 text-xs text-muted-foreground">
+            <div className="flex items-center gap-3 border-t border-border/55 px-4 py-2 text-xs text-muted-foreground">
               <span>↑↓ 选择</span>
               <span>↵ 跳转</span>
               <span className="ml-auto">esc 关闭</span>

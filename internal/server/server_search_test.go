@@ -30,11 +30,11 @@ func TestSearchAPI(t *testing.T) {
 	h := srv.Handler()
 
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"title":"DVWA 深挖"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"DVWA 深挖"}`, http.StatusOK, &created)
 	dvwa := created["id"]
-	post(t, h, http.MethodPost, "/api/tasks", `{"title":"边界梳理"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"边界梳理"}`, http.StatusOK, &created)
 	edge := created["id"]
-	post(t, h, http.MethodPost, "/api/tasks", `{"title":"已删任务"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"已删任务"}`, http.StatusOK, &created)
 	gone := created["id"]
 
 	// 铺垫:两任务的声明各一条 + 已删任务一条(不应搜出)。

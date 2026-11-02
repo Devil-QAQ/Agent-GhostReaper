@@ -1,0 +1,144 @@
+{
+  "schema_version": "mimosa-task-review/v2",
+  "run_id": "20261026T022042879Z-46193-bb1a3b6993f3",
+  "run_status": "completed",
+  "errors": [],
+  "coverage": {
+    "schema_version": "mimosa-hook-coverage/v1",
+    "status": "complete",
+    "scope": "hook_observed_diff",
+    "baseline": {
+      "complete": true,
+      "captured_files": 347,
+      "candidate_limit": 5000,
+      "truncated": false,
+      "enumeration_error_count": 0,
+      "snapshot_error_count": 0,
+      "compensated_target_count": 2
+    },
+    "change_tracking": {
+      "touched_observed": 2,
+      "touched_retained": 2,
+      "truncated": false,
+      "bash_mutation": false,
+      "bash_discovered": 0,
+      "bash_discovery_limit": 80,
+      "bash_discovery_truncated": false
+    },
+    "candidates": {
+      "eligible_files": 2,
+      "selected_files": 2,
+      "limit": 20,
+      "truncated": false
+    },
+    "scanning": {
+      "required_files": 2,
+      "scanned_files": 2,
+      "skipped_files": 0,
+      "failed_files": 0,
+      "project_checks_required": 0,
+      "project_checks_completed": 0
+    },
+    "notification": {
+      "eligible_findings": 0,
+      "detailed_findings": 0,
+      "detail_limit": 3,
+      "truncated": false
+    },
+    "reason_counts": {},
+    "reasons": [],
+    "reasons_truncated": false
+  },
+  "generated_at": "2026-10-26T02:20:42.879Z",
+  "session_id": "session_d09def15d63abae60cdff7083ca952f7",
+  "target": ".",
+  "revision": "a83b50a6d377c9ef5644abcb681962c62f6c2133",
+  "rules_version": "unavailable",
+  "diff_hash": "3e0f3d5b01942fff6548827bdf233f08fbdcc861d2859d9103de09c5ee77ca56",
+  "diff": {
+    "algorithm": "sha256",
+    "changed_file_count": 2,
+    "changed_files": [
+      {
+        "file": "internal/overmind/queue_test.go",
+        "ranges": [
+          {
+            "start": 21,
+            "end": 25
+          },
+          {
+            "start": 183,
+            "end": 187
+          },
+          {
+            "start": 206,
+            "end": 206
+          }
+        ],
+        "before_hash": "aae88a15e9b7d5d3e4bd957f92e2316b7299944629fe0ee3b0d80e6ba33b0fbb",
+        "after_hash": "b85ff1d15e27880f0898cfaf53ad94ac953fceff740018351c5aeb943434b2d5"
+      },
+      {
+        "file": "internal/server/server_p429_test.go",
+        "ranges": [
+          {
+            "start": 15,
+            "end": 15
+          }
+        ],
+        "before_hash": "31b0cc7f9e6715eeb6b0d104e2f331105065f792220f3d73a3fafba3a806bbde",
+        "after_hash": "24ea336be5c3a12f823f36ddf43044a964b2c52344be7b4efaf53149b2a3e1e9"
+      }
+    ]
+  },
+  "timing": {
+    "started_at": "2026-10-26T02:20:42.125Z",
+    "completed_at": "2026-10-26T02:20:42.879Z",
+    "duration_ms": 754,
+    "measurement": "hook_wall_clock"
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "model_calls": 0,
+    "measurement": "known-zero"
+  },
+  "telemetry": {
+    "schemaVersion": "mimosa-gate-telemetry/v1",
+    "profile": "gate",
+    "operation": "Stop",
+    "outcome": "complete",
+    "latencyMs": 754,
+    "peakMemoryBytes": 210993152,
+    "memoryMeasurement": "max-observed-process-rss",
+    "scannedFiles": 2,
+    "cache": {
+      "hits": 0,
+      "misses": 0,
+      "measurement": "not-applicable"
+    },
+    "denyCount": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "total": 0,
+      "modelCalls": 0,
+      "measurement": "known-zero"
+    }
+  },
+  "finding_count": 0,
+  "rewake_finding_count": 0,
+  "evidence_boundary": {
+    "scan": "candidate",
+    "static_fix_verification": "observed_static_only",
+    "runtime_verification": "not_performed"
+  },
+  "finding_events": [],
+  "findings": [],
+  "artifacts": {
+    "immutable_report": ".mimosa/reports/task-review-session_d09def15d63abae60cdff7083ca952f7-20261026T022042879Z-46193-bb1a3b6993f3.json",
+    "latest_report": ".mimosa/reports/task-review-session_d09def15d63abae60cdff7083ca952f7.json",
+    "history_summary": ".mimosa/history/run-20261026T022042879Z-46193-bb1a3b6993f3.json"
+  }
+}

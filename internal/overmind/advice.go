@@ -104,7 +104,7 @@ func (l *Loop) writeAdviceVerdicts(ctx context.Context, plans []adviceVerdictPla
 	}
 	pending, err := l.pendingAdvices(ctx)
 	if err != nil {
-		l.setErr(fmt.Errorf("overmind: 建议裁决查待决: %w", err))
+		l.setErr(fmt.Errorf("overmind: 建议判定查待决: %w", err))
 		return
 	}
 	byID := map[string]pendingAdvice{}
@@ -142,7 +142,7 @@ func (l *Loop) writeAdviceVerdicts(ctx context.Context, plans []adviceVerdictPla
 			}
 		}
 		if _, err := l.Store.Append(ctx, l.TaskID, ev); err != nil {
-			l.setErr(fmt.Errorf("overmind: 建议裁决入账 %s: %w", id, err))
+			l.setErr(fmt.Errorf("overmind: 建议判定写入 %s: %w", id, err))
 		}
 	}
 }

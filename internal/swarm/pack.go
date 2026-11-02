@@ -199,7 +199,7 @@ func (e *Executor) Claim(ctx context.Context, taskID, stepID string) (*TaskPack,
 	if tcID, _ := step.Detail["testclaim_id"].(string); tcID != "" {
 		claim, err := e.Store.Node(ctx, taskID, tcID)
 		if err != nil {
-			return nil, fmt.Errorf("swarm: 领取反证声明 %s: %w", tcID, err)
+			return nil, fmt.Errorf("swarm: 领取反证判断 %s: %w", tcID, err)
 		}
 		if claim.Type != rings.NodeTestClaim {
 			return nil, fmt.Errorf("swarm: 反证绑定节点 %s 是 %s 不是 testclaim", tcID, claim.Type)

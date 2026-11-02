@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "mimosa-hook-status/v1",
+  "recordedAt": "2026-10-26T13:36:59.773Z",
+  "sessionId": "session_bc5c1a4e093c279b3b9f4d3f86c80629",
+  "event": "PostToolUse",
+  "toolName": "Write",
+  "file": "/tmp/gr-p431r3-verify.mjs",
+  "outcome": "clear",
+  "coverage": "complete",
+  "findingCount": 0,
+  "durationMs": 3,
+  "hostState": "hook_complete",
+  "reportHint": ".mimosa/reports/"
+}

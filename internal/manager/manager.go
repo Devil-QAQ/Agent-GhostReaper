@@ -182,7 +182,7 @@ func New(cfg Config) (*Manager, error) {
 				runnable = append(runnable, candidate{t, r.Status})
 				action = "relaunch"
 			} else {
-				if err := m.adoptPaused(t, r.Status, "进程重启收养:无循环体可拉起(未配置模型),收养为已暂停(可恢复)"); err != nil {
+				if err := m.adoptPaused(t, r.Status, "进程重启接管:无循环体可拉起(未配置模型),接管为已暂停(可恢复)"); err != nil {
 					return nil, err
 				}
 				action = "adopt_paused"
@@ -192,7 +192,7 @@ func New(cfg Config) (*Manager, error) {
 				waiting = append(waiting, candidate{t, r.Status})
 				action = "requeue"
 			} else {
-				if err := m.adoptPaused(t, r.Status, "进程重启收养:无循环体可拉起(未配置模型),收养为已暂停(可恢复)"); err != nil {
+				if err := m.adoptPaused(t, r.Status, "进程重启接管:无循环体可拉起(未配置模型),接管为已暂停(可恢复)"); err != nil {
 					return nil, err
 				}
 				action = "adopt_paused"
@@ -208,10 +208,10 @@ func New(cfg Config) (*Manager, error) {
 				detail["ghost_steps"] = ghosts
 				detail["ghost_note"] = "崩溃残留 running 的步骤已重置回可领取"
 			}
-			runlog.Infof("进程重启收养: 任务 %s(%s → %s,幽灵步骤 %d 个)", r.ID, r.Status, action, len(ghosts))
+			runlog.Infof("进程重启接管: 任务 %s(%s → %s,幽灵步骤 %d 个)", r.ID, r.Status, action, len(ghosts))
 			if err := blackbox.Record(context.Background(), m.cfg.Store, r.ID, "manager",
 				rings.BlackboxRecord{Type: rings.BlackboxRestartAdoption, Detail: detail}); err != nil {
-				return nil, fmt.Errorf("manager: 收养留痕 %s: %w", r.ID, err)
+				return nil, fmt.Errorf("manager: 接管留痕 %s: %w", r.ID, err)
 			}
 		}
 	}
@@ -242,7 +242,7 @@ func New(cfg Config) (*Manager, error) {
 	for _, c := range toStart {
 		if err := m.record(c.t.ID, StatusStarted, map[string]any{
 			"adopted": true, "from": c.from,
-			"reason": "进程重启收养:重新拉起任务循环(超时协调器随循环重建,已过期立即收尾)",
+			"reason": "进程重启接管:重新拉起任务循环(超时协调器随循环重建,已过期立即收尾)",
 		}); err != nil {
 			// 局部记账失败不挡其余任务:名额回滚,该任务退回已暂停。
 			m.mu.Lock()
@@ -253,7 +253,7 @@ func New(cfg Config) (*Manager, error) {
 			c.t.mu.Unlock()
 			_ = m.record(c.t.ID, StatusPaused, map[string]any{
 				"orphan": true, "from": c.from,
-				"reason": "进程重启收养:拉起记账失败,收养为已暂停(可恢复)",
+				"reason": "进程重启接管:拉起记账失败,接管为已暂停(可恢复)",
 			})
 			continue
 		}
@@ -264,7 +264,7 @@ func New(cfg Config) (*Manager, error) {
 	for _, t := range queued {
 		if err := m.record(t.ID, StatusQueued, map[string]any{
 			"adopted": true,
-			"reason":  "进程重启收养:重新排队等待并发名额",
+			"reason":  "进程重启接管:重新排队等待并发名额",
 		}); err != nil {
 			m.mu.Lock()
 			m.dequeueLocked(t)
@@ -274,7 +274,7 @@ func New(cfg Config) (*Manager, error) {
 			t.mu.Unlock()
 			_ = m.record(t.ID, StatusPaused, map[string]any{
 				"orphan": true,
-				"reason": "进程重启收养:排队记账失败,收养为已暂停(可恢复)",
+				"reason": "进程重启接管:排队记账失败,接管为已暂停(可恢复)",
 			})
 			continue
 		}
@@ -558,7 +558,7 @@ func (m *Manager) runTask(ctx context.Context, t *Task, runDone chan struct{}) {
 			t.status = StatusStopped
 			t.mu.Unlock()
 			_ = m.record(t.ID, StatusStopped,
-				map[string]any{"reason": "收尾流程异常退出,如实落停止终态"})
+				map[string]any{"reason": "收尾流程异常退出,如实记为已停止"})
 		case StatusCheckpointed:
 			// 断点收场(P3-07):checkpointed 已由 Checkpoint 记账,不发
 			// 完成终态;收掉任务 ctx 停掉随行 goroutine(收尾线看护/心跳
@@ -713,7 +713,7 @@ func (m *Manager) FinishSettling(taskID string, achieved bool, detail map[string
 		return fmt.Errorf("manager: 任务 %s 不存在", taskID)
 	}
 	if st := t.Status(); st != StatusSettling {
-		return fmt.Errorf("manager: 任务 %s 状态 %s 不是收尾中,不定终态", taskID, st)
+		return fmt.Errorf("manager: 任务 %s 状态 %s 不是收尾中,不定结束状态", taskID, st)
 	}
 	terminal := StatusStopped
 	if achieved {

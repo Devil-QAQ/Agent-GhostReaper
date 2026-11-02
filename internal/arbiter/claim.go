@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 
 	"ghostreaper/internal/rings"
@@ -197,7 +196,7 @@ func JudgeClaim(ctx context.Context, store *rings.Store, taskID, claimID string)
 	}
 	node, err := store.Node(ctx, taskID, claimID)
 	if err != nil {
-		return nil, fmt.Errorf("arbiter: 查声明 %s: %w", claimID, err)
+		return nil, fmt.Errorf("arbiter: 查判断 %s: %w", claimID, err)
 	}
 	if node.Type != rings.NodeTestClaim {
 		return nil, fmt.Errorf("%w: task %s node %s 是 %s", ErrClaimNotFound, taskID, claimID, node.Type)
@@ -207,7 +206,7 @@ func JudgeClaim(ctx context.Context, store *rings.Store, taskID, claimID string)
 	}
 	// 当前轮 = 战役内轮次号最大(并列取最晚创建)的反证 Step。
 	if len(origin.rounds) == 0 {
-		return nil, fmt.Errorf("%w: 声明 %s 战役内无反证步骤", ErrClaimNotReady, claimID)
+		return nil, fmt.Errorf("%w: 判断 %s 战役内无反证步骤", ErrClaimNotReady, claimID)
 	}
 	cur := &origin.rounds[len(origin.rounds)-1]
 	for i := range origin.rounds {
@@ -366,7 +365,7 @@ func judgeFullFalsify(o *claimOrigin, cur *falsifyRoundInfo, claimID string, rev
 	case existenceRefuted:
 		j.Status = rings.TestClaimPending
 		v.Decision = rings.VerdictPending
-		v.PendingReason = "存在性被反证推翻,声明不成立,待复核(重开可再证)"
+		v.PendingReason = "存在性被反证推翻,判断不成立,待复核(重开可再证)"
 	case !independent:
 		j.Status = rings.TestClaimPending
 		v.Decision = rings.VerdictPending
@@ -382,20 +381,20 @@ func judgeFullFalsify(o *claimOrigin, cur *falsifyRoundInfo, claimID string, rev
 		j.Status = rings.TestClaimAwaitingRound
 		v.Decision = rings.VerdictAdvanceRound
 		j.AliveAlt = alive
-		v.PendingReason = fmt.Sprintf("第 %d 轮反证完成,%d 条竞争性替代解释未排除(%s),待派下一轮反证",
-			roundNumber(cur.round), len(alive), altIDs(alive))
+		v.PendingReason = fmt.Sprintf("第 %d 轮反证完成,还有 %d 个疑点没排除(%s),待派下一轮反证",
+			roundNumber(cur.round), len(alive), altLabels(alive))
 	default:
 		j.Status = rings.TestClaimPending
 		v.Decision = rings.VerdictPending
 		var parts []string
 		if len(alive) > 0 {
-			parts = append(parts, fmt.Sprintf("%d 条竞争性替代解释未能在 %d 轮反证内排除(%s)",
-				len(alive), o.standard.maxRoundsNorm(), altIDs(alive)))
+			parts = append(parts, fmt.Sprintf("还有 %d 个疑点没排除(%s)",
+				len(alive), altLabels(alive)))
 		}
 		if o.standard.RequireImpact && !impactOK {
-			parts = append(parts, "末轮影响面证据不足以支撑所声明的实际影响")
+			parts = append(parts, "证据不足以支撑申报的影响")
 		}
-		v.PendingReason = strings.Join(parts, ";")
+		v.PendingReason = strings.Join(parts, ",")
 	}
 	return j, nil
 }
@@ -453,10 +452,10 @@ func pendingReason(o *claimOrigin, conds []rings.ArbiterConditionResult) string 
 		parts = append(parts, "反证单位与发现单位相同(R12 违例),反证结果不被采信")
 	}
 	if byKind[CondExistenceNotRefuted] {
-		parts = append(parts, "存在性被反证推翻,声明不成立,待复核")
+		parts = append(parts, "存在性被反证推翻,判断不成立,待复核")
 	}
 	if byKind[CondImpactSupported] {
-		parts = append(parts, "反证未推翻存在性,但影响面证据不足以支撑所声明的实际影响")
+		parts = append(parts, "反证未推翻存在性,但证据不足以支撑申报的影响")
 	}
 	if len(parts) == 0 {
 		parts = append(parts, "判定标准条件未满足")
@@ -498,20 +497,24 @@ func falsifyIncompleteReason(stepStatus string) string {
 	case "aborted":
 		return "反证轮被中止"
 	case "approval_denied":
-		return "反证轮被审批拒绝终止(该单位已熔断)"
+		return "反证轮被审批拒绝终止(该单位已终止)"
 	default:
 		return "反证步骤状态 " + stepStatus
 	}
 }
 
-// altIDs 解释清单的 ID 串(定序,机器拼装)。
-func altIDs(alts []rings.Alternative) string {
-	ids := make([]string, 0, len(alts))
+// altLabels 解释清单的内容串(按 ID 定序,机器拼装)——界面显示疑点
+// 内容本身,不显示 alt 编号;旧账本无 label 的条目如实退显 ID。
+func altLabels(alts []rings.Alternative) string {
+	labels := make([]string, 0, len(alts))
 	for _, a := range alts {
-		ids = append(ids, a.ID)
+		if a.Label != "" {
+			labels = append(labels, a.Label)
+		} else {
+			labels = append(labels, a.ID)
+		}
 	}
-	sort.Strings(ids)
-	return strings.Join(ids, ",")
+	return strings.Join(labels, "、")
 }
 
 // AliveAlternatives 当前战役内仍存活的竞争解释(收割派发下一轮反证的
@@ -585,7 +588,7 @@ func loadClaimOrigin(ctx context.Context, store *rings.Store, taskID, claimID st
 			}
 			st, err := ParseClaimStandard(raw)
 			if err != nil {
-				return nil, fmt.Errorf("arbiter: 声明 %s 冻结标准非法: %w", claimID, err)
+				return nil, fmt.Errorf("arbiter: 判断 %s 冻结标准非法: %w", claimID, err)
 			}
 			o.standard = st
 			o.alternatives = parseAlternatives(p.Detail["alternatives"])

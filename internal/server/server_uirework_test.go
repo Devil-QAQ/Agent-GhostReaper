@@ -39,8 +39,8 @@ func TestServerConfigAPI(t *testing.T) {
 
 	var cfg ConfigView
 	get(t, h, "/api/config", http.StatusOK, &cfg)
-	if cfg.Swarm.MaxConcurrentUnits != 3 {
-		t.Fatalf("虫群并发默认值 = %d, want 3", cfg.Swarm.MaxConcurrentUnits)
+	if cfg.Swarm.MaxConcurrentUnits != 5 {
+		t.Fatalf("虫群并发默认值 = %d, want 5", cfg.Swarm.MaxConcurrentUnits)
 	}
 	if cfg.LLM.Configured || cfg.LLM.Model != "" {
 		t.Fatalf("零值装配应如实呈现未注入: %+v", cfg.LLM)
@@ -80,7 +80,7 @@ func TestServerAssetDetail(t *testing.T) {
 	ctx := context.Background()
 
 	var created map[string]any
-	post(t, h, http.MethodPost, "/api/tasks", `{
+	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],
 		"id":"detail-t","title":"资产详情验证",
 		"assets":[
 			{"class":"service","title":"http://10.10.0.5:8080"},

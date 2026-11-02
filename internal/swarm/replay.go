@@ -56,9 +56,9 @@ func ReplaySID(claimID string, round int) string {
 // 重放发起的错误词汇(server 据此映射 HTTP 状态)。
 var (
 	// ErrReplayInFlight 该声明已有重放在途(同声明同时至多一轮)。
-	ErrReplayInFlight = errors.New("swarm: 该声明重放校验进行中,等本轮结束再发起")
+	ErrReplayInFlight = errors.New("该判断重放校验进行中,等本轮结束再发起")
 	// ErrReplayNoEvidence 声明无绑定流量证据(重放对象是绑定证据)。
-	ErrReplayNoEvidence = errors.New("swarm: 该声明未绑定流量证据,无可重放对象(先在流量页绑定)")
+	ErrReplayNoEvidence = errors.New("该判断未绑定流量证据,无可重放对象(先在流量页绑定)")
 	// ErrReplayUnavailable 重放依赖未装配(镜)。
 	ErrReplayUnavailable = errors.New("swarm: 重放依赖未装配(镜缺失,面板激活主用模型后自动装配)")
 )
@@ -95,7 +95,7 @@ func (e *Executor) ReplayRunning(taskID, claimID string) bool {
 func (e *Executor) BeginReplay(ctx context.Context, taskID, claimID string) (*ReplayRun, error) {
 	claim, err := e.Store.Node(ctx, taskID, claimID)
 	if err != nil {
-		return nil, fmt.Errorf("swarm: 重放声明 %s: %w", claimID, err)
+		return nil, fmt.Errorf("swarm: 重放判断 %s: %w", claimID, err)
 	}
 	if claim.Type != rings.NodeTestClaim {
 		return nil, fmt.Errorf("swarm: 节点 %s 是 %s 不是 testclaim", claimID, claim.Type)
@@ -257,7 +257,7 @@ func (e *Executor) DriveReplay(ctx context.Context, run *ReplayRun) error {
 	if _, err := e.Store.Append(ledgerCtx, run.taskID, rings.Event{
 		Kind: rings.EventTestClaimRecord, Actor: "swarm:" + run.unitID, Payload: rec,
 	}); err != nil {
-		return fmt.Errorf("swarm: 重放结论入账: %w", err)
+		return fmt.Errorf("swarm: 重放结论写入: %w", err)
 	}
 	return nil
 }

@@ -5,8 +5,15 @@ import { XIcon } from "lucide-react";
 import * as React from "react";
 
 import { cn } from "@/lib/utils";
+import { FloatingLayer, useFloatingLayer, floatingShadow } from "@/components/ui/floating-layer";
 
-const Dialog = DialogPrimitive.Root;
+function Dialog({ nested = false, children, ...props }) {
+  return (
+    <FloatingLayer nested={nested}>
+      <DialogPrimitive.Root {...props}>{children}</DialogPrimitive.Root>
+    </FloatingLayer>
+  );
+}
 const DialogTrigger = DialogPrimitive.Trigger;
 const DialogPortal = DialogPrimitive.Portal;
 const DialogClose = DialogPrimitive.Close;
@@ -24,24 +31,30 @@ function DialogOverlay({ className, ...props }) {
   );
 }
 
-function DialogContent({ className, children, ...props }) {
+function DialogContent({ className, children, hideClose, ...props }) {
+  const depth = useFloatingLayer();
   return (
     <DialogPortal>
       <DialogOverlay />
       <DialogPrimitive.Content
         data-slot="dialog-content"
+        data-layer-depth={depth}
       className={cn(
         // 8.9 #3:浮层柔和大投影 + 表面色阶分层;250ms 平滑(无弹跳)
-        "fixed top-1/2 left-1/2 z-50 grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl border border-border/60 bg-popover p-6 shadow-float duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
+        // P4-31 ⑦模态弹窗:圆角 16、内边距 24、行距 16、弱描边 55%
+        "fixed top-1/2 left-1/2 z-50 grid w-[calc(100vw-32px)] max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 rounded-2xl border border-border/55 bg-popover p-6 duration-250 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
+        floatingShadow(depth),
         className
       )}
         {...props}
       >
         {children}
-        <DialogPrimitive.Close className="absolute top-4 right-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none disabled:pointer-events-none cursor-pointer">
-          <XIcon />
-          <span className="sr-only">关闭</span>
-        </DialogPrimitive.Close>
+        {!hideClose && (
+          <DialogPrimitive.Close className="absolute top-4 right-4 flex size-8 items-center justify-center rounded-md opacity-70 transition-colors hover:bg-hover-lift hover:opacity-100 focus:outline-none disabled:pointer-events-none cursor-pointer">
+            <XIcon />
+            <span className="sr-only">关闭</span>
+          </DialogPrimitive.Close>
+        )}
       </DialogPrimitive.Content>
     </DialogPortal>
   );
@@ -68,10 +81,11 @@ function DialogFooter({ className, ...props }) {
 }
 
 function DialogTitle({ className, ...props }) {
+  const depth = useFloatingLayer();
   return (
     <DialogPrimitive.Title
       data-slot="dialog-title"
-      className={cn("text-lg leading-none font-semibold", className)}
+      className={cn(depth > 1 ? "t-float-nested" : "t-float", "pr-8", className)}
       {...props}
     />
   );

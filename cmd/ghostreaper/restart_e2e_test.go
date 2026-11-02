@@ -118,7 +118,7 @@ func (m *mockLLM) handle(w http.ResponseWriter, r *http.Request) {
 			text = fmt.Sprintf(`{"new_intents":[{"intent":"%s 对靶标域名做一次确认观察","action_level":"只读探测","covers":["%s"],"expected_observation":"域名解析可达"}]}`,
 				intentMarker, asset)
 		}
-	} else if strings.Contains(req.LastUser, "重启收养 · 续跑") {
+	} else if strings.Contains(req.LastUser, "重启接管 · 续跑") {
 		text = "步骤完成:确认观察已写回,本步骤意图达成。"
 	} else if !req.HasToolMsg {
 		// 虫群首回合:提交候选事实(带资产锚点,收割可转正)。
@@ -339,9 +339,12 @@ func apiJSON(t *testing.T, method, addr, path string, body any) (int, []byte) {
 // createTaskWithGoal 建任务(带域名资产种子 + fact_confirmed 目标)。
 func createTaskWithGoal(t *testing.T, addr, title string, timeoutSeconds int) string {
 	t.Helper()
+	// P4-16:建任务必带目标——建单带的种子目标随建即经面板人工标记
+	// 达成,任务完成终态仍由后面的谓词目标驱动。
 	code, b := apiJSON(t, "POST", addr, "/api/tasks", map[string]any{
 		"title":           title,
 		"timeout_seconds": timeoutSeconds,
+		"goals":           []string{"种子目标"},
 		"assets":          []map[string]any{{"class": "domain", "title": "mock.local"}},
 	})
 	if code != 200 {
@@ -373,6 +376,21 @@ func createTaskWithGoal(t *testing.T, addr, title string, timeoutSeconds int) st
 	})
 	if code != 200 {
 		t.Fatalf("建目标失败 %d: %s", code, b)
+	}
+	// 谓词目标先立,种子目标再人工标记达成(完成终态仍由谓词目标驱动)。
+	_, gb := apiJSON(t, "GET", addr, "/api/tasks/"+created.ID+"/goals", nil)
+	var goalList []struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+	}
+	_ = json.Unmarshal(gb, &goalList)
+	for _, g := range goalList {
+		if g.Title == "种子目标" {
+			if code, b = apiJSON(t, "POST", addr, "/api/tasks/"+created.ID+"/goals/"+g.ID+"/achieve",
+				map[string]any{"reason": "建单种子目标随建即收"}); code != 200 {
+				t.Fatalf("标记种子目标达成失败 %d: %s", code, b)
+			}
+		}
 	}
 	return created.ID
 }
@@ -473,7 +491,7 @@ func TestRestartAdoptionE2E(t *testing.T) {
 		if strings.Contains(r.RawBody, factMarker) {
 			sawHistory = true
 		}
-		if strings.Contains(r.LastUser, "重启收养 · 续跑") {
+		if strings.Contains(r.LastUser, "重启接管 · 续跑") {
 			sawResumeInput = true
 			if strings.Contains(r.LastUser, "【任务包 · 七要素】") {
 				sawPackReinjected = true
@@ -556,7 +574,7 @@ func assertAdoptionLedger(t *testing.T, dbPath, tasksDir string, ids ...string) 
 		t.Fatalf("读 t1 转录: %v", err)
 	}
 	text := string(tr)
-	for _, marker := range []string{"【任务包 · 七要素】", factMarker, "重启收养 · 续跑", "步骤完成"} {
+	for _, marker := range []string{"【任务包 · 七要素】", factMarker, "重启接管 · 续跑", "步骤完成"} {
 		if !strings.Contains(text, marker) {
 			t.Fatalf("t1 转录续写缺 %q(连续性破坏)", marker)
 		}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // applyEvent 将单个事件应用到投影(nodes/edges)。事件插入与投影更新
@@ -140,9 +141,48 @@ func applyEvent(tx *sql.Tx, taskID string, rev int64, kind EventKind, payload []
 			return fmt.Errorf("rings: 解码 session.meta 负载: %w", err)
 		}
 		return validateSessionMeta(p)
+	case EventClosureRecord:
+		var p ClosureRecord
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return fmt.Errorf("rings: 解码 closure.record 负载: %w", err)
+		}
+		return validateClosureRecord(p)
 	default:
 		return fmt.Errorf("%w: %s", ErrUnknownKind, string(kind))
 	}
+}
+
+// validateClosureRecord 校验收口信号记录(P4-18;审核迭代 1 扩 config)。
+// 不进 nodes/edges 投影(审计流,同 overmind.record)。结构性强制:类型
+// 词汇受限;prompt 是机器判定快照,轮数与双阈值必为正、锚点时刻必为可
+// 解析时刻——快照字段缺失的提醒无从对账;config 是任务级配置快照,开关
+// 必带、单项值非负(0 = 该项用全局默认,范围上界在 server 写入口)。
+func validateClosureRecord(p ClosureRecord) error {
+	if !closureRecordTypes[p.Type] {
+		return fmt.Errorf("%w: %s", ErrUnknownClosureRecType, p.Type)
+	}
+	if p.Type == ClosureRecConfig {
+		if p.Enabled == nil {
+			return fmt.Errorf("%w: config 缺开关", ErrInvalidClosureRecord)
+		}
+		if p.Rounds < 0 || p.Minutes < 0 {
+			return fmt.Errorf("%w: config 轮数/间隔不能为负", ErrInvalidClosureRecord)
+		}
+		return nil
+	}
+	if p.Type != ClosureRecPrompt {
+		return nil // continue/end/dismiss:备注可选,无快照字段
+	}
+	if p.Rounds < 1 || p.RoundsThreshold < 1 || p.MinutesThreshold < 1 {
+		return fmt.Errorf("%w: prompt 快照缺轮数或阈值", ErrInvalidClosureRecord)
+	}
+	if _, err := time.Parse(time.RFC3339, p.AnchorAt); err != nil {
+		return fmt.Errorf("%w: prompt 锚点时刻不可解析: %w", ErrInvalidClosureRecord, err)
+	}
+	if !closureAnchorKinds[p.AnchorKind] {
+		return fmt.Errorf("%w: prompt 锚点种类 %q 不在词表内", ErrInvalidClosureRecord, p.AnchorKind)
+	}
+	return nil
 }
 
 // sessionIDRe 会话锚白名单(P3-13b ②):字母数字 / 下划线 / 连字符 /
@@ -223,7 +263,7 @@ func validateShepherdRecord(p ShepherdRecord) error {
 			return fmt.Errorf("%w: %s", ErrUnknownShepherdAdviceState, p.State)
 		}
 		if strings.TrimSpace(p.Reason) == "" {
-			return fmt.Errorf("%w: 裁决须携带理由", ErrShepherdRecMissingField)
+			return fmt.Errorf("%w: 判定须携带理由", ErrShepherdRecMissingField)
 		}
 	case ShepherdRecSystemNote:
 		if strings.TrimSpace(p.Text) == "" || p.MessageID == "" {
@@ -246,7 +286,7 @@ func validateSteerRecord(p SteerRecord) error {
 		return fmt.Errorf("%w: %s", ErrUnknownSteerState, p.State)
 	}
 	if p.SteerID == "" || p.StepID == "" {
-		return fmt.Errorf("%w: 舵杆记录缺 steer_id/step_id", ErrInvalidSteerRecord)
+		return fmt.Errorf("%w: 纠偏记录缺 steer_id/step_id", ErrInvalidSteerRecord)
 	}
 	// 纠偏消息必填限于携带完整指令的记录(queued/delivered/stale 随原
 	// 记录回写);adopted/rejected 是回执状态迁移,消息在排队/送达记录
@@ -333,7 +373,7 @@ func validateInterjectRecord(p InterjectRecord) error {
 			return fmt.Errorf("%w: %s", ErrUnknownShepherdAdviceState, p.State)
 		}
 		if strings.TrimSpace(p.Reason) == "" {
-			return fmt.Errorf("%w: 裁决须携带理由", ErrInterjectRecMissingField)
+			return fmt.Errorf("%w: 判定须携带理由", ErrInterjectRecMissingField)
 		}
 	}
 	return nil
@@ -420,7 +460,10 @@ func validateBlackboxRecord(p BlackboxRecord) error {
 //   - repro 的严重级别只允许四级词汇(空=未定级,如实呈现不造数据);
 //   - evidence(P3-02)须锚定本任务图上的 TestClaim,且每个交换必须是
 //     本任务账本内已有的 http/https 镜留痕(blob 引用非空——隧道留痕
-//     无原文可回放,绑定了也不构成可验证证据,入口即拒)。
+//     无原文可回放,绑定了也不构成可验证证据,入口即拒);
+//   - report_review(P4-30)须锚定本任务图上的 TestClaim 且复核理由
+//     必填(标记必有可审计的"为何不纳入报告");账本只追加标记记录,
+//     判断节点与历史记录不动(不涂改)。
 func validateTestClaimRecord(tx *sql.Tx, taskID string, p TestClaimRecord) error {
 	if !testClaimRecordTypes[p.Type] {
 		return fmt.Errorf("%w: %s", ErrUnknownTestClaimRecType, p.Type)
@@ -493,6 +536,21 @@ func validateTestClaimRecord(tx *sql.Tx, taskID string, p TestClaimRecord) error
 		return nil
 	case TestClaimRecReplay:
 		return validateReplayRecord(tx, taskID, p)
+	case TestClaimRecReportReview:
+		// 存量复核标记(P4-30 ③):复核理由必填;锚点必须是本任务图上
+		// 的 TestClaim(标记的是判断,锚错即拒)。只追加标记记录,判断
+		// 节点与历史不动——账本不涂改,读取侧按最新标记过滤报告。
+		if strings.TrimSpace(p.Reason) == "" {
+			return fmt.Errorf("%w: 复核理由为空", ErrReportReviewInvalid)
+		}
+		nt, err := nodeTypeOf(tx, taskID, p.ClaimID)
+		if err != nil {
+			return fmt.Errorf("%w: 判断 %s: %w", ErrReportReviewInvalid, p.ClaimID, err)
+		}
+		if nt != NodeTestClaim {
+			return fmt.Errorf("%w: 节点 %s 是 %s 不是 testclaim", ErrReportReviewInvalid, p.ClaimID, nt)
+		}
+		return nil
 	default: // repro
 		if p.Severity != "" && !impactLevels[p.Severity] {
 			return fmt.Errorf("%w: %s", ErrUnknownImpactLevel, p.Severity)
@@ -518,7 +576,7 @@ func validateReplayRecord(tx *sql.Tx, taskID string, p TestClaimRecord) error {
 	}
 	nt, err := nodeTypeOf(tx, taskID, p.ClaimID)
 	if err != nil {
-		return fmt.Errorf("%w: 声明 %s: %w", ErrReplayRecordInvalid, p.ClaimID, err)
+		return fmt.Errorf("%w: 判断 %s: %w", ErrReplayRecordInvalid, p.ClaimID, err)
 	}
 	if nt != NodeTestClaim {
 		return fmt.Errorf("%w: 节点 %s 是 %s 不是 testclaim", ErrReplayRecordInvalid, p.ClaimID, nt)
@@ -561,7 +619,7 @@ func validateReplayRecord(tx *sql.Tx, taskID string, p TestClaimRecord) error {
 		}
 		seen[r.ExchangeID] = true
 		if !bound[r.ExchangeID] {
-			return fmt.Errorf("%w: 交换 %s 不在声明 %s 的绑定证据内(重放只许绑定证据)", ErrReplayRecordInvalid, r.ExchangeID, p.ClaimID)
+			return fmt.Errorf("%w: 交换 %s 不在判断 %s 的绑定证据内(重放只许绑定证据)", ErrReplayRecordInvalid, r.ExchangeID, p.ClaimID)
 		}
 	}
 	return nil
@@ -575,7 +633,7 @@ func validateReplayRecord(tx *sql.Tx, taskID string, p TestClaimRecord) error {
 func validateEvidenceBinding(tx *sql.Tx, taskID string, p TestClaimRecord) error {
 	nt, err := nodeTypeOf(tx, taskID, p.ClaimID)
 	if err != nil {
-		return fmt.Errorf("%w: 声明 %s: %w", ErrEvidenceBindingInvalid, p.ClaimID, err)
+		return fmt.Errorf("%w: 判断 %s: %w", ErrEvidenceBindingInvalid, p.ClaimID, err)
 	}
 	if nt != NodeTestClaim {
 		return fmt.Errorf("%w: 节点 %s 是 %s 不是 testclaim", ErrEvidenceBindingInvalid, p.ClaimID, nt)
@@ -904,6 +962,38 @@ func applyNodeAdded(tx *sql.Tx, taskID string, rev int64, p NodeAdded) error {
 }
 
 func applyNodeStateChanged(tx *sql.Tx, taskID string, rev int64, p NodeStateChanged) error {
+	// P4-27 ⑥⑦:blocked 归因的机器标记(Note 恰为 model_fault/
+	// determinant)随状态迁移合并进节点 detail(blocked_class 键),
+	// 供受阻派生按归因过滤(确定性拒绝不计故障)。其余 Note(人工
+	// 标记的迁移依据)照旧只留事件流,不进投影(P3-14b ④ 惯例)。
+	if p.Note == "model_fault" || p.Note == "determinant" || p.Status == "cancelled" {
+		var detail string
+		if err := tx.QueryRow(
+			`SELECT detail FROM nodes WHERE task_id = ? AND node_id = ?`, taskID, p.NodeID,
+		).Scan(&detail); err != nil {
+			return fmt.Errorf("%w: task %s node %s", ErrNodeNotFound, taskID, p.NodeID)
+		}
+		m := map[string]any{}
+		if json.Unmarshal([]byte(detail), &m) != nil {
+			m = map[string]any{} // detail 损坏时重建(状态迁移不因旧值失败)
+		}
+		if p.Status == "cancelled" {
+			m["cancellation_reason"] = p.Note
+		} else {
+			m["blocked_class"] = p.Note
+		}
+		raw, err := marshalDetail(m)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(
+			`UPDATE nodes SET status = ?, detail = ?, updated_rev = ? WHERE task_id = ? AND node_id = ?`,
+			p.Status, raw, rev, taskID, p.NodeID,
+		); err != nil {
+			return fmt.Errorf("rings: 投影更新节点 %s 状态: %w", p.NodeID, err)
+		}
+		return nil
+	}
 	res, err := tx.Exec(
 		`UPDATE nodes SET status = ?, updated_rev = ? WHERE task_id = ? AND node_id = ?`,
 		p.Status, rev, taskID, p.NodeID,

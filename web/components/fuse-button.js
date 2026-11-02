@@ -20,21 +20,21 @@ import { toast } from "sonner";
 // 任务 ctx(次序由后端 Manager 保证),账本可审计"谁·何时·哪个任务"。
 export function FuseButton({ taskID, taskTitle, onFused }) {
   const [open, setOpen] = React.useState(false);
-  const [reason, setReason] = React.useState("面板熔断");
+  const [reason, setReason] = React.useState("面板终止");
   const [busy, setBusy] = React.useState(false);
 
   const fuse = async () => {
     setBusy(true);
     const { ok, body } = await postJSON(`/api/tasks/${taskID}/stop`, {
-      reason: reason.trim() || "面板熔断",
+      reason: reason.trim() || "面板终止",
     });
     setBusy(false);
     if (!ok) {
-      toast.error(`熔断失败:${body.error || "原因未说明"}`);
+      toast.error(`终止失败:${body.error || "原因未说明"}`);
       return;
     }
     setOpen(false);
-    toast.success(`任务 ${taskTitle || taskID} 已熔断(账本可审计)`);
+    toast.success(`任务 ${taskTitle || taskID} 已终止(账本可审计)`);
     if (onFused) onFused();
   };
 
@@ -43,22 +43,22 @@ export function FuseButton({ taskID, taskTitle, onFused }) {
       <Button
         variant="destructive"
         size="sm"
-        title="熔断任务,不可恢复;原因入账本"
+        title="终止任务,不可恢复;原因记录在账本"
         onClick={() => setOpen(true)}
       >
-        熔断
+        终止
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>熔断任务</DialogTitle>
+            <DialogTitle>终止任务</DialogTitle>
             <DialogDescription>
-              熔断即终止任务,不可恢复;谁 · 何时 · 为何全部入账本。
-              运行中的虫群单位一并熔断。
+              终止后任务不可恢复;谁 · 何时 · 为何全部记录在账本。
+              运行中的虫群单位一并终止。
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">
-            <Label htmlFor="fuse-reason">熔断理由(入账本)</Label>
+            <Label htmlFor="fuse-reason">终止理由(记录在账本)</Label>
             <Input
               id="fuse-reason"
               value={reason}
@@ -70,7 +70,7 @@ export function FuseButton({ taskID, taskTitle, onFused }) {
               取消
             </Button>
             <Button variant="destructive" onClick={fuse} disabled={busy}>
-              确认熔断
+              确认终止
             </Button>
           </DialogFooter>
         </DialogContent>

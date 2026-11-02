@@ -1,0 +1,297 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20261024T153513638Z-62296-e70137bcc57f",
+  "runId": "20261024T153513638Z-62296-e70137bcc57f",
+  "runStatus": "inconclusive",
+  "coverage": {
+    "status": "partial",
+    "reasons": [
+      {
+        "code": "changed_file_unreadable",
+        "stage": "candidate-select",
+        "target": "web/lib/task-status.js",
+        "detail": "observed changed file no longer exists or cannot be read",
+        "affectsCompletion": true
+      },
+      {
+        "code": "changed_file_unreadable",
+        "stage": "candidate-select",
+        "target": "internal/failover/p427_live_test.go",
+        "detail": "observed changed file no longer exists or cannot be read",
+        "affectsCompletion": true
+      },
+      {
+        "code": "changed_file_unreadable",
+        "stage": "candidate-select",
+        "target": "internal/overmind/p427_live_test.go",
+        "detail": "observed changed file no longer exists or cannot be read",
+        "affectsCompletion": true
+      },
+      {
+        "code": "candidate_limit_exceeded",
+        "stage": "candidate-select",
+        "target": "internal/overmind/machinegate.go",
+        "detail": "14 changed reviewable file(s) were not scanned because the limit is 20",
+        "affectsCompletion": true
+      },
+      {
+        "code": "baseline_partial",
+        "stage": "baseline",
+        "target": ".",
+        "detail": "baseline capture had enumeration or snapshot errors",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "candidate-select",
+        "target": "web/lib/task-status.js",
+        "detail": "changed_file_unreadable: observed changed file no longer exists or cannot be read",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "candidate-select",
+        "target": "internal/failover/p427_live_test.go",
+        "detail": "changed_file_unreadable: observed changed file no longer exists or cannot be read",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "candidate-select",
+        "target": "internal/overmind/p427_live_test.go",
+        "detail": "changed_file_unreadable: observed changed file no longer exists or cannot be read",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "candidate-select",
+        "target": "internal/overmind/machinegate.go",
+        "detail": "candidate_limit_exceeded: 14 changed reviewable file(s) were not scanned because the limit is 20",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline",
+        "target": ".",
+        "detail": "baseline_partial: baseline capture had enumeration or snapshot errors",
+        "affectsCompletion": true
+      }
+    ]
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "a83b50a6d377c9ef5644abcb681962c62f6c2133",
+  "diffHash": "9a3c22430d925240837adad896f13fd9dc4c0975e11836da8a46d101eeca9747",
+  "rulesVersion": "unavailable",
+  "sessionHash": "3a298171095e9c22c42b0d88423e9a5af6d73d62be310504f32e73ebd9e00f79",
+  "reportRef": ".mimosa/reports/task-review-session_e61e7a5aebb898a6390106ab894af43a-20261024T153513638Z-62296-e70137bcc57f.json",
+  "events": [
+    {
+      "eventId": "hook-bd9b6f878d5b174c35fbdfd1416ecaf0",
+      "findingId": "mimosa-2242eaf633c9eba37343655a",
+      "type": "finding_blocked",
+      "at": "2026-10-24T14:09:17.360Z",
+      "identity": {
+        "projectRelativeFile": "internal/swarm/modelretry_test.go",
+        "ruleId": "security",
+        "codeEvidenceHash": "8b8744f1adfa033d4c7ecd682e25341338a3cb934feb19c450ae8ed554da6bb8",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 74,
+      "endLine": 74,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "8b8744f1adfa033d4c7ecd682e25341338a3cb934feb19c450ae8ed554da6bb8"
+      },
+      "sequence": 0
+    },
+    {
+      "eventId": "hook-cf024ba8f2dc21ce58b44237dc47f074",
+      "findingId": "mimosa-2242eaf633c9eba37343655a",
+      "type": "static_fix_verified",
+      "at": "2026-10-24T14:10:10.331Z",
+      "identity": {
+        "projectRelativeFile": "internal/swarm/modelretry_test.go",
+        "ruleId": "security",
+        "codeEvidenceHash": "8b8744f1adfa033d4c7ecd682e25341338a3cb934feb19c450ae8ed554da6bb8",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 74,
+      "endLine": 74,
+      "reasonCode": "static_rescan_passed",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "observed",
+        "producer": "deterministic",
+        "evidenceHash": "8b8744f1adfa033d4c7ecd682e25341338a3cb934feb19c450ae8ed554da6bb8"
+      },
+      "sequence": 1
+    },
+    {
+      "eventId": "hook-165126ee0938af81b5ccf7bb7e62b8a9",
+      "findingId": "mimosa-f5af9b3f57a05bba67c73cba",
+      "type": "finding_blocked",
+      "at": "2026-10-24T14:25:18.265Z",
+      "identity": {
+        "projectRelativeFile": "internal/server/server_models_test.go",
+        "ruleId": "security",
+        "codeEvidenceHash": "9334e67441b36bdb9175400bc02d98407059831aa6247340d859c0415b4e21b8",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 247,
+      "endLine": 247,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "9334e67441b36bdb9175400bc02d98407059831aa6247340d859c0415b4e21b8"
+      },
+      "sequence": 2
+    },
+    {
+      "eventId": "hook-7f74432b5df744ed64026de743aca538",
+      "findingId": "mimosa-f5af9b3f57a05bba67c73cba",
+      "type": "static_fix_verified",
+      "at": "2026-10-24T14:29:47.140Z",
+      "identity": {
+        "projectRelativeFile": "internal/server/server_models_test.go",
+        "ruleId": "security",
+        "codeEvidenceHash": "9334e67441b36bdb9175400bc02d98407059831aa6247340d859c0415b4e21b8",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 247,
+      "endLine": 247,
+      "reasonCode": "static_rescan_passed",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "observed",
+        "producer": "deterministic",
+        "evidenceHash": "9334e67441b36bdb9175400bc02d98407059831aa6247340d859c0415b4e21b8"
+      },
+      "sequence": 3
+    }
+  ],
+  "observedFindingIds": [
+    "mimosa-72915dc0bc5fd0cafcd4c90e",
+    "mimosa-1d075b884c3302197fe2d171",
+    "mimosa-e921b39214f64329e18dfad5",
+    "mimosa-968ab2877632077e3c307159"
+  ],
+  "verifiedFiles": [
+    {
+      "file": "internal/swarm/modelretry.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/swarm/executor.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/rings/project.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/overmind/loop.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/failover/chain.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/server/server_models.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/server/server.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/report/report.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "web/lib/api.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "web/views/tasks-page.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "web/views/workbench-page.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "web/components/app-shell.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "web/views/agent-page.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "web/views/llm-page.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/rings/event.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/swarm/tools.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/swarm/harmnote.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "web/views/roe-page.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/swarm/promptspec.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/overmind/proofread.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-10-24T15:35:13.957Z"
+}

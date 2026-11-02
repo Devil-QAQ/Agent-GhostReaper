@@ -17,8 +17,10 @@ import { fetchJSON, postJSON } from "@/lib/api";
 
 // 冬眠/唤醒按钮(P2-08,第七章「任务冬眠」):任务行控制组。冬眠需
 // 确认——对话框打开时拉取待裁决笔数如实提示(冻结为只读,唤醒后恢复
-// 可裁决);唤醒无确认(唯一恢复入口,可再次冬眠)。
-export function HibernateButton({ taskID, taskTitle, hibernated, onChanged }) {
+// 可裁决);唤醒无确认。P4-25 审核迭代 2:「冬眠中」盖三种底层态
+//(真冬眠/面板暂停/断点存档),wakeable 时统一显示「唤醒」,端点内
+// 按实际状态路由恢复通道(冬眠抵扣唤醒 / 暂停与断点原地拉起)。
+export function HibernateButton({ taskID, taskTitle, wakeable, onChanged }) {
   const [open, setOpen] = React.useState(false);
   const [pending, setPending] = React.useState(null); // 待裁决笔数(对话框开时拉取)
   const [busy, setBusy] = React.useState(false);
@@ -50,7 +52,7 @@ export function HibernateButton({ taskID, taskTitle, hibernated, onChanged }) {
     }
     toast.success(
       `任务 ${taskTitle || taskID} 已冬眠${
-        body?.pending_approvals ? `;待裁决审批 ${body.pending_approvals} 笔已冻结` : ""
+        body?.pending_approvals ? `;待审批 ${body.pending_approvals} 笔已冻结` : ""
       }`
     );
     if (onChanged) onChanged();
@@ -68,7 +70,7 @@ export function HibernateButton({ taskID, taskTitle, hibernated, onChanged }) {
     if (onChanged) onChanged();
   };
 
-  if (hibernated) {
+  if (wakeable) {
     return (
       <Button
         variant="outline"
@@ -99,15 +101,15 @@ export function HibernateButton({ taskID, taskTitle, hibernated, onChanged }) {
             <DialogTitle>冬眠任务</DialogTitle>
             <DialogDescription>
               冬眠:全部暂停,计时停走;唤醒后同一单位同一会话原地继续。
-              冬眠可唤醒,熔断不可逆。
+              冬眠可唤醒,终止不可逆。
             </DialogDescription>
           </DialogHeader>
           <div className="text-sm text-muted-foreground">
             {pending === null
-              ? "正在读取待裁决审批…"
+              ? "正在读取待审批…"
               : pending > 0
-                ? `当前待裁决审批 ${pending} 笔:冬眠期间冻结为只读,唤醒后恢复可裁决。`
-                : "当前无待裁决审批。"}
+                ? `当前待审批 ${pending} 笔:冬眠期间冻结为只读,唤醒后恢复可审批。`
+                : "当前无待审批。"}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)}>

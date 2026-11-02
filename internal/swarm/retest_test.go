@@ -315,10 +315,10 @@ func TestBeginRetestGuardsAndRounds(t *testing.T) {
 	if run1.Round() != 1 || run1.SID() != RetestSID(claim, 1) {
 		t.Fatalf("第 1 轮锚不符: %d %s", run1.Round(), run1.SID())
 	}
-	if !strings.Contains(run1.env.retest.firstMessage, "存在性声明: 声明一") ||
+	if !strings.Contains(run1.env.retest.firstMessage, "存在性判断: 声明一") ||
 		!strings.Contains(run1.env.retest.firstMessage, "复现步骤") ||
 		!strings.Contains(run1.env.retest.firstMessage, "请求用户接口") {
-		t.Fatalf("自动首条消息缺声明/复现步骤上下文:\n%s", run1.env.retest.firstMessage)
+		t.Fatalf("自动首条消息缺判断/复现步骤上下文:\n%s", run1.env.retest.firstMessage)
 	}
 	if _, err := ex.BeginRetest(ctx, task, claim); !errors.Is(err, ErrRetestInFlight) {
 		t.Fatalf("并发发起应 ErrRetestInFlight,得到 %v", err)
@@ -394,7 +394,7 @@ func TestRunRetestScriptedE2E(t *testing.T) {
 				ID: "c1", Name: "bash",
 				Args: fmt.Sprintf(`{"command":%q}`, "curl -s "+target.MainURL()+"/robots.txt"),
 			}}, Finish: "tool_calls"}
-		case !seenToolResult(rr, "submit_retest_result", "已入账"):
+		case !seenToolResult(rr, "submit_retest_result", "已记录"):
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
 				ID: "c2", Name: "submit_retest_result",
 				Args: `{"verdict":"fixed","evidence":"重放 curl 返回 403,原文:Forbidden","note":"重放一次完成"}`,

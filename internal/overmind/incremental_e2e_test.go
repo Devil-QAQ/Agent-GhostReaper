@@ -38,7 +38,7 @@ func TestLandingWakesIncrementalRoundE2E(t *testing.T) {
 	packURLRe := regexp.MustCompile(`-\s+web1 \[service\] (http://\S+)`)
 
 	held := make(chan struct{})     // 慢线:全程挂起,测试末放行
-	heldFast := make(chan struct{}) // 快线:探测后的提交调用挂起,派发后轮过后放行
+	heldFast := make(chan struct{}) // 快线:探测后的提交调用挂起,确认无自我规划后放行
 	var sawIncrement atomic.Bool
 	// 任务包意图节锚点:前序尝试节含同目标其他步骤(快线的包里也有
 	// 慢线字样),判别单位身份须锚定"本步骤意图"节。
@@ -61,7 +61,6 @@ func TestLandingWakesIncrementalRoundE2E(t *testing.T) {
 				strings.Contains(rr.LastUser, "[running]") &&
 				!strings.Contains(rr.LastUser, "增量新方向"):
 				sawIncrement.Store(true)
-				sawIncrement.Store(true)
 				return scriptedReply{Text: `{"assessment":{"q_unlock":"快线单位已落地并确认首页指纹,据此解锁指纹驱动的接口探测;慢线在途,不阻塞对新结果的响应","note":"增量研判:基于快线产出新方向"},"new_intents":[` +
 					`{"intent":"基于指纹的增量新方向:探测版本接口","expected_observation":"版本接口响应","action_level":"只读探测","covers":["web1"]}]}`, Finish: "stop"}
 			default:
@@ -74,7 +73,7 @@ func TestLandingWakesIncrementalRoundE2E(t *testing.T) {
 		}
 		switch {
 		case strings.Contains(rr.LastUser, intentSection+"慢线"):
-			if !seenToolResult(rr, "submit_candidate_fact", "已入候选事实") {
+			if !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实") {
 				return scriptedReply{ToolCalls: []scriptedToolCall{{
 					ID: "m1", Name: "submit_candidate_fact",
 					Args: `{"statement":"目录结构已枚举","evidence":"http_probe 逐路径实测","asset_id":"web1"}`,
@@ -82,7 +81,7 @@ func TestLandingWakesIncrementalRoundE2E(t *testing.T) {
 			}
 			return scriptedReply{Text: "慢线完成:目录已枚举。", Finish: "stop"}
 		case strings.Contains(rr.LastUser, intentSection+"基于指纹的增量新方向"):
-			if !seenToolResult(rr, "submit_candidate_fact", "已入候选事实") {
+			if !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实") {
 				return scriptedReply{ToolCalls: []scriptedToolCall{{
 					ID: "i1", Name: "submit_candidate_fact",
 					Args: `{"statement":"版本接口已确认","evidence":"http_probe 实测版本端点","asset_id":"web1"}`,
@@ -96,7 +95,7 @@ func TestLandingWakesIncrementalRoundE2E(t *testing.T) {
 					Args: fmt.Sprintf(`{"url":%q}`, base+"/"),
 				}}, Finish: "tool_calls"}
 			}
-			if !seenToolResult(rr, "submit_candidate_fact", "已入候选事实") {
+			if !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实") {
 				return scriptedReply{ToolCalls: []scriptedToolCall{{
 					ID: "f2", Name: "submit_candidate_fact",
 					Args: `{"statement":"首页指纹已确认:服务在线","evidence":"http_probe 实测响应","asset_id":"web1"}`,
@@ -113,9 +112,9 @@ func TestLandingWakesIncrementalRoundE2E(t *testing.T) {
 			return held
 		case strings.Contains(rr.LastUser, intentSection+"快线") &&
 			seenToolResult(rr, "http_probe", "status="):
-			// 快线的探测后调用(提交指纹/收口):挂住直至派发后轮已过,
-			// 保证落地必然发生在第二轮研判之后——增量只能由落地唤醒
-			// 撞出,不会被派发后轮抢先撞见(确定性)。
+			// 快线的探测后调用(提交指纹/收口):挂住直至无自我规划已确认,
+			// 保证双单位挂起时无派发后自我规划——增量只能由落地唤醒
+			// 撞出(确定性)。
 			return heldFast
 		}
 		return nil
@@ -144,10 +143,14 @@ func TestLandingWakesIncrementalRoundE2E(t *testing.T) {
 	mustSeedAsset(t, store, task, "web1", mainURL)
 	m.Task(task).Wake()
 
-	// ---- 轮次定序:派发轮与派发后轮都先于任何落地(双单位挂起) ----
-	waitFor(t, 60*time.Second, "派发轮+派发后轮到达(均无事实)", func() bool {
-		return len(model.decomposeRequests()) >= 2
+	// ---- P4-29:双单位挂起时只允许首轮规划，派发不触发下一轮 ----
+	waitFor(t, 60*time.Second, "首轮已派发且两单位在跑", func() bool {
+		return countNodes(t, store, task, rings.NodeStep, "running") == 2
 	})
+	time.Sleep(200 * time.Millisecond)
+	if got := len(model.decomposeRequests()); got != 1 {
+		t.Fatalf("派发后无结果不得自我规划，实际 %d 轮", got)
+	}
 	for i, rr := range model.decomposeRequests() {
 		if strings.Contains(rr.LastUser, "首页指纹已确认") {
 			t.Fatalf("落地前第 %d 轮不应看到已确认事实(定序被破坏)", i)
@@ -156,7 +159,7 @@ func TestLandingWakesIncrementalRoundE2E(t *testing.T) {
 	if s1 := mustNode(t, store, task, "s1"); s1.Status != "running" {
 		t.Fatalf("快线应挂起在执行中,实际 %s", s1.Status)
 	}
-	close(heldFast) // 放行快线:其落地只能撞出增量轮(第二轮已过)
+	close(heldFast) // 放行快线:其落地只能撞出增量轮(派发后无自我规划)
 
 	// ---- 增量轮:慢线仍挂起(从未落地)时,基于快线增量的研判已发生 ----
 	waitFor(t, 60*time.Second, "快线落地即触发增量研判轮(不等慢线)", func() bool {
@@ -175,7 +178,7 @@ func TestLandingWakesIncrementalRoundE2E(t *testing.T) {
 		t.Fatalf("慢线应仍在执行(增量轮发生在其落地前),实际 %s", s2.Status)
 	}
 	// 拆解请求直证:存在一轮既看到快线已确认事实、又看到在跑步骤的
-	// 增量研判(旧实现等批,且派发后轮已过——此轮只能是落地唤醒的)。
+	// 增量研判(旧实现等批,且无自我规划已确认——此轮只能是落地唤醒的)。
 	var incrementalReq bool
 	for _, rr := range model.decomposeRequests() {
 		if strings.Contains(rr.LastUser, "首页指纹已确认") && strings.Contains(rr.LastUser, "[running]") {

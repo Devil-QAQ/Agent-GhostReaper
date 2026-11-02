@@ -45,64 +45,94 @@ navigatorExt(cytoscape);
 // 小地图;节点点击走全站跳转协议(抽屉 + ?focus= 聚焦)。声明级别与
 // 组合链读发现列表(账本审计流,同源零新增采集)。
 
-// ---- 8.4 token 的 canvas 取值(Cytoscape 画布渲染不吃 CSS 变量,
-// 与 globals.css 同值;ReactFlow 侧共用保证两库同色) ----
+// ---- 8.4 token 的画布取值(P4-26 品牌换装:Cytoscape 画布渲染不吃 CSS
+// 变量,渲染时读当前主题 token——暗/亮自动生效;SSR 与取值失败的回退
+// = 暗色 token 值,与 globals.css 同源) ----
 
-const T = {
-  card: "#111827",
-  border: "#1f2937",
-  mutedFg: "#9ca3af",
-  edgeLabel: "#c3cbd8",
-  primary: "#3b82f6",
-  critical: "#ef4444",
-  high: "#f97316",
-  medium: "#eab308",
-  info: "#6b7280",
-  success: "#22c55e",
-  warning: "#eab308",
-  danger: "#ef4444",
-  running: "#3b82f6",
-  paused: "#6b7280",
+const T_DARK = {
+  background: "#060607",
+  card: "#0d0d0f",
+  foreground: "#e7e5e4",
+  mutedFg: "#9b9a94",
+  primary: "#8fae94",
+  critical: "#e5484d",
+  high: "#ce7a45",
+  medium: "#c9a96e",
+  info: "#7e7d78",
+  success: "#8fae94",
+  warning: "#c9a96e",
+  danger: "#e5484d",
+  running: "#8fae94",
+  paused: "#7e7d78",
 };
 
-const TONE_HEX = {
-  running: T.running,
-  high: T.high,
-  success: T.success,
-  critical: T.critical,
-  warning: T.warning,
-  info: T.info,
-};
+function graphPalette() {
+  if (typeof window === "undefined") return T_DARK;
+  const cs = getComputedStyle(document.body);
+  const v = (name, fb) => cs.getPropertyValue(name).trim() || fb;
+  return {
+    background: v("--background", T_DARK.background),
+    card: v("--card", T_DARK.card),
+    foreground: v("--foreground", T_DARK.foreground),
+    mutedFg: v("--muted-foreground", T_DARK.mutedFg),
+    primary: v("--primary", T_DARK.primary),
+    critical: v("--severity-critical", T_DARK.critical),
+    high: v("--severity-high", T_DARK.high),
+    medium: v("--severity-medium", T_DARK.medium),
+    info: v("--severity-info", T_DARK.info),
+    success: v("--status-success", T_DARK.success),
+    warning: v("--status-warning", T_DARK.warning),
+    danger: v("--status-danger", T_DARK.danger),
+    running: v("--status-running", T_DARK.running),
+    paused: v("--status-paused", T_DARK.paused),
+  };
+}
 
-// 边类型 → 语义色 / 虚线(goal 与 falsify 是投影层派生边,虚线与账本
-// 边区分;verifies 虚线与 produces 同色区分)。
-const EDGE_META = {
-  goal: { color: T.running, dashed: true },
-  falsify: { color: T.danger, dashed: true },
-  produces: { color: T.success },
-  derived_from: { color: T.high },
-  about: { color: T.info },
-  covers: { color: T.medium },
-  depends_on: { color: T.running },
-  verifies: { color: T.success, dashed: true },
-  sub_of: { color: T.mutedFg, dashed: true },
-  via_fact: { color: T.success },
-  via_claim: { color: T.critical },
-  via_hyp: { color: T.warning },
-  chain: { color: T.primary },
-};
+// 卡片色调(类型色头部/小地图节点色)→ 当前主题语义色。
+function toneHex(tone) {
+  const T = graphPalette();
+  return (
+    {
+      running: T.running,
+      high: T.high,
+      success: T.success,
+      critical: T.critical,
+      warning: T.warning,
+      info: T.info,
+    }[tone] || T.info
+  );
+}
 
 // 年轮图派生边的操作者语言(经由 X = 资产网透镜按共同锚点归并的
 // 资产互联;chain = 攻击链透镜的环节序边);账本边走 EDGE_LABELS。
 const ANNULUS_EDGE_LABELS = {
   via_fact: "经由事实",
-  via_claim: "经由声明",
+  via_claim: "经由判断",
   via_hyp: "经由假设",
   chain: "环节",
 };
 
+// 边类型 → 语义色 / 虚线(goal 与 falsify 是投影层派生边,虚线与账本
+// 边区分;verifies 虚线与 produces 同色区分)。色值随当前主题。
 function edgeMeta(type) {
-  return EDGE_META[type] || { color: T.mutedFg };
+  const T = graphPalette();
+  return (
+    {
+      goal: { color: T.running, dashed: true },
+      falsify: { color: T.danger, dashed: true },
+      produces: { color: T.success },
+      derived_from: { color: T.high },
+      about: { color: T.info },
+      covers: { color: T.medium },
+      depends_on: { color: T.running },
+      verifies: { color: T.success, dashed: true },
+      sub_of: { color: T.mutedFg, dashed: true },
+      via_fact: { color: T.success },
+      via_claim: { color: T.critical },
+      via_hyp: { color: T.warning },
+      chain: { color: T.primary },
+    }[type] || { color: T.mutedFg }
+  );
 }
 
 function edgeLabel(type) {
@@ -165,7 +195,8 @@ function cardSpec(n, claimOf, focusedID, role) {
     typeName: meta.label,
     tone: meta.tone,
     shape: meta.shape,
-    status: st ? { label: st.label, variant: st.variant } : null,
+    // 状态徽标(P4-28):hint 悬停人话、live 过程态呼吸点,随全站词表。
+    status: st ? { label: st.label, variant: st.variant, hint: st.hint, live: st.live } : null,
     extras,
   };
 }
@@ -185,16 +216,16 @@ function pillHTML(label, tone) {
 function cardHTML(d) {
   const pills = (d.extras || []).map((e) => pillHTML(e.label, e.tone)).join("");
   return (
-    `<div class="gr-cy-card box-border overflow-hidden rounded-xl border bg-card shadow-xs ${d.dead ? "opacity-40 saturate-50" : ""} ${d.focused ? "border-primary ring-2 ring-primary" : "border-border"}" style="width:${CARD_W}px">` +
+    `<div class="gr-cy-card box-border overflow-hidden rounded-xl border border-border/55 bg-card shadow-xs ${d.dead ? "opacity-40 saturate-50" : ""} ${d.focused ? "border-primary ring-2 ring-primary" : "border-border"}" style="width:${CARD_W}px">` +
     `<div class="flex items-center gap-2 border-b px-2 py-1 ${HEADER_TONE[d.tone] || HEADER_TONE.info}">` +
     `<span class="size-2.5 shrink-0 border border-current ${d.shape} ${SWATCH_TONE[d.tone] || SWATCH_TONE.info}"></span>` +
     `<span class="text-[10px] font-medium tracking-wide">${esc(d.typeName)}</span>` +
-    (d.status ? `<span class="ml-auto inline-flex items-center rounded-full border px-2 py-px text-[10px] leading-4 whitespace-nowrap ${badgeVariants({ variant: d.status.variant })}">${esc(d.status.label)}</span>` : "") +
+    (d.status ? `<span class="ml-auto inline-flex items-center rounded-full border px-2 py-px text-[10px] leading-4 whitespace-nowrap${d.status.live ? " gr-live" : ""} ${badgeVariants({ variant: d.status.variant })}"${d.status.hint ? ` title="${esc(d.status.hint)}"` : ""}>${esc(d.status.label)}</span>` : "") +
     `</div>` +
     `<div class="flex flex-col gap-1 px-2 py-2">` +
-    `<div class="truncate text-[12px] leading-snug text-foreground">${esc(d.title)}</div>` +
+    `<div class="truncate text-xs leading-snug text-foreground">${esc(d.title)}</div>` +
     (pills ? `<div class="flex flex-wrap gap-1">${pills}</div>` : "") +
-    `<div class="font-mono text-[9px] leading-3 text-muted-foreground">${esc(d.id)}</div>` +
+    `<div class="num text-[10px] leading-3 text-muted-foreground">${esc(d.id)}</div>` +
     `</div></div>`
   );
 }
@@ -205,7 +236,7 @@ function AnnulusCard({ data }) {
   return (
     <div
       className={cn(
-        "gr-cy-card flex flex-col overflow-hidden rounded-xl border bg-card shadow-xs",
+        "gr-cy-card flex flex-col overflow-hidden rounded-xl border border-border/55 bg-card shadow-xs",
         s.dead && "opacity-40 saturate-50",
         s.focused ? "border-primary ring-2 ring-primary" : "border-border",
       )}
@@ -218,13 +249,20 @@ function AnnulusCard({ data }) {
         <span className={cn("size-2.5 shrink-0 border border-current", s.shape, SWATCH_TONE[s.tone] || SWATCH_TONE.info)} />
         <span className="text-[10px] font-medium tracking-wide">{s.typeName}</span>
         {s.status && (
-          <span className={cn("ml-auto inline-flex items-center rounded-full border px-2 py-px text-[10px] leading-4 whitespace-nowrap", badgeVariants({ variant: s.status.variant }))}>
+          <span
+            title={s.status.hint}
+            className={cn(
+              "ml-auto inline-flex items-center rounded-full border px-2 py-px text-[10px] leading-4 whitespace-nowrap",
+              s.status.live && "gr-live",
+              badgeVariants({ variant: s.status.variant }),
+            )}
+          >
             {s.status.label}
           </span>
         )}
       </div>
       <div className="flex flex-col gap-1 px-2 py-2">
-        <div className="truncate text-[12px] leading-snug">{s.title}</div>
+        <div className="truncate text-xs leading-snug">{s.title}</div>
         {s.extras.length > 0 && (
           <div className="flex flex-wrap gap-1">
             {s.extras.map((e, i) => (
@@ -234,7 +272,7 @@ function AnnulusCard({ data }) {
             ))}
           </div>
         )}
-        <div className="font-mono text-[9px] leading-3 text-muted-foreground">{s.id}</div>
+        <div className="num text-[10px] leading-3 text-muted-foreground">{s.id}</div>
       </div>
     </div>
   );
@@ -245,6 +283,7 @@ const RF_NODE_TYPES = { annulusCard: AnnulusCard };
 // ---- Cytoscape 透镜(发散全景 / 资产网)----
 
 function cyStyle() {
+  const T = graphPalette();
   return [
     {
       selector: "node",
@@ -267,7 +306,7 @@ function cyStyle() {
         width: 1.4,
         label: "data(label)",
         "font-size": 10,
-        color: T.edgeLabel,
+        color: T.foreground,
         "text-background-color": T.card,
         "text-background-opacity": 1,
         "text-background-padding": 4,
@@ -460,7 +499,7 @@ function CyLens({ elements, focus, onNodeClick, heightClass }) {
   };
 
   return (
-    <div className={cn("relative overflow-hidden rounded-xl border bg-card", heightClass || "h-[calc(100vh-318px)] min-h-[420px]")}>
+    <div className={cn("relative overflow-hidden rounded-xl border border-border/55 bg-card", heightClass || "h-[calc(100vh-318px)] min-h-[420px]")}>
       {/* 画布容器定位走内联样式:Cytoscape 初始化会注入
           .__________cytoscape_container{position:relative} 样式表,晚于
           Tailwind 生效会把 absolute 类顶掉、容器塌成 0 高(卡片浮层照常
@@ -475,7 +514,7 @@ function CyLens({ elements, focus, onNodeClick, heightClass }) {
           <button
             key={b.icon}
             title={b.title}
-            className="rounded-md border border-border bg-card/95 p-2 text-muted-foreground shadow-xs transition-colors duration-150 hover:bg-hover-lift hover:text-foreground cursor-pointer"
+            className="rounded-md border border-border/55 bg-card/95 p-2 text-muted-foreground shadow-xs transition-colors duration-150 hover:bg-hover-lift hover:text-foreground cursor-pointer"
             onClick={b.fn}
           >
             {React.createElement(iconOf(b.icon), { className: "size-3.5" })}
@@ -537,7 +576,7 @@ function RfLens({ rfNodes, rfEdges, focus, onNodeClick, heightClass }) {
   }, [focus, rfNodes]);
 
   return (
-    <div className={cn("overflow-hidden rounded-xl border bg-card", heightClass || "h-[calc(100vh-318px)] min-h-[420px]")}>
+    <div className={cn("overflow-hidden rounded-xl border border-border/55 bg-card", heightClass || "h-[calc(100vh-318px)] min-h-[420px]")}>
       <ReactFlow
         nodes={rfNodes}
         edges={rfEdges}
@@ -562,9 +601,9 @@ function RfLens({ rfNodes, rfEdges, focus, onNodeClick, heightClass }) {
           position="bottom-left"
           pannable
           zoomable
-          maskColor="rgba(11,14,20,0.72)"
-          nodeColor={(n) => TONE_HEX[n.data?.spec?.tone] || T.info}
-          nodeStrokeColor="#0b0e14"
+          maskColor="color-mix(in srgb, var(--background) 72%, transparent)"
+          nodeColor={(n) => toneHex(n.data?.spec?.tone)}
+          nodeStrokeColor="var(--background)"
           nodeBorderRadius={3}
           style={{ width: 168, height: 116, borderRadius: 10, border: "1px solid var(--border)", background: "var(--card)" }}
         />
@@ -616,6 +655,7 @@ function buildElements(nodes, edges, withSubOf) {
 // 血缘透镜:layoutGraph 分层(derived_from 反向取父子,同进度图),边
 // 从左向右指(parent→child);跨列边走同一套避让路由(P2-14b④)。
 function buildLineage(nodes, edges) {
+  const T = graphPalette();
   const { nodes: specs, edges: ledges } = buildElements(nodes, edges, false);
   const rawEdges = edges.filter((e) => e.type !== "sub_of");
   const pos = layoutGraph(specs, rawEdges);
@@ -643,8 +683,8 @@ function buildLineage(nodes, edges) {
       type: "grEdge",
       data: route,
       label: e.label,
-      labelColor: T.edgeLabel,
-      labelBg: "rgba(17,24,39,0.92)",
+      labelColor: T.foreground,
+      labelBg: `color-mix(in srgb, ${T.card} 92%, transparent)`,
       style: { stroke: e.color, strokeWidth: 1.3, strokeDasharray: e.dash ? "6 4" : undefined },
       markerEnd: { type: MarkerType.ArrowClosed, color: e.color, width: 15, height: 15 },
     };
@@ -660,6 +700,7 @@ const CHAIN_ASSET_ROW = 118;
 const CHAIN_BLOCK_GAP = 72;
 
 function buildChain(nodes, edges, claims, hiddenEdges, focusedID) {
+  const T = graphPalette();
   const nodeOf = new Map(nodes.map((n) => [n.id, n]));
   const assetsOf = (id) => edges.filter((e) => e.type === "about" && e.from === id).map((e) => e.to);
   const showAbout = !hiddenEdges.has("about");
@@ -815,7 +856,7 @@ function FilterChips({ nodes, edges, hiddenTypes, hiddenEdges, onToggleType, onT
           <button
             key={type}
             className={cn(
-              "flex items-center gap-2 rounded-full border border-border bg-card px-2 py-0.5 transition-opacity duration-150 cursor-pointer hover:bg-hover-lift",
+              "flex items-center gap-2 rounded-full border border-border/55 bg-card px-2 py-0.5 transition-opacity duration-150 cursor-pointer hover:bg-hover-lift",
               !on && "opacity-40 saturate-50",
             )}
             title={on ? `隐藏${meta.label}节点` : `显示${meta.label}节点`}
@@ -836,7 +877,7 @@ function FilterChips({ nodes, edges, hiddenTypes, hiddenEdges, onToggleType, onT
             <button
               key={type}
               className={cn(
-                "flex items-center gap-2 rounded-full border border-border bg-card px-2 py-0.5 transition-opacity duration-150 cursor-pointer hover:bg-hover-lift",
+                "flex items-center gap-2 rounded-full border border-border/55 bg-card px-2 py-0.5 transition-opacity duration-150 cursor-pointer hover:bg-hover-lift",
                 !on && "opacity-40 saturate-50",
               )}
               title={on ? `隐藏${edgeLabel(type)}关系` : `显示${edgeLabel(type)}关系`}
@@ -913,7 +954,7 @@ export function AnnulusPage({ currentTask, focus }) {
         <EmptyState
           icon="network"
           title="暂无节点"
-          hint={error ? `读取失败:${error}` : "账本入账后,全图在此生长"}
+          hint={error ? `读取失败:${error}` : "账本记录后,全图在此生长"}
           action={{ label: "去会话", href: `/task/${tid}/sessions` }}
         />
       </div>
@@ -1005,15 +1046,15 @@ export function AnnulusPage({ currentTask, focus }) {
         <CyLens elements={buildElements(specs, visEdges, true)} focus={focus} onNodeClick={setSheet} />
       ) : lens === "assetsnet" ? (
         assetsEl.nodes.length === 0 ? (
-          <div className="flex h-[calc(100vh-318px)] min-h-[420px] items-center justify-center rounded-xl border bg-card">
-            <EmptyState icon="server" title="暂无资产" hint="资产入账后在此互联" />
+          <div className="flex h-[calc(100vh-318px)] min-h-[420px] items-center justify-center rounded-xl border border-border/55 bg-card">
+            <EmptyState icon="server" title="暂无资产" hint="资产记录后在此互联" />
           </div>
         ) : (
           <CyLens elements={assetsEl} focus={focus} onNodeClick={setSheet} />
         )
       ) : lens === "chain" ? (
         chainData.chains === 0 ? (
-          <div className="flex h-[calc(100vh-318px)] min-h-[420px] items-center justify-center rounded-xl border bg-card">
+          <div className="flex h-[calc(100vh-318px)] min-h-[420px] items-center justify-center rounded-xl border border-border/55 bg-card">
             <EmptyState
               icon="link"
               title="暂无组合发现"

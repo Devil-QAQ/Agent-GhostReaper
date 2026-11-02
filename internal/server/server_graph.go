@@ -2,6 +2,8 @@ package server
 
 import (
 	"fmt"
+	"ghostreaper/internal/overmind"
+	"ghostreaper/internal/rings"
 	"net/http"
 )
 
@@ -56,9 +58,17 @@ func (s *Server) handleTaskGraph(w http.ResponseWriter, r *http.Request) {
 		excluded = roe.ExcludedAssetSet()
 	}
 	v := struct {
-		Nodes []graphNodeJSON `json:"nodes"`
-		Edges []graphEdgeJSON `json:"edges"`
+		Queue overmind.QueueWatermark `json:"queue"`
+		Nodes []graphNodeJSON         `json:"nodes"`
+		Edges []graphEdgeJSON         `json:"edges"`
 	}{Nodes: []graphNodeJSON{}, Edges: []graphEdgeJSON{}}
+	var steps []rings.NodeFull
+	for _, n := range g.Nodes {
+		if n.Type == rings.NodeStep {
+			steps = append(steps, rings.NodeFull{NodeView: rings.NodeView{ID: n.ID, Status: n.Status}})
+		}
+	}
+	v.Queue = overmind.QueueWatermarkOf(steps, g.Edges, overmind.QueueLimit(r.Context(), s.Store))
 	for _, n := range g.Nodes {
 		v.Nodes = append(v.Nodes, graphNodeJSON{
 			ID: n.ID, Type: string(n.Type), Title: n.Title, Status: n.Status,

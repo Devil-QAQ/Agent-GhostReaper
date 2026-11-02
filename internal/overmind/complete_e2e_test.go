@@ -90,8 +90,8 @@ func TestLoopCompletesTaskAfterClaimsSettle(t *testing.T) {
 	// 脚本模型:拆解状态感知(审计意图已派过即空);发现包 port_probe →
 	// robots/备份/版本三连 curl → 两条声明 → 候选事实 → 收口;反证包
 	// 按"存在性声明:"行分支(备份=影响面成立 / 版本=影响面不足)。
-	claimIDRe := regexp.MustCompile(`声明 (tc-[0-9a-f]+)`)
-	stmtBackupRe := regexp.MustCompile(`(?m)^\s*存在性声明: .*备份目录`)
+	claimIDRe := regexp.MustCompile(`判断 (tc-[0-9a-f]+)`)
+	stmtBackupRe := regexp.MustCompile(`(?m)^\s*存在性判断: .*备份目录`)
 	packURLRe := regexp.MustCompile(`-\s+web1 \[service\] (http://\S+)`)
 	model := newGatedScriptedModel(func(rr *recordedRequest) scriptedReply {
 		if len(rr.ToolsOffered) == 0 {
@@ -116,7 +116,7 @@ func TestLoopCompletesTaskAfterClaimsSettle(t *testing.T) {
 					return scriptedReply{ToolCalls: []scriptedToolCall{{
 						ID: "fb", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/old-backup/"}`, base),
 					}}, Finish: "tool_calls"}
-				case !seenToolResult(rr, "submit_falsify_result", "已入账"):
+				case !seenToolResult(rr, "submit_falsify_result", "已记录"):
 					return scriptedReply{ToolCalls: []scriptedToolCall{{
 						ID: "fr1", Name: "submit_falsify_result",
 						Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":true},{"id":"alt2","refuted":true},{"id":"alt3","refuted":true},{"id":"alt4","refuted":true}],"evidence":"独立重放 /old-backup/ 仍返回备份文件列举,匿名可读,影响面成立","note":"复核一致"}`, claimID),
@@ -130,7 +130,7 @@ func TestLoopCompletesTaskAfterClaimsSettle(t *testing.T) {
 				return scriptedReply{ToolCalls: []scriptedToolCall{{
 					ID: "fv", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/api/version"}`, base),
 				}}, Finish: "tool_calls"}
-			case !seenToolResult(rr, "submit_falsify_result", "已入账"):
+			case !seenToolResult(rr, "submit_falsify_result", "已记录"):
 				return scriptedReply{ToolCalls: []scriptedToolCall{{
 					ID: "fr2", Name: "submit_falsify_result",
 					Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":false,"alternatives":[{"id":"alt1","refuted":true},{"id":"alt2","refuted":true},{"id":"alt3","refuted":true},{"id":"alt4","refuted":true}],"evidence":"独立重放 /api/version 返回 2.4.1,但仅版本号本身,影响面证据不足","note":"存在,影响面不足"}`, claimID),
@@ -171,7 +171,7 @@ func TestLoopCompletesTaskAfterClaimsSettle(t *testing.T) {
 				ID: "d5", Name: "submit_test_claim",
 				Args: fmt.Sprintf(`{"statement":"/api/version 公开暴露服务版本号","impact":"版本号可支撑定向利用","evidence":"curl 实测返回 2.4.1","asset_id":"web1","vulnclass":"信息暴露"}`),
 			}}, Finish: "tool_calls"}
-		case !seenToolResult(rr, "submit_candidate_fact", "已入候选事实"):
+		case !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实"):
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
 				ID: "d6", Name: "submit_candidate_fact",
 				Args: `{"statement":"主站服务在线,HTTP 指纹已确认","evidence":"port_probe state=open;curl 首页含 gr-mock-main","asset_id":"web1"}`,

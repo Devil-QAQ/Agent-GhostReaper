@@ -160,7 +160,7 @@ func TestHypothesisBackflowE2E(t *testing.T) {
 					ID: "vf1", Name: "submit_candidate_fact",
 					Args: `{"statement":"web2 为需 Basic 认证的管理后台(401 质询)","evidence":"curl -i 实测返回 401 + Basic 质询,正文 mock admin console","asset_id":"web2"}`,
 				}}, Finish: "tool_calls"}
-			case !seenToolResult(rr, "submit_hypothesis_result", "已入账"):
+			case !seenToolResult(rr, "submit_hypothesis_result", "已记录"):
 				return scriptedReply{ToolCalls: []scriptedToolCall{{
 					ID: "vr1", Name: "submit_hypothesis_result",
 					Args: fmt.Sprintf(`{"hypothesis_id":%q,"verdict":"supported","evidence":"独立探测 web2:401 + Basic 质询 + mock admin console,确为管理后台(未授权不可进入)","note":"后台形态证实"}`, hypID),

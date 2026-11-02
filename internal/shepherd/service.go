@@ -179,7 +179,7 @@ func (s *Service) Enqueue(ctx context.Context, taskID, text string) (string, err
 		Kind: rings.EventShepherdRecord, Actor: "creator",
 		Payload: rings.ShepherdRecord{MessageID: id, Type: rings.ShepherdRecUserMessage, Text: text},
 	}); err != nil {
-		return "", fmt.Errorf("shepherd: 消息入账: %w", err)
+		return "", fmt.Errorf("shepherd: 消息写入: %w", err)
 	}
 	s.kickLine(taskID, "")
 	return id, nil
@@ -222,7 +222,7 @@ func (s *Service) EnqueueClaim(ctx context.Context, taskID, claimID, text string
 			ClaimID: claimID, Round: round, Prelude: prelude,
 		},
 	}); err != nil {
-		return "", 0, fmt.Errorf("shepherd: 追问入账: %w", err)
+		return "", 0, fmt.Errorf("shepherd: 追问写入: %w", err)
 	}
 	s.kickLine(taskID, qaLine(claimID))
 	return id, round, nil
@@ -281,7 +281,7 @@ func (s *Service) OnTerminal(taskID, status string) {
 		Kind: rings.EventShepherdRecord, Actor: "system",
 		Payload: rings.ShepherdRecord{
 			MessageID: id, Type: rings.ShepherdRecSystemNote,
-			Text: fmt.Sprintf("任务已到终态:%s。请核对账本后输出一句任务进展总结(目标达成情况、确认发现数、关键结论)。", word),
+			Text: fmt.Sprintf("任务已结束:%s。请核对账本后输出一句任务进展总结(目标达成情况、确认发现数、关键结论)。", word),
 		},
 	}); err != nil {
 		return
@@ -297,7 +297,7 @@ func (s *Service) OnTerminal(taskID, status string) {
 func (s *Service) Start(ctx context.Context) error {
 	rows, err := s.Store.Tasks(ctx)
 	if err != nil {
-		return fmt.Errorf("shepherd: 收养扫描: %w", err)
+		return fmt.Errorf("shepherd: 接管扫描: %w", err)
 	}
 	for _, r := range rows {
 		lines, aerr := s.adoptionScan(ctx, r.ID)

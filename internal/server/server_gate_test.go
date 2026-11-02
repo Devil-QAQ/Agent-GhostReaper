@@ -214,7 +214,7 @@ func TestServerRoEAndGoalsAPI(t *testing.T) {
 
 	// 建任务(最小创建入口;种子表单归 P1-09)。
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"title":"RoE 面板验证"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"RoE 面板验证"}`, http.StatusOK, &created)
 	task := created["id"]
 	if task == "" {
 		t.Fatalf("建任务未返回 id: %+v", created)
@@ -282,8 +282,18 @@ func TestServerRoEAndGoalsAPI(t *testing.T) {
 
 	var goals []map[string]any
 	get(t, h, "/api/tasks/"+task+"/goals", http.StatusOK, &goals)
-	if len(goals) != 1 || goals[0]["status"] != "active" || goals[0]["predicate"] == nil {
-		t.Fatalf("目标列表不符: %+v", goals)
+	// P4-16:建任务必带种子目标,列表 = 建单种子 + API 建(坏目标 400 未入)。
+	if len(goals) != 2 {
+		t.Fatalf("目标列表不符(建单种子 1 + API 建 1): %+v", goals)
+	}
+	var predGoal map[string]any
+	for _, g := range goals {
+		if g["title"] == "摸清暴露面" {
+			predGoal = g
+		}
+	}
+	if predGoal == nil || predGoal["status"] != "active" || predGoal["predicate"] == nil {
+		t.Fatalf("谓词目标不符: %+v", goals)
 	}
 
 	// 审批:未知请求 404;空列表返回 {pending:[], records:[]}。
@@ -400,7 +410,7 @@ func TestServerApprovalGateE2E(t *testing.T) {
 
 	// 建任务(经面板 API)→ 种资产 → 目标(经面板 API,无谓词开放目标)→ 唤醒。
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"id":"gate-e2e","title":"审批弹门 E2E"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"gate-e2e","title":"审批弹门 E2E"}`, http.StatusOK, &created)
 	if _, err := store.Append(ctx, "gate-e2e", rings.Event{
 		Kind: rings.EventNodeAdded, Actor: "creator",
 		Payload: rings.NodeAdded{NodeID: "web1", NodeType: rings.NodeAsset,
@@ -586,11 +596,11 @@ func TestServerApprovalReleaseAPI(t *testing.T) {
 	gate := swarm.NewLedgerGate(store)
 	ex := swarm.NewExecutor(store, prov, filepath.Join(dir, "tasks"), swarm.Budget{})
 	ex.Gate = gate
+	// 不挂主宰循环:本测试手工铺图与手工驱动步骤,P4-16 建任务必带
+	// 目标与资产会唤醒循环收养 dispatched 步骤,与手工驱动互抢(无循环
+	// 时 Manager 走空转骨架,审批链路由 ex 与面板 API 承担)。
 	mgr, err := manager.New(manager.Config{
 		Store: store, RootDir: filepath.Join(dir, "tasks"),
-		OnTaskRun: func(tctx context.Context, taskID string, wake <-chan struct{}) {
-			(&overmind.Loop{TaskID: taskID, Store: store, Swarm: ex, Provider: prov}).Run(tctx, wake)
-		},
 	})
 	if err != nil {
 		t.Fatalf("构建 Manager 失败: %v", err)
@@ -608,7 +618,7 @@ func TestServerApprovalReleaseAPI(t *testing.T) {
 
 	// 种任务:s1 危害类(数据销毁,直接拒绝);s2 弹门级(面板拒绝)。
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"id":"rel-e2e","title":"研判后放行 E2E"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"rel-e2e","title":"研判后放行 E2E"}`, http.StatusOK, &created)
 
 	// 无执行器时如实 503(不降级;任务存在性先过)。
 	srvBare, err := New(store, mgr, gate)

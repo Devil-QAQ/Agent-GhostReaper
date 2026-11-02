@@ -405,6 +405,25 @@ func (c *Chain) Ready() bool {
 	return c.lead != nil || len(c.members) > 0
 }
 
+// AllCooling 全部腿是否都熔断冷却中(P4-27 ② 任务受阻收紧为任务级
+// 普遍故障的链级实时信号:≥1 条腿存在且当前无任何可路由腿——冷却
+// 期满待探测的腿不算冷却中,探测成功即恢复)。零腿(未配置)不在此
+// 判定内——那是"未配置可用模型",由装配层如实呈现,不标受阻。
+func (c *Chain) AllCooling() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	legs := c.allLegs()
+	if len(legs) == 0 {
+		return false
+	}
+	for _, l := range legs {
+		if c.nowAvail(l) {
+			return false
+		}
+	}
+	return true
+}
+
 // Members 链成员快照(主用在前、备链按序;面板「主备轮询」抽屉数据
 // 源);状态词 closed/open/probing(冷却期满待探测)。
 func (c *Chain) Members() []MemberStatus {
@@ -477,21 +496,6 @@ func (c *Chain) ActiveModel() string {
 		return ""
 	}
 	return route.currentModel
-}
-
-// RerunLimit 意图级重跑上限(重试覆盖⑤):按该任务当前将路由的腿解析
-// (与请求路由同一解析)。ok=false 表示该腿未覆盖,调用方取全局默认。
-func (c *Chain) RerunLimit(ctx context.Context) (int, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	l := c.pickAvailLeg(ctx)
-	if l == nil || l.cfg.RetryRerun == 0 {
-		return 0, false
-	}
-	if l.cfg.RetryRerun == -1 {
-		return 0, true // 关闭:0 次重跑
-	}
-	return l.cfg.RetryRerun, true
 }
 
 // taskKey 任务级路由的 ctx 键(执行器把 taskID 附进请求 ctx,链据此
@@ -668,24 +672,6 @@ func (c *Chain) pickLeg(lead *leg, members []*leg, withWindow bool, fits func(*l
 	return resolvedRoute{}, false
 }
 
-// pickAvailLeg 当前将路由的腿(RerunLimit 用,不看请求窗口——决策时
-// 无请求在手)。全冷却时返回 nil。
-func (c *Chain) pickAvailLeg(ctx context.Context) *leg {
-	lead, members, _ := c.routeOf(ctx)
-	if lead != nil && c.nowAvail(lead) {
-		return lead
-	}
-	for _, l := range members {
-		if c.nowAvail(l) {
-			return l
-		}
-	}
-	if lead != nil {
-		return lead // 全冷却:按主用报(如实读其覆盖)
-	}
-	return nil
-}
-
 // estimateTokens 请求规模的粗估(token):ASCII 类 4 字符计 1,CJK 类
 // 1 字符计 1(仅用于"上下文装不下跳过"的保守判定,不作记账)。
 func estimateTokens(req llm.CompletionRequest) int {
@@ -752,6 +738,10 @@ func (c *Chain) onFailure(l *leg, cls ErrClass, err error) {
 	}
 }
 
+// LogMsgBreakerTripped 熔断触发的日志行前缀(诊断包"受阻与恢复"类型
+// 过滤引用同一字面,行词汇单一来源、两处不漂移;P4-32)。
+const LogMsgBreakerTripped = "模型熔断触发"
+
 // openLocked 开闸:梯度取档(累计开闸次数,顶档封顶),冷却期内不再
 // 路由该成员。运行日志 WARN(P3-13b ③:熔断触发,第几次与原因)。
 func (c *Chain) openLocked(l *leg, reason string) {
@@ -761,7 +751,7 @@ func (c *Chain) openLocked(l *leg, reason string) {
 	l.brk.Reason = reason
 	l.brk.UpdatedAt = c.Now()
 	l.consec = 0
-	runlog.Warnf("模型熔断触发: 配置 %s 第 %d 次开闸,原因 %s,冷却至 %s",
+	runlog.Warnf(LogMsgBreakerTripped+": 配置 %s 第 %d 次开闸,原因 %s,冷却至 %s",
 		l.name, l.brk.Opens, reason, l.brk.OpenUntil.Format("15:04:05"))
 	c.persistLocked(context.Background())
 }
@@ -810,8 +800,10 @@ func (c *Chain) replayLimitOf(l *leg) int {
 // Stream 路由 + 零交付安全重放。迭代器内惰性执行:已向调用方交付任何
 // 事件后失败只上抛(重放会重复半截输出);零交付失败按类别处置(额度
 // →开闸换腿重放;瞬时→重放并计连续失败;确定性/超长→上抛)。换腿后
-// 重放预算重计(新腿自帷新生)。
+// 重放预算重计(新腿自帷新生)。入口先做出站消息清洗(P4-27 ⑤:坏
+// 消息根本不出站)。
 func (c *Chain) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
+	req = sanitizeReq(ctx, req)
 	return func(yield func(llm.StreamEvent, error) bool) {
 		replays := 0
 		lastName := ""
@@ -893,8 +885,9 @@ func (c *Chain) routeChanged(ctx context.Context, req llm.CompletionRequest, pre
 }
 
 // Complete 非流式:整请求要么成功要么失败,失败一律可安全重放(无半截
-// 交付),路由与计数语义同 Stream。
+// 交付),路由与计数语义同 Stream。入口先做出站消息清洗(P4-27 ⑤)。
 func (c *Chain) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	req = sanitizeReq(ctx, req)
 	replays := 0
 	lastName := ""
 	for {

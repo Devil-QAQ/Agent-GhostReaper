@@ -42,12 +42,12 @@ export function ThemeMenu() {
         {React.createElement(iconOf(current.icon), { className: "size-4" })}
       </button>
       {open && (
-        <div className="absolute right-0 z-50 mt-2 flex w-36 flex-col gap-0.5 rounded-lg border border-border/60 bg-popover p-1.5 shadow-float duration-150 animate-rise">
+        <div className="absolute right-0 z-50 mt-2 flex w-36 flex-col gap-0.5 rounded-md bg-popover p-1 shadow-float duration-150 animate-rise">
           {THEMES.map((t) => (
             <button
               key={t.value}
               className={cn(
-                "flex items-center gap-2 rounded-md px-2.5 py-1.5 text-sm transition-colors duration-150 cursor-pointer",
+                "flex h-8 items-center gap-2 rounded-md px-3 text-[13px] transition-colors duration-150 cursor-pointer",
                 t.value === theme
                   ? "bg-primary/10 font-medium text-primary"
                   : "text-muted-foreground hover:bg-hover-lift hover:text-foreground"

@@ -98,12 +98,18 @@ func (h *liveHub) onCommit(taskID string, events []rings.Event) {
 		switch ev.Kind {
 		case rings.EventTaskLifecycle, rings.EventTaskMeta:
 			topics = append(topics, liveTopicTasks)
+		case rings.EventClosureRecord:
+			// 收口信号(P4-18):提醒到达与两键裁决都改任务列表的待决
+			// 投影,订阅方重拉即弹/即收。
+			topics = append(topics, liveTopicTasks)
 		case rings.EventRoeUpdated:
 			// RoE 变更改写图载荷的资产范围口径(P4-05 摘除 / P4-09
 			// 覆盖条分母)——tasks 主题订阅方(工作台图 / 任务列表)重拉。
 			topics = append(topics, liveTopicTasks)
 		case rings.EventApprovalRecord:
-			topics = append(topics, liveTopicApproval+taskID)
+			// 审批请求/裁决改动待决计数——除本任务的审批重事件外,
+			// 任务列表的 pending_approvals 投影(P4-23)随之标脏。
+			topics = append(topics, liveTopicApproval+taskID, liveTopicTasks)
 		case rings.EventTestClaimRecord:
 			topics = append(topics, claim)
 		case rings.EventNodeAdded:

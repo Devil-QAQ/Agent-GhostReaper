@@ -4,8 +4,9 @@ import * as React from "react";
 import { cn } from "@/lib/utils";
 
 // 徽标变体=8.4 状态色/严重级色全站统一映射(胶囊:软底+全彩字+同色边)。
+// P4-31 ④尺寸表:胶囊 padding 4×11,字号微标档 11。
 const badgeVariants = cva(
-  "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium whitespace-nowrap [&_svg]:size-3",
+  "inline-flex items-center gap-1 rounded-full border px-[11px] py-[4px] text-[11px] font-medium whitespace-nowrap [&_svg]:size-3",
   {
     variants: {
       variant: {

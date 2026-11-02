@@ -84,11 +84,6 @@ func main() {
 		startupFatalf("打开年轮账本: %v", err)
 	}
 	defer store.Close()
-	// 日志级别可配(P3-13b ③):启动读设置,缺省 info;面板保存后即时
-	// 生效(系统设置「导出诊断包」卡)。
-	if e, ok, lerr := store.Setting(context.Background(), runlog.SettingKeyLogLevel); lerr == nil && ok {
-		runlog.SetLevel(runlog.ParseLevel(e.Value))
-	}
 
 	// 静态加密(P3-09):主密钥独立文件(0600,<db>.key,与库同目录),
 	// 敏感设置值(模型 key / 搜索 key / 目标凭据 / 镜 CA 私钥)存储层
@@ -162,7 +157,7 @@ func main() {
 		shep.Skills = reg
 	}
 	if err := shep.Start(context.Background()); err != nil {
-		startupFatalf("牧者会话收养: %v", err)
+		startupFatalf("牧者会话接管: %v", err)
 	}
 
 	// 执行器全家桶装配(P3-05b ⑤ 重排为两段):buildExec 构建虫群执行器

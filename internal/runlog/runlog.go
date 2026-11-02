@@ -1,7 +1,7 @@
 // Package runlog 是运行日志设施(P3-13b ③):logs/ 目录滚动文件
 // (按大小 / 日期滚动,保留上限与天数清理),日志头自动带版本号 /
-// 平台 / 启动配置,分级 DEBUG / INFO / WARN / ERROR(级别可配,排查期
-// 开 DEBUG)。
+// 平台 / 启动配置,分级 DEBUG / INFO / WARN / ERROR(P4-32 起级别
+// 固定全量 DEBUG——级别设置与端点已删,磁盘由滚动上限控制)。
 //
 // 红线:敏感信息零记录——key / 凭据 / 流量正文一律不进日志(日志会
 // 随诊断包外发)。埋点侧纪律:不记任何设置值原文、工具调用明细不记
@@ -26,12 +26,8 @@ import (
 	"ghostreaper/internal/buildinfo"
 )
 
-// Level 日志级别(数值越大越严重;低于当前级别的记录被丢弃)。
+// Level 日志级别(行内标签用;P4-32 起固定全量,不再可配)。
 type Level int8
-
-// SettingKeyLogLevel 日志级别的设置键(系统设置「导出诊断包」卡写,
-// 启动读取与保存即时生效;P3-13b ③ 级别可配)。
-const SettingKeyLogLevel = "log.level"
 
 const (
 	LevelDebug Level = iota
@@ -39,20 +35,6 @@ const (
 	LevelWarn
 	LevelError
 )
-
-// ParseLevel 级别词表解析(配置值 → 级别;空与非法退 info,fail-safe)。
-func ParseLevel(s string) Level {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "debug":
-		return LevelDebug
-	case "warn", "warning":
-		return LevelWarn
-	case "error":
-		return LevelError
-	default:
-		return LevelInfo
-	}
-}
 
 // String 级别呈现词(日志行内标签)。
 func (l Level) String() string {
@@ -109,12 +91,11 @@ type Logger struct {
 
 var std atomic.Pointer[Logger]
 
-// procLevel 进程级日志级别:独立于日志器存亡——未开日志文件时
-// SetLevel/Current 也如实生效(面板保存即改,启动读设置补齐一致)。
-// 缺省 info(atomic 零值是 debug,init 拨正)。
+// procLevel 进程级日志级别:P4-32 起固定全量 DEBUG(级别设置已删),
+// 启动即最详细,任何级别都不丢弃;保留 atomic 仅因并发读写需要。
 var procLevel atomic.Int64
 
-func init() { procLevel.Store(int64(LevelInfo)) }
+func init() { procLevel.Store(int64(LevelDebug)) }
 
 // Open 打开运行日志(建目录、开活动文件、写日志头)。StartupConfig 行
 // 会原样进入头部——调用方负责不含敏感值(红线)。
@@ -158,10 +139,7 @@ func (l *Logger) Close() {
 	}
 }
 
-// SetLevel 调整级别(进程级,运行时生效;来源为系统设置的日志级别配置)。
-func (l *Logger) SetLevel(v Level) { SetLevel(v) }
-
-// Level 当前级别。
+// Level 当前级别(固定 DEBUG,日志头呈现用)。
 func (l *Logger) Level() Level { return Current() }
 
 // Log 记一条(level 低于当前级别被丢弃;msg 经兜底擦洗)。
@@ -359,7 +337,7 @@ func stdLogf(lv Level, format string, args ...any) {
 	}
 }
 
-// Debugf 调试级(排查期开 DEBUG 才落盘)。
+// Debugf 调试级(P4-32 起级别固定全量,恒落盘)。
 func Debugf(format string, args ...any) { stdLogf(LevelDebug, format, args...) }
 
 // Infof 信息级(任务生命周期 / 单位起落 / 登录登出与配置修改等)。
@@ -372,11 +350,7 @@ func Warnf(format string, args ...any) { stdLogf(LevelWarn, format, args...) }
 // 面板 API 服务端错误 / 启动装配失败)。
 func Errorf(format string, args ...any) { stdLogf(LevelError, format, args...) }
 
-// SetLevel 进程级级别调整(未 Open 也生效——启动后面板改级别,
-// 无论日志文件是否可用都如实记录在案)。
-func SetLevel(v Level) { procLevel.Store(int64(v)) }
-
-// Current 进程级当前级别(缺省 info)。
+// Current 进程级当前级别(固定 DEBUG)。
 func Current() Level { return Level(procLevel.Load()) }
 
 // Dir 全局日志目录(未 Open 返回空串;诊断包据此收集)。

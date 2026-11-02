@@ -90,10 +90,10 @@ export function ExchangeRaw({ tid, exID, bare = false }) {
         <>
           <div className="flex flex-wrap items-center gap-2 text-xs">
             {meta.request?.method && (
-              <span className="font-mono font-medium">{meta.request.method}</span>
+              <span className="num font-medium">{meta.request.method}</span>
             )}
             {meta.request?.url && (
-              <span className="max-w-full break-all font-mono text-muted-foreground">
+              <span className="max-w-full break-all num text-muted-foreground">
                 {meta.request.url}
               </span>
             )}
@@ -110,7 +110,7 @@ export function ExchangeRaw({ tid, exID, bare = false }) {
             )}
             {meta.error && <Badge variant="danger">{meta.error}</Badge>}
           </div>
-          <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-[10px] text-muted-foreground">
+          <div className="flex flex-wrap gap-x-4 gap-y-1 num text-[10px] text-muted-foreground">
             <span>记录 {meta.id}</span>
             {meta.step_id && <span>步骤 {meta.step_id}</span>}
             {meta.unit_id && <span>单位 {meta.unit_id}</span>}
@@ -142,7 +142,7 @@ export function ExchangeRaw({ tid, exID, bare = false }) {
           )}
           {bare && meta.blob_ref && (
             <div
-              className="font-mono text-[10px] text-muted-foreground"
+              className="num text-[10px] text-muted-foreground"
               title={meta.blob_ref}
             >
               原始数据 · {fmtBytes(meta.raw_total)}
@@ -274,7 +274,7 @@ function RawSide({ tid, exID, side, label }) {
         loading={loading}
         onMore={readMore}
       />
-      <pre className="max-h-72 overflow-auto rounded-md bg-input-surface p-2 font-mono text-xs leading-relaxed whitespace-pre-wrap break-all">
+      <pre className="max-h-72 overflow-auto rounded-md bg-input-surface p-2 num text-xs leading-relaxed whitespace-pre-wrap break-all">
         {text}
       </pre>
     </div>
@@ -326,7 +326,7 @@ export function TrafficTypeBadge({ type, tls }) {
   return (
     <span
       className={cn(
-        "rounded px-1.5 py-0.5 font-mono text-[10px]",
+        "rounded px-1.5 py-0.5 num text-[10px]",
         type === "https"
           ? "bg-status-info-soft text-status-info"
           : type === "tunnel"

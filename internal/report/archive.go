@@ -87,7 +87,7 @@ func ArchiveTask(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore
 		Kind: rings.EventReportRecord, Actor: by, Payload: rec,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("report: 存档登记入账: %w", err)
+		return nil, fmt.Errorf("report: 存档登记写入: %w", err)
 	}
 	return &ArchiveView{
 		Rev: revs[0], At: time.Now().UTC(), Format: rec.Format, Ref: ref,

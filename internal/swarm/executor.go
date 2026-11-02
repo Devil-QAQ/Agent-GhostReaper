@@ -60,11 +60,13 @@ type Executor struct {
 	// (P1 行为,http_probe 直连);会话起不来即执行失败——镜是强制
 	// 基础设施,起不来就不放行任何流量。
 	Mirror *mirror.Mirror
-	// ModelRetryLimit / ModelRetryBackoff 意图级模型错误退避重跑参数
-	// (P2-06e):重跑次数上限与退避基值;零值取 Default*。退避等待与
-	// 零进展失败段不计预算(block_wait),耗尽落 StepBlocked。
-	ModelRetryLimit   int
-	ModelRetryBackoff time.Duration
+	// ModelRetryLadder / BlockedDeepAfter 意图级模型错误长退避参数
+	// (P4-27 ①):退避梯度(1m/5m/15m)与深阈值(连续失败跨线才落
+	// blocked);零值取 Default*(深阈值全局键 swarm.modelretry.deep_minutes
+	// 可配,Agent 栏虫群参数)。退避等待与零进展失败段不计预算
+	// (block_wait)。测试缩小时长只影响时序不影响语义。
+	ModelRetryLadder []time.Duration
+	BlockedDeepAfter time.Duration
 	// Helm 舵杆(P2-05,第八章第 8 节):steer_work / kill_work 的权威
 	// 登记表,面板与主宰经它下达指令;生效点在单位工具调用边界
 	//(见 guard.go)。NewExecutor 自建默认实例;装配层把同一实例交给
@@ -207,6 +209,26 @@ func (e *Executor) CancelRunningUnits() []string {
 	return ids
 }
 
+// CancelUnitsOf 硬停单个任务的在飞单位(P4-18 收口结束的宽限硬停):
+// 与 CancelRunningUnits 同一收场语义,范围限定在单任务——多任务并发
+// 时收口结束只硬停本任务单位,不误伤其他任务。返回被硬停的单位清单。
+func (e *Executor) CancelUnitsOf(taskID string) []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var ids []string
+	for k, unitID := range e.stepUnits {
+		t, _, found := strings.Cut(k, "\x00")
+		if !found || t != taskID {
+			continue
+		}
+		if cancel, ok := e.unitCancels[unitID]; ok {
+			ids = append(ids, unitID)
+			cancel()
+		}
+	}
+	return ids
+}
+
 // RunResult 一次虫群单位执行的结果摘要。
 type RunResult struct {
 	UnitID       string
@@ -216,6 +238,11 @@ type RunResult struct {
 	StepStatus   string // done|exhausted|failed|aborted|approval_denied|blocked|dispatched(断点/R14 回可领取)
 	FinalText    string
 	Stale        bool // R14 复检失败,未执行
+	// BlockedClass blocked 归因(P4-27 ⑥⑦):model_fault=模型故障(跨
+	// 深阈值,计任务受阻);determinant=确定性拒绝(程序缺陷,不计
+	// 故障计数)。仅 StepStatus==blocked 时有值;随步骤 detail 与黑匣子
+	// 落账,任务受阻计数(overmind)据此排除确定性归因。
+	BlockedClass string
 	// Checkpointed 断点存档收场(P3-07):当前工具调用完成后单位落地,
 	// 步骤回可领取、会话保留可续(session_finished 带 Checkpointed 标记)。
 	Checkpointed bool
@@ -325,7 +352,7 @@ func (e *Executor) beginUnit(ctx context.Context, pack *TaskPack) (*unitEnv, Bud
 		case resumeCheckpoint:
 			resumeNote = "断点续接:原会话续(" + tid + ")"
 		default:
-			resumeNote = "重启收养:原会话续(" + tid + ")"
+			resumeNote = "重启接管:原会话续(" + tid + ")"
 		}
 	}
 
@@ -346,7 +373,7 @@ func (e *Executor) beginUnit(ctx context.Context, pack *TaskPack) (*unitEnv, Bud
 		},
 	}); err != nil {
 		runlog.Errorf("账本写入失败: 单位起飞 %s/%s: %v", pack.TaskID, env.UnitID, err)
-		return nil, Budget{}, nil, fmt.Errorf("swarm: session_started 入账: %w", err)
+		return nil, Budget{}, nil, fmt.Errorf("swarm: session_started 写入: %w", err)
 	}
 	if resumeNote != "" {
 		runlog.Infof("虫群单位起飞: %s 任务 %s 步骤 %s(%s)", env.UnitID, pack.TaskID, pack.StepID, resumeNote)
@@ -453,7 +480,7 @@ func (e *Executor) finishUnit(ctx context.Context, env *unitEnv, pack *TaskPack,
 	// 落地收尾:同步骤未送达的舵杆指令失去生效点,落 stale 回执
 	//(P2-08 回执状态机闭环;正常路径无未送达指令,零留痕)。
 	if e.Helm != nil {
-		e.Helm.expirePending(pack.TaskID, pack.StepID, "单位已落地,指令失去生效点(已过时)")
+		e.Helm.expirePending(pack.TaskID, pack.StepID, "单位已干完,指令失去生效点(已过时)")
 	}
 
 	// 终态入账(无论成败,审计闭环)。时间账随 session_finished note 落账:
@@ -466,11 +493,19 @@ func (e *Executor) finishUnit(ctx context.Context, env *unitEnv, pack *TaskPack,
 	// P3-07:断点存档收场时步骤回可领取、会话保留(Checkpointed 标记)
 	// ——重启/恢复领取时优先原会话 Resume 续跑。
 	status := res.StepStatus
+	// blocked 归因随状态迁移落步骤 detail(P4-27 ⑥⑦:确定性拒绝与
+	// 模型故障都落 blocked,但归因分开——报告侧受阻派生与任务受阻
+	// 计数只认模型故障;投影层把这两个机器标记合并进 detail,其他
+	// Note 不落投影)。
+	stateNote := ""
+	if status == StepBlocked {
+		stateNote = res.BlockedClass
+	}
 	e.claimMu.Lock()
 	_, serr := e.Store.Append(ledgerCtx, pack.TaskID,
 		rings.Event{
 			Kind: rings.EventNodeStateChanged, Actor: "swarm:" + env.UnitID,
-			Payload: rings.NodeStateChanged{NodeID: pack.StepID, Status: status},
+			Payload: rings.NodeStateChanged{NodeID: pack.StepID, Status: status, Note: stateNote},
 		},
 		rings.Event{
 			Kind: rings.EventSwarmRecord, Actor: "swarm:" + env.UnitID,
@@ -486,10 +521,10 @@ func (e *Executor) finishUnit(ctx context.Context, env *unitEnv, pack *TaskPack,
 	)
 	e.claimMu.Unlock()
 	if serr != nil && err == nil {
-		runlog.Errorf("账本写入失败: 单位终态 %s/%s: %v", pack.TaskID, env.UnitID, serr)
-		err = fmt.Errorf("swarm: 终态入账: %w", serr)
+		runlog.Errorf("账本写入失败: 单位结束 %s/%s: %v", pack.TaskID, env.UnitID, serr)
+		err = fmt.Errorf("swarm: 结束状态写入: %w", serr)
 	}
-	runlog.Infof("虫群单位落地: %s 任务 %s 步骤 %s 终态 %s(原因 %s,轮次 %d)", env.UnitID, pack.TaskID, pack.StepID, status, res.Reason, res.Turns)
+	runlog.Infof("虫群单位干完: %s 任务 %s 步骤 %s 结束 %s(原因 %s,轮次 %d)", env.UnitID, pack.TaskID, pack.StepID, status, res.Reason, res.Turns)
 
 	// 预算耗尽 ≠ 失败(R16):终态落地后黑匣子留痕(暂停接力,非失败)。
 	// P4-01 ② 后 exhausted 落地仅剩任务总闸场景(配了上限的单位到线
@@ -506,15 +541,18 @@ func (e *Executor) finishUnit(ctx context.Context, env *unitEnv, pack *TaskPack,
 			err = berr
 		}
 	}
-	// 模型故障受阻(P2-06e):意图级退避重跑耗尽后落 blocked,原因与
-	// 等待时长入黑匣子(任务受阻徽标与自动重开据此研判)。
+	// 模型故障/确定性拒绝受阻(P2-06e,P4-27 ①⑥):原因与等待时长入
+	// 黑匣子;归因分开(确定性拒绝是程序缺陷,不进任务受阻判定)。
 	if res.StepStatus == StepBlocked {
+		note := "模型错误长退避跨深阈值,步骤受阻(等待配置恢复自动重开)"
+		if res.BlockedClass == BlockedClassDeterminant {
+			note = "模型确定性拒绝,立即受阻不重试(程序缺陷/配置错误,不计故障)"
+		}
 		if berr := blackbox.Record(ledgerCtx, e.Store, pack.TaskID, "swarm:"+env.UnitID,
 			rings.BlackboxRecord{
 				Type: rings.BlackboxUnitBlocked, StepID: pack.StepID, UnitID: env.UnitID,
 				Detail: map[string]any{
-					"reason": res.Reason,
-					"note":   "模型错误退避重跑耗尽,步骤受阻(等待配置恢复自动重开)",
+					"reason": res.Reason, "class": res.BlockedClass, "note": note,
 				},
 			}); berr != nil && err == nil {
 			err = berr
@@ -528,7 +566,7 @@ func (e *Executor) finishUnit(ctx context.Context, env *unitEnv, pack *TaskPack,
 				Type: rings.BlackboxUnitApprovalDeny, StepID: pack.StepID, UnitID: env.UnitID,
 				Detail: map[string]any{
 					"reason": res.Reason,
-					"note":   "审批拒绝熔断该单位会话(单位级终止,被拒单位不得换法重试)",
+					"note":   "审批拒绝终止单位会话(单位级终止,被拒单位不得换法重试)",
 				},
 			}); berr != nil && err == nil {
 			err = berr
@@ -691,6 +729,7 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 	reqSeq := 0
 	reqID := nextRequestID(env.UnitID, &reqSeq)
 	modelFails := 0
+	var failStreak time.Time // 连续失败起算时刻(成功即清零;深阈值只量全不通连续段)
 	injectedNotes := map[string]bool{}
 
 	for seg := 0; ; seg++ {
@@ -912,7 +951,7 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 				}); aerr != nil {
 					// 记账失败不中断执行,但结果必须如实带回。
 					runlog.Errorf("账本写入失败: 工具调用 %s/%s: %v", pack.TaskID, env.UnitID, aerr)
-					return res, fmt.Errorf("swarm: 工具调用入账: %w", aerr)
+					return res, fmt.Errorf("swarm: 工具调用写入: %w", aerr)
 				}
 			case harness.KindText:
 				// 助手正文累计(P2-08 舵杆回执标记的扫描源;段末统一扫)。
@@ -942,11 +981,13 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 		}
 		asst.Reset()
 
-		// ---- P2-06e 模型故障:意图级退避重跑,耗尽落 blocked ----
+		// ---- P2-06e/P4-27 ①⑥ 模型故障:长退避续试,确定性立即受阻 ----
 		// 非取消的流断与 model_error 终因都是模型故障:退避等待不计
 		// 预算(blockWait),重试只追发短续跑指令(requestID 防续跑
-		// 消息重复注入);耗尽后步骤落受阻终态,等配置恢复自动重开。
-		if failBrief, ok := modelFailure(segCtx, streamErr, termErr, res); ok {
+		// 消息重复注入);瞬时失败长退避循环(1m/5m/15m,模型不通
+		// 持续等),仅连续失败跨深阈值才落受阻;确定性拒绝(4xx/
+		// 超长)重试无意义,立即受阻且不计故障(归因 determinant)。
+		if failBrief, failErr, ok := modelFailure(segCtx, streamErr, termErr, res); ok {
 			// 时间账:本段有成功轮次照计 billable,零进展段归 block_wait
 			//(故障不吃预算)。
 			if usage.Turns() > turnsAtSeg {
@@ -957,29 +998,50 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 			// 活动时钟:退避等待前冻结(读数停在已收拢的 billable)。
 			e.clockSet(pack.TaskID, env.TranscriptID, billable, false)
 			modelFails++
-			if modelFails <= e.modelRetryLimit(ctx) {
-				runlog.Warnf("模型错误重跑: 任务 %s 单位 %s 第 %d 次: %s", pack.TaskID, env.UnitID, modelFails, failBrief)
-				noteKey := reqID + "#" + strconv.Itoa(modelFails)
-				if injectedNotes[noteKey] {
-					// 守卫命中:同一次重试的续跑指令已在会话里,不再重复注入
-					//(不变式被破坏的防御路径,按耗尽收场)。
-					res.Reason, res.StepStatus = blockedReason(modelFails, failBrief), StepBlocked
-					break
-				}
-				wait := e.modelRetryBackoff(modelFails)
-				if !sleepInterruptible(ctx, wait) {
-					res.Reason, res.StepStatus = "aborted", "aborted"
-					return res, fmt.Errorf("swarm: 模型重试等待被中断: %w", ctx.Err())
-				}
-				blockWait += wait
-				injectedNotes[noteKey] = true
-				input = modelRetryNote(reqID, modelFails)
-				continue
+			if failStreak.IsZero() {
+				failStreak = time.Now()
 			}
-			res.Reason, res.StepStatus = blockedReason(modelFails, failBrief), StepBlocked
-			break
+			// 确定性拒绝:立即受阻不重试(P4-27 ⑥)。
+			if cls := failover.Classify(context.Background(), failErr); cls == failover.ClassDeterminant || cls == failover.ClassTooLong {
+				runlog.Errorf("模型确定性拒绝(不重试): 任务 %s 单位 %s: %s", pack.TaskID, env.UnitID, failBrief)
+				res.Reason, res.StepStatus = blockedReasonDeterminant(failBrief), StepBlocked
+				res.BlockedClass = BlockedClassDeterminant
+				break
+			}
+			deep := e.modelBlockedDeepAfter(ctx)
+			streak := time.Since(failStreak)
+			landBlocked := func() {
+				res.Reason, res.StepStatus = blockedReason(modelFails, streak, failBrief), StepBlocked
+				res.BlockedClass = BlockedClassModelFault
+			}
+			// 深阈值:连续失败跨线(全不通)才受阻;此前长退避续试。
+			if streak >= deep {
+				landBlocked()
+				break
+			}
+			noteKey := reqID + "#" + strconv.Itoa(modelFails)
+			if injectedNotes[noteKey] {
+				// 守卫命中:同一次重试的续跑指令已在会话里,不再重复注入
+				//(不变式被破坏的防御路径,按受阻收场)。
+				landBlocked()
+				break
+			}
+			wait := e.modelRetryBackoff(modelFails, streak, deep)
+			runlog.Warnf("模型错误重跑: 任务 %s 单位 %s 第 %d 次(已连续失败 %s,再不通 %s 后受阻): %s",
+				pack.TaskID, env.UnitID, modelFails, roundDur(streak), roundDur(deep-streak), failBrief)
+			if !sleepInterruptible(ctx, wait) {
+				res.Reason, res.StepStatus = "aborted", "aborted"
+				return res, fmt.Errorf("swarm: 模型重试等待被中断: %w", ctx.Err())
+			}
+			blockWait += wait
+			injectedNotes[noteKey] = true
+			input = modelRetryNote(reqID, modelFails)
+			continue
 		}
 		billable += elapsed
+		// 模型恢复:连续失败计数与起算时刻清零(深阈值只量"全不通"
+		// 的连续段;恢复过就重新起算)。
+		modelFails, failStreak = 0, time.Time{}
 		// ---- P2-08 工具边界/段间挂起:先于流错误结案 ----
 		// guard 收段后引擎可能以 aborted 终态或段 ctx 流错误收段,两者都
 		// 是挂起信号而非失败(段是被挂起收拢的);单位在被暂缓调用后自然
@@ -1019,7 +1081,7 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 			gateWait += time.Since(waitStart)
 			if werr != nil {
 				// 等待期间任务熔断/收尾:按拒绝结案留痕,单位随任务 ctx 中止。
-				_ = e.Gate.Expire(pack.TaskID, env.park.Req.ID, "等待审批期间任务收尾/熔断,按拒绝结案")
+				_ = e.Gate.Expire(pack.TaskID, env.park.Req.ID, "等待审批期间任务收尾/终止,按拒绝结案")
 				env.park = nil
 				res.Reason, res.StepStatus = "aborted", "aborted"
 				return res, fmt.Errorf("swarm: 审批等待被中断: %w", ctx.Err())
@@ -1041,12 +1103,9 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 						}
 					}
 				}
-				// 批准续跑:单次放行配额 + 续跑指令(裁决账已由 Decide 先记)。
-				env.allowance = &gateAllowance{
-					requestID: env.park.Req.ID,
-					toolName:  env.park.Req.ToolName,
-					args:      env.park.Req.ToolArgs,
-				}
+				// 批准续跑:执行侧授权(单次放行配额;代理旁路组同时
+				// 武装单位级放行,P4-17)+ 续跑指令(裁决账已由 Decide 先记)。
+				env.armGateApproval(env.park.Req)
 				input = approvalResumePrompt(env.park.Req, d)
 				reqID = nextRequestID(env.UnitID, &reqSeq) // 新逻辑注入,新 requestID
 				env.park = nil
@@ -1143,6 +1202,11 @@ func approvalResumePrompt(req ApprovalRequest, d GateDecision) string {
 		fmt.Fprintf(&b, "批准备注:%s。", r)
 	}
 	b.WriteString("该次调用已被单次授权,可直接重新发起;等待期间该单位的运行预算未消耗,请继续完成本步骤意图。")
+	if req.GateGroup == HardGroupProxyBypass {
+		b.WriteString("本单位后续命中代理旁路组的命令已一并获准,可直接执行。")
+	} else if req.GateGroup == "" {
+		b.WriteString("本步骤的后续命令已一并获准,可直接执行。")
+	}
 	return b.String()
 }
 
@@ -1152,7 +1216,7 @@ func approvalResumePrompt(req ApprovalRequest, d GateDecision) string {
 // 重复注入(与 P2-06e 模型重试的短指令同一纪律)。
 func adoptionResumePrompt(pack *TaskPack) string {
 	var b strings.Builder
-	b.WriteString("【重启收养 · 续跑】执行进程重启,本会话已从转录完整恢复(历史消息与已耗用量俱在)。")
+	b.WriteString("【重启接管 · 续跑】执行进程重启,本会话已从转录完整恢复(历史消息与已耗用量俱在)。")
 	fmt.Fprintf(&b, "继续完成本步骤意图:%s。", pack.StepIntent)
 	b.WriteString("已执行过的动作与已写回的结论勿重复;若意图已近完成,直接收尾写回最终结论。本单位的运行预算已按新领取重置。")
 	return b.String()
@@ -1254,7 +1318,7 @@ func designDeferral(text string) string {
 	case strings.Contains(text, approvalPendingNote):
 		return "审批暂挂"
 	case strings.Contains(text, deferNote):
-		return "舵杆注入暂缓"
+		return "纠偏注入暂缓"
 	case strings.Contains(text, pauseDeferNote):
 		return "单位挂起暂缓"
 	}
@@ -1324,20 +1388,27 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 		// 被镜污染、直连对照复测"由人判);批准后模型重发同调用,先查
 		// 放行配额(⑥ 同语义,查在拦前——否则批准的重发被再次拦住);
 		// 拒绝照旧熔断。其余处置(拒绝)命中直接拒绝留痕。
+		// P4-17:该单位代理旁路组已批准过一次的,同组任何命中(不同
+		// 规则、不同参数)直接放行执行、逐次留痕,不再弹门。
 		if r, m, hit := matchHardRule(guardLedgerCtx, env.Executor.Store, toolName, input); hit {
 			if r.Action == HardActionGate {
 				if a := env.allowance; a != nil && a.toolName == toolName && jsonEquiv(a.args, string(input)) {
 					env.allowance = nil
 					return permission.Allowed()
 				}
+				if env.bypassPass != nil && r.Group == HardGroupProxyBypass {
+					env.recordGateGroupPass(pack, r, m, toolName, input)
+					return permission.Allowed()
+				}
 				if env.Executor.Gate == nil {
 					return denyUnit(rings.DenyLineNoGate,
-						"无审批门可用(fail-safe):命中拦截规则(弹门处置)的动作须有人在环批准")
+						"无审批门可用(fail-safe):命中拦截规则(需批准处置)的动作须有人在环批准")
 				}
 				ticket, err := env.Executor.Gate.Enter(ApprovalRequest{
 					TaskID: pack.TaskID, StepID: pack.StepID, UnitID: env.UnitID,
 					Intent: pack.StepIntent, ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
 					ToolName: toolName, ToolArgs: string(input), Note: hardRuleGateNote(r, m),
+					GateGroup: r.Group,
 				})
 				if err != nil {
 					return permission.Denied("审批请求登记失败(fail-safe): " + err.Error())
@@ -1345,7 +1416,7 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 				env.park = ticket
 				env.fuseSegment()
 				return permission.Denied(fmt.Sprintf(
-					"%s(请求 %s):命令命中拦截规则(%s · %s),已提交面板人工裁决,批准后继续执行",
+					"%s(请求 %s):命令命中拦截规则(%s · %s),已提交面板审批,批准后继续执行",
 					approvalPendingNote, ticket.Req.ID, r.Group, strings.TrimPrefix(r.Name, HardRuleBuiltinPrefix)))
 			}
 			return denyUnit(rings.DenyLineHardRule, hardRuleDenyReason(r, m))
@@ -1373,7 +1444,7 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 				harmWord = "拒绝服务类"
 			}
 			return denyUnit(rings.DenyLineHarm,
-				"拒绝线(非常严重):"+harmWord+"动作直接拒绝;造物主可在面板研判后放行")
+				"拒绝线(非常严重):"+harmWord+"动作直接拒绝;造物主可在面板规划后放行")
 		}
 		// ⑥ 批准续跑的单次放行配额:同请求(同工具同参数)恰好一次。
 		// 参数比对按 JSON 语义等价(键序与转义形态无关)——续跑重发的
@@ -1383,12 +1454,21 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 			env.allowance = nil
 			return permission.Allowed()
 		}
+		// ⑥b 同步骤放行(P4-27 ⑧):审批门槛的首条命令批准一次后,本
+		// 单位本步骤的后续命令(不同工具、不同参数,含查看类)直接
+		// 放行执行、逐次留痕——门第一次照弹、意图照审,同一意图的
+		// 执行延续不再逐条弹门(P4-17 只解决了"同规则不同参数",这
+		// 里补"同步骤不同命令")。
+		if env.stepPass != nil {
+			env.recordStepPass(pack, toolName, input)
+			return permission.Allowed()
+		}
 		// ⑦ 弹门线:达到审批门槛的意图分级挂起等裁决。
 		threshold := NormalizeApprovalThreshold(pack.Authorization.ApprovalThreshold)
 		if ActionLevelRank(pack.ActionLevel) >= ActionLevelRank(threshold) {
 			if env.Executor.Gate == nil {
 				return denyUnit(rings.DenyLineNoGate,
-					"无审批门可用(fail-safe):弹门级动作须有人在环批准")
+					"无审批门可用(fail-safe):需批准级动作须有人在环批准")
 			}
 			ticket, err := env.Executor.Gate.Enter(ApprovalRequest{
 				TaskID: pack.TaskID, StepID: pack.StepID, UnitID: env.UnitID,
@@ -1418,6 +1498,69 @@ type gateAllowance struct {
 	requestID string
 	toolName  string
 	args      string
+}
+
+// gateGroupPass P4-17 代理旁路组的单位级放行:面板对该组弹门批准一次后
+// 武装,该单位后续命中该组任何弹门规则(组内不同规则、不同参数)直接
+// 放行执行、逐次留痕。"永久"=单位生命周期——一 Step 一单位,销毁即
+// 失效,任务内新单位重新弹门一次;拒绝照旧熔断。其他弹门规则不享受:
+// 用户自建 gate 规则批准一次仅放行同参数那一次(现状不变)。放行只对
+// 弹门处置生效——组内被改成拒绝处置的条目照旧拒绝,不越过用户意志。
+type gateGroupPass struct {
+	originRequestID string // 触发放行的批准请求(逐次留痕回指)
+}
+
+// gateStepPass P4-27 ⑧ 同步骤放行:审批门槛(意图分级)弹门批准一次后
+// 武装,该单位本步骤后续命令不再逐条弹门(直接执行、逐次留痕)。
+// 与 gateGroupPass 的分工:组级放行管硬规则弹门(代理旁路组),步骤级
+// 放行管审批门槛(分级线);"同一单位同一步骤"=单位生命周期,一 Step
+// 一单位,销毁即失效,任务内新单位重新弹门一次。
+type gateStepPass struct {
+	originRequestID string // 触发放行的批准请求(逐次留痕回指)
+}
+
+// armGateApproval 批准续跑的执行侧授权(P4-17;P4-27 ⑧):单次放行配额
+// 恒置(同工具同参数恰好一次,重发同调用走配额不另留痕);来源是代理
+// 旁路组弹门时同时武装单位级组放行(后续同组任何命中直接执行);来源
+// 是审批门槛弹门(无 GateGroup)时同时武装同步骤放行(本步骤后续命令
+// 不再逐条弹门)。用户自建 gate 规则不武装步骤级放行(P4-17 语义保持:
+// 批准一次仅放行同参数那一次)。
+func (env *unitEnv) armGateApproval(req ApprovalRequest) {
+	env.allowance = &gateAllowance{requestID: req.ID, toolName: req.ToolName, args: req.ToolArgs}
+	switch {
+	case req.GateGroup == HardGroupProxyBypass:
+		env.bypassPass = &gateGroupPass{originRequestID: req.ID}
+	case req.GateGroup == "":
+		env.stepPass = &gateStepPass{originRequestID: req.ID}
+	}
+}
+
+// recordStepPass P4-27 ⑧ 同步骤放行的逐次留痕:每次经放行直接执行的
+// 命令落一笔 step_pass 审批记录(带命令原文,与弹门流的审批卡同口径,
+// 可对账)。留痕失败不挡执行——放行依据是先前的面板批准,账本基础
+// 设施故障由 tool_call 侧的写入路径如实暴露。
+func (env *unitEnv) recordStepPass(pack *TaskPack, toolName string, input json.RawMessage) {
+	env.recordApproval(rings.ApprovalRecord{
+		StepID: pack.StepID, UnitID: env.UnitID, Type: rings.ApprovalRecStepPass,
+		ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
+		Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input,
+		DecidedBy: "creator",
+		Reason:    fmt.Sprintf("本步骤审批已批准一次(请求 %s),本命令直接放行", env.stepPass.originRequestID),
+	})
+}
+
+// recordGateGroupPass P4-17 单位级放行的逐次留痕:每次经放行直接执行的
+// 命令落一笔 group_pass 审批记录(带命令原文与命中规则,与弹门流的
+// 审批卡同口径,可对账)。留痕失败不挡执行——放行依据是先前的面板
+// 批准,账本基础设施故障由 tool_call 侧的写入路径如实暴露。
+func (env *unitEnv) recordGateGroupPass(pack *TaskPack, r HardRule, matched, toolName string, input json.RawMessage) {
+	env.recordApproval(rings.ApprovalRecord{
+		StepID: pack.StepID, UnitID: env.UnitID, Type: rings.ApprovalRecGroupPass,
+		ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
+		Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input,
+		Note: hardRuleGateNote(r, matched), DecidedBy: "creator",
+		Reason: fmt.Sprintf("代理旁路组已批准一次(请求 %s),本命令直接放行", env.bypassPass.originRequestID),
+	})
 }
 
 // fuseSegment 收拢当前执行段(弹门挂起):取消段 ctx,引擎以 aborted

@@ -39,7 +39,8 @@ func TestBlockedSessionKeptResumable(t *testing.T) {
 		t.Fatalf("构建 provider: %v", err)
 	}
 	ex := NewExecutor(store, prov, filepath.Join(dir, "tasks"), Budget{})
-	ex.ModelRetryLimit, ex.ModelRetryBackoff = 1, time.Millisecond
+	ex.ModelRetryLadder = []time.Duration{time.Millisecond}
+	ex.BlockedDeepAfter = 3 * time.Millisecond
 
 	res, err := ex.RunStep(context.Background(), task, "s1")
 	if err != nil || res.StepStatus != StepBlocked {
@@ -96,7 +97,8 @@ func TestReopenBlockedStepResumesOriginalSession(t *testing.T) {
 		t.Fatalf("构建 provider: %v", err)
 	}
 	ex := NewExecutor(store, deadProv, root, Budget{})
-	ex.ModelRetryLimit, ex.ModelRetryBackoff = 1, time.Millisecond
+	ex.ModelRetryLadder = []time.Duration{time.Millisecond}
+	ex.BlockedDeepAfter = 3 * time.Millisecond
 	blocked, err := ex.RunStep(context.Background(), task, "s1")
 	if err != nil || blocked.StepStatus != StepBlocked {
 		t.Fatalf("第一阶段应落 blocked: %v %+v", err, blocked)

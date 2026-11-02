@@ -167,13 +167,13 @@ func parseTaskExtract(reply string) (*extractReply, []string) {
 		action := strings.TrimSpace(c.Action)
 		disp := strings.TrimSpace(c.Disposition)
 		if action == "" || (disp != "forbid" && disp != "allow") {
-			issues = append(issues, fmt.Sprintf("约束 %q 处置 %q 非法(须 forbid|allow),已丢弃", c.Action, c.Disposition))
+			issues = append(issues, fmt.Sprintf("拦截规则 %q 处置 %q 非法(须 forbid|allow),已丢弃", c.Action, c.Disposition))
 			continue
 		}
 		quota := c.Quota
 		if quota < 0 || (disp == "forbid" && quota > 0) {
 			if quota != 0 {
-				issues = append(issues, fmt.Sprintf("约束 %q 的次数上限不适用于禁止,已去除", action))
+				issues = append(issues, fmt.Sprintf("拦截规则 %q 的次数上限不适用于禁止,已去除", action))
 			}
 			quota = 0
 		}
@@ -183,7 +183,7 @@ func parseTaskExtract(reply string) (*extractReply, []string) {
 				continue
 			}
 			if _, err := regexp.Compile(p); err != nil {
-				issues = append(issues, fmt.Sprintf("约束 %q 的匹配模式 %q 编译不过,已丢弃", action, p))
+				issues = append(issues, fmt.Sprintf("拦截规则 %q 的匹配模式 %q 编译不过,已丢弃", action, p))
 				continue
 			}
 			patterns = append(patterns, p)

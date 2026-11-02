@@ -1,0 +1,141 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20261024T165116162Z-72195-f148c9668717",
+  "runId": "20261024T165116162Z-72195-f148c9668717",
+  "runStatus": "inconclusive",
+  "coverage": {
+    "status": "partial",
+    "reasons": [
+      {
+        "code": "changed_file_unreadable",
+        "stage": "candidate-select",
+        "target": "_p428seed/main.go",
+        "detail": "observed changed file no longer exists or cannot be read",
+        "affectsCompletion": true
+      },
+      {
+        "code": "baseline_partial",
+        "stage": "baseline",
+        "target": ".",
+        "detail": "baseline capture had enumeration or snapshot errors",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "candidate-select",
+        "target": "_p428seed/main.go",
+        "detail": "changed_file_unreadable: observed changed file no longer exists or cannot be read",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline",
+        "target": ".",
+        "detail": "baseline_partial: baseline capture had enumeration or snapshot errors",
+        "affectsCompletion": true
+      }
+    ]
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "a83b50a6d377c9ef5644abcb681962c62f6c2133",
+  "diffHash": "1829e3e4965f7183cd18ce7e15fbed7cff295f0e73817411309d831a45b0f1b0",
+  "rulesVersion": "unavailable",
+  "sessionHash": "21e15a77f444900a31e21d051f269d452a0f7c3fa170e98ffdfc9a87eea83740",
+  "reportRef": ".mimosa/reports/task-review-session_d8af519aab4a86419ad2ef43046eb272-20261024T165116162Z-72195-f148c9668717.json",
+  "events": [],
+  "observedFindingIds": [
+    "mimosa-968ab2877632077e3c307159",
+    "mimosa-e921b39214f64329e18dfad5"
+  ],
+  "verifiedFiles": [
+    {
+      "file": "internal/rings/statuswords.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/swarm/tools.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/shepherd/tools.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/report/export.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/report/report.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/swarm/retest.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "web/lib/api.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "web/components/status-badge.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "web/views/findings-page.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "web/views/node-sheets.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "web/views/sessions-page.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "web/views/traffic-page.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "web/views/workbench-page.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "web/views/annulus-page.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "web/views/progress-page.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/report/report_test.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "internal/rings/statuswords_test.go",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-10-24T16:51:16.470Z"
+}

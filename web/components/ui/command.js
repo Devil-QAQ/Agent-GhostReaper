@@ -25,7 +25,7 @@ function Command({ className, ...props }) {
 
 function CommandInput({ className, ...props }) {
   return (
-    <div className="flex items-center gap-2 border-b border-border/60 px-4">
+    <div className="flex items-center gap-2 border-b border-border/55 px-4">
       {React.createElement(iconOf("search"), {
         className: "size-4 shrink-0 text-muted-foreground",
       })}
@@ -62,7 +62,7 @@ function CommandGroup({ className, ...props }) {
   return (
     <CommandPrimitive.Group
       className={cn(
-        "flex flex-col gap-0.5 overflow-hidden p-1 text-foreground [&_[cmdk-group-heading]]:px-2.5 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground",
+        "flex flex-col gap-0.5 overflow-hidden p-1 text-foreground [&_[cmdk-group-heading]]:px-3 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground",
         className
       )}
       {...props}
@@ -75,7 +75,8 @@ function CommandItem({ className, ...props }) {
     <CommandPrimitive.Item
       className={cn(
         // 当前项:浅表面 + 品牌色强调(克制,不整块铺色);150ms 平滑。
-        "flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm outline-none select-none data-[selected=true]:bg-primary/10 data-[selected=true]:text-primary data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50",
+        // P4-31 ⑦下拉:菜单项高 32、内边距 12、圆角 8
+        "flex h-8 cursor-pointer items-center gap-2 rounded-md px-3 text-[13px] outline-none select-none data-[selected=true]:bg-primary/10 data-[selected=true]:text-primary data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50",
         className
       )}
       {...props}

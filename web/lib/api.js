@@ -120,41 +120,55 @@ export function useTaskContext() {
 
 // ---- 标签词汇(与后端词汇表对应,面板侧仅做展示映射) ----
 
-// 任务状态(Manager 运行态)→ 徽标变体。completed 为 P1-10 完成终态
-//(全部目标经仲裁者判定达成);settling 为 P2-04 任务级总闸的收尾子态
-//(整体超时到点:停止派发、在跑单位收尾、终局判定后定终态);
-// hibernated 为 P2-08 冬眠态(可唤醒恢复,区别于已暂停与已熔断);
-// checkpointed 为 P3-07 断点存档态(在跑单位已收拢,进程可关;重启后
-// 任务自动原地续跑)。
-export const TASK_STATUS = {
-  created: { label: "已创建", variant: "info" },
-  queued: { label: "排队中", variant: "paused" },
-  started: { label: "运行中", variant: "running" },
-  settling: { label: "收尾中", variant: "running" },
-  paused: { label: "已暂停", variant: "paused" },
-  hibernated: { label: "冬眠中", variant: "paused" },
-  checkpointed: { label: "已存档", variant: "info" },
-  stopped: { label: "已熔断", variant: "danger" },
-  completed: { label: "已完成", variant: "success" },
-};
+// 任务状态显示取态(P4-20 起,P4-27 ② 全状态矩阵绝对单显)为纯显示
+// 逻辑,实现独立于数据层在 task-status.js(测试脚本直引做 36 格矩阵
+// 断言);此处再导出,全站消费点不变。
+export {
+  TASK_STATUS,
+  TASK_BLOCKED_HINT,
+  taskActiveStatus,
+  taskFrozenStatus,
+  taskStatusBadge,
+  taskStopWay,
+} from "./task-status.mjs";
 
-// 发现(TestClaim)状态 → 徽标变体。awaiting_round 为 P2-02 待下轮反证
-//(轮末机器评估:竞争解释未全灭且轮次未尽);fixed 为 P3-06 复测确认
-// 已修复(锤炼态之上的修复标记,成果与报告不消失)。
+// 发现(TestClaim)状态 → 徽标变体。P4-28 ⑥ 显示层合并 12→6:过程态
+// candidate/testing/awaiting_round 合并显示"锤炼中"(hint 悬停细分当前
+// 所处阶段),出结果才显示已确认/待确认;fixed 为 P3-06 复测确认已修复
+// (锤炼态之上的修复标记,成果与报告不消失)。live 过程态徽标带呼吸点
+// 动画(gr-live),终态静态。与 rings.ClaimStatusWord 同词同口径。
 export const CLAIM_STATUS = {
-  candidate: { label: "候选", variant: "info" },
-  testing: { label: "反证中", variant: "running" },
-  awaiting_round: { label: "待下轮反证", variant: "paused" },
-  confirmed: { label: "Confirmed", variant: "success" },
-  pending: { label: "待确认", variant: "warning" },
-  fixed: { label: "已修复", variant: "success" },
+  candidate: {
+    label: "锤炼中", variant: "running", live: true,
+    hint: "锤炼中(待验证)：已提交，等待安排独立单位反证",
+  },
+  testing: {
+    label: "锤炼中", variant: "running", live: true,
+    hint: "锤炼中(反证中)：独立单位正在反证",
+  },
+  awaiting_round: {
+    label: "锤炼中", variant: "running", live: true,
+    hint: "锤炼中(待下轮反证)：本轮疑点未排完，等下一轮反证",
+  },
+  confirmed: {
+    label: "已确认", variant: "success",
+    hint: "反证未推翻且证据充分，判定成立",
+  },
+  pending: {
+    label: "待确认", variant: "warning",
+    hint: "暂不成立挂起，有新证据自动重开，无需人工操作",
+  },
+  fixed: {
+    label: "已修复", variant: "success",
+    hint: "复测确认漏洞已不可触发，发现记录保留",
+  },
 };
 
-// 复测结论(P3-06):修复状态轴三值,如实呈现。
+// 复测结论(P3-06):修复状态轴三值,如实呈现(P4-28 ② 悬停人话)。
 export const RETEST_VERDICT = {
-  fixed: { label: "已修复", variant: "success" },
-  unfixed: { label: "未修复", variant: "danger" },
-  inconclusive: { label: "未能定论", variant: "warning" },
+  fixed: { label: "已修复", variant: "success", hint: "复测重放显示漏洞不再可触发" },
+  unfixed: { label: "未修复", variant: "danger", hint: "复测显示漏洞仍可触发" },
+  inconclusive: { label: "未能定论", variant: "warning", hint: "复测未能判定，如目标不可达" },
 };
 
 // 重放校验结论(P3-07):绑定流量证据原样重放后的确定性比对——只陈述
@@ -167,30 +181,47 @@ export const REPLAY_VERDICT = {
 
 // 假设(Hypothesis)状态 → 徽标变体(P2-03 直觉回流:候选 → 主宰评估
 // 三去向 → 验证结论;挂账 = 存疑留在图上待唤醒,已废弃 = 有理由的废案)。
+// P4-28 ⑥:过程态 candidate/testing 合并显示"锤炼中"(hint 细分)。
 export const HYP_STATUS = {
-  candidate: { label: "候选", variant: "info" },
-  testing: { label: "验证中", variant: "running" },
-  held: { label: "挂账", variant: "paused" },
-  confirmed: { label: "成立", variant: "success" },
-  discarded: { label: "已废弃", variant: "danger" },
+  candidate: {
+    label: "锤炼中", variant: "running", live: true,
+    hint: "锤炼中(待验证)：已提交，等待主宰评估",
+  },
+  testing: {
+    label: "锤炼中", variant: "running", live: true,
+    hint: "锤炼中(验证中)：独立单位正在验证",
+  },
+  held: {
+    label: "搁置", variant: "paused",
+    hint: "评估存疑暂留，唤醒后重新评估",
+  },
+  confirmed: {
+    label: "成立", variant: "success",
+    hint: "验证取得支持证据，猜测成立",
+  },
+  discarded: {
+    label: "已废弃", variant: "danger",
+    hint: "已判不成立，理由留档不删除",
+  },
 };
 
-// 假设评估三去向(主宰收割裁决)。
+// 假设评估三去向(主宰检查归纳后的判定)。
 export const HYP_DECISION = {
   verify: { label: "转验证", tone: "running" },
-  hold: { label: "挂账", tone: "warning" },
+  hold: { label: "搁置", tone: "warning" },
   discard: { label: "废弃", tone: "danger" },
 };
 
-// 假设验证结论(验证单位结构化写回)。
+// 假设验证结论(验证单位结构化写回;variant 供 StatusBadge,P4-28 ②
+// 悬停人话)。
 export const HYP_VERDICT = {
-  supported: { label: "成立", tone: "success" },
-  refuted: { label: "不成立", tone: "danger" },
-  inconclusive: { label: "未能定论", tone: "warning" },
+  supported: { label: "成立", variant: "success", hint: "验证取得支持证据，猜测成立" },
+  refuted: { label: "不成立", variant: "danger", hint: "验证推翻了这条猜测" },
+  inconclusive: { label: "未能定论", variant: "warning", hint: "验证过但证据不足，可再验" },
 };
 
 // 严重级别(critical/high/medium/low)→ 徽标变体。级别只来自反证轮的
-// 影响面证据(收割定稿),发现者无级别通道(两维声明定稿,P2-02)。
+// 影响面证据(检查归纳定稿),发现者无级别通道(两维判断定稿,P2-02)。
 export const SEVERITY = ["critical", "high", "medium", "low"];
 
 export function severityMeta(level) {
@@ -218,12 +249,12 @@ export function levelVariant(level) {
   return hit ? hit.variant : "info";
 }
 
-// 审批门槛选项(P2-06b:该级及以上的意图弹门;默认宽=仅增删改弹门)。
+// 审批门槛选项(P2-06b:该级及以上的意图需批准;默认宽=仅增删改需批准)。
 export const APPROVAL_THRESHOLD_OPTIONS = [
-  { value: "修改与持久化", label: "仅增删改弹门(默认)" },
-  { value: "利用深入", label: "利用深入及以上弹门" },
-  { value: "主动测试", label: "主动测试及以上弹门" },
-  { value: "只读探测", label: "全部弹门" },
+  { value: "修改与持久化", label: "仅增删改需批准(默认)" },
+  { value: "利用深入", label: "利用深入及以上需批准" },
+  { value: "主动测试", label: "主动测试及以上需批准" },
+  { value: "只读探测", label: "全部需批准" },
 ];
 
 // 拒绝线类别 → 操作者语言。
@@ -325,7 +356,7 @@ export const NODE_TYPES = {
   goal: { label: "目标", icon: "flag", tone: "running", shape: "gr-shape-goal" },
   step: { label: "步骤", icon: "arrowRight", tone: "high", shape: "gr-shape-step" },
   fact: { label: "事实", icon: "check", tone: "success", shape: "gr-shape-fact" },
-  testclaim: { label: "声明", icon: "shieldAlert", tone: "critical", shape: "gr-shape-claim" },
+  testclaim: { label: "判断", icon: "shieldAlert", tone: "critical", shape: "gr-shape-claim" },
   hypothesis: { label: "假设", icon: "sparkles", tone: "warning", shape: "gr-shape-hypo" },
   asset: { label: "资产", icon: "server", tone: "info", shape: "gr-shape-asset" },
 };
@@ -343,14 +374,15 @@ export const STEP_STATUS = {
   exhausted: "预算耗尽",
   failed: "失败",
   aborted: "已中止",
+  cancelled: "已取消",
   blocked: "受阻",
   approval_denied: "审批拒绝终止",
 };
 
-// 事实状态(两态:候选 / 仲裁确认)。
+// 事实状态(两态:待确认 / 仲裁确认;P4-28 ② 悬停人话)。
 export const FACT_STATUS = {
-  candidate: "候选",
-  confirmed: "已确认",
+  candidate: { label: "待确认", variant: "info", hint: "虫群提交的事实，待主宰检查归纳" },
+  confirmed: { label: "已确认", variant: "success", hint: "已经主宰检查归纳确认" },
 };
 
 // 目标证书校验结论(https 流量标注;与后端 mirror.TLSLabel 同一映射,
@@ -386,8 +418,10 @@ export function nodeStatusMeta(type, status) {
         label: STEP_STATUS[status] || status,
         variant: status === "done" ? "success" : status === "running" ? "running" : "paused",
       };
-    case "fact":
-      return { label: FACT_STATUS[status] || status, variant: status === "confirmed" ? "success" : "info" };
+    case "fact": {
+      const f = FACT_STATUS[status];
+      return f || { label: status, variant: "info" };
+    }
     case "testclaim":
       return CLAIM_STATUS[status] || null;
     case "hypothesis":
@@ -398,7 +432,7 @@ export function nodeStatusMeta(type, status) {
 }
 
 // 终止且无产出的节点状态:进度图灰显保留(R10 废案可视化的分支态)。
-export const DEAD_STATUSES = new Set(["discarded", "aborted", "approval_denied", "failed"]);
+export const DEAD_STATUSES = new Set(["discarded", "cancelled", "aborted", "approval_denied", "failed"]);
 
 // 类型化边 → 操作者语言(goal / falsify 为图投影派生边,血缘上标
 // "派生"/"反证";sub_of 仅资产树视图消费,进度图不画)。

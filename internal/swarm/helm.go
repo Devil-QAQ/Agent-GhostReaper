@@ -76,13 +76,13 @@ func (h *Helm) SteerWork(ctx context.Context, taskID, stepID, message, by string
 	}
 	step, err := h.Store.Node(ctx, taskID, stepID)
 	if err != nil {
-		return "", fmt.Errorf("swarm: 舵杆指向步骤 %s: %w", stepID, err)
+		return "", fmt.Errorf("swarm: 纠偏指向步骤 %s: %w", stepID, err)
 	}
 	if step.Type != rings.NodeStep {
 		return "", fmt.Errorf("swarm: 节点 %s 是 %s 不是 step", stepID, step.Type)
 	}
 	if step.Status != "running" {
-		return "", fmt.Errorf("swarm: 步骤 %s 当前状态 %s,不在执行中——舵杆只指向在跑的虫群单位", stepID, step.Status)
+		return "", fmt.Errorf("swarm: 步骤 %s 当前状态 %s,不在执行中——纠偏只指向在跑的虫群单位", stepID, step.Status)
 	}
 	rec := rings.SteerRecord{
 		SteerID: steerID(), StepID: stepID, Command: rings.SteerCommandSteer,
@@ -91,7 +91,7 @@ func (h *Helm) SteerWork(ctx context.Context, taskID, stepID, message, by string
 	if _, err := h.Store.Append(steerCtx, taskID, rings.Event{
 		Kind: rings.EventSteerRecord, Actor: actorOf(by), Payload: rec,
 	}); err != nil {
-		return "", fmt.Errorf("swarm: 舵杆排队记账: %w", err)
+		return "", fmt.Errorf("swarm: 纠偏排队记账: %w", err)
 	}
 	h.mu.Lock()
 	h.pending[steerKey(taskID, stepID)] = append(h.pending[steerKey(taskID, stepID)], rec)
@@ -106,7 +106,7 @@ func (h *Helm) SteerWork(ctx context.Context, taskID, stepID, message, by string
 func (h *Helm) KillWork(ctx context.Context, taskID, stepID, reason, by string) (string, error) {
 	step, err := h.Store.Node(ctx, taskID, stepID)
 	if err != nil {
-		return "", fmt.Errorf("swarm: 舵杆指向步骤 %s: %w", stepID, err)
+		return "", fmt.Errorf("swarm: 纠偏指向步骤 %s: %w", stepID, err)
 	}
 	if step.Type != rings.NodeStep {
 		return "", fmt.Errorf("swarm: 节点 %s 是 %s 不是 step", stepID, step.Type)
@@ -122,7 +122,7 @@ func (h *Helm) KillWork(ctx context.Context, taskID, stepID, reason, by string) 
 	}
 	unitID, ok := hook(taskID, stepID)
 	if !ok {
-		return "", fmt.Errorf("swarm: 步骤 %s 无在跑单位(领取竞态:单位刚落地)", stepID)
+		return "", fmt.Errorf("swarm: 步骤 %s 无在跑单位(领取竞态:单位刚干完)", stepID)
 	}
 	rec := rings.SteerRecord{
 		SteerID: steerID(), StepID: stepID, UnitID: unitID, Command: rings.SteerCommandKill,
@@ -132,7 +132,7 @@ func (h *Helm) KillWork(ctx context.Context, taskID, stepID, reason, by string) 
 	if _, err := h.Store.Append(steerCtx, taskID, rings.Event{
 		Kind: rings.EventSteerRecord, Actor: actorOf(by), Payload: rec,
 	}); err != nil {
-		return "", fmt.Errorf("swarm: 舵杆止损记账: %w", err)
+		return "", fmt.Errorf("swarm: 纠偏止损记账: %w", err)
 	}
 	h.expirePending(taskID, stepID, "止损终止:单位已停,指令失去生效点(已过时)")
 	return rec.SteerID, nil

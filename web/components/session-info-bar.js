@@ -25,29 +25,29 @@ export function SessionInfoBar({ info, startedAt, billableSeconds, deductSeconds
   return (
     <div
       className={cn(
-        "flex flex-wrap items-center gap-x-5 gap-y-1.5 rounded-lg border bg-card px-4 py-2 text-xs text-muted-foreground",
+        "flex flex-wrap items-center gap-x-5 gap-y-1.5 rounded-lg border border-border/55 bg-card px-4 py-2 text-xs text-muted-foreground",
         className
       )}
     >
       <span className="flex items-center gap-2">
         {React.createElement(iconOf("brain"), { className: "size-3.5" })}
         模型{" "}
-        <span className="font-mono text-foreground">
+        <span className="num text-foreground">
           {i.model ? shortModel(i.model) : "—"}
         </span>
       </span>
       <span className="flex items-center gap-2">
         {React.createElement(iconOf("zap"), { className: "size-3.5" })}
-        输入 <span className="font-mono text-foreground">{hasUsage ? fmtNum(i.input_tokens) : "—"}</span>
-        {" · "}输出 <span className="font-mono text-foreground">{hasUsage ? fmtNum(i.output_tokens) : "—"}</span>
-        {" · "}缓存 <span className="font-mono text-foreground">{hasUsage ? fmtNum(i.cache_tokens) : "—"}</span>
+        输入 <span className="num text-foreground">{hasUsage ? fmtNum(i.input_tokens) : "—"}</span>
+        {" · "}输出 <span className="num text-foreground">{hasUsage ? fmtNum(i.output_tokens) : "—"}</span>
+        {" · "}缓存 <span className="num text-foreground">{hasUsage ? fmtNum(i.cache_tokens) : "—"}</span>
       </span>
       <span className="flex items-center gap-2">
         {React.createElement(iconOf("gauge"), { className: "size-3.5" })}
         上下文{" "}
         {i.context_window > 0 ? (
           <>
-            <span className="font-mono text-foreground">
+            <span className="num text-foreground">
               {hasUsage ? ((i.context_ratio || 0) * 100).toFixed(1) + "%" : "0.0%"}
             </span>
             <span className="relative inline-block h-1.5 w-16 overflow-hidden rounded-full bg-muted">
@@ -63,7 +63,7 @@ export function SessionInfoBar({ info, startedAt, billableSeconds, deductSeconds
             </span>
           </>
         ) : (
-          <span className="font-mono text-foreground">—</span>
+          <span className="num text-foreground">—</span>
         )}
       </span>
       <span className="ml-auto flex items-center gap-2" title="有效运行时长:审批等待 / 受阻 / 冬眠 / 挂起期间不计时">
@@ -82,21 +82,27 @@ export function SessionInfoBar({ info, startedAt, billableSeconds, deductSeconds
 // BillableDuration 服务端口径的时长(虫群单位会话):值随轮询刷新,
 // 不本地走秒——冻结与续走由服务端读数天然承载。
 function BillableDuration({ seconds }) {
-  return <span className="font-mono text-foreground">{fmtDuration(seconds)}</span>;
+  return <span className="num text-foreground">{fmtDuration(seconds)}</span>;
 }
 
-// Duration 自然时长 − 冬眠抵扣,每秒刷新;frozen(冬眠中)钉住不涨,
-// 解冻后随最新抵扣值续走。未开始呈 —。
+// Duration 自然时长 − 冬眠抵扣,每秒刷新;frozen(冬眠中)锚定进入
+// 冬眠时刻的读数定值——冻结期不推进不重算(P4-15 ③:抵扣随轮询更新,
+// 若逐轮"客户端钟−服务端抵扣"重算,两钟采样差会让读数来回跳);
+// 唤醒后随最新抵扣值续走。未开始呈 —;冻结期首次打开按当次采样
+// 计一次后定值。
 function Duration({ startedAt, deduct, frozen }) {
   const [sec, setSec] = React.useState(null);
   const frozenRef = React.useRef(frozen);
+  const secRef = React.useRef(null);
   frozenRef.current = frozen;
+  secRef.current = sec;
   React.useEffect(() => {
     if (!startedAt) {
       setSec(null);
       return;
     }
     const compute = () => {
+      if (frozenRef.current && secRef.current != null) return; // 冻结期锚定,不重算
       const start = new Date(startedAt.replace(" ", "T")).getTime();
       if (!Number.isFinite(start)) {
         setSec(null);
@@ -110,11 +116,11 @@ function Duration({ startedAt, deduct, frozen }) {
     }, 1000);
     return () => clearInterval(t);
   }, [startedAt, deduct]);
-  if (sec == null) return <span className="font-mono text-foreground">—</span>;
-  return <span className="font-mono text-foreground">{fmtDuration(sec)}</span>;
+  if (sec == null) return <span className="num text-foreground">—</span>;
+  return <span className="num text-foreground">{fmtDuration(sec)}</span>;
 }
 
-// fmtDuration 秒 → HH:MM:SS(精确,tabular 数字由 font-mono 承载)。
+// fmtDuration 秒 → HH:MM:SS(精确,tabular 数字由 num 承载)。
 function fmtDuration(sec) {
   let s = Math.max(0, Math.floor(sec));
   const h = Math.floor(s / 3600);

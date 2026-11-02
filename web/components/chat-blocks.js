@@ -22,6 +22,83 @@ export const DELIVERY = {
 // nowStamp 本地时间戳(与账本事件侧 at 同格式,本地即显的消息用)。
 export const nowStamp = () => new Date().toLocaleString("sv-SE").slice(0, 19);
 
+// ---- 消息流滚动(P4-22,问题清单 #34) ----
+
+// 贴底阈值(像素):滚动位置距底部以内视为"在底部",享有自动跟滚
+// 资格;翻阅历史(超出阈值)则不被新内容拽动。
+const STICK_GAP = 80;
+
+// tailGrowSig 末条消息的内容增量签名:回答期间思考卡/工具卡/回复随
+// 处理实时出现(消息条数不变),内容量增长同样触发贴底跟滚。
+export function tailGrowSig(msg) {
+  if (!msg) return "0";
+  return `${(msg.thinking || "").length}|${(msg.tool_calls || []).length}|${(msg.reply || "").length}`;
+}
+
+// ChatStream 消息流容器:在底部(近底部阈值内)时新内容自动滚到底;
+// 翻阅历史时不拽动;右下角浮「回到底部」按钮,翻阅中有未看新消息时
+// 带提示,到底即隐。会话页全部消息流共用(牧者/主宰/单位/插话/成果
+// 追问窗)。sig = 流内容变更签名;resetKey = 会话身份,切换时回到
+// 默认在底部。
+export function ChatStream({ sig, resetKey, className, children }) {
+  const boxRef = React.useRef(null);
+  const pinnedRef = React.useRef(true); // 贴底中(跟滚资格)
+  const [away, setAway] = React.useState(false); // 不在底部:按钮出现
+  const [fresh, setFresh] = React.useState(false); // 翻阅中有未看新消息
+
+  const onScroll = () => {
+    const el = boxRef.current;
+    if (!el) return;
+    const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_GAP;
+    pinnedRef.current = bottom;
+    setAway(!bottom);
+    if (bottom) setFresh(false);
+  };
+
+  // 新内容到达:贴底则跟滚到底;翻阅中只记未看,不拽动。取布局期
+  // 滚动(渲染后上屏前),新内容不闪现一帧再跳。
+  React[typeof window === "undefined" ? "useEffect" : "useLayoutEffect"](() => {
+    const el = boxRef.current;
+    if (!el) return;
+    if (pinnedRef.current) el.scrollTop = el.scrollHeight;
+    else setFresh(true);
+  }, [sig]);
+
+  // 切换会话:重置为默认在底部(晚于 sig 生效,同帧切换以重置为准)。
+  React.useEffect(() => {
+    pinnedRef.current = true;
+    setAway(false);
+    setFresh(false);
+    const el = boxRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [resetKey]);
+
+  return (
+    <div className="relative min-h-0 flex-1">
+      <div
+        ref={boxRef}
+        onScroll={onScroll}
+        className={cn("h-full overflow-y-auto", className)}
+      >
+        {children}
+      </div>
+      {away && (
+        <button
+          type="button"
+          onClick={() => {
+            const el = boxRef.current;
+            if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+          }}
+          className="absolute bottom-3 right-4 z-10 flex cursor-pointer items-center gap-1.5 rounded-full border border-border/55 bg-card px-3 py-1.5 text-xs shadow-md hover:bg-hover-lift"
+        >
+          {React.createElement(iconOf("arrowDown"), { className: "size-3.5" })}
+          {fresh ? "回到底部 · 有新消息" : "回到底部"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 // MessageBlock 一条问答:造物主消息(带送达状态)→ 思考段 → 工具折叠卡
 // 流 → 牧者回复(引用可点击)。
 export function MessageBlock({ msg, taskID, onNode }) {
@@ -43,11 +120,11 @@ export function MessageBlock({ msg, taskID, onNode }) {
               <ToolCallCard key={i} call={c} />
             ))}
             {msg.reply && (
-              <div className="max-w-[90%] rounded-lg border bg-background px-3 py-2 text-[13px] whitespace-pre-wrap [overflow-wrap:anywhere]">
+              <div className="t-body max-w-[90%] rounded-lg border border-border/55 bg-background px-3 py-2 whitespace-pre-wrap [overflow-wrap:anywhere]">
                 <RefText text={msg.reply} taskID={taskID} onNode={onNode} />
                 <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
                   <Badge variant="outline">进展总结</Badge>
-                  <span className="font-mono">{msg.reply_at?.slice(11)}</span>
+                  <span className="num">{msg.reply_at?.slice(11)}</span>
                 </div>
               </div>
             )}
@@ -60,11 +137,11 @@ export function MessageBlock({ msg, taskID, onNode }) {
     <div className="flex flex-col gap-2">
       {/* 造物主 */}
       <div className="flex flex-col items-end gap-0.5">
-        <div className="max-w-[85%] rounded-lg bg-primary/15 px-3 py-2 text-[13px] whitespace-pre-wrap [overflow-wrap:anywhere]">
+        <div className="t-body max-w-[85%] rounded-lg bg-primary/15 px-3 py-2 whitespace-pre-wrap [overflow-wrap:anywhere]">
           {msg.text}
         </div>
         <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-          <span className="font-mono">{msg.at?.slice(11)}</span>
+          <span className="num">{msg.at?.slice(11)}</span>
           <Badge variant={st.variant}>{st.label}</Badge>
         </div>
         {msg.state === "failed" && msg.note && (
@@ -82,11 +159,11 @@ export function MessageBlock({ msg, taskID, onNode }) {
             <InlineAdvice key={a.id} advice={a} />
           ))}
           {msg.reply && (
-            <div className="max-w-[90%] rounded-lg border bg-background px-3 py-2 text-[13px] whitespace-pre-wrap [overflow-wrap:anywhere]">
+            <div className="t-body max-w-[90%] rounded-lg border border-border/55 bg-background px-3 py-2 whitespace-pre-wrap [overflow-wrap:anywhere]">
               <RefText text={msg.reply} taskID={taskID} onNode={onNode} />
               <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
                 <Badge variant="outline">回复</Badge>
-                <span className="font-mono">{msg.reply_at?.slice(11)}</span>
+                <span className="num">{msg.reply_at?.slice(11)}</span>
               </div>
             </div>
           )}
@@ -100,7 +177,7 @@ export function MessageBlock({ msg, taskID, onNode }) {
 export function ThinkingCard({ text }) {
   const [open, setOpen] = React.useState(false);
   return (
-    <div className="max-w-[85%] rounded-lg border bg-background">
+    <div className="max-w-[85%] rounded-lg border border-border/55 bg-background">
       <button
         className="flex w-full items-center gap-2 px-3 py-1 text-[11px] text-muted-foreground cursor-pointer"
         onClick={() => setOpen((o) => !o)}
@@ -127,7 +204,7 @@ export function ToolCallCard({ call }) {
   return (
     <div
       className={cn(
-        "max-w-[85%] rounded-lg border bg-background",
+        "max-w-[85%] rounded-lg border border-border/55 bg-background",
         call.is_error && "border-status-danger/60"
       )}
     >
@@ -136,7 +213,7 @@ export function ToolCallCard({ call }) {
         onClick={() => setOpen((o) => !o)}
       >
         <Badge variant="outline">{call.is_error ? "工具出错" : "工具调用"}</Badge>
-        <span className="truncate font-mono">{call.name}</span>
+        <span className="truncate num">{call.name}</span>
         <span className="ml-auto shrink-0 text-muted-foreground">
           {call.at?.slice(11)}
         </span>
@@ -149,7 +226,7 @@ export function ToolCallCard({ call }) {
           {call.args && (
             <div>
               <div className="mb-0.5 text-muted-foreground">参数</div>
-              <pre className="overflow-x-auto rounded-md bg-input-surface p-2 font-mono whitespace-pre-wrap break-all">
+              <pre className="overflow-x-auto rounded-md bg-input-surface p-2 num whitespace-pre-wrap break-all">
                 {call.args}
               </pre>
             </div>
@@ -157,7 +234,7 @@ export function ToolCallCard({ call }) {
           {call.result_head && (
             <div>
               <div className="mb-0.5 text-muted-foreground">结果</div>
-              <pre className="max-h-56 overflow-y-auto rounded-md bg-input-surface p-2 font-mono whitespace-pre-wrap break-all">
+              <pre className="max-h-56 overflow-y-auto rounded-md bg-input-surface p-2 num whitespace-pre-wrap break-all">
                 {call.result_head}
               </pre>
             </div>
@@ -173,22 +250,22 @@ export function ToolCallCard({ call }) {
 export function InlineAdvice({ advice }) {
   const meta = (st) =>
     st === "pending"
-      ? { label: "待裁决", variant: "paused" }
+      ? { label: "待判定", variant: "paused" }
       : st === "adopted"
         ? { label: "已采纳", variant: "success" }
         : { label: "未采纳", variant: "danger" };
   const m = meta(advice.state);
   return (
-    <div className="w-[85%] rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-[12px]">
+    <div className="w-[85%] rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
       <div className="flex items-center gap-2">
         {React.createElement(iconOf("sparkles"), { className: "size-3 shrink-0 text-primary" })}
         <span className="text-muted-foreground">对主宰的建议</span>
         <Badge variant={m.variant}>{m.label}</Badge>
-        <span className="font-mono text-[11px] text-muted-foreground">{advice.id}</span>
+        <span className="num text-[11px] text-muted-foreground">{advice.id}</span>
       </div>
       <div className="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere]">{advice.text}</div>
       {advice.reason && (
-        <div className="mt-1 text-[11px] text-muted-foreground">裁决:{advice.reason}</div>
+        <div className="mt-1 text-[11px] text-muted-foreground">理由:{advice.reason}</div>
       )}
     </div>
   );
@@ -211,7 +288,7 @@ export function RefText({ text, taskID, onNode }) {
     parts.push(
       <button
         key={m.index}
-        className="cursor-pointer font-mono text-primary underline decoration-dotted underline-offset-2"
+        className="cursor-pointer num text-primary underline decoration-dotted underline-offset-2"
         title="查看节点"
         onClick={async () => {
           const r = await fetch(`/api/tasks/${taskID}/nodes/${nodeID}`);

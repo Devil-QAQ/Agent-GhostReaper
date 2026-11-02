@@ -1,0 +1,807 @@
+{
+  "schema_version": "mimosa-task-review/v2",
+  "run_id": "20261024T153513638Z-62296-e70137bcc57f",
+  "run_status": "inconclusive",
+  "errors": [
+    {
+      "stage": "candidate-select",
+      "target": "web/lib/task-status.js",
+      "reason": "changed_file_unreadable: observed changed file no longer exists or cannot be read"
+    },
+    {
+      "stage": "candidate-select",
+      "target": "internal/failover/p427_live_test.go",
+      "reason": "changed_file_unreadable: observed changed file no longer exists or cannot be read"
+    },
+    {
+      "stage": "candidate-select",
+      "target": "internal/overmind/p427_live_test.go",
+      "reason": "changed_file_unreadable: observed changed file no longer exists or cannot be read"
+    },
+    {
+      "stage": "candidate-select",
+      "target": "internal/overmind/machinegate.go",
+      "reason": "candidate_limit_exceeded: 14 changed reviewable file(s) were not scanned because the limit is 20"
+    },
+    {
+      "stage": "baseline",
+      "target": ".",
+      "reason": "baseline_partial: baseline capture had enumeration or snapshot errors"
+    }
+  ],
+  "coverage": {
+    "schema_version": "mimosa-hook-coverage/v1",
+    "status": "partial",
+    "scope": "hook_observed_diff",
+    "baseline": {
+      "complete": false,
+      "captured_files": 343,
+      "candidate_limit": 5000,
+      "truncated": false,
+      "enumeration_error_count": 0,
+      "snapshot_error_count": 3,
+      "compensated_target_count": 34
+    },
+    "change_tracking": {
+      "touched_observed": 35,
+      "touched_retained": 35,
+      "truncated": false,
+      "bash_mutation": true,
+      "bash_discovered": 34,
+      "bash_discovery_limit": 80,
+      "bash_discovery_truncated": false
+    },
+    "candidates": {
+      "eligible_files": 34,
+      "selected_files": 20,
+      "limit": 20,
+      "truncated": true
+    },
+    "scanning": {
+      "required_files": 20,
+      "scanned_files": 20,
+      "skipped_files": 0,
+      "failed_files": 0,
+      "project_checks_required": 0,
+      "project_checks_completed": 0
+    },
+    "notification": {
+      "eligible_findings": 0,
+      "detailed_findings": 0,
+      "detail_limit": 3,
+      "truncated": false
+    },
+    "reason_counts": {
+      "changed_file_unreadable": 3,
+      "candidate_limit_exceeded": 1,
+      "baseline_partial": 1,
+      "project_check_failed": 5
+    },
+    "reasons": [
+      {
+        "code": "changed_file_unreadable",
+        "stage": "candidate-select",
+        "target": "web/lib/task-status.js",
+        "detail": "observed changed file no longer exists or cannot be read",
+        "affects_completion": true
+      },
+      {
+        "code": "changed_file_unreadable",
+        "stage": "candidate-select",
+        "target": "internal/failover/p427_live_test.go",
+        "detail": "observed changed file no longer exists or cannot be read",
+        "affects_completion": true
+      },
+      {
+        "code": "changed_file_unreadable",
+        "stage": "candidate-select",
+        "target": "internal/overmind/p427_live_test.go",
+        "detail": "observed changed file no longer exists or cannot be read",
+        "affects_completion": true
+      },
+      {
+        "code": "candidate_limit_exceeded",
+        "stage": "candidate-select",
+        "target": "internal/overmind/machinegate.go",
+        "detail": "14 changed reviewable file(s) were not scanned because the limit is 20",
+        "affects_completion": true
+      },
+      {
+        "code": "baseline_partial",
+        "stage": "baseline",
+        "target": ".",
+        "detail": "baseline capture had enumeration or snapshot errors",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "candidate-select",
+        "target": "web/lib/task-status.js",
+        "detail": "changed_file_unreadable: observed changed file no longer exists or cannot be read",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "candidate-select",
+        "target": "internal/failover/p427_live_test.go",
+        "detail": "changed_file_unreadable: observed changed file no longer exists or cannot be read",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "candidate-select",
+        "target": "internal/overmind/p427_live_test.go",
+        "detail": "changed_file_unreadable: observed changed file no longer exists or cannot be read",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "candidate-select",
+        "target": "internal/overmind/machinegate.go",
+        "detail": "candidate_limit_exceeded: 14 changed reviewable file(s) were not scanned because the limit is 20",
+        "affects_completion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline",
+        "target": ".",
+        "detail": "baseline_partial: baseline capture had enumeration or snapshot errors",
+        "affects_completion": true
+      }
+    ],
+    "reasons_truncated": false
+  },
+  "generated_at": "2026-10-24T15:35:13.638Z",
+  "session_id": "session_e61e7a5aebb898a6390106ab894af43a",
+  "target": ".",
+  "revision": "a83b50a6d377c9ef5644abcb681962c62f6c2133",
+  "rules_version": "unavailable",
+  "diff_hash": "9a3c22430d925240837adad896f13fd9dc4c0975e11836da8a46d101eeca9747",
+  "diff": {
+    "algorithm": "sha256",
+    "changed_file_count": 20,
+    "changed_files": [
+      {
+        "file": "internal/failover/chain.go",
+        "ranges": [
+          {
+            "start": 501,
+            "end": 672
+          }
+        ],
+        "before_hash": "176f6ae1a19c628be8689894a8e311ac97fefe46e9c9878c5d824bf933eaca1b",
+        "after_hash": "642909da1c69d1620d32ea5ceba9ea44575fe75aa3dbc68a8a8ecb32d46c026d"
+      },
+      {
+        "file": "internal/overmind/loop.go",
+        "ranges": [
+          {
+            "start": 225,
+            "end": 234
+          },
+          {
+            "start": 237,
+            "end": 238
+          },
+          {
+            "start": 1043,
+            "end": 1045
+          },
+          {
+            "start": 1055,
+            "end": 1057
+          },
+          {
+            "start": 1777,
+            "end": 1780
+          },
+          {
+            "start": 1786,
+            "end": 1788
+          }
+        ],
+        "before_hash": "66d3a97dd2a99b17200537fd7eac489237c5b4610b250c490e2b78a5c33cb14c",
+        "after_hash": "07cad2cb464d4a74dfc3bf4635235d64bead3005eec162bb75c1f92f173ad20d"
+      },
+      {
+        "file": "internal/overmind/proofread.go",
+        "ranges": [
+          {
+            "start": 108,
+            "end": 109
+          },
+          {
+            "start": 111,
+            "end": 111
+          }
+        ],
+        "before_hash": "873cb3d8ccee832cb4f734056c6932c985f5ccfec58421b582d3ee576dbdd844",
+        "after_hash": "8eac60d0d9f0a67ee3de7b22b26fa67a18c50ab4864fc762b6854eb82e27233d"
+      },
+      {
+        "file": "internal/report/report.go",
+        "ranges": [
+          {
+            "start": 56,
+            "end": 56
+          },
+          {
+            "start": 60,
+            "end": 60
+          },
+          {
+            "start": 154,
+            "end": 157
+          },
+          {
+            "start": 162,
+            "end": 165
+          }
+        ],
+        "before_hash": "6cae26f0fed52d14f065a3bf3533af3692b624221380904e98d08c21acac140c",
+        "after_hash": "15ffffb16e866b5f7c0cfe0b5c94ef060927958bcbe947d44bec828193c4d660"
+      },
+      {
+        "file": "internal/rings/event.go",
+        "ranges": [
+          {
+            "start": 517,
+            "end": 517
+          },
+          {
+            "start": 526,
+            "end": 526
+          }
+        ],
+        "before_hash": "910a36eec086da150d73a4208a5b655ff27a397e514d01349b89cbb708ceab2b",
+        "after_hash": "646922148dee24832954f5708b4049cd1657fc18c8b6b0bc673e7f561b007196"
+      },
+      {
+        "file": "internal/rings/project.go",
+        "ranges": [
+          {
+            "start": 947,
+            "end": 974
+          }
+        ],
+        "before_hash": "545c006e8673eff41558728b51c432a192b000eb50d1d27d7c4a89e8037a7cb3",
+        "after_hash": "bf7134095c0a38575554d3e8d018991e8a8e8d41663b8e14b40084aa83d28122"
+      },
+      {
+        "file": "internal/server/server_models.go",
+        "ranges": [
+          {
+            "start": 364,
+            "end": 364
+          },
+          {
+            "start": 366,
+            "end": 382
+          },
+          {
+            "start": 384,
+            "end": 387
+          }
+        ],
+        "before_hash": "fa1aa19bc3699bdc324bbde95db60c81bcd67436730c3c1b3792ab4d73e8e8c6",
+        "after_hash": "0642f8d41b72c53b4c2e0b5b8e3577b7d0acc59edeb678686fe8ba04d1f775a3"
+      },
+      {
+        "file": "internal/server/server.go",
+        "ranges": [
+          {
+            "start": 526,
+            "end": 527
+          },
+          {
+            "start": 555,
+            "end": 556
+          },
+          {
+            "start": 1737,
+            "end": 1740
+          },
+          {
+            "start": 1760,
+            "end": 1762
+          }
+        ],
+        "before_hash": "5b586160a1e78615d80ae4b0c1a7ef9005da6ca350bd843cf80e55327c0fb68e",
+        "after_hash": "380e6f84bba7f7a3f6ee3d0966c4ecb5c0ae49e8fc780263046b71115bfcc780"
+      },
+      {
+        "file": "internal/swarm/executor.go",
+        "ranges": [
+          {
+            "start": 63,
+            "end": 69
+          },
+          {
+            "start": 241,
+            "end": 245
+          },
+          {
+            "start": 496,
+            "end": 503
+          },
+          {
+            "start": 508,
+            "end": 508
+          },
+          {
+            "start": 544,
+            "end": 545
+          },
+          {
+            "start": 547,
+            "end": 550
+          },
+          {
+            "start": 555,
+            "end": 555
+          },
+          {
+            "start": 732,
+            "end": 732
+          },
+          {
+            "start": 984,
+            "end": 984
+          },
+          {
+            "start": 987,
+            "end": 990
+          },
+          {
+            "start": 1001,
+            "end": 1002
+          },
+          {
+            "start": 1004,
+            "end": 1039
+          },
+          {
+            "start": 1042,
+            "end": 1044
+          },
+          {
+            "start": 1207,
+            "end": 1208
+          },
+          {
+            "start": 1457,
+            "end": 1465
+          },
+          {
+            "start": 1513,
+            "end": 1527
+          },
+          {
+            "start": 1530,
+            "end": 1531
+          },
+          {
+            "start": 1533,
+            "end": 1534
+          },
+          {
+            "start": 1538,
+            "end": 1551
+          }
+        ],
+        "before_hash": "cb98d0b65751b61ba79351cb1b109192ff1cb212a7dc695a75c3ae6ff1c6a375",
+        "after_hash": "4fb232859109228ba5e550c3e59e6918deb104cfae285456b7767ece7e71815e"
+      },
+      {
+        "file": "internal/swarm/harmnote.go",
+        "ranges": [
+          {
+            "start": 1,
+            "end": 208
+          }
+        ],
+        "before_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "after_hash": "240ad6081404b9515b17110fa00a0b8eb650bd87b2a799cd3b435665c930d005"
+      },
+      {
+        "file": "internal/swarm/modelretry.go",
+        "ranges": [
+          {
+            "start": 10,
+            "end": 11
+          },
+          {
+            "start": 14,
+            "end": 14
+          },
+          {
+            "start": 18,
+            "end": 31
+          },
+          {
+            "start": 33,
+            "end": 34
+          },
+          {
+            "start": 36,
+            "end": 41
+          },
+          {
+            "start": 44,
+            "end": 45
+          },
+          {
+            "start": 47,
+            "end": 59
+          },
+          {
+            "start": 61,
+            "end": 70
+          },
+          {
+            "start": 72,
+            "end": 72
+          },
+          {
+            "start": 75,
+            "end": 81
+          },
+          {
+            "start": 83,
+            "end": 88
+          },
+          {
+            "start": 101,
+            "end": 103
+          },
+          {
+            "start": 105,
+            "end": 105
+          },
+          {
+            "start": 109,
+            "end": 109
+          },
+          {
+            "start": 113,
+            "end": 113
+          },
+          {
+            "start": 115,
+            "end": 120
+          },
+          {
+            "start": 123,
+            "end": 133
+          },
+          {
+            "start": 167,
+            "end": 183
+          }
+        ],
+        "before_hash": "59a4531614faa49c860d79cba2e457aed2c7d84e9df05f0842b812f8b21f03c4",
+        "after_hash": "57beb465bc459266d87b634c98aba6a7bec7f62809fada375b2e75805df28305"
+      },
+      {
+        "file": "internal/swarm/promptspec.go",
+        "ranges": [
+          {
+            "start": 75,
+            "end": 83
+          }
+        ],
+        "before_hash": "c1a8dca135dc6ad6e9b1c9b1b73608b9ed08ad67d82702eab014543b4ad07205",
+        "after_hash": "d8d6fcfa911055d8f917603a6ae2e9f4776b9f46d8544e470812a16909cee525"
+      },
+      {
+        "file": "internal/swarm/tools.go",
+        "ranges": [
+          {
+            "start": 47,
+            "end": 47
+          },
+          {
+            "start": 588,
+            "end": 588
+          }
+        ],
+        "before_hash": "be4b7f7bcd9e056dc5bebb37d8d1c46aaaf059e36771b808f18be579e7c04ae0",
+        "after_hash": "ec136bc48170a6d4d3a8ba6502f9d1a74a296bf928dd063b5e9522734104cbff"
+      },
+      {
+        "file": "web/components/app-shell.js",
+        "ranges": [
+          {
+            "start": 281,
+            "end": 291
+          },
+          {
+            "start": 307,
+            "end": 317
+          }
+        ],
+        "before_hash": "e6d1e37d0166ec78e19608364ddc3df7d21021b3283699aa80efe23344773cfd",
+        "after_hash": "c686d16509c1a36b13fb40133ea50471289a6c147007d2db14d1e55503aa781e"
+      },
+      {
+        "file": "web/lib/api.js",
+        "ranges": [
+          {
+            "start": 123,
+            "end": 133
+          }
+        ],
+        "before_hash": "7ebe1c2973af13c96afe8c2c5746c1e6c77815e75b4cbd624dd4c85cb77971dd",
+        "after_hash": "fb8698b5a8e9458c11a0d38c3a948db2c934f64cba20ccc687a12c2322622bf8"
+      },
+      {
+        "file": "web/views/agent-page.js",
+        "ranges": [
+          {
+            "start": 47,
+            "end": 47
+          },
+          {
+            "start": 73,
+            "end": 73
+          }
+        ],
+        "before_hash": "71119f0bc13702a60517637bba5c9f89ef5376043ae7f5707bad569c72427a3f",
+        "after_hash": "4c89952c05d3d200831473d8cf8cfac5e22cba6d6cc8584a3cd5d7034eb8d5b7"
+      },
+      {
+        "file": "web/views/llm-page.js",
+        "ranges": [
+          {
+            "start": 66,
+            "end": 412
+          }
+        ],
+        "before_hash": "bc5e5e9074f05c2439e342bb86f7b279e6226d0bc778cb7a82ef4ab5e2189896",
+        "after_hash": "5b61dfa1328c2c6ed21086f039b55ff898a1fa5aff4aaeb6761af1e5f4512085"
+      },
+      {
+        "file": "web/views/roe-page.js",
+        "ranges": [
+          {
+            "start": 57,
+            "end": 57
+          },
+          {
+            "start": 397,
+            "end": 401
+          }
+        ],
+        "before_hash": "ded94cc3d1e48029f77f830a5d77f2760fb92887c978fe489fe9c4e55918e1b7",
+        "after_hash": "3abba5e7d247678940f955c297997603ecc8be0efe627ee804342be798e2297b"
+      },
+      {
+        "file": "web/views/tasks-page.js",
+        "ranges": [
+          {
+            "start": 42,
+            "end": 42
+          },
+          {
+            "start": 475,
+            "end": 491
+          }
+        ],
+        "before_hash": "274b006a97efcf32e4c9875840a9c6087a814601a76d3164ad6507122868a512",
+        "after_hash": "45b3ae5a631636bcc5b2bc7346b5aeefc0d2845480817f27b072c4f17feda1be"
+      },
+      {
+        "file": "web/views/workbench-page.js",
+        "ranges": [
+          {
+            "start": 196,
+            "end": 198
+          },
+          {
+            "start": 201,
+            "end": 201
+          },
+          {
+            "start": 205,
+            "end": 205
+          }
+        ],
+        "before_hash": "63f3c252bbf498e0d2bec943d0fc86efcc1478c51066bb2b8337c40d942d5aad",
+        "after_hash": "beccaaf800792c2327872729f894e019af94a68b7e3c331505167275885a336d"
+      }
+    ]
+  },
+  "timing": {
+    "started_at": "2026-10-24T15:35:11.960Z",
+    "completed_at": "2026-10-24T15:35:13.638Z",
+    "duration_ms": 1678,
+    "measurement": "hook_wall_clock"
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "model_calls": 0,
+    "measurement": "known-zero"
+  },
+  "telemetry": {
+    "schemaVersion": "mimosa-gate-telemetry/v1",
+    "profile": "gate",
+    "operation": "Stop",
+    "outcome": "partial/INCONCLUSIVE",
+    "latencyMs": 1678,
+    "peakMemoryBytes": 231260160,
+    "memoryMeasurement": "max-observed-process-rss",
+    "scannedFiles": 20,
+    "cache": {
+      "hits": 0,
+      "misses": 0,
+      "measurement": "not-applicable"
+    },
+    "denyCount": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "total": 0,
+      "modelCalls": 0,
+      "measurement": "known-zero"
+    }
+  },
+  "finding_count": 0,
+  "rewake_finding_count": 0,
+  "evidence_boundary": {
+    "scan": "candidate",
+    "static_fix_verification": "observed_static_only",
+    "runtime_verification": "not_performed"
+  },
+  "finding_events": [
+    {
+      "finding_id": "mimosa-2242eaf633c9eba37343655a",
+      "file": "internal/swarm/modelretry_test.go",
+      "line": 74,
+      "rule_id": "security",
+      "severity": "high",
+      "category": "硬编码凭据",
+      "status": "blocked",
+      "decision": "deny",
+      "at": "2026-10-24T14:09:17.360Z",
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "source": "semgrep",
+        "evidence_hash": "8b8744f1adfa033d4c7ecd682e25341338a3cb934feb19c450ae8ed554da6bb8",
+        "runtime_oracle": false
+      }
+    },
+    {
+      "finding_id": "mimosa-2242eaf633c9eba37343655a",
+      "file": "internal/swarm/modelretry_test.go",
+      "line": 74,
+      "rule_id": "security",
+      "severity": "high",
+      "category": "硬编码凭据",
+      "status": "fixed_candidate",
+      "decision": "repair_observed",
+      "at": "2026-10-24T14:10:10.331Z",
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "source": "semgrep",
+        "evidence_hash": "8b8744f1adfa033d4c7ecd682e25341338a3cb934feb19c450ae8ed554da6bb8",
+        "candidate_before_evidence_hash": "8b8744f1adfa033d4c7ecd682e25341338a3cb934feb19c450ae8ed554da6bb8",
+        "post_change_evidence_hash_at_previous_location": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_oracle": false,
+        "verification": {
+          "method": "mimosa-posttool-static-rescan",
+          "finding_absent": true,
+          "runtime_oracle": false
+        }
+      }
+    },
+    {
+      "finding_id": "mimosa-2242eaf633c9eba37343655a",
+      "file": "internal/swarm/modelretry_test.go",
+      "line": 74,
+      "rule_id": "security",
+      "severity": "high",
+      "category": "硬编码凭据",
+      "status": "static_verified",
+      "decision": "static_rescan_passed",
+      "at": "2026-10-24T14:10:10.331Z",
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "observed",
+        "producer": "deterministic",
+        "source": "semgrep",
+        "evidence_hash": "8b8744f1adfa033d4c7ecd682e25341338a3cb934feb19c450ae8ed554da6bb8",
+        "candidate_before_evidence_hash": "8b8744f1adfa033d4c7ecd682e25341338a3cb934feb19c450ae8ed554da6bb8",
+        "post_change_evidence_hash_at_previous_location": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_oracle": false,
+        "verification": {
+          "method": "mimosa-posttool-static-rescan",
+          "finding_absent": true,
+          "runtime_oracle": false
+        }
+      }
+    },
+    {
+      "finding_id": "mimosa-f5af9b3f57a05bba67c73cba",
+      "file": "internal/server/server_models_test.go",
+      "line": 247,
+      "rule_id": "security",
+      "severity": "high",
+      "category": "硬编码凭据",
+      "status": "blocked",
+      "decision": "deny",
+      "at": "2026-10-24T14:25:18.265Z",
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "source": "semgrep",
+        "evidence_hash": "9334e67441b36bdb9175400bc02d98407059831aa6247340d859c0415b4e21b8",
+        "runtime_oracle": false
+      }
+    },
+    {
+      "finding_id": "mimosa-f5af9b3f57a05bba67c73cba",
+      "file": "internal/server/server_models_test.go",
+      "line": 247,
+      "rule_id": "security",
+      "severity": "high",
+      "category": "硬编码凭据",
+      "status": "fixed_candidate",
+      "decision": "repair_observed",
+      "at": "2026-10-24T14:29:47.140Z",
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "source": "semgrep",
+        "evidence_hash": "9334e67441b36bdb9175400bc02d98407059831aa6247340d859c0415b4e21b8",
+        "candidate_before_evidence_hash": "9334e67441b36bdb9175400bc02d98407059831aa6247340d859c0415b4e21b8",
+        "post_change_evidence_hash_at_previous_location": "994f5f02441f0fcac3b1be2347792d26dfb711e2e25c4b9ece9c9fcd6606ab49",
+        "runtime_oracle": false,
+        "verification": {
+          "method": "mimosa-posttool-static-rescan",
+          "finding_absent": true,
+          "runtime_oracle": false
+        }
+      }
+    },
+    {
+      "finding_id": "mimosa-f5af9b3f57a05bba67c73cba",
+      "file": "internal/server/server_models_test.go",
+      "line": 247,
+      "rule_id": "security",
+      "severity": "high",
+      "category": "硬编码凭据",
+      "status": "static_verified",
+      "decision": "static_rescan_passed",
+      "at": "2026-10-24T14:29:47.140Z",
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "observed",
+        "producer": "deterministic",
+        "source": "semgrep",
+        "evidence_hash": "9334e67441b36bdb9175400bc02d98407059831aa6247340d859c0415b4e21b8",
+        "candidate_before_evidence_hash": "9334e67441b36bdb9175400bc02d98407059831aa6247340d859c0415b4e21b8",
+        "post_change_evidence_hash_at_previous_location": "994f5f02441f0fcac3b1be2347792d26dfb711e2e25c4b9ece9c9fcd6606ab49",
+        "runtime_oracle": false,
+        "verification": {
+          "method": "mimosa-posttool-static-rescan",
+          "finding_absent": true,
+          "runtime_oracle": false
+        }
+      }
+    }
+  ],
+  "findings": [],
+  "artifacts": {
+    "immutable_report": ".mimosa/reports/task-review-session_e61e7a5aebb898a6390106ab894af43a-20261024T153513638Z-62296-e70137bcc57f.json",
+    "latest_report": ".mimosa/reports/task-review-session_e61e7a5aebb898a6390106ab894af43a.json",
+    "history_summary": ".mimosa/history/run-20261024T153513638Z-62296-e70137bcc57f.json"
+  }
+}

@@ -3,7 +3,7 @@
 import * as React from "react";
 import { toast } from "sonner";
 
-import { MessageBlock, nowStamp } from "@/components/chat-blocks";
+import { ChatStream, MessageBlock, nowStamp, tailGrowSig } from "@/components/chat-blocks";
 import { LongText } from "@/components/long-text";
 import { NodeRefButton } from "@/components/node-ref-button";
 import { SessionInfoBar } from "@/components/session-info-bar";
@@ -52,7 +52,6 @@ export function ClaimFollowupDialog({ tid, claimID, round, open, onClose }) {
   const [sending, setSending] = React.useState(false);
   const [pendingNew, setPendingNew] = React.useState(false); // 新开一轮待生效
   const [node, setNode] = React.useState(null); // 窗内节点抽屉(引用下钻不卸载本窗)
-  const bottomRef = React.useRef(null);
 
   const claim = detail?.claim || {};
   const sev = severityMeta(claim.severity || detail?.repro?.severity);
@@ -63,10 +62,9 @@ export function ClaimFollowupDialog({ tid, claimID, round, open, onClose }) {
   const latestRound = chat?.latest_round || viewingRound;
   const readOnly = viewingRound > 0 && viewingRound < latestRound;
   const frozen = hibernated || readOnly;
-
-  React.useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [messages.length, messages[messages.length - 1]?.reply]);
+  // 流内容签名(P4-22):问答条数 + 末条回答量,贴底跟滚判据;换成果/
+  // 换轮次视作新会话,回到默认在底部。
+  const sig = `${messages.length}|${tailGrowSig(messages[messages.length - 1])}`;
 
   const send = async () => {
     const body = text.trim();
@@ -103,18 +101,18 @@ export function ClaimFollowupDialog({ tid, claimID, round, open, onClose }) {
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="flex h-[85vh] max-h-[85vh] w-[720px] max-w-[720px] flex-col gap-3 p-4">
+      <DialogContent className="flex h-[85vh] max-h-[85vh] w-[min(720px,calc(100vw-32px))] max-w-[720px] flex-col gap-4">
         <DialogHeader className="space-y-0 pb-0 text-left">
           {/* 锚定条:严重级徽标 + 成果名 + 追问(轮次) */}
-          <DialogTitle className="flex min-w-0 flex-wrap items-center gap-2 text-base">
+          <DialogTitle className="flex min-w-0 flex-wrap items-center gap-2">
             {React.createElement(iconOf("messageCircle"), { className: "size-4 shrink-0 text-primary" })}
             {sev && <Badge variant={sev.variant} className="shrink-0">{sev.label}</Badge>}
-            <span className="shrink-0 text-base">追问</span>
+            <span className="shrink-0">追问</span>
             <LongText
               text={claim.statement || claimID || "…"}
               max={44}
               variant="dialog"
-              label="声明原文"
+              label="判断原文"
               className="min-w-0 flex-1 font-normal"
             />
             {(chat?.rounds || 0) > 1 && (
@@ -140,11 +138,15 @@ export function ClaimFollowupDialog({ tid, claimID, round, open, onClose }) {
         )}
         {chat && chat.provider_on === false && !hibernated && (
           <div className="rounded-md border border-status-warning/40 bg-status-warning-soft px-3 py-1 text-xs text-status-warning">
-            模型未配置:追问会入账并记为失败。在 LLM配置 页激活模型后重发。
+            模型未配置:追问会记录并记为失败。在 LLM配置 页激活模型后重发。
           </div>
         )}
-        {/* 对话流:链路摘要卡开场 + 问答 */}
-        <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto rounded-xl border bg-card px-3 py-3">
+        {/* 对话流(贴底跟滚,P4-22):链路摘要卡开场 + 问答 */}
+        <ChatStream
+          sig={sig}
+          resetKey={`${claimID}|${viewRound}`}
+          className="space-y-3 rounded-xl border border-border/55 bg-card px-3 py-3"
+        >
           <PreludeCard detail={detail} onSelectNode={setNode} />
           {messages.length === 0 && (
             <div className="py-6 text-center text-[13px] text-muted-foreground">
@@ -154,10 +156,9 @@ export function ClaimFollowupDialog({ tid, claimID, round, open, onClose }) {
           {messages.map((m) => (
             <MessageBlock key={m.id} msg={m} taskID={tid} onNode={setNode} />
           ))}
-          <div ref={bottomRef} />
-        </div>
+        </ChatStream>
         {/* 输入区 */}
-        <div className="rounded-xl border bg-card p-3">
+        <div className="rounded-xl border border-border/55 bg-card p-3">
           <div className="mb-1 flex items-center gap-2 text-[11px] text-muted-foreground">
             <span>
               {readOnly
@@ -242,9 +243,9 @@ function PreludeCard({ detail, onSelectNode }) {
   const falsifiers = origin?.falsifiers || [];
   const confirmedAt = detail?.timing?.terminal_at;
   const terminalWord =
-    detail?.claim?.status === "confirmed" ? "确认" : "终态";
+    detail?.claim?.status === "confirmed" ? "确认" : "结束";
   return (
-    <div className="flex flex-col gap-1.5 rounded-lg border border-dashed bg-background px-3 py-2.5 text-[12px]">
+    <div className="flex flex-col gap-1.5 rounded-lg border border-dashed bg-background px-3 py-3 text-xs">
       <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
         <Badge variant="outline">链路摘要</Badge>
         <span>开场预载 · 与发现详情一致</span>
@@ -257,7 +258,7 @@ function PreludeCard({ detail, onSelectNode }) {
           发现单位
           {discoverer ? (
             <>
-              <span className="font-mono">{discoverer.unit_id}</span>
+              <span className="num">{discoverer.unit_id}</span>
               {discoverer.step_id && (
                 <NodeRefButton
                   meta={{ id: discoverer.step_id, type: "step", typeLabel: "步骤" }}

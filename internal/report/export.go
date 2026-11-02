@@ -226,6 +226,11 @@ func taskZipInto(zw *zip.Writer, ctx context.Context, store *rings.Store, blobs 
 	cn, pn := 0, 0
 	for _, c := range claims {
 		var idx, tag string
+		// 复核标记不纳入报告的(P4-30 ③,信息性)不进分文件——与报告
+		// 正文同口径,证据包随条目一并退出(zip 内审计链走报告 md 汇总行)。
+		if cases[c.ID] != nil && cases[c.ID].ReportExcluded {
+			continue
+		}
 		switch c.Status {
 		case rings.TestClaimConfirmed, rings.TestClaimFixed:
 			cn++
@@ -315,7 +320,7 @@ func claimMD(ctx context.Context, store *rings.Store, taskID string, c rings.Nod
 		assetTitle[a.ID] = a.Title
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "# 漏洞报告 · `%s`\n\n", c.ID)
+	fmt.Fprintf(&b, "# 漏洞报告 · %s\n\n", c.Title)
 	fmt.Fprintf(&b, "> 任务 `%s`(%s)· 单条发现 · 由年轮账本确定性组装,零 LLM\n\n", task.ID, task.Title)
 	writeClaim(&b, 1, claimPrefixOf(c.Status), c, assetTitle, abouts, cs)
 	b.WriteString("---\n证据全文见配套流量证据包(zip 同名目录);血缘与反证链可按节点 ID 在账本下钻。\n")
@@ -358,7 +363,7 @@ func scopedClaims(ctx context.Context, store *rings.Store, blobs *swarm.BlobStor
 }
 
 // csvHeader 发现清单 csv 固定列(中文表头,操作者语言)。
-var csvHeader = []string{"任务ID", "发现ID", "状态", "级别", "类型", "存在性声明", "影响面声明", "资产锚点", "发现单位", "验证单位", "复现步骤数", "搁置理由"}
+var csvHeader = []string{"任务ID", "发现ID", "状态", "级别", "类型", "存在性判断", "影响面判断", "资产锚点", "发现单位", "验证单位", "复现步骤数", "搁置理由"}
 
 // findingsCSV 发现清单 csv(范围口径;级别序 critical→low、未定级沉底,
 // 同级按入账序——与面板成果视图同序)。BOM 头保证 Excel 中文不乱码。
@@ -397,8 +402,15 @@ func findingsCSVRows(ctx context.Context, store *rings.Store, taskID string, sco
 	if err != nil {
 		return nil, fmt.Errorf("report: 查资产锚点边: %w", err)
 	}
-	ordered := make([]rings.NodeFull, len(claims))
-	copy(ordered, claims)
+	ordered := make([]rings.NodeFull, 0, len(claims))
+	for _, c := range claims {
+		// 复核标记不纳入报告的(P4-30 ③,信息性)不进 csv——报告零信息
+		// 条目与 md/json 同口径。
+		if cases[c.ID] != nil && cases[c.ID].ReportExcluded {
+			continue
+		}
+		ordered = append(ordered, c)
+	}
 	sort.SliceStable(ordered, func(i, j int) bool {
 		si, sj := severityRank((cases[ordered[i].ID]).Severity()), severityRank((cases[ordered[j].ID]).Severity())
 		return si < sj || si == sj && ordered[i].CreatedRev < ordered[j].CreatedRev
@@ -473,6 +485,11 @@ func reportJSON(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore,
 		Findings []finding `json:"findings"`
 	}{Task: taskInfo{ID: task.ID, Title: task.Title, Status: task.Status, Rev: task.UpdatedRev}}
 	for _, c := range claims {
+		// 复核标记不纳入报告的(P4-30 ③,信息性)不进 json——报告零
+		// 信息条目与 md/csv 同口径。
+		if cases[c.ID] != nil && cases[c.ID].ReportExcluded {
+			continue
+		}
 		cs := cases[c.ID]
 		f := finding{
 			ID: c.ID, Status: c.Status, StatusWord: claimStatusWord(c.Status),
@@ -505,16 +522,10 @@ func reportJSON(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore,
 
 // ---- 小工具 ----
 
-// claimStatusWord 状态 → 操作者语言(与面板 CLAIM_STATUS 同词)。
+// claimStatusWord 状态 → 操作者语言(rings.ClaimStatusWord 单一来源,
+// 显示层合并口径 P4-28,与面板 CLAIM_STATUS 同词)。
 func claimStatusWord(status string) string {
-	words := map[string]string{
-		"candidate": "候选", "testing": "反证中", "awaiting_round": "待下轮反证",
-		"confirmed": "Confirmed", "pending": "待确认",
-	}
-	if w := words[status]; w != "" {
-		return w
-	}
-	return status
+	return rings.ClaimStatusWord(status)
 }
 
 func severityRank(sev string) int {

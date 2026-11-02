@@ -29,6 +29,10 @@ import (
 const (
 	keyHardRulePrefix = "guard.hardrule."
 	keyHardRuleTomb   = "guard.hardrule.tombstones"
+	// keyHardRuleBypassOff P4-21 一次性迁移标记:存量部署的内置代理旁路
+	// 条目已随默认改禁用置为不启用。标记写过即不再触碰——面板此后的
+	// 启用 / 禁用是用户意志,重启播种不回改。
+	keyHardRuleBypassOff = "guard.hardrule.proxybypass.defaultoff"
 )
 
 // 硬规则组词表(面板分组呈现)。
@@ -38,10 +42,13 @@ const (
 	HardGroupHTTPKill   = "HTTP 破坏请求"
 	HardGroupBulkWipe   = "批量清空路径"
 	HardGroupExfilPipe  = "外泄管道"
-	// HardGroupProxyBypass 代理旁路(P3-05b ④,P3-05 实测挂账提前收):
-	// 模型用 --noproxy / env -i / unset 等退出镜注入的代理环境,流量
-	// 绕开镜 = 绕开全量留痕,审计根基被破坏——与外泄管道不同纪律,
-	// **默认启用**(逃生门仍是面板禁用/编辑,操作本身留痕)。
+	// HardGroupProxyBypass 代理旁路(P3-05b ④,P3-05 实测挂账提前收;
+	// P4-03 ② 处置改弹门,P4-21 默认改禁用):模型用 --noproxy / env -i /
+	// unset 等退出镜注入的代理环境,流量绕开镜 = 直连不经镜。弹门随
+	// 单位数轰炸的审批疲劳在案(问题清单 #35,20 分钟 15 次弹门),
+	// **默认不启用**——旁路命令直接放行执行(命令与执行照旧全量
+	// 留痕,仅直连流量不经镜);严审计部署面板一键启用,规则定义与
+	// P4-03 科学对照能力保留不删。
 	HardGroupProxyBypass = "代理旁路"
 )
 
@@ -141,20 +148,21 @@ func builtinHardRules() []HardRule {
 			`(?i)\b(nc|ncat|netcat|socat)\b[^|;&]*\s(-e|-c|--exec)\b`, "bash", false),
 		hr("hr-pipe-exfil", HardGroupExfilPipe, "管道数据外传",
 			`(?i)\b(curl|wget)\b[^|;&]*(-d\s*@-|--data-binary\s*@-|-F\s*\"?file=@|--upload-file\s+-|-T\s+-)`, "bash", false),
-		// 代理旁路(P3-05b ④,默认启用:旁路破坏流量审计根基,与外泄
-		// 管道的默认禁用不同纪律;P4-03 ② 处置改弹门:科学对照场景
-		// ——如怀疑观测被镜的本地代理污染、需 --noproxy 直连复测——
-		// 由人裁决,默认安全不变、审计留痕不丢)。四类模式:curl 显式
-		// 绕代理(--noproxy / 置空代理)、wget 绕代理、env -i 清空注入
+		// 代理旁路(P4-21 默认禁用:弹门随单位数轰炸的审批疲劳在案,
+		// 旁路命令直接放行执行、命令与执行照旧全量留痕,仅直连流量
+		// 不经镜;严审计部署面板一键启用。规则定义与 P4-03 ② 弹门处置
+		// 保留不删——如怀疑观测被镜的本地代理污染、需 --noproxy 直连
+		// 复测的科学对照场景,启用后由人裁决)。四类模式:curl 显式绕
+		// 代理(--noproxy / 置空代理)、wget 绕代理、env -i 清空注入
 		// 环境、unset/空赋值/通配 no_proxy 清除代理变量。
 		hr("hr-proxy-curl-bypass", HardGroupProxyBypass, "curl 绕过代理",
-			`(?i)\bcurl\b[^|;&]*(--noproxy\b|--proxy[= ]?["']{2}|-x[= ]?["']{2})`, "bash", true),
+			`(?i)\bcurl\b[^|;&]*(--noproxy\b|--proxy[= ]?["']{2}|-x[= ]?["']{2})`, "bash", false),
 		hr("hr-proxy-wget-bypass", HardGroupProxyBypass, "wget 绕过代理",
-			`(?i)\bwget\b[^|;&]*(--no-proxy\b|--proxy=["']{2})`, "bash", true),
+			`(?i)\bwget\b[^|;&]*(--no-proxy\b|--proxy=["']{2})`, "bash", false),
 		hr("hr-proxy-env-clear", HardGroupProxyBypass, "清空环境绕过代理",
-			`(?i)\benv\s+(-i\b|--ignore-environment\b)`, "bash", true),
+			`(?i)\benv\s+(-i\b|--ignore-environment\b)`, "bash", false),
 		hr("hr-proxy-unset-vars", HardGroupProxyBypass, "清除代理变量",
-			`(?i)\bunset\b[^|;&]*(https?_proxy|all_proxy|no_proxy)\b|\b(https?_proxy|all_proxy|no_proxy)=(["']{2}|["']?\*|\s|$)`, "bash", true),
+			`(?i)\bunset\b[^|;&]*(https?_proxy|all_proxy|no_proxy)\b|\b(https?_proxy|all_proxy|no_proxy)=(["']{2}|["']?\*|\s|$)`, "bash", false),
 	}
 	for i := range rules {
 		if rules[i].Group == HardGroupProxyBypass {
@@ -190,9 +198,14 @@ func hardRuleID() string {
 
 // SeedHardRules 启动播种:内置清单逐条写入缺失键;已存在的键一律不动
 // (用户改过 / 禁用过 / 编辑过的条目保持用户状态——播种不覆盖用户改动)。
-// 唯一的例外是 P4-03 ② 处置迁移:内置代理旁路条目在旧库无 action 字段
-// (字段当时不存在,不存在用户意志),补写 gate 使存量部署同样弹门化;
-// 用户此后经面板改过处置(action 字段已有值)则不再触碰。
+// 两个历史例外(均为一次性迁移,只认内置 ID、不碰自建条目):
+//   - P4-03 ② 处置迁移:旧库内置代理旁路条目无 action 字段(字段当时
+//     不存在,不存在用户意志),补写 gate;用户此后经面板改过处置
+//     (action 字段已有值)则不再触碰。
+//   - P4-21 默认禁用迁移:存量部署的内置代理旁路条目一律置为不启用
+//     (与默认一致,行为统一);标记键写过即不再触碰,面板此后的
+//     启用是用户意志,重启不回改。
+//
 // 删除过的内置条目在墓碑内,不再复活。幂等,可每次启动调用。
 func SeedHardRules(ctx context.Context, store *rings.Store) error {
 	if store == nil {
@@ -226,6 +239,46 @@ func SeedHardRules(ctx context.Context, store *rings.Store) error {
 		if err := store.SetSetting(ctx, keyHardRulePrefix+r.ID, string(raw), "system"); err != nil {
 			return fmt.Errorf("swarm: 播种硬规则 %s: %w", r.ID, err)
 		}
+	}
+	return migrateProxyBypassDefaultOff(ctx, store, tombs)
+}
+
+// migrateProxyBypassDefaultOff P4-21 一次性迁移:内置代理旁路条目(默认
+// 曾经启用)一律置为不启用,存量部署与新默认行为统一。只认内置清单里的
+// 代理旁路 ID 且库存条目仍属该组(自建条目、被用户改组的条目不动);
+// 已是禁用态的条目跳过写。迁移完成写标记键,此后重启不再触碰。
+func migrateProxyBypassDefaultOff(ctx context.Context, store *rings.Store, tombs map[string]bool) error {
+	if e, ok, err := store.Setting(ctx, keyHardRuleBypassOff); err != nil {
+		return fmt.Errorf("swarm: 读代理旁路迁移标记: %w", err)
+	} else if ok && e.Value != "" {
+		return nil
+	}
+	for _, r := range builtinHardRules() {
+		if r.Group != HardGroupProxyBypass || tombs[r.ID] {
+			continue
+		}
+		e, ok, err := store.Setting(ctx, keyHardRulePrefix+r.ID)
+		if err != nil {
+			return fmt.Errorf("swarm: 迁移代理旁路默认禁用 %s: %w", r.ID, err)
+		}
+		if !ok {
+			continue
+		}
+		var old HardRule
+		if json.Unmarshal([]byte(e.Value), &old) != nil || old.ID != r.ID || old.Group != HardGroupProxyBypass || !old.Enabled {
+			continue
+		}
+		old.Enabled = false
+		raw, merr := json.Marshal(old)
+		if merr != nil {
+			return fmt.Errorf("swarm: 序列化硬规则 %s: %w", r.ID, merr)
+		}
+		if serr := store.SetSetting(ctx, keyHardRulePrefix+r.ID, string(raw), "system"); serr != nil {
+			return fmt.Errorf("swarm: 迁移代理旁路默认禁用 %s: %w", r.ID, serr)
+		}
+	}
+	if err := store.SetSetting(ctx, keyHardRuleBypassOff, "1", "system"); err != nil {
+		return fmt.Errorf("swarm: 写代理旁路迁移标记: %w", err)
 	}
 	return nil
 }
@@ -317,7 +370,7 @@ func SaveHardRule(ctx context.Context, store *rings.Store, r HardRule, by string
 		return "", fmt.Errorf("swarm: 适用工具 %q 不在工具全集内", r.ToolScope)
 	}
 	if r.Action != "" && r.Action != HardActionGate {
-		return "", fmt.Errorf("swarm: 处置 %q 不在词表内(空=拒绝 / gate=弹门)", r.Action)
+		return "", fmt.Errorf("swarm: 处置 %q 不在词表内(空=拒绝 / gate=需批准)", r.Action)
 	}
 	if _, err := regexp.Compile(r.Pattern); err != nil {
 		return "", fmt.Errorf("swarm: 匹配模式编译失败: %w", err)

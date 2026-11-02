@@ -119,7 +119,7 @@ func TestRunSecondsBudgetRenewsInPlace(t *testing.T) {
 
 	model := newScriptedModel(func(rr *recordedRequest) scriptedReply {
 		if strings.Contains(rr.LastUser, "运行预算即将耗尽") {
-			if !seenToolResult(rr, "submit_candidate_fact", "已入候选事实") {
+			if !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实") {
 				return scriptedReply{ToolCalls: []scriptedToolCall{{
 					ID: "w1", Name: "submit_candidate_fact",
 					Args: `{"statement":"墙钟预算内实测端口开放","evidence":"port_probe 实测 state=open","asset_id":"target"}`,
@@ -481,7 +481,7 @@ func TestTaskGateStopsDespiteUnlimitedBudget(t *testing.T) {
 
 	model := newScriptedModel(func(rr *recordedRequest) scriptedReply {
 		if strings.Contains(rr.LastUser, "运行预算即将耗尽") {
-			if !seenToolResult(rr, "submit_candidate_fact", "已入候选事实") {
+			if !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实") {
 				return scriptedReply{ToolCalls: []scriptedToolCall{{
 					ID: "w1", Name: "submit_candidate_fact",
 					Args: `{"statement":"总闸收尾前实测端口开放","evidence":"port_probe 实测 state=open","asset_id":"target"}`,

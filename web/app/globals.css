@@ -1,59 +1,64 @@
-/* 主题 token 唯一定义点(8.4 落地,色板定稿,组件层禁止出现色值)。
-   暗色为默认主题(8.1);P3-10 亮色三态:dark(缺省,无 class)/
-   light(.light)由首帧前 boot script 定 class(防闪烁),跟随系统 =
-   按媒介查询落二者之一。亮色系值同源于 8.4 token 名(表面色阶/
-   品牌蓝/语义色在亮底上取深一档,保证对比度)。
+/* 主题 token 唯一定义点(8.4 落地,组件层禁止出现色值)。
+   P4-26 品牌换装(色值定稿 2026-10-24 经 demo 双主题对照审定):
+   暗色=碳黑+鼠尾草绿(#8FAE94 点缀,血红 #E5484D 只留终止/危险);
+   亮色=冷雪白+碳灰(主操作按钮黑底白字,无彩瑞士风);语义色(严重级/
+   状态)同批适配两底色,对比度达标。
+   三态:dark(缺省,无 class)/ light(.light)由首帧前 boot script 定
+   class(防闪烁),跟随系统 = 按媒介查询落二者之一(P4-26 起缺省值
+   = 跟随系统)。
    P2-08c 质感返工:按 8.4 扩充(表面色阶/柔和大投影/圆角加大/动效两档/
    间距阶梯/骨架屏),8.9 质感规范的执行地基。 */
 @import "tailwindcss";
 @import "tw-animate-css";
 
 :root,
-.dark {
-  /* 背景多层(表面色阶,质感的地基):页面底 / 面板 / 浮层 / 输入件 */
-  --background: #0b0e14;
-  --card: #111827;
-  --popover: #1a2030;
-  --input-surface: #141b2a;
+:root.dark {
+  /* 背景多层(表面色阶,质感的地基):页面底 / 卡 / 浮层 / 输入件 */
+  --background: #060607;
+  --card: #0d0d0f;
+  --popover: #141417;
+  --input-surface: #121215;
 
   /* 悬停提亮 = 所在层 +5% 亮度(叠加层,与底色无关) */
   --hover-lift: color-mix(in srgb, #ffffff 5%, transparent);
 
-  /* 前景与边界(面板色派生灰阶) */
-  --foreground: #e5e7eb;
-  --muted-foreground: #9ca3af;
-  --border: #1f2937;
-  --input: #243044;
-  --ring: #3b82f6;
+  /* 前景与边界(三级文字 + 边框;正文暖白/次级经定稿) */
+  --foreground: #e7e5e4;
+  --muted-foreground: #9b9a94;
+  --tertiary-foreground: #6e6d68;
+  --border: #232327;
+  --input: #2c2c32;
+  --ring: #8fae94;
 
-  /* 品牌蓝:主操作/链接/当前导航项 */
-  --primary: #3b82f6;
-  --primary-foreground: #ffffff;
+  /* 品牌点缀鼠尾草绿:主操作/链接/当前导航项(按钮墨色深底) */
+  --primary: #8fae94;
+  --primary-foreground: #0a0a0b;
 
   /* 次级表面 */
-  --secondary: #1a2332;
-  --secondary-foreground: #e5e7eb;
-  --muted: #161d2b;
-  --accent: #1e293b;
-  --accent-foreground: #e5e7eb;
+  --secondary: #17171a;
+  --secondary-foreground: #e7e5e4;
+  --muted: #121215;
+  --accent: #1b1b1e;
+  --accent-foreground: #e7e5e4;
 
-  /* 危险(熔断/拒绝) */
-  --destructive: #ef4444;
+  /* 危险(熔断/拒绝):血红只留终止/危险语义 */
+  --destructive: #e5484d;
   --destructive-foreground: #ffffff;
 
-  /* 严重级语义色(8.4):徽标全站统一色映射 */
-  --severity-critical: #ef4444;
-  --severity-high: #f97316;
-  --severity-medium: #eab308;
-  --severity-low: #3b82f6;
-  --severity-info: #6b7280;
+  /* 严重级语义色(8.4):徽标全站统一色映射(红=血红,橙=烬橙,
+     金=暖金,低危=品牌绿,信息=中性灰) */
+  --severity-critical: #e5484d;
+  --severity-high: #ce7a45;
+  --severity-medium: #c9a96e;
+  --severity-low: #8fae94;
+  --severity-info: #7e7d78;
 
-  /* 状态色(8.4) */
-  --status-success: #22c55e;
-  --status-warning: #eab308;
-  --status-danger: #ef4444;
-  --status-running: #3b82f6;
-  --status-paused: #6b7280;
+  /* 状态色(8.4):成功/运行=品牌绿,警告=暖金,危险=血红,暂停=灰 */
+  --status-success: #8fae94;
+  --status-warning: #c9a96e;
+  --status-danger: #e5484d;
+  --status-running: #8fae94;
+  --status-paused: #7e7d78;
 
   /* 徽标软底(全彩字的胶囊底,token 派生仍定义于此) */
   --severity-critical-soft: color-mix(in srgb, var(--severity-critical) 16%, transparent);
@@ -75,6 +80,7 @@
 
   /* 圆角加大(8.4):按钮与输入 md≈8px,卡片 xl≈12px */
   --radius: 0.625rem;
+  --text-micro: 10px;
 
   /* 动效 token(8.4):两档时长 + 平滑曲线,无弹跳 */
   --motion-fast: 150ms;
@@ -83,55 +89,61 @@
 
   /* 阴影 token(8.4):浮层柔和大投影 + 卡片 hover 微投影 */
   --shadow-float: 0 8px 32px rgba(0, 0, 0, 0.45);
+  --shadow-float-nested: 0 16px 48px rgba(0, 0, 0, 0.55);
+  --shadow-float-deep: 0 24px 64px rgba(0, 0, 0, 0.65);
   --shadow-card: 0 4px 16px rgba(0, 0, 0, 0.25);
 
   /* 原生控件(滚动条/输入)配色随主题,防暗色滚动条混进亮色页面 */
   color-scheme: dark;
 }
 
-/* 亮色主题(P3-10,8.4 增亮色系值):同名 token 整组覆盖,表面色阶
-   改白系分层;品牌蓝与语义色取深一档(蓝 600/红 600/橙 600/黄 600),
-   白底对比度成立;悬停提亮改为黑 4%;投影淡化为墨色低透明。 */
-.light {
-  --background: #f8fafc;
-  --card: #ffffff;
+/* 亮色主题(P3-10 起,P4-26 定稿):同名 token 整组覆盖——冷雪白底 +
+   碳灰正文(纯黑压柔防刺眼,经造物主审定),主操作按钮黑底白字(无彩
+   瑞士风);语义色取深一档(深鼠尾草绿/深金/砖红),白底对比度成立;
+   悬停提亮改为墨 4%;投影淡化为中性墨低透明。 */
+:root.light {
+  --background: #fcfcfd;
+  --card: #f4f4f6;
   --popover: #ffffff;
-  --input-surface: #f1f5f9;
+  --input-surface: #ececef;
 
-  --hover-lift: color-mix(in srgb, #0f172a 4%, transparent);
+  --hover-lift: color-mix(in srgb, #17171a 4%, transparent);
 
-  --foreground: #0f172a;
-  --muted-foreground: #64748b;
-  --border: #e2e8f0;
-  --input: #cbd5e1;
-  --ring: #2563eb;
+  --foreground: #2a2a30;
+  --muted-foreground: #4a4a52;
+  --tertiary-foreground: #75757d;
+  --border: #e2e2e7;
+  --input: #c8c8d0;
+  --ring: #3e6b4f;
 
-  --primary: #2563eb;
+  --primary: #17171a;
   --primary-foreground: #ffffff;
 
-  --secondary: #f1f5f9;
-  --secondary-foreground: #0f172a;
-  --muted: #f1f5f9;
-  --accent: #e2e8f0;
-  --accent-foreground: #0f172a;
+  --secondary: #e9e9ee;
+  --secondary-foreground: #2a2a30;
+  --muted: #ececef;
+  --accent: #e2e2e7;
+  --accent-foreground: #2a2a30;
 
-  --destructive: #dc2626;
+  --destructive: #b23c34;
   --destructive-foreground: #ffffff;
 
-  --severity-critical: #dc2626;
-  --severity-high: #ea580c;
-  --severity-medium: #ca8a04;
-  --severity-low: #2563eb;
-  --severity-info: #64748b;
+  --severity-critical: #b23c34;
+  --severity-high: #a0522d;
+  --severity-medium: #8a6d3b;
+  --severity-low: #3e6b4f;
+  --severity-info: #6b6b73;
 
-  --status-success: #16a34a;
-  --status-warning: #ca8a04;
-  --status-danger: #dc2626;
-  --status-running: #2563eb;
-  --status-paused: #64748b;
+  --status-success: #3e6b4f;
+  --status-warning: #8a6d3b;
+  --status-danger: #b23c34;
+  --status-running: #3e6b4f;
+  --status-paused: #6b6b73;
 
-  --shadow-float: 0 8px 32px rgba(15, 23, 42, 0.14);
-  --shadow-card: 0 4px 16px rgba(15, 23, 42, 0.08);
+  --shadow-float: 0 8px 32px rgba(23, 23, 26, 0.12);
+  --shadow-float-nested: 0 16px 48px rgba(23, 23, 26, 0.18);
+  --shadow-float-deep: 0 24px 64px rgba(23, 23, 26, 0.24);
+  --shadow-card: 0 4px 16px rgba(23, 23, 26, 0.07);
 
   color-scheme: light;
 }
@@ -149,6 +161,7 @@
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
+  --color-tertiary-foreground: var(--tertiary-foreground);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
@@ -190,13 +203,18 @@
   --color-input-surface: var(--input-surface);
   --color-hover-lift: var(--hover-lift);
   --shadow-float: var(--shadow-float);
+  --shadow-float-nested: var(--shadow-float-nested);
+  --shadow-float-deep: var(--shadow-float-deep);
   --shadow-card: var(--shadow-card);
+  --text-sm--line-height: 1.65;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.65;
 }
 
 * {
@@ -243,9 +261,97 @@ body {
   animation: gr-shimmer 1.4s linear infinite;
 }
 
-/* 统计数字等宽不跳动(8.9 #5) */
-.tnum {
+/* ---- P4-31 融合设计律工具(全站;方案三柔雾卡片骨架 × 方案二终端仪态
+   骨相,验收基准 web/design-fusion.html) ----
+   双字体分工:等宽管数据(① 大数字/时间戳/任务号/进度/命令 URL),
+   无衬线管文字。字号五级制:
+     页面标题 22 粗(.t-page)/ 浮层标题 16 粗·嵌套 15(.t-float 与
+     text-[15px]) / 区块标题 13 半粗(.t-sec) / 正文 12.5~14
+     (.t-body 与 text-[13px]~text-sm) / 辅助 11~12 与微标 10~11
+     (text-[11px] 与 text-xs / text-[10px])。 */
+.t-page {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: 0.3px;
+}
+
+.t-float,
+.t-float-nested {
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.t-float {
+  font-size: 16px;
+}
+
+.t-float-nested {
+  font-size: 15px;
+}
+
+.t-sec {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.t-body {
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+/* 等宽数字(①):mono + tabular-nums 一步到位,数据位一律走它 */
+.num {
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+}
+
+/* KPI 族(①②):等宽小字标签带字距 + 30px 粗等宽大数字 */
+.k-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  color: var(--tertiary-foreground);
+}
+
+.k-value {
+  font-family: var(--font-mono);
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Toast 图标(P4-31 ⑦:图标 14) */
+[data-sonner-toast] [data-icon] svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* 锤炼过程态徽标(P4-28 ①):进行色 + 呼吸点动画,一眼分清"还在动"
+   还是"结束了";终态徽标不带本类,静态呈现。 */
+@keyframes gr-breathe {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.gr-live {
+  gap: 5px;
+}
+
+.gr-live::before {
+  content: "";
+  inline-size: 6px;
+  block-size: 6px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: gr-breathe 1.6s ease-in-out infinite;
 }
 
 /* 进度图节点(P2-09,8.7 进度图视图):六类节点形状徽记——形状+类型色
@@ -331,7 +437,7 @@ body {
 /* ReactFlow 缩放控件(进度图/年轮图·血缘与攻击链透镜,P2-14b④):
    库默认亮色白底,收敛为 8.4 token 暗色——按钮浮层色、描边细线、
    悬停提亮一档。 */
-.react-flow__controls {
+.react-flow .react-flow__controls {
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -339,20 +445,30 @@ body {
   box-shadow: var(--shadow-float);
 }
 
-.react-flow__controls-button {
+.react-flow .react-flow__controls-button {
   border-bottom: 1px solid var(--border);
   background: var(--card);
   color: var(--muted-foreground);
 }
 
-.react-flow__controls-button:last-child {
+.react-flow .react-flow__controls-button:last-child {
   border-bottom: none;
 }
 
-.react-flow__controls-button:hover {
+.react-flow .react-flow__controls-button:hover {
   background: var(--popover);
 }
 
-.react-flow__controls-button svg {
+.react-flow .react-flow__controls-button svg {
   fill: currentColor;
+}
+
+/* 图库自带 light/dark 类只影响库自身，不参与全站主题变量切换。 */
+.react-flow {
+  --xy-node-color: var(--foreground);
+  --xy-minimap-background-color: var(--card);
+  --xy-controls-button-background-color: var(--popover);
+  --xy-controls-button-color: var(--muted-foreground);
+  --xy-controls-button-background-color-hover: var(--accent);
+  --xy-controls-button-border-color: var(--border);
 }

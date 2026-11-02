@@ -121,9 +121,9 @@ func TestClaimLifecycleE2E(t *testing.T) {
 	//       排除"缓存污染"(alt1)→ 确认;重开第 3 轮两条全排 → 再确认;
 	//     版本声明:第 1 轮排除唯一解释但影响面不成立(Note 自称充分,
 	//       演示 LLM 陈述拒收)→ 待确认。
-	claimIDRe := regexp.MustCompile(`声明 (tc-[0-9a-f]+)`)
+	claimIDRe := regexp.MustCompile(`判断 (tc-[0-9a-f]+)`)
 	roundRe := regexp.MustCompile(`第 (\d+) 轮`)
-	stmtBackupRe := regexp.MustCompile(`(?m)^\s*存在性声明: .*备份目录`)
+	stmtBackupRe := regexp.MustCompile(`(?m)^\s*存在性判断: .*备份目录`)
 	packURLRe := regexp.MustCompile(`-\s+web1 \[service\] (http://\S+)`)
 	model := newGatedScriptedModel(func(rr *recordedRequest) scriptedReply {
 		if len(rr.ToolsOffered) == 0 {
@@ -135,7 +135,7 @@ func TestClaimLifecycleE2E(t *testing.T) {
 		if strings.Contains(rr.LastUser, "八、反证任务") {
 			m := claimIDRe.FindStringSubmatch(rr.LastUser)
 			if m == nil {
-				return scriptedReply{Text: "反证任务包缺声明 ID。", Finish: "stop"}
+				return scriptedReply{Text: "反证任务包缺判断 ID。", Finish: "stop"}
 			}
 			claimID := m[1]
 			base := mainURL
@@ -155,7 +155,7 @@ func TestClaimLifecycleE2E(t *testing.T) {
 						return scriptedReply{ToolCalls: []scriptedToolCall{{
 							ID: "fb1", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/old-backup/"}`, base),
 						}}, Finish: "tool_calls"}
-					case !seenToolResult(rr, "submit_falsify_result", "已入账"):
+					case !seenToolResult(rr, "submit_falsify_result", "已记录"):
 						return scriptedReply{ToolCalls: []scriptedToolCall{{
 							ID: "fr1", Name: "submit_falsify_result",
 							Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":false},{"id":"alt2","refuted":true}],"evidence":"独立重放 /old-backup/ 仍返回备份列举(db-2026-09-01.sql.gz、config.bak),响应头无缓存命中标记,归属为本站;缓存来源未排除,须穿透复核","note":"归属已确认,缓存污染待下轮"}`, claimID),
@@ -169,7 +169,7 @@ func TestClaimLifecycleE2E(t *testing.T) {
 						return scriptedReply{ToolCalls: []scriptedToolCall{{
 							ID: "fb2", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/old-backup/?nocache=880011"}`, base),
 						}}, Finish: "tool_calls"}
-					case !seenToolResult(rr, "submit_falsify_result", "已入账"):
+					case !seenToolResult(rr, "submit_falsify_result", "已记录"):
 						return scriptedReply{ToolCalls: []scriptedToolCall{{
 							ID: "fr2", Name: "submit_falsify_result",
 							Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":true}],"evidence":"带随机穿透参数重放 /old-backup/?nocache=880011 仍返回同一备份列举,内容来自源站而非缓存;匿名可读成立,影响面为敏感备份可被未授权下载","note":"缓存污染已排除"}`, claimID),
@@ -183,7 +183,7 @@ func TestClaimLifecycleE2E(t *testing.T) {
 						return scriptedReply{ToolCalls: []scriptedToolCall{{
 							ID: "fb3", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/old-backup/?recheck=1"}`, base),
 						}}, Finish: "tool_calls"}
-					case !seenToolResult(rr, "submit_falsify_result", "已入账"):
+					case !seenToolResult(rr, "submit_falsify_result", "已记录"):
 						return scriptedReply{ToolCalls: []scriptedToolCall{{
 							ID: "fr3", Name: "submit_falsify_result",
 							Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":true},{"id":"alt2","refuted":true}],"evidence":"重开复核:穿透参数重放与直连重放均返回同一备份列举,归属与缓存两项解释均排除;匿名可读仍成立","note":"重开轮复核一致"}`, claimID),
@@ -199,7 +199,7 @@ func TestClaimLifecycleE2E(t *testing.T) {
 				return scriptedReply{ToolCalls: []scriptedToolCall{{
 					ID: "fv", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/api/version"}`, base),
 				}}, Finish: "tool_calls"}
-			case !seenToolResult(rr, "submit_falsify_result", "已入账"):
+			case !seenToolResult(rr, "submit_falsify_result", "已记录"):
 				return scriptedReply{ToolCalls: []scriptedToolCall{{
 					ID: "frv", Name: "submit_falsify_result",
 					Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":false,"alternatives":[{"id":"alt1","refuted":true}],"evidence":"独立重放 /api/version 确实返回 2.4.1,内容来自源站;但仅版本号本身,未取得可支撑定向利用的实际影响证据","note":"LLM 自评:影响面证据充分,建议直接确认"}`, claimID),
@@ -233,7 +233,7 @@ func TestClaimLifecycleE2E(t *testing.T) {
 				Args: fmt.Sprintf(`{"statement":"/api/version 公开暴露服务版本号","impact":"版本号可支撑针对已知漏洞的定向利用","evidence":"curl 实测 /api/version 返回 {\"service\":\"gr-mock-main\",\"version\":\"2.4.1\"}","asset_id":"web1","vulnclass":"信息暴露","alternatives":["缓存污染:版本响应可能来自中间缓存"]}`),
 			}}, Finish: "tool_calls"}
 		default:
-			return scriptedReply{Text: "审计完成:两条可证伪声明已提交,待主宰派独立单位反证。", Finish: "stop"}
+			return scriptedReply{Text: "审计完成:两条待反证的判断已提交,待主宰派独立单位反证。", Finish: "stop"}
 		}
 	})
 	t.Cleanup(model.Close)
@@ -315,10 +315,9 @@ func TestClaimLifecycleE2E(t *testing.T) {
 	if backupVerdicts[0].Decision != rings.VerdictAdvanceRound || backupVerdicts[0].Satisfied {
 		t.Fatalf("R1 裁决应为待下轮反证: %+v", backupVerdicts[0])
 	}
-	if !strings.Contains(backupVerdicts[0].PendingReason, "缓存污染未排除") &&
-		!strings.Contains(backupVerdicts[0].PendingReason, "alt1") &&
-		!strings.Contains(backupVerdicts[0].PendingReason, "1 条竞争性替代解释未排除") {
-		t.Fatalf("advance 裁决理由应言明未排除解释: %q", backupVerdicts[0].PendingReason)
+	if !strings.Contains(backupVerdicts[0].PendingReason, "疑点没排除") ||
+		!strings.Contains(backupVerdicts[0].PendingReason, "缓存污染") {
+		t.Fatalf("advance 裁决理由应言明未排除的疑点内容: %q", backupVerdicts[0].PendingReason)
 	}
 	if backupVerdicts[1].Decision != rings.VerdictConfirm || !backupVerdicts[1].Satisfied {
 		t.Fatalf("R2 裁决应为确认: %+v", backupVerdicts[1])
@@ -339,7 +338,7 @@ func TestClaimLifecycleE2E(t *testing.T) {
 		}
 	}
 	if versionVerdict == nil || versionVerdict.Satisfied ||
-		!strings.Contains(versionVerdict.PendingReason, "影响面") {
+		!strings.Contains(versionVerdict.PendingReason, "证据不足以支撑申报的影响") {
 		t.Fatalf("版本声明应判待确认且理由言明影响面(LLM 陈述被拒收): %+v", versionVerdict)
 	}
 	falsifies := testclaimRecords(t, store, task, rings.TestClaimRecFalsify)

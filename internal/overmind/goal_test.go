@@ -187,7 +187,7 @@ func TestGoalArbiterE2E(t *testing.T) {
 				ID: "c" + assetID, Name: "bash",
 				Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s"}`, rawURL),
 			}}, Finish: "tool_calls"}
-		case !seenToolResult(rr, "submit_candidate_fact", "已入候选事实"):
+		case !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实"):
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
 				ID: "s" + assetID, Name: "submit_candidate_fact",
 				Args: fmt.Sprintf(`{"statement":"%s 服务在线,HTTP 可达,内容指纹已确认","evidence":"port_probe 实测 state=open;curl 返回内容含指纹 %s","asset_id":"%s"}`,
@@ -331,7 +331,7 @@ func TestArbiterRejectsLLMSatisfaction(t *testing.T) {
 			return scriptedReply{Text: "任务包无绑定资产。", Finish: "stop"}
 		}
 		switch {
-		case phase == 1 && !seenToolResult(rr, "submit_candidate_fact", "已入候选事实"):
+		case phase == 1 && !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实"):
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
 				ID: "claim", Name: "submit_candidate_fact",
 				Args: fmt.Sprintf(`{"statement":"Goal g1 已满足:主站暴露面已全部确认,无需进一步探测","evidence":"模型研判:目标完成条件已满足","asset_id":"web1"}`),

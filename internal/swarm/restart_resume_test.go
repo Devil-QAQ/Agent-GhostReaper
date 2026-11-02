@@ -123,7 +123,7 @@ func TestRunStepResumesOriginalSession(t *testing.T) {
 
 	resumedReq := make(chan *recordedRequest, 4)
 	model := newScriptedModel(func(rr *recordedRequest) scriptedReply {
-		if strings.Contains(rr.LastUser, "重启收养 · 续跑") {
+		if strings.Contains(rr.LastUser, "重启接管 · 续跑") {
 			select {
 			case resumedReq <- rr:
 			default:
@@ -161,7 +161,7 @@ func TestRunStepResumesOriginalSession(t *testing.T) {
 		if !sawHistory {
 			t.Fatalf("恢复的请求应携带崩溃前的任务包原文历史")
 		}
-		if !strings.Contains(rr.LastUser, "重启收养 · 续跑") {
+		if !strings.Contains(rr.LastUser, "重启接管 · 续跑") {
 			t.Fatalf("新输入应为续跑指令,得到尾部 user: %.120s", rr.LastUser)
 		}
 		if strings.Count(rr.LastUser, "七要素") > 0 {
@@ -228,7 +228,7 @@ func TestRunStepResumesOriginalSession(t *testing.T) {
 		if r.Message == nil {
 			continue
 		}
-		if r.Message.Role == llm.RoleUser && strings.Contains(r.Message.Text(), "重启收养 · 续跑") {
+		if r.Message.Role == llm.RoleUser && strings.Contains(r.Message.Text(), "重启接管 · 续跑") {
 			sawAdoptionInput = true
 		}
 		if r.Message.Role == llm.RoleAssistant && strings.Contains(r.Message.Text(), "本步骤完成") {
@@ -280,7 +280,7 @@ func TestRunStepResumeFallsBackWithoutTranscript(t *testing.T) {
 		if !strings.Contains(rr.LastUser, "【任务包 · 七要素】") {
 			t.Fatalf("降级应重注入完整任务包,得到尾部 user: %.120s", rr.LastUser)
 		}
-		if strings.Contains(rr.LastUser, "重启收养 · 续跑") {
+		if strings.Contains(rr.LastUser, "重启接管 · 续跑") {
 			t.Fatalf("转录缺失应降级重注入任务包,不应发续跑指令")
 		}
 	case <-time.After(10 * time.Second):

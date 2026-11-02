@@ -63,7 +63,6 @@ const EMPTY_FORM = {
   retry_empty: 0,
   retry_replay: 0,
   retry_breaker: 0,
-  retry_rerun: 0,
 };
 
 // 上下文窗口以 M 呈现(主流 1M 级):≥1M 两位小数去尾零,不足 1M 退 K。
@@ -146,7 +145,6 @@ export function LLMPage() {
       retry_empty: intOf(f.retry_empty),
       retry_replay: intOf(f.retry_replay),
       retry_breaker: intOf(f.retry_breaker),
-      retry_rerun: intOf(f.retry_rerun),
     });
     setBusy(false);
     if (!ok) {
@@ -221,7 +219,7 @@ export function LLMPage() {
         <div className="grid gap-4 lg:grid-cols-2">
           {[0, 1].map((i) => (
             <Card key={i}>
-              <CardContent className="flex flex-col gap-3 p-6">
+              <CardContent className="flex flex-col gap-4 p-5">
                 <div className="skeleton h-5 w-36" />
                 <div className="skeleton h-4 w-48" />
                 <div className="skeleton h-3 max-w-72 w-full" />
@@ -302,9 +300,9 @@ function ModelCard({ cfg, active, member, busy, revealedKey, revealBusy, onRevea
 
   return (
     <Card className="h-full transition-shadow duration-150 hover:shadow-card">
-      <CardContent className="flex h-full flex-col gap-3 p-6">
+      <CardContent className="flex h-full flex-col gap-4 p-5">
         <div className="flex items-center gap-3">
-          <span className="text-[15px] font-semibold leading-none">{cfg.name}</span>
+          <span className="t-sec leading-none">{cfg.name}</span>
           {active ? (
             <Badge variant="success">主用</Badge>
           ) : cfg.poll_disabled ? (
@@ -312,16 +310,16 @@ function ModelCard({ cfg, active, member, busy, revealedKey, revealBusy, onRevea
           ) : (
             <Badge variant="info">备 {cfg.poll_priority || 1}</Badge>
           )}
-          <span className="ml-auto font-mono text-xs text-muted-foreground">{cfg.format}</span>
+          <span className="ml-auto num text-xs text-muted-foreground">{cfg.format}</span>
         </div>
 
         <div className="flex flex-col gap-1">
-          <div className="font-mono text-[13px]">{cfg.model}</div>
-          <div className="truncate font-mono text-xs text-muted-foreground" title={cfg.base_url}>{cfg.base_url}</div>
+          <div className="num text-[13px]">{cfg.model}</div>
+          <div className="truncate num text-xs text-muted-foreground" title={cfg.base_url}>{cfg.base_url}</div>
           <div className={cn("flex min-w-0 items-center gap-1 text-xs", !cfg.has_key ? "text-status-warning" : "text-muted-foreground")}>
             {cfg.has_key ? (
               <>
-                <span className="min-w-0 truncate font-mono">
+                <span className="min-w-0 truncate num">
                   {revealedKey !== undefined ? revealedKey || "—" : `key ${cfg.api_key_mask || "—"}`}
                 </span>
                 {revealedKey !== undefined && <span className="shrink-0 text-status-warning">明文</span>}
@@ -344,7 +342,7 @@ function ModelCard({ cfg, active, member, busy, revealedKey, revealBusy, onRevea
         {member && state === "open" && (
           <div className="flex flex-col gap-1 rounded-md bg-status-danger-soft px-3 py-2">
             <div className="flex items-center gap-2 text-xs text-status-danger">
-              <Badge variant="danger">熔断冷却中</Badge>
+              <Badge variant="danger">冷却中</Badge>
               <span>至 {shortClock(member.open_until)}</span>
               {member.opens > 0 && <span className="text-muted-foreground">第 {member.opens} 档</span>}
             </div>
@@ -389,7 +387,7 @@ function EnvCard({ env, chainReady, activePrimary }) {
           {chainReady ? "可用" : "未配置"}
         </Badge>
         {env?.configured ? (
-          <span className="font-mono text-xs text-muted-foreground">
+          <span className="num text-xs text-muted-foreground">
             {env.model} · {env.format}
           </span>
         ) : (
@@ -411,8 +409,7 @@ const RETRY_FIELDS = [
   ["retry_connect", "建连重试", "连接建立失败的重试"],
   ["retry_empty", "空响应重试", "请求成功但零输出的重发"],
   ["retry_replay", "零交付重放", "未交付内容即失败的整请求重放"],
-  ["retry_breaker", "熔断阈值", "连续失败几次后开冷却"],
-  ["retry_rerun", "意图级重跑", "步骤受阻前的退避重跑"],
+  ["retry_breaker", "连续失败进冷却的次数", "连续失败几次后进入冷却"],
 ];
 
 // ModelDialog 弹窗:平台与格式选定后端点预填(可改,改后不再跟动);
@@ -529,7 +526,7 @@ function ModelDialog({ open, form, busy, presets, platforms, ocModes, onForm, on
     <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
       <DialogContent className="max-h-[88vh] w-[min(620px,94vw)] max-w-none gap-4 overflow-y-auto p-6">
         <DialogHeader>
-          <DialogTitle className="text-base">{f.has_key ? `编辑:${f.name}` : "新增模型"}</DialogTitle>
+          <DialogTitle>{f.has_key ? `编辑:${f.name}` : "新增模型"}</DialogTitle>
           <DialogDescription>填端点与 key,拉取选模型;其余收在高级选项。</DialogDescription>
         </DialogHeader>
 
@@ -572,14 +569,14 @@ function ModelDialog({ open, form, busy, presets, platforms, ocModes, onForm, on
             </Select>
           </Field>
           <Field label="Base URL">
-            <Input className={cn(INPUT, "font-mono text-xs")} value={f.base_url || ""}
+            <Input className={cn(INPUT, "num text-xs")} value={f.base_url || ""}
               placeholder="https://api.example.com/v1"
               onChange={(e) => onForm({ ...f, base_url: e.target.value })} />
           </Field>
           <Field label="key">
             <div className="relative min-w-0 flex-1">
               <Input
-                className={cn(INPUT, "font-mono text-xs pr-9")}
+                className={cn(INPUT, "num text-xs pr-[36px]")}
                 type={keyVisible ? "text" : "password"}
                 value={f.api_key || ""}
                 placeholder={f.has_key ? "留空保留原 key" : ""}
@@ -599,15 +596,15 @@ function ModelDialog({ open, form, busy, presets, platforms, ocModes, onForm, on
             <div className="flex min-w-0 flex-1 items-center gap-2">
               {fetched ? (
                 <Select value={f.model || ""} onValueChange={pickModel}>
-                  <SelectTrigger className={cn(INPUT, "min-w-0 flex-1 font-mono text-xs")}>
+                  <SelectTrigger className={cn(INPUT, "min-w-0 flex-1 num text-xs")}>
                     <SelectValue placeholder="选择模型" />
                   </SelectTrigger>
                   <SelectContent className="max-h-64">
                     {(fetched || []).map((m) => (
                       <SelectItem key={m.id} value={m.id}>
-                        <span className="font-mono">{m.id}</span>
+                        <span className="num">{m.id}</span>
                         {m.context_window > 0 && (
-                          <span className="ml-2 text-xs text-muted-foreground tnum">
+                          <span className="ml-2 text-xs text-muted-foreground num">
                             {m.window_source === "endpoint" ? "" : "≈"}
                             {fmtCtx(m.context_window)}
                           </span>
@@ -617,7 +614,7 @@ function ModelDialog({ open, form, busy, presets, platforms, ocModes, onForm, on
                   </SelectContent>
                 </Select>
               ) : (
-                <Input className={cn(INPUT, "min-w-0 flex-1 font-mono text-xs")} value={f.model || ""}
+                <Input className={cn(INPUT, "min-w-0 flex-1 num text-xs")} value={f.model || ""}
                   placeholder="拉取后下拉选择;或直接输入"
                   onChange={(e) => onForm({ ...f, model: e.target.value })} />
               )}
@@ -627,7 +624,7 @@ function ModelDialog({ open, form, busy, presets, platforms, ocModes, onForm, on
             </div>
           </Field>
           <Field label="上下文窗口">
-            <Input className={cn(NUM, "tnum")} type="text" inputMode="decimal"
+            <Input className={cn(NUM, "num")} type="text" inputMode="decimal"
               value={
                 f._ctx_text !== undefined
                   ? f._ctx_text
@@ -644,7 +641,7 @@ function ModelDialog({ open, form, busy, presets, platforms, ocModes, onForm, on
                 });
               }} />
             <span className="text-xs text-muted-foreground">M</span>
-            <span className="text-xs text-muted-foreground tnum">{ctxHint}</span>
+            <span className="text-xs text-muted-foreground num">{ctxHint}</span>
           </Field>
 
           {/* 高级选项折叠:横线 — 箭头 — 文字 — 横线 */}
@@ -655,7 +652,7 @@ function ModelDialog({ open, form, busy, presets, platforms, ocModes, onForm, on
           {advanced && (
             <div className="flex animate-rise flex-col gap-4">
               <Field label="代理">
-                <Input className={cn(INPUT, "font-mono text-xs")} value={f.proxy || ""}
+                <Input className={cn(INPUT, "num text-xs")} value={f.proxy || ""}
                   placeholder="http:// · https:// · socks5://"
                   onChange={(e) => onForm({ ...f, proxy: e.target.value })} />
                 <span className="text-xs text-muted-foreground">只走模型出站</span>
@@ -713,7 +710,7 @@ function ModelDialog({ open, form, busy, presets, platforms, ocModes, onForm, on
                   value={f.max_tokens_field || "max_tokens"}
                   onValueChange={(v) => onForm({ ...f, max_tokens_field: v })}
                 >
-                  <SelectTrigger className={cn(INPUT, "w-52 font-mono text-xs")}><SelectValue /></SelectTrigger>
+                  <SelectTrigger className={cn(INPUT, "w-52 num text-xs")}><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="max_tokens">max_tokens</SelectItem>
                     <SelectItem value="max_completion_tokens">max_completion_tokens</SelectItem>
@@ -768,11 +765,11 @@ function ModelDialog({ open, form, busy, presets, platforms, ocModes, onForm, on
                 <div className="flex min-w-0 flex-1 flex-col gap-1">
                   <span className="text-xs text-status-success">
                     连通 · {testResult.body.latency_ms} ms ·
-                    <span className="font-mono"> {testResult.body.model}</span>
+                    <span className="num"> {testResult.body.model}</span>
                   </span>
                   {/* 回复原文(看得见模型说话才算通);与错误展示同款折行限高。 */}
                   {testResult.body.text && (
-                    <span className="max-h-24 min-w-0 overflow-y-auto break-all font-mono text-xs text-muted-foreground">
+                    <span className="max-h-24 min-w-0 overflow-y-auto break-all num text-xs text-muted-foreground">
                       {testResult.body.text}
                     </span>
                   )}
@@ -800,30 +797,30 @@ function ModelDialog({ open, form, busy, presets, platforms, ocModes, onForm, on
 
 // 固定说明文案(设计定稿):备链规则一段话。
 const CHAIN_RULE_TEXT =
-  "主用始终第 1;备按优先级从小到大接替,同优先级轮流;上下文装不下的自动跳过;任务显式绑定模型时失败不换、如实报错;熔断冷却 60 秒→5 分钟→30 分钟逐次加长,冷却期满自动探测,恢复即归零。";
+  "主用始终第 1;备按优先级从小到大接替,同优先级轮流;上下文装不下的自动跳过;任务显式绑定模型时失败不换、如实报错;连续失败进冷却,冷却时长 60 秒→5 分钟→30 分钟逐次加长,冷却期满自动探测,恢复即归零。";
 
 function PollingDrawer({ open, onOpenChange, members, busy, onRecover }) {
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="flex w-[480px] flex-col gap-4 overflow-y-auto p-6 sm:max-w-[480px]">
+      <SheetContent className="flex w-[480px] flex-col gap-5 overflow-y-auto sm:max-w-[480px]">
         <SheetHeader className="pb-0">
-          <SheetTitle className="text-base">主备轮询</SheetTitle>
+          <SheetTitle>主备轮询</SheetTitle>
           <SheetDescription>{CHAIN_RULE_TEXT}</SheetDescription>
         </SheetHeader>
         {members.length === 0 ? (
-          <div className="rounded-lg border bg-card px-3 py-6 text-center text-[13px] text-muted-foreground">
+          <div className="mx-5 mb-5 rounded-xl border border-border/55 bg-card px-4 py-6 text-center text-[13px] text-muted-foreground">
             链上暂无成员。
           </div>
         ) : (
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-4 px-5 pb-5">
             {members.map((m, i) => (
               <div
                 key={m.name}
-                className="flex animate-rise flex-col gap-2 rounded-xl border bg-card p-4"
+                className="flex animate-rise flex-col gap-2 rounded-xl border border-border/55 bg-card p-4"
                 style={{ animationDelay: `${Math.min(i, 6) * 40}ms` }}
               >
                 <div className="flex items-center gap-2">
-                  <span className="w-4 shrink-0 text-right font-mono text-xs text-muted-foreground tnum">{i + 1}</span>
+                  <span className="w-4 shrink-0 text-right num text-xs text-muted-foreground">{i + 1}</span>
                   <span className="text-[13px] font-medium leading-none">{m.name}</span>
                   {m.priority === 0 ? (
                     <Badge variant="success">主用</Badge>
@@ -840,8 +837,8 @@ function PollingDrawer({ open, onOpenChange, members, busy, onRecover }) {
                   </span>
                 </div>
                 <div className="flex items-center gap-2 pl-6 text-xs text-muted-foreground">
-                  <span className="font-mono">{m.model}</span>
-                  {m.state === "open" && <span className="tnum">冷却至 {shortClock(m.open_until)} · 第 {m.opens} 档</span>}
+                  <span className="num">{m.model}</span>
+                  {m.state === "open" && <span className="num">冷却至 {shortClock(m.open_until)} · 第 {m.opens} 档</span>}
                 </div>
                 {m.state === "open" && m.reason && (
                   <div className="pl-6 text-xs text-status-warning">{m.reason}</div>
@@ -858,7 +855,7 @@ function PollingDrawer({ open, onOpenChange, members, busy, onRecover }) {
 function MemberStateBadge({ m }) {
   switch (m.state) {
     case "open":
-      return <Badge variant="danger">熔断冷却中</Badge>;
+      return <Badge variant="danger">冷却中</Badge>;
     case "probing":
       return <Badge variant="warning">冷却期满探测</Badge>;
     default:

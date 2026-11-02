@@ -76,13 +76,16 @@ type ReproStepView struct {
 // Steps 为去同型后的复现流程(P4-08 ③);Variants 为去重收起的变体
 // 交换(证据包全量收,面板/报告正文不显);Narrative 为定稿冻结的
 // 来龙去脉叙述(P4-13:模型生成人话,读定稿零 LLM;旧定稿无叙述为空,
-// 读侧如实标注不编造)。
+// 读侧如实标注不编造)。NarrativeUnpolished / Steps[].Unpolished 为
+// 文风校验未过的如实标注(P4-24 ②:校对+重写一次后仍含机器语特征,
+// 原文保留,读侧渲染一行说明)。
 type ReproFinal struct {
-	Rev       int64             `json:"rev"`
-	Severity  string            `json:"severity"`
-	Narrative string            `json:"narrative,omitempty"`
-	Steps     []ReproStepView   `json:"steps"`
-	Variants  []rings.ReproStep `json:"variants,omitempty"`
+	Rev                 int64             `json:"rev"`
+	Severity            string            `json:"severity"`
+	Narrative           string            `json:"narrative,omitempty"`
+	NarrativeUnpolished bool              `json:"narrative_unpolished,omitempty"`
+	Steps               []ReproStepView   `json:"steps"`
+	Variants            []rings.ReproStep `json:"variants,omitempty"`
 }
 
 // RetestFinal 最新复测结论(P3-06):修复状态是锤炼态之上的正交轴,
@@ -100,6 +103,10 @@ type ClaimCase struct {
 	Alternatives []AltView    `json:"alternatives"`
 	Repro        *ReproFinal  `json:"repro,omitempty"`
 	Retest       *RetestFinal `json:"retest,omitempty"`
+	// 复核标记不纳入报告(P4-30 ③):最新 report_review 记录为准(取代
+	// 语义);账本不涂改,判断保留可追溯——报告只收已确认且非信息性。
+	ReportExcluded       bool   `json:"report_excluded,omitempty"`
+	ReportExcludedReason string `json:"report_excluded_reason,omitempty"`
 }
 
 // claimCases 一次事件流扫描装配全部声明卷宗(报告渲染与详情 API 共用)。
@@ -144,7 +151,14 @@ func claimCases(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore,
 			// evidence 绑定记录(P3-02)与 retest 复测结论(P3-06)不进
 			// 反证时间线——绑定是证据管理事实(呈现走详情的流量证据区),
 			// 复测是修复状态轴(呈现走复测区),与锤炼状态机轨迹分列。
+			// report_review 复核标记(P4-30 ③)同列:报告治理轴,不进
+			// 锤炼轨迹;最新标记为准(取代语义)。
 			if p.Type == rings.TestClaimRecEvidence || p.Type == rings.TestClaimRecRetest {
+				continue
+			}
+			if p.Type == rings.TestClaimRecReportReview {
+				cases[p.ClaimID].ReportExcluded = true
+				cases[p.ClaimID].ReportExcludedReason = strings.TrimSpace(p.Reason)
 				continue
 			}
 			cases[p.ClaimID].Timeline = append(cases[p.ClaimID].Timeline, caseEntryOf(ev.Revision, p))
@@ -165,8 +179,17 @@ func claimCases(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore,
 				alive[a.ID] = true
 			}
 		}
+		labels := map[string]string{}
 		for _, a := range frozen {
 			cs.Alternatives = append(cs.Alternatives, AltView{ID: a.ID, Label: a.Label, Killed: !alive[a.ID]})
+			labels[a.ID] = a.Label
+		}
+		// 时间线 alt 结论只带 ID,按冻结清单回填内容(界面显示疑点
+		// 内容本身;旧数据无 label 时前端退显 ID)。
+		for i := range cs.Timeline {
+			for j := range cs.Timeline[i].AltResults {
+				cs.Timeline[i].AltResults[j].Label = labels[cs.Timeline[i].AltResults[j].ID]
+			}
 		}
 		// 最新 repro(取代语义)→ 定稿视图 + blob 原文回放 + 变体清单。
 		cs.Repro = reproStepsOf(blobs, evs, id)
@@ -243,7 +266,8 @@ func reproStepsOf(blobs *swarm.BlobStore, evs []rings.RawEvent, claimID string) 
 	if latest == nil {
 		return nil
 	}
-	out := &ReproFinal{Rev: rev, Severity: latest.Severity, Narrative: latest.Narrative, Variants: latest.Variants}
+	out := &ReproFinal{Rev: rev, Severity: latest.Severity, Narrative: latest.Narrative,
+		NarrativeUnpolished: latest.NarrativeUnpolished, Variants: latest.Variants}
 	steps := make([]ReproStepView, 0, len(latest.Steps))
 	for _, st := range latest.Steps {
 		sv := ReproStepView{ReproStep: st}

@@ -3,6 +3,7 @@ package overmind
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -50,6 +51,7 @@ func SeedGoal(ctx context.Context, store *rings.Store, taskID, goalID, title str
 
 // DispatchOptions 派发一条意图(Step)的参数。
 type DispatchOptions struct {
+	source              dispatchSource
 	GoalID              string // 归属目标(存入 step.detail.goal_id)
 	ExpectedObservation string // 预期观察(验收参考而非产出上限)
 	ActionLevel         string // 意图分级(必填:只读探测|主动测试|利用深入|修改与持久化)
@@ -72,12 +74,22 @@ type DispatchOptions struct {
 // 动作分类,分级决定审批强度——无分级即无审批依据,缺级/坏级拒绝派发;
 // 细则见 swarm/actionlevel.go 与拆解提示词)。
 func DispatchStep(ctx context.Context, store *rings.Store, taskID, stepID, intent string, opt DispatchOptions) error {
-	events, err := stepEvents(ctx, store, taskID, stepID, intent, opt)
-	if err != nil {
+	for ctx.Err() == nil {
+		rev, err := store.CurrentRevision(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		events, err := stepEvents(ctx, store, taskID, stepID, intent, opt)
+		if err != nil {
+			return err
+		}
+		_, err = store.AppendAtRevision(ctx, taskID, rev, events...)
+		if errors.Is(err, rings.ErrStaleRevision) {
+			continue
+		}
 		return err
 	}
-	_, err = store.Append(ctx, taskID, events...)
-	return err
+	return ctx.Err()
 }
 
 // stepEvents 构造派发一条意图的事件批(Step 节点 + covers 边 + depends_on
@@ -85,6 +97,16 @@ func DispatchStep(ctx context.Context, store *rings.Store, taskID, stepID, inten
 // 落账)。P2-06:优先级词汇受限(非法拒派);depends_on 端点必须是图上
 // 既有 Step 且不得成环(环状依赖永不可执行,入口即拒)。
 func stepEvents(ctx context.Context, store *rings.Store, taskID, stepID, intent string, opt DispatchOptions) ([]rings.Event, error) {
+	if opt.source == sourceExplore {
+		_, steps, edges, err := queueView(ctx, store, taskID)
+		if err != nil {
+			return nil, err
+		}
+		w := QueueWatermarkOf(steps, edges, QueueLimit(ctx, store))
+		if w.Available == 0 {
+			return nil, &QueueFullError{Watermark: w}
+		}
+	}
 	if swarm.ActionLevelRank(rings.ActionLevel(opt.ActionLevel)) == 0 {
 		return nil, fmt.Errorf("overmind: 派发 %s: 意图分级 %q 缺失或非法(须为 只读探测|主动测试|利用深入|修改与持久化 之一)",
 			stepID, opt.ActionLevel)
@@ -119,6 +141,11 @@ func stepEvents(ctx context.Context, store *rings.Store, taskID, stepID, intent 
 	detail := map[string]any{}
 	for k, v := range opt.Detail {
 		detail[k] = v
+	}
+	// 豁免标记只允许真实来源入口写入，普通探索不可自报。
+	if opt.source == sourceExplore {
+		delete(detail, "urgent")
+		delete(detail, "kind")
 	}
 	if opt.GoalID != "" {
 		detail["goal_id"] = opt.GoalID
@@ -169,7 +196,7 @@ func validateDependencies(ctx context.Context, store *rings.Store, taskID, stepI
 			return fmt.Errorf("不得依赖自身(%s)", stepID)
 		}
 		if seen[dep] {
-			return fmt.Errorf("前置 %s 重复声明", dep)
+			return fmt.Errorf("前置 %s 重复申报", dep)
 		}
 		seen[dep] = true
 		n, err := store.Node(ctx, taskID, dep)
@@ -208,7 +235,7 @@ type HarvestResult struct {
 func Harvest(ctx context.Context, store *rings.Store, taskID string) (*HarvestResult, error) {
 	candidates, err := store.NodesByType(ctx, taskID, rings.NodeFact, "candidate")
 	if err != nil {
-		return nil, fmt.Errorf("overmind: 收割扫描候选: %w", err)
+		return nil, fmt.Errorf("overmind: 检查归纳扫描待确认事实: %w", err)
 	}
 	res := &HarvestResult{}
 	for _, c := range candidates {
@@ -220,7 +247,7 @@ func Harvest(ctx context.Context, store *rings.Store, taskID string) (*HarvestRe
 			hasEvidence = true
 		}
 		if !hasEvidence {
-			res.Skipped = append(res.Skipped, Skipped{FactID: c.ID, Reason: "候选无证据引用,不转正"})
+			res.Skipped = append(res.Skipped, Skipped{FactID: c.ID, Reason: "待确认事实无证据引用,不确认"})
 			continue
 		}
 		events := []rings.Event{{
@@ -230,12 +257,12 @@ func Harvest(ctx context.Context, store *rings.Store, taskID string) (*HarvestRe
 		if decl := factNewAsset(c.Detail); decl != nil {
 			assetEvents, err := discoveredAssetEvents(ctx, store, taskID, c, decl)
 			if err != nil {
-				return res, fmt.Errorf("overmind: 收割候选 %s 入图新对象: %w", c.ID, err)
+				return res, fmt.Errorf("overmind: 检查归纳事实 %s 入图新对象: %w", c.ID, err)
 			}
 			events = append(events, assetEvents...)
 		}
 		if _, err := store.Append(ctx, taskID, events...); err != nil {
-			return res, fmt.Errorf("overmind: 收割候选 %s: %w", c.ID, err)
+			return res, fmt.Errorf("overmind: 检查归纳事实 %s: %w", c.ID, err)
 		}
 		res.Confirmed = append(res.Confirmed, c.ID)
 	}
@@ -349,11 +376,11 @@ type HarvestClaimsResult struct {
 func HarvestClaims(ctx context.Context, store *rings.Store, taskID string) (*HarvestClaimsResult, error) {
 	candidates, err := store.NodesByType(ctx, taskID, rings.NodeTestClaim, rings.TestClaimCandidate)
 	if err != nil {
-		return nil, fmt.Errorf("overmind: 收割扫描候选声明: %w", err)
+		return nil, fmt.Errorf("overmind: 检查归纳扫描待确认判断: %w", err)
 	}
 	awaiting, err := store.NodesByType(ctx, taskID, rings.NodeTestClaim, rings.TestClaimAwaitingRound)
 	if err != nil {
-		return nil, fmt.Errorf("overmind: 收割扫描待下轮声明: %w", err)
+		return nil, fmt.Errorf("overmind: 检查归纳扫描待下轮判断: %w", err)
 	}
 	res := &HarvestClaimsResult{}
 	if len(candidates) == 0 && len(awaiting) == 0 {
@@ -361,26 +388,26 @@ func HarvestClaims(ctx context.Context, store *rings.Store, taskID string) (*Har
 	}
 	derived, err := store.Edges(ctx, taskID, rings.EdgeDerivedFrom)
 	if err != nil {
-		return nil, fmt.Errorf("overmind: 收割声明: 查血缘: %w", err)
+		return nil, fmt.Errorf("overmind: 检查归纳判断: 查血缘: %w", err)
 	}
 	abouts, err := store.Edges(ctx, taskID, rings.EdgeAbout)
 	if err != nil {
-		return nil, fmt.Errorf("overmind: 收割声明: 查资产锚点: %w", err)
+		return nil, fmt.Errorf("overmind: 检查归纳判断: 查资产锚点: %w", err)
 	}
 	steps, err := store.NodesByType(ctx, taskID, rings.NodeStep, "")
 	if err != nil {
-		return nil, fmt.Errorf("overmind: 收割声明: 查步骤: %w", err)
+		return nil, fmt.Errorf("overmind: 检查归纳判断: 查步骤: %w", err)
 	}
 
 	for _, c := range candidates {
 		rawStd, _ := c.Detail["standard"].(map[string]any)
 		if _, err := arbiter.ParseClaimStandard(rawStd); err != nil {
 			res.Skipped = append(res.Skipped, Skipped{FactID: c.ID,
-				Reason: "声明无冻结判定标准,不进反证(仲裁者不可判): " + err.Error()})
+				Reason: "判断无冻结判定标准,不进反证(仲裁者不可判): " + err.Error()})
 			continue
 		}
 		if u, _ := c.Detail["unit_id"].(string); u == "" {
-			res.Skipped = append(res.Skipped, Skipped{FactID: c.ID, Reason: "声明无发现单位记录,R12 无法核验,不进反证"})
+			res.Skipped = append(res.Skipped, Skipped{FactID: c.ID, Reason: "判断无发现单位记录,R12 无法核验,不进反证"})
 			continue
 		}
 		combined, _ := c.Detail["combined"].(bool)
@@ -399,7 +426,7 @@ func HarvestClaims(ctx context.Context, store *rings.Store, taskID string) (*Har
 			}
 			if links < MinChainLinks {
 				res.Skipped = append(res.Skipped, Skipped{FactID: c.ID,
-					Reason: fmt.Sprintf("组合声明血缘不全(derived_from→Fact 仅 %d 条,须 ≥%d),不进反证", links, MinChainLinks)})
+					Reason: fmt.Sprintf("组合判断血缘不全(derived_from→Fact 仅 %d 条,须 ≥%d),不进反证", links, MinChainLinks)})
 				continue
 			}
 		} else {
@@ -415,12 +442,12 @@ func HarvestClaims(ctx context.Context, store *rings.Store, taskID string) (*Har
 				}
 			}
 			if discoverStepID == "" {
-				res.Skipped = append(res.Skipped, Skipped{FactID: c.ID, Reason: "声明无发现步骤血缘(derived_from),不进反证"})
+				res.Skipped = append(res.Skipped, Skipped{FactID: c.ID, Reason: "判断无发现步骤血缘(derived_from),不进反证"})
 				continue
 			}
 			step, err := store.Node(ctx, taskID, discoverStepID)
 			if err != nil {
-				return nil, fmt.Errorf("overmind: 收割声明 %s: 查发现步骤: %w", c.ID, err)
+				return nil, fmt.Errorf("overmind: 检查归纳判断 %s: 查发现步骤: %w", c.ID, err)
 			}
 			discoverStep = step
 		}
@@ -432,7 +459,7 @@ func HarvestClaims(ctx context.Context, store *rings.Store, taskID string) (*Har
 		}
 		if err := dispatchFalsifyRound(ctx, store, taskID, c, 1, claimAlternatives(c), discoverStep, assets,
 			"反证(第 1 轮): "+c.Title); err != nil {
-			return res, fmt.Errorf("overmind: 派发声明 %s 反证: %w", c.ID, err)
+			return res, fmt.Errorf("overmind: 派发判断 %s 反证: %w", c.ID, err)
 		}
 		res.Dispatched = append(res.Dispatched, c.ID)
 	}
@@ -452,7 +479,7 @@ func HarvestClaims(ctx context.Context, store *rings.Store, taskID string) (*Har
 			}
 			if links < MinChainLinks {
 				res.Skipped = append(res.Skipped, Skipped{FactID: c.ID,
-					Reason: fmt.Sprintf("组合声明血缘不全(derived_from→Fact 仅 %d 条),不派下一轮", links)})
+					Reason: fmt.Sprintf("组合判断血缘不全(derived_from→Fact 仅 %d 条),不派下一轮", links)})
 				continue
 			}
 		} else {
@@ -467,12 +494,12 @@ func HarvestClaims(ctx context.Context, store *rings.Store, taskID string) (*Har
 				}
 			}
 			if discoverStepID == "" {
-				res.Skipped = append(res.Skipped, Skipped{FactID: c.ID, Reason: "声明无发现步骤血缘(derived_from),无法继承意图分级,不派下一轮"})
+				res.Skipped = append(res.Skipped, Skipped{FactID: c.ID, Reason: "判断无发现步骤血缘(derived_from),无法继承意图分级,不派下一轮"})
 				continue
 			}
 			step, err := store.Node(ctx, taskID, discoverStepID)
 			if err != nil {
-				return nil, fmt.Errorf("overmind: 收割声明 %s: 查发现步骤: %w", c.ID, err)
+				return nil, fmt.Errorf("overmind: 检查归纳判断 %s: 查发现步骤: %w", c.ID, err)
 			}
 			discoverStep = step
 		}
@@ -485,11 +512,11 @@ func HarvestClaims(ctx context.Context, store *rings.Store, taskID string) (*Har
 		next := maxFalsifyRound(steps, c.ID) + 1
 		alive, err := arbiter.AliveAlternatives(ctx, store, taskID, c.ID)
 		if err != nil {
-			return res, fmt.Errorf("overmind: 声明 %s 算存活解释: %w", c.ID, err)
+			return res, fmt.Errorf("overmind: 判断 %s 算存活解释: %w", c.ID, err)
 		}
 		if err := dispatchFalsifyRound(ctx, store, taskID, c, next, altToRaw(alive), discoverStep, assets,
 			fmt.Sprintf("反证(第 %d 轮): %s", next, c.Title)); err != nil {
-			return res, fmt.Errorf("overmind: 派发声明 %s 第 %d 轮反证: %w", c.ID, next, err)
+			return res, fmt.Errorf("overmind: 派发判断 %s 第 %d 轮反证: %w", c.ID, next, err)
 		}
 		res.Dispatched = append(res.Dispatched, c.ID)
 	}
@@ -527,6 +554,7 @@ func dispatchFalsifyRound(ctx context.Context, store *rings.Store, taskID string
 		detail["alternatives"] = rawAlts
 	}
 	events, err := stepEvents(ctx, store, taskID, stepID, intent, DispatchOptions{
+		source:              sourceFalsify,
 		GoalID:              goalID,
 		ExpectedObservation: "经 submit_falsify_result 写回结构化反证结论(逐条竞争解释按 ID 给 refuted)",
 		ActionLevel:         string(level),
@@ -713,7 +741,7 @@ func AssembleRepro(ctx context.Context, store *rings.Store, taskID, claimID, sev
 			ExchangeID: m.ExchangeID,
 		}
 		if m.Error != "" {
-			step.Note = "交换异常: " + m.Error
+			step.Note = "该请求未完成" // 原始错误串在流量页悬停与交换详情,不进复现正文
 		}
 		if list := ops[m.StepID]; len(list) > 0 {
 			step.Op = strings.Join(list, "; ")
@@ -906,20 +934,20 @@ func clipLine(s string, n int) string {
 func ReopenClaim(ctx context.Context, store *rings.Store, taskID, claimID, trigger, reason, actor string) error {
 	claim, err := store.Node(ctx, taskID, claimID)
 	if err != nil {
-		return fmt.Errorf("overmind: 重开声明 %s: %w", claimID, err)
+		return fmt.Errorf("overmind: 重开判断 %s: %w", claimID, err)
 	}
 	if claim.Type != rings.NodeTestClaim {
 		return fmt.Errorf("overmind: 节点 %s 是 %s 不是 testclaim", claimID, claim.Type)
 	}
 	if claim.Status != rings.TestClaimConfirmed && claim.Status != rings.TestClaimPending {
-		return fmt.Errorf("overmind: 声明 %s 当前状态 %s,只有 Confirmed/待确认 可重开", claimID, claim.Status)
+		return fmt.Errorf("overmind: 判断 %s 当前状态 %s,只有已确认/待确认可重开", claimID, claim.Status)
 	}
 	if strings.TrimSpace(reason) == "" {
 		return fmt.Errorf("overmind: 重开必须说明理由(可反驳的结论必有可审计的反驳依据)")
 	}
 	derived, err := store.Edges(ctx, taskID, rings.EdgeDerivedFrom)
 	if err != nil {
-		return fmt.Errorf("overmind: 重开声明 %s: 查血缘: %w", claimID, err)
+		return fmt.Errorf("overmind: 重开判断 %s: 查血缘: %w", claimID, err)
 	}
 	combined, _ := claim.Detail["combined"].(bool)
 	var discoverStep *rings.NodeFull
@@ -934,17 +962,17 @@ func ReopenClaim(ctx context.Context, store *rings.Store, taskID, claimID, trigg
 			}
 		}
 		if discoverStepID == "" {
-			return fmt.Errorf("overmind: 声明 %s 无发现步骤血缘,无法派重开反证", claimID)
+			return fmt.Errorf("overmind: 判断 %s 无发现步骤血缘,无法派重开反证", claimID)
 		}
 		discoverStep, err = store.Node(ctx, taskID, discoverStepID)
 		if err != nil {
-			return fmt.Errorf("overmind: 重开声明 %s: 查发现步骤: %w", claimID, err)
+			return fmt.Errorf("overmind: 重开判断 %s: 查发现步骤: %w", claimID, err)
 		}
 	}
 	var assets []string
 	abouts, err := store.Edges(ctx, taskID, rings.EdgeAbout)
 	if err != nil {
-		return fmt.Errorf("overmind: 重开声明 %s: 查资产锚点: %w", claimID, err)
+		return fmt.Errorf("overmind: 重开判断 %s: 查资产锚点: %w", claimID, err)
 	}
 	for _, e := range abouts {
 		if e.From == claimID {
@@ -953,12 +981,12 @@ func ReopenClaim(ctx context.Context, store *rings.Store, taskID, claimID, trigg
 	}
 	steps, err := store.NodesByType(ctx, taskID, rings.NodeStep, "")
 	if err != nil {
-		return fmt.Errorf("overmind: 重开声明 %s: 查步骤续号: %w", claimID, err)
+		return fmt.Errorf("overmind: 重开判断 %s: 查步骤续号: %w", claimID, err)
 	}
 	next := maxFalsifyRound(steps, claimID) + 1
 	stepID, err := nextStepID(ctx, store, taskID)
 	if err != nil {
-		return fmt.Errorf("overmind: 重开声明 %s: %w", claimID, err)
+		return fmt.Errorf("overmind: 重开判断 %s: %w", claimID, err)
 	}
 	level := rings.ActionReadOnly
 	harm := ""
@@ -981,6 +1009,7 @@ func ReopenClaim(ctx context.Context, store *rings.Store, taskID, claimID, trigg
 		}},
 	}
 	stepEvs, err := stepEvents(ctx, store, taskID, stepID, fmt.Sprintf("反证(重开第 %d 轮): %s", next, claim.Title), DispatchOptions{
+		source:              sourceFalsify,
 		GoalID:              goalID,
 		ExpectedObservation: "经 submit_falsify_result 写回结构化反证结论(重开轮:全部竞争解释重新检验)",
 		ActionLevel:         string(level),
@@ -991,13 +1020,51 @@ func ReopenClaim(ctx context.Context, store *rings.Store, taskID, claimID, trigg
 			"alternatives": claimAlternatives(*claim)},
 	})
 	if err != nil {
-		return fmt.Errorf("overmind: 重开声明 %s: %w", claimID, err)
+		return fmt.Errorf("overmind: 重开判断 %s: %w", claimID, err)
 	}
 	events = append(events, stepEvs...)
 	events = append(events, rings.Event{Kind: rings.EventNodeStateChanged, Actor: actor,
 		Payload: rings.NodeStateChanged{NodeID: claimID, Status: rings.TestClaimTesting}})
 	if _, err := store.Append(ctx, taskID, events...); err != nil {
-		return fmt.Errorf("overmind: 重开声明 %s 入账: %w", claimID, err)
+		return fmt.Errorf("overmind: 重开判断 %s 写入: %w", claimID, err)
 	}
 	return nil
+}
+
+// ---- 存量复核标记(P4-30 ③,问题清单 #51) ----
+
+// reportExclusionPlan 拆解回复里的复核标记:主宰按立判危害门槛复核
+// 图上既有判断,纯信息性的(纯前置条件/环境特性/无害观察)标记"不纳入
+// 报告"。
+type reportExclusionPlan struct {
+	ClaimID string `json:"claim_id"`
+	Reason  string `json:"reason"`
+}
+
+// applyReportExclusion 复核标记落账:程序校验形状——判断在本轮快照内、
+// 复核理由非空;理由语义归模型(程序不代替判断,同 cancelQueued 纪律)。
+// 落 testclaim.record(report_review)追加事件:账本不涂改、判断保留
+// 可追溯,报告只收已确认且非信息性;读取侧按最新标记取舍(取代语义)。
+func (l *Loop) applyReportExclusion(ctx context.Context, p reportExclusionPlan, evaluatedRev int64) error {
+	if strings.TrimSpace(p.Reason) == "" {
+		return fmt.Errorf("标记不纳入报告须注明理由(写明为何无直接危害)")
+	}
+	n, err := l.Store.Node(ctx, l.TaskID, p.ClaimID)
+	if err != nil {
+		return fmt.Errorf("判断 %s 不在图上", p.ClaimID)
+	}
+	if n.Type != rings.NodeTestClaim {
+		return fmt.Errorf("节点 %s 是 %s 不是判断", p.ClaimID, n.Type)
+	}
+	if n.CreatedRev > evaluatedRev {
+		return fmt.Errorf("判断 %s 不在本轮快照中", p.ClaimID)
+	}
+	_, err = l.Store.Append(ctx, l.TaskID, rings.Event{
+		Kind: rings.EventTestClaimRecord, Actor: ActorOvermind,
+		Payload: rings.TestClaimRecord{
+			ClaimID: p.ClaimID, Type: rings.TestClaimRecReportReview,
+			Reason: strings.TrimSpace(p.Reason),
+		},
+	})
+	return err
 }

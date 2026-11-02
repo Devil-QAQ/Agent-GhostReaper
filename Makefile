@@ -29,11 +29,37 @@ build-all: web
 	GOOS=linux   GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY)-linux-amd64 ./cmd/ghostreaper
 	GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY)-windows-amd64.exe ./cmd/ghostreaper
 
+# 前置闸(P4-15 ②):未定义 JSX 引用检查——引用未导入/未声明的组件
+# 构建器不报错、浏览器运行时才黑屏(v1.0.1/v1.0.2 连穿两版),同类
+# 错误自此过不了构建。
+# 前置闸(P4-19):界面禁用词检查——前端源码与 Go 界面串按审定词表
+# (18 条映射,2026-10-23 造物主审定)扫字符串字面量,命中过不了构建。
+# 前置闸(P4-26):旧色值巡检——换装前品牌色板(蓝系/碳蓝底/旧语义色)
+# 在源码零残留,图页画布回退值与 globals.css token 同源对账。
+# 前置闸(P4-27 ②b):任务状态全矩阵测试——9 后端态 × 受阻 × 冬眠
+# 36 格唯一显示词零并排,取态改动过不了构建。
+# 前置闸(P4-28 ⑥):旧状态词残留检查——显示层合并 12→6 后,旧状态词
+# 不得再作徽标/筛选/时间线显示词,报告导出状态词与六词对齐。
+# 前置闸(P4-31 ⑨):融合设计律扫描——字号五级/间距阶梯/组件高度/圆角
+# 尺寸表/写死色值,覆盖 views 与 components 全部文件(含 ui/ 原件与
+# 弹窗抽屉模板),越级值过不了构建。
 web:
+	node $(WEB_DIR)/scripts/check-jsx-refs.mjs
+	node $(WEB_DIR)/scripts/check-ui-words.mjs
+	node $(WEB_DIR)/scripts/check-hardcoded-colors.mjs
+	node $(WEB_DIR)/scripts/check-status-words.mjs
+	node $(WEB_DIR)/scripts/check-fusion-rules.mjs
+	node $(WEB_DIR)/scripts/test-task-status-matrix.mjs
 	cd $(WEB_DIR) && { [ -f package-lock.json ] && npm ci || npm install; } && NEXT_TELEMETRY_DISABLED=1 npm run build
 	rm -rf $(WEB_DIST) && cp -R $(WEB_DIR)/out $(WEB_DIST)
 
 test:
+	node $(WEB_DIR)/scripts/check-ui-words.mjs
+	node $(WEB_DIR)/scripts/check-hardcoded-colors.mjs
+	node $(WEB_DIR)/scripts/check-status-words.mjs
+	node $(WEB_DIR)/scripts/check-fusion-rules.mjs
+	node $(WEB_DIR)/scripts/test-fusion-rules.mjs
+	node $(WEB_DIR)/scripts/test-task-status-matrix.mjs
 	go test ./...
 
 run: build

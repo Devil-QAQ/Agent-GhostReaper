@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>整站设计语言 · 三套方案（你的两套主题渲染）</title>
+<style>
+/* ============ 公共：你的两种主题 token ============ */
+:root {
+  --bg: #0A0A0B; --card: #131315; --float: #1A1A1D; --border: #26262A;
+  --fg: #E7E5E4; --fg2: #9B9A94; --accent: #8FAE94; --accent-ink: #0A0A0B;
+  --danger: #E5484D; --ok: #8FAE94;
+}
+.light {
+  --bg: #FCFCFD; --card: #F4F4F6; --float: #FFFFFF; --border: #E2E2E7;
+  --fg: #18181B; --fg2: #71717A; --accent: #18181B; --accent-ink: #FCFCFD;
+  --danger: #B23C34; --ok: #3E6B4F;
+}
+* { box-sizing: border-box; margin: 0; }
+body { background: #050506; color: #E7E5E4; font-family: -apple-system, "PingFang SC", sans-serif; padding: 36px; }
+h1 { font-size: 20px; margin-bottom: 6px; }
+.sub { color: #9ca3af; font-size: 12px; margin-bottom: 30px; }
+.plan-h { margin: 44px 0 6px; display: flex; align-items: baseline; gap: 12px; }
+.plan-h b { font-size: 17px; }
+.plan-h span { font-size: 12px; color: #9ca3af; }
+.plan-note { font-size: 12px; color: #9ca3af; margin-bottom: 14px; }
+.frame { border-radius: 18px; overflow: hidden; border: 1px solid #26262a; margin-bottom: 18px; }
+
+/* ============ 方案一：碳黑编辑部（衬线标题 · 杂志留白） ============ */
+.ed .page { background: var(--bg); padding: 44px 52px; }
+.ed .page h2 { font-family: Georgia, "Songti SC", serif; font-size: 30px; font-weight: 700; letter-spacing: .5px; }
+.ed .page .psub { font-size: 13px; color: var(--fg2); margin-top: 6px; font-style: normal; }
+.ed .kpis { display: flex; gap: 28px; margin: 36px 0; }
+.ed .kpi { flex: 1; padding: 4px 0; }
+.ed .kpi .k { font-size: 11px; color: var(--fg2); letter-spacing: 2px; }
+.ed .kpi .v { font-family: Georgia, serif; font-size: 44px; font-weight: 700; margin-top: 6px; font-variant-numeric: tabular-nums; }
+.ed .kpi .d { font-size: 12px; color: var(--fg2); margin-top: 4px; }
+.ed .rows { border-top: 1px solid var(--border); }
+.ed .row { display: flex; align-items: center; gap: 20px; padding: 18px 4px; border-bottom: 1px solid var(--border); }
+.ed .row .name { font-size: 14px; font-weight: 600; width: 160px; }
+.ed .row .desc { font-size: 12px; color: var(--fg2); flex: 1; }
+.ed .pill { font-size: 11px; letter-spacing: 1px; padding: 4px 12px; border: 1px solid var(--accent); color: var(--accent); border-radius: 999px; }
+.ed .btn { background: var(--accent); color: var(--accent-ink); font-size: 13px; padding: 10px 22px; border: none; border-radius: 2px; }
+
+/* ============ 方案二：终端仪态（等宽数字 · 网格密度） ============ */
+.tm .page { background: var(--bg); padding: 24px 28px; font-family: "SF Mono", ui-monospace, Menlo, monospace; }
+.tm .page h2 { font-size: 15px; font-weight: 600; }
+.tm .page .psub { font-size: 11px; color: var(--fg2); margin-top: 3px; font-family: -apple-system, sans-serif; }
+.tm .grid3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); margin: 18px 0; }
+.tm .cell { background: var(--card); padding: 12px 14px; }
+.tm .cell .k { font-size: 10px; color: var(--fg2); letter-spacing: 1px; }
+.tm .cell .v { font-size: 26px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.tm .cell .v.ok { color: var(--ok); }
+.tm .tbl { border: 1px solid var(--border); }
+.tm .tr { display: flex; align-items: center; gap: 14px; padding: 9px 14px; border-bottom: 1px solid var(--border); background: var(--card); font-size: 12px; }
+.tm .tr:last-child { border-bottom: none; }
+.tm .tag { font-size: 10px; padding: 2px 8px; border-radius: 3px; background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
+.tm .btn { background: var(--accent); color: var(--accent-ink); font-size: 12px; padding: 7px 16px; border: none; border-radius: 4px; font-family: -apple-system, sans-serif; }
+
+/* ============ 方案三：柔雾卡片（大圆角 · 色阶分层） ============ */
+.mg .page { background: var(--bg); padding: 36px 40px; }
+.mg .page h2 { font-size: 24px; font-weight: 700; }
+.mg .page .psub { font-size: 13px; color: var(--fg2); margin-top: 4px; }
+.mg .cards { display: grid; grid-template-columns: repeat(3,1fr); gap: 16px; margin: 24px 0; }
+.mg .card { background: var(--card); border-radius: 20px; padding: 20px 22px; border: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+.mg .card .k { font-size: 12px; color: var(--fg2); }
+.mg .card .v { font-size: 30px; font-weight: 700; margin-top: 8px; font-variant-numeric: tabular-nums; }
+.mg .card .v.ok { color: var(--ok); }
+.mg .card .bar { height: 6px; border-radius: 99px; background: color-mix(in srgb, var(--fg) 8%, transparent); margin-top: 14px; overflow: hidden; }
+.mg .card .bar i { display: block; height: 100%; background: var(--ok); border-radius: 99px; }
+.mg .list { display: flex; flex-direction: column; gap: 12px; }
+.mg .item { display: flex; align-items: center; gap: 16px; background: var(--card); border-radius: 16px; padding: 14px 18px; }
+.mg .item .name { font-size: 14px; font-weight: 600; width: 150px; }
+.mg .item .desc { font-size: 12px; color: var(--fg2); flex: 1; }
+.mg .pill { font-size: 11px; padding: 5px 12px; border-radius: 999px; background: color-mix(in srgb, var(--ok) 13%, transparent); color: var(--ok); }
+.mg .btn { background: var(--accent); color: var(--accent-ink); font-size: 13px; padding: 10px 20px; border: none; border-radius: 12px; }
+</style>
+</head>
+<body>
+
+<h1>整站设计语言 · 三套</h1>
+<div class="sub">主题用你已定的两种（碳黑＋鼠尾草绿 / 冷雪白＋碳黑）——每套设计语言都是暗/亮双主题渲染，只换排版律，不换配色。每套展示同一页面（任务列表）。</div>
+
+<!-- ================= 方案一 ================= -->
+<div class="plan-h"><b>方案一 · 碳黑编辑部</b><span>衬线大标题＋杂志留白＋细分隔线——安静、有文化气，和衬线 G 图标一脉相承</span></div>
+<div class="plan-note">字号律：标题 30 衬线 / 区块 15 / 正文 13 / 辅助 12 / 微标 11（字距加宽）。间距律：4 的倍数·区块间 36~44 大留白。组件：直角按钮（2px 圆角）、胶囊描边徽标、细线分隔不卡片化。</div>
+<div class="frame ed"><div class="page">
+  <div style="display:flex; justify-content:space-between; align-items:flex-end;">
+    <div><h2>任务</h2><div class="psub">年轮账本内的全部任务 · 主宰规划、虫群单位执行</div></div>
+    <button class="btn">新建任务</button>
+  </div>
+  <div class="kpis">
+    <div class="kpi"><div class="k">任务 TASKS</div><div class="v">6</div><div class="d">运行中 2 · 已完成 3</div></div>
+    <div class="kpi"><div class="k">资产 ASSETS</div><div class="v">48</div><div class="d">范围内 44 · 范围外 4</div></div>
+    <div class="kpi"><div class="k">已确认发现 FINDINGS</div><div class="v" style="color:var(--ok)">5</div><div class="d">高危 1 · 中危 3</div></div>
+  </div>
+  <div class="rows">
+    <div class="row"><div class="name">czgs1024 教育站</div><div class="desc">若依定制站全量渗透 · 目标：取 shell</div><span class="pill">运行中</span></div>
+    <div class="row"><div class="name">sxu 门户体检</div><div class="desc">暴露面梳理与弱口令核查</div><span class="pill" style="border-color:var(--fg2);color:var(--fg2)">冬眠中</span></div>
+    <div class="row"><div class="name">内部平台复测</div><div class="desc">上轮发现的修复验证</div><span class="pill" style="border-color:var(--ok);color:var(--ok)">已完成</span></div>
+  </div>
+</div></div>
+<div class="frame ed light"><div class="page">
+  <div style="display:flex; justify-content:space-between; align-items:flex-end;">
+    <div><h2>任务</h2><div class="psub">年轮账本内的全部任务 · 主宰规划、虫群单位执行</div></div>
+    <button class="btn">新建任务</button>
+  </div>
+  <div class="kpis">
+    <div class="kpi"><div class="k">任务 TASKS</div><div class="v">6</div><div class="d">运行中 2 · 已完成 3</div></div>
+    <div class="kpi"><div class="k">资产 ASSETS</div><div class="v">48</div><div class="d">范围内 44 · 范围外 4</div></div>
+    <div class="kpi"><div class="k">已确认发现 FINDINGS</div><div class="v" style="color:var(--ok)">5</div><div class="d">高危 1 · 中危 3</div></div>
+  </div>
+</div></div>
+
+<!-- ================= 方案二 ================= -->
+<div class="plan-h"><b>方案二 · 终端仪态</b><span>等宽数字全面化＋1px 网格＋高密度——仪器感、专业冷峻</span></div>
+<div class="plan-note">字号律：标题 15 半粗 / 正文 12 等宽 / 辅助 10~11（大写字距）。间距律：紧凑 3~14px·靠 1px 网格线分组。组件：小圆角（3~4px）、方块徽标、表格化一切、tabular-nums 全站。</div>
+<div class="frame tm"><div class="page">
+  <div style="display:flex; justify-content:space-between; align-items:center;">
+    <div><h2>任务</h2><div class="psub">年轮账本内的全部任务 · 主宰规划、虫群单位执行</div></div>
+    <button class="btn">新建任务</button>
+  </div>
+  <div class="grid3">
+    <div class="cell"><div class="k">任务 TASKS</div><div class="v">6</div></div>
+    <div class="cell"><div class="k">资产 ASSETS</div><div class="v">48</div></div>
+    <div class="cell"><div class="k">已确认 FINDINGS</div><div class="v ok">5</div></div>
+  </div>
+  <div class="tbl">
+    <div class="tr"><span style="width:120px;color:var(--fg)">czgs1024 教育站</span><span style="flex:1;color:var(--fg2)">若依定制站全量渗透 · 取 shell</span><span class="tag">运行中</span><span style="color:var(--fg2)">17:22</span></div>
+    <div class="tr"><span style="width:120px;color:var(--fg)">sxu 门户体检</span><span style="flex:1;color:var(--fg2)">暴露面梳理与弱口令核查</span><span class="tag" style="background:color-mix(in srgb,var(--fg2) 12%,transparent);color:var(--fg2)">冬眠中</span><span style="color:var(--fg2)">16:40</span></div>
+    <div class="tr"><span style="width:120px;color:var(--fg)">内部平台复测</span><span style="flex:1;color:var(--fg2)">上轮发现的修复验证</span><span class="tag">已完成</span><span style="color:var(--fg2)">10-21</span></div>
+  </div>
+</div></div>
+<div class="frame tm light"><div class="page">
+  <div class="grid3">
+    <div class="cell"><div class="k">任务 TASKS</div><div class="v">6</div></div>
+    <div class="cell"><div class="k">资产 ASSETS</div><div class="v">48</div></div>
+    <div class="cell"><div class="k">已确认 FINDINGS</div><div class="v ok">5</div></div>
+  </div>
+</div></div>
+
+<!-- ================= 方案三 ================= -->
+<div class="plan-h"><b>方案三 · 柔雾卡片</b><span>大圆角＋色阶分层＋进度语言——最接近你 demo 页气质，柔和现代</span></div>
+<div class="plan-note">字号律：标题 24 粗 / 正文 13 / 数字 30 粗（卡片主角）/ 辅助 12。间距律：卡片间 16·卡片内 20~22·区块间 24。组件：16~20px 大圆角、无描边靠色阶、胶囊徽标、进度条贯穿。</div>
+<div class="frame mg"><div class="page">
+  <div style="display:flex; justify-content:space-between; align-items:center;">
+    <div><h2>任务</h2><div class="psub">年轮账本内的全部任务 · 主宰规划、虫群单位执行</div></div>
+    <button class="btn">新建任务</button>
+  </div>
+  <div class="cards">
+    <div class="card"><div class="k">任务</div><div class="v">6</div><div class="bar"><i style="width:50%"></i></div></div>
+    <div class="card"><div class="k">资产覆盖</div><div class="v">92%</div><div class="bar"><i style="width:92%"></i></div></div>
+    <div class="card"><div class="k">已确认发现</div><div class="v ok">5</div><div class="bar"><i style="width:36%;background:var(--ok)"></i></div></div>
+  </div>
+  <div class="list">
+    <div class="item"><div class="name">czgs1024 教育站</div><div class="desc">若依定制站全量渗透 · 目标：取 shell</div><span class="pill">运行中</span></div>
+    <div class="item"><div class="name">sxu 门户体检</div><div class="desc">暴露面梳理与弱口令核查</div><span class="pill" style="background:color-mix(in srgb,var(--fg2) 10%,transparent);color:var(--fg2)">冬眠中</span></div>
+    <div class="item"><div class="name">内部平台复测</div><div class="desc">上轮发现的修复验证</div><span class="pill">已完成</span></div>
+  </div>
+</div></div>
+<div class="frame mg light"><div class="page">
+  <div class="cards">
+    <div class="card"><div class="k">任务</div><div class="v">6</div><div class="bar"><i style="width:50%"></i></div></div>
+    <div class="card"><div class="k">资产覆盖</div><div class="v">92%</div><div class="bar"><i style="width:92%"></i></div></div>
+    <div class="card"><div class="k">已确认发现</div><div class="v ok">5</div><div class="bar"><i style="width:36%"></i></div></div>
+  </div>
+</div></div>
+
+</body>
+</html>

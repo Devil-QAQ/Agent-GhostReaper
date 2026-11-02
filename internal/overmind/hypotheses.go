@@ -43,12 +43,12 @@ const StepDetailKindVerify = "verify"
 // hypoEvalSystemPrompt 假设收割评估的系统提示词(P2-03):只做"候选假设
 // → 三去向裁决"的映射,输出受限 JSON。P3-11a 追加常驻文风条款:
 // 裁决理由与验证意图是上面板的研判叙述,按人话写;JSON 结构照契约。
-const hypoEvalSystemPrompt = `你是渗透测试任务的主宰(Overmind),负责收割评估虫群单位提交的候选假设(直觉/线索/疑似问题,尚未取得直接证据)。
+const hypoEvalSystemPrompt = `你是渗透测试任务的主宰(Overmind),负责检查归纳虫群单位提交的待验证的猜测(直觉/线索/疑似问题,尚未取得直接证据)。
 对态势快照中列出的每条待评估假设,裁决三种去向之一:
 - verify(值得跟):生成本Step派发给不同虫群单位验证——须给出具体、可执行、可观察的验证意图与意图分级(验证不得派回原发现者);
 - hold(存疑):依据尚不足以判断价值,留在图上待唤醒——低排序不等于拒绝,不得借 hold 丢弃;
 - discard(不成立):已有可信反证或假设本身无验证价值——标记废弃并记录理由;直觉有账、废案有理由。
-裁决只依据态势快照中的真实信息;已挂账的假设若态势无新变化,维持 hold 即可,不必改判、不必换措辞重写理由。
+判定只依据态势快照中的真实信息;已搁置的假设若态势无新变化,维持 hold 即可,不必改判、不必换措辞重写理由。
 只输出 JSON:{"verdicts":[{"hypothesis_id":"h-…","decision":"verify|hold|discard","reason":"一句话理由","verify_intent":"验证意图(verify 必填)","action_level":"只读探测|主动测试|利用深入|修改与持久化"}]}
 不要输出 JSON 以外的任何内容。
 
@@ -90,14 +90,14 @@ func (l *Loop) harvestHypotheses(ctx context.Context) (int, error) {
 func (l *Loop) closeHypotheses(ctx context.Context) (int, error) {
 	testing, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeHypothesis, rings.HypothesisTesting)
 	if err != nil {
-		return 0, fmt.Errorf("overmind: 假设收割: 查验证中假设: %w", err)
+		return 0, fmt.Errorf("overmind: 假设检查归纳: 查验证中假设: %w", err)
 	}
 	if len(testing) == 0 {
 		return 0, nil
 	}
 	steps, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeStep, "")
 	if err != nil {
-		return 0, fmt.Errorf("overmind: 假设收割: 查验证步骤: %w", err)
+		return 0, fmt.Errorf("overmind: 假设检查归纳: 查验证步骤: %w", err)
 	}
 	latestVerify := map[string]rings.NodeFull{} // 假设 ID → 最新验证 Step
 	for _, s := range steps {
@@ -115,7 +115,7 @@ func (l *Loop) closeHypotheses(ctx context.Context) (int, error) {
 	results := map[string]rings.HypothesisRecord{} // "hypID\x00stepID" → 最新结论
 	evs, err := l.Store.Events(ctx, l.TaskID, 0, 0)
 	if err != nil {
-		return 0, fmt.Errorf("overmind: 假设收割: 读事件流: %w", err)
+		return 0, fmt.Errorf("overmind: 假设检查归纳: 读事件流: %w", err)
 	}
 	for _, ev := range evs {
 		if ev.Kind != rings.EventHypothesisRecord {
@@ -123,7 +123,7 @@ func (l *Loop) closeHypotheses(ctx context.Context) (int, error) {
 		}
 		var r rings.HypothesisRecord
 		if err := json.Unmarshal(ev.Payload, &r); err != nil {
-			return 0, fmt.Errorf("overmind: 假设收割: 解码 hypothesis.record: %w", err)
+			return 0, fmt.Errorf("overmind: 假设检查归纳: 解码 hypothesis.record: %w", err)
 		}
 		if r.Type == rings.HypothesisRecResult {
 			results[r.HypothesisID+"\x00"+r.StepID] = r
@@ -207,7 +207,7 @@ func (l *Loop) evaluateHypotheses(ctx context.Context) (int, error) {
 			moved++
 		case rings.HypothesisHold:
 			if reason == "" {
-				l.setErr(fmt.Errorf("overmind: 假设 %s 挂账缺理由,保持待评估", p.HypothesisID))
+				l.setErr(fmt.Errorf("overmind: 假设 %s 搁置缺理由,保持待评估", p.HypothesisID))
 				continue
 			}
 			if h.Status == rings.HypothesisHeld {
@@ -220,7 +220,7 @@ func (l *Loop) evaluateHypotheses(ctx context.Context) (int, error) {
 				rings.Event{Kind: rings.EventNodeStateChanged, Actor: ActorOvermind,
 					Payload: rings.NodeStateChanged{NodeID: h.ID, Status: rings.HypothesisHeld}},
 			); err != nil {
-				return moved, fmt.Errorf("overmind: 假设 %s 挂账: %w", h.ID, err)
+				return moved, fmt.Errorf("overmind: 假设 %s 搁置: %w", h.ID, err)
 			}
 			moved++
 		case rings.HypothesisDiscard:
@@ -272,6 +272,7 @@ func (l *Loop) dispatchVerifyStep(ctx context.Context, h rings.NodeFull, intent,
 		},
 	}}
 	stepEvs, err := stepEvents(ctx, l.Store, l.TaskID, stepID, "验证假设: "+h.Title, DispatchOptions{
+		source:              sourceVerify,
 		GoalID:              l.currentGoalID(ctx),
 		ExpectedObservation: "经 submit_hypothesis_result 写回结构化结论(supported|refuted|inconclusive)",
 		ActionLevel:         level,
@@ -292,7 +293,7 @@ func (l *Loop) dispatchVerifyStep(ctx context.Context, h rings.NodeFull, intent,
 			Payload: rings.NodeStateChanged{NodeID: h.ID, Status: rings.HypothesisTesting}},
 	)
 	if _, err := l.Store.Append(ctx, l.TaskID, events...); err != nil {
-		return fmt.Errorf("overmind: 转验证 %s 入账: %w", h.ID, err)
+		return fmt.Errorf("overmind: 转验证 %s 写入: %w", h.ID, err)
 	}
 	return nil
 }
@@ -459,7 +460,7 @@ func (l *Loop) hypoEvalSnapshot(ctx context.Context) (string, error) {
 		fmt.Fprintf(&b, "  - %s [%s] %s\n", s.ID, s.Status, s.Title)
 	}
 
-	b.WriteString("\n待评估假设(逐条裁决):\n")
+	b.WriteString("\n待评估假设(逐条判定):\n")
 	n := 0
 	for _, h := range hyps {
 		if h.Status != rings.HypothesisCandidate && h.Status != rings.HypothesisHeld {
@@ -481,7 +482,7 @@ func (l *Loop) hypoEvalSnapshot(ctx context.Context) (string, error) {
 		b.WriteString("  (无)\n")
 	}
 
-	b.WriteString("\n【评估指令】\n对每条待评估假设输出三去向裁决,只输出 JSON;" +
+	b.WriteString("\n【评估指令】\n对每条待评估假设输出三去向判定,只输出 JSON;" +
 		"若无待评估输出 {\"verdicts\":[]}。\n")
 	return b.String(), nil
 }

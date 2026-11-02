@@ -237,7 +237,7 @@ func TestRenderTaskReport(t *testing.T) {
 		"任务 ID:`rep-t`",
 		"任务状态:已完成(completed)",
 		"g1 摸清靶场暴露面[已达成]",
-		"审批门槛 主动测试 及以上弹门",
+		"审批门槛 主动测试 及以上需批准",
 		"禁止工具 nmap",
 		"说明:仅白天测试",
 		"零 LLM",
@@ -249,7 +249,7 @@ func TestRenderTaskReport(t *testing.T) {
 
 	// 聚合摘要:1 Confirmed / 1 待确认 / 覆盖 1/2 / 事实 1。
 	for _, want := range []string{
-		"Confirmed 发现:**1** 条;待确认:1 条",
+		"已确认发现:**1** 条;待确认:1 条",
 		"资产覆盖:1 / 2(覆盖率 50%)",
 		"已确认事实:1 条",
 	} {
@@ -273,12 +273,12 @@ func TestRenderTaskReport(t *testing.T) {
 	// Confirmed 条目:声明、影响面、锚点(带标题)、发现/验证单位 R12、
 	// 来龙去脉(P4-13:定稿冻结的模型叙述,读定稿零 LLM)。
 	for _, want := range []string{
-		"### C-1 `tc-1` · 信息暴露 · 级别 high",
-		"存在性声明:/old-backup/ 备份目录可公开匿名列举",
-		"影响面声明:敏感数据可被未授权访问",
+		"### C-1 /old-backup/ 备份目录可公开匿名列举 · 信息暴露 · 级别 high",
+		"存在性判断:/old-backup/ 备份目录可公开匿名列举",
+		"影响面判断:敏感数据可被未授权访问",
 		"资产锚点:`web1`(http://10.10.0.5:8080)",
 		"发现单位 `u1` · 发现步骤 `s1`;验证单位 `u2`(验证者 ≠ 发现者)",
-		"仲裁者机器判定 Confirmed",
+		"仲裁者机器判定已确认",
 		"来龙去脉:单位 u1 执行「审计主站敏感路径」时,在 /old-backup/ 的 200 响应正文里发现备份列举",
 	} {
 		if !strings.Contains(md, want) {
@@ -290,13 +290,16 @@ func TestRenderTaskReport(t *testing.T) {
 	// 原文,与面板同源装配)。P4-08 ⑤:操作方法撤下报告正文(证据包
 	// 收);⑥:请求行 origin-form(Host 头承载)。
 	for _, want := range []string{
-		"级别分布(Confirmed,跟影响面证据走):high 1",
-		"反证记录(年轮版本刻度):",
-		"候选声明入账(发现单位 `u1`)",
+		"级别分布(已确认,跟影响面证据走):high 1",
+		// P4-28 ⑥:过程态计数按合并口径(candidate/testing/awaiting_round
+		// 合计"锤炼中";本账本无过程态判断,如实为 0)。
+		"判断在途:锤炼中 0",
+		"反证记录:",
+		"判断已记录，等待安排反证(发现单位 `u1`)",
 		"反证(单位 `u2`):存在性未推翻 · 影响面成立(high)",
-		"机器裁决 confirm(Satisfied=true)",
-		"竞争性替代解释(创建时冻结):",
-		"复现步骤(收割定稿 · 版本",
+		"机器判定:已确认",
+		"其他可能原因(创建时冻结):",
+		"复现步骤(检查归纳定稿",
 		"HTTP 原文(Burp 可验证):",
 		"GET /old-backup/ HTTP/1.1",
 		"Host: 10.10.0.5:8080",
@@ -317,7 +320,7 @@ func TestRenderTaskReport(t *testing.T) {
 
 	// 待确认条目:搁置理由直陈(R4)。
 	for _, want := range []string{
-		"### P-1 `tc-2` · 信息暴露",
+		"### P-1 /api/version 公开暴露服务版本号 · 信息暴露",
 		"搁置理由:反证未推翻存在性,但影响面证据不足以支撑所声明的实际影响",
 	} {
 		if !strings.Contains(md, want) {
@@ -327,8 +330,8 @@ func TestRenderTaskReport(t *testing.T) {
 
 	// 审计摘要:审批统计、无熔断、事件构成。
 	for _, want := range []string{
-		"审批弹门:请求 1 · 批准 1 · 拒绝 0 · 研判后放行 0",
-		"熔断记录:无",
+		"需批准:请求 1 · 批准 1 · 拒绝 0 · 规划后放行 0",
+		"终止记录:无",
 		"testclaim.record ×5",
 	} {
 		if !strings.Contains(md, want) {
@@ -395,7 +398,7 @@ func TestRenderEdgeStates(t *testing.T) {
 	}
 	for _, want := range []string{
 		"任务状态:运行中(started)",
-		"本轮无经独立反证与机器裁决确认的发现。",
+		"本轮无经独立反证与机器判定确认的发现。",
 		"无待确认发现。",
 		"资产覆盖:0 / 0",
 	} {
@@ -409,7 +412,7 @@ func TestRenderEdgeStates(t *testing.T) {
 	// 熔断留痕场景:stopped 带操作者与理由。
 	const fused = "rep-fused"
 	if _, err := store.Append(ctx, fused,
-		rings.Event{Kind: rings.EventTaskLifecycle, Actor: "manager", Payload: rings.TaskLifecycle{Action: "created", Title: "被熔断"}},
+		rings.Event{Kind: rings.EventTaskLifecycle, Actor: "manager", Payload: rings.TaskLifecycle{Action: "created", Title: "被终止"}},
 		rings.Event{Kind: rings.EventTaskLifecycle, Actor: "manager", Payload: rings.TaskLifecycle{
 			Action: "stopped", Detail: map[string]any{"operator": "creator", "reason": "范围变更"}}},
 	); err != nil {
@@ -417,11 +420,69 @@ func TestRenderEdgeStates(t *testing.T) {
 	}
 	md2, err := Render(ctx, store, nil, fused, nil)
 	if err != nil {
-		t.Fatalf("熔断任务渲染失败: %v", err)
+		t.Fatalf("终止任务渲染失败: %v", err)
 	}
-	if !strings.Contains(md2, "任务状态:已熔断(stopped)") ||
-		!strings.Contains(md2, "熔断记录:creator 于") || !strings.Contains(md2, "理由:范围变更") {
-		t.Fatalf("熔断审计呈现不符:\n%s", md2)
+	if !strings.Contains(md2, "任务状态:已停止(手动终止)") ||
+		!strings.Contains(md2, "终止记录:creator 于") || !strings.Contains(md2, "理由:范围变更") {
+		t.Fatalf("终止审计呈现不符:\n%s", md2)
+	}
+	// 已停止统称的结束方式括注(P4-25 审核迭代):整体超时与收口结束
+	// 两种有序收尾各验一例,与面板悬停同口径。
+	for _, tc := range []struct{ id, by, want string }{
+		{"rep-settled-gate", rings.SettleByTaskGate, "任务状态:已停止(整体超时)"},
+		{"rep-settled-closure", rings.SettleByClosurePrompt, "任务状态:已停止(收口结束)"},
+	} {
+		if _, err := store.Append(ctx, tc.id,
+			rings.Event{Kind: rings.EventTaskLifecycle, Actor: "manager", Payload: rings.TaskLifecycle{Action: "created", Title: "收尾终态"}},
+			rings.Event{Kind: rings.EventTaskLifecycle, Actor: "manager", Payload: rings.TaskLifecycle{
+				Action: "stopped", Detail: map[string]any{"settled_by": tc.by}}},
+		); err != nil {
+			t.Fatalf("铺账本失败: %v", err)
+		}
+		md, err := Render(ctx, store, nil, tc.id, nil)
+		if err != nil {
+			t.Fatalf("收尾终态渲染失败: %v", err)
+		}
+		if !strings.Contains(md, tc.want) {
+			t.Fatalf("%s 应呈 %q:\n%s", tc.id, tc.want, md)
+		}
+	}
+}
+
+// TestRenderBlockedOverlay 受阻单显覆盖层(P4-27 ② 报告同口径):
+// 活动任务存在模型故障归因的 blocked 步骤 → 状态词单显"受阻";
+// 确定性归因不触发(⑦:程序缺陷不计故障);冻结态单显冬眠中不叠加。
+func TestRenderBlockedOverlay(t *testing.T) {
+	store := openStore(t)
+	ctx := context.Background()
+	seedBlockedTask := func(task, note string) {
+		if _, err := store.Append(ctx, task,
+			rings.Event{Kind: rings.EventTaskLifecycle, Actor: "manager", Payload: rings.TaskLifecycle{Action: "created", Title: "受阻任务"}},
+			rings.Event{Kind: rings.EventTaskLifecycle, Actor: "manager", Payload: rings.TaskLifecycle{Action: "started"}},
+			rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
+				NodeID: "s1", NodeType: rings.NodeStep, Title: "探测意图", Status: "dispatched"}},
+			rings.Event{Kind: rings.EventNodeStateChanged, Actor: "swarm:u1",
+				Payload: rings.NodeStateChanged{NodeID: "s1", Status: "blocked", Note: note}},
+		); err != nil {
+			t.Fatalf("铺账本失败: %v", err)
+		}
+	}
+	seedBlockedTask("rep-blocked-model", "model_fault")
+	md, err := Render(ctx, store, nil, "rep-blocked-model", nil)
+	if err != nil {
+		t.Fatalf("渲染失败: %v", err)
+	}
+	if !strings.Contains(md, "任务状态:受阻(started)") {
+		t.Fatalf("模型故障 blocked 应单显受阻:\n%s", md)
+	}
+	// 确定性归因:不触发受阻覆盖层。
+	seedBlockedTask("rep-blocked-det", "determinant")
+	md, err = Render(ctx, store, nil, "rep-blocked-det", nil)
+	if err != nil {
+		t.Fatalf("渲染失败: %v", err)
+	}
+	if !strings.Contains(md, "任务状态:运行中(started)") {
+		t.Fatalf("确定性归因不应触发受阻覆盖层:\n%s", md)
 	}
 }
 

@@ -61,9 +61,9 @@ func TestSnapshotInjectsPendingAdvices(t *testing.T) {
 	if err != nil {
 		t.Fatalf("快照失败: %v", err)
 	}
-	if !strings.Contains(snap, "待裁决建议") || !strings.Contains(snap, "av-1") ||
+	if !strings.Contains(snap, "待判定建议") || !strings.Contains(snap, "av-1") ||
 		!strings.Contains(snap, "优先覆盖 web 入口") {
-		t.Fatalf("快照应含待裁决建议:\n%s", snap)
+		t.Fatalf("快照应含待判定建议:\n%s", snap)
 	}
 
 	// 裁决后:不再出现在快照。

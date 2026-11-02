@@ -78,38 +78,22 @@ func TestHeaderCrossPlatform(t *testing.T) {
 	}
 }
 
-func TestLevelFilterAndRuntimeSwitch(t *testing.T) {
+func TestLevelFixedFullCapture(t *testing.T) {
+	// P4-32 起级别固定全量 DEBUG:任何级别都不丢弃。
 	dir := t.TempDir()
 	l := openForTest(t, dir, Options{NoStderr: true})
 	l.Infof("info-可见")
-	l.Debugf("debug-应被丢弃")
-	l.SetLevel(LevelDebug)
-	l.Debugf("debug-开关后可见")
-	l.SetLevel(LevelError)
-	l.Warnf("warn-降级后应被丢弃")
-	t.Cleanup(func() { SetLevel(LevelInfo) }) // 级别是进程级状态,测完复位
+	l.Debugf("debug-也可见")
+	l.Warnf("warn-也可见")
+	l.Errorf("error-也可见")
+	if Current() != LevelDebug {
+		t.Fatalf("级别应固定 DEBUG,得到 %v", Current())
+	}
 
 	got := readActive(t, dir)
-	for _, want := range []string{"info-可见", "debug-开关后可见"} {
+	for _, want := range []string{"info-可见", "debug-也可见", "warn-也可见", "error-也可见"} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("缺 %q:\n%s", want, got)
-		}
-	}
-	for _, banned := range []string{"debug-应被丢弃", "warn-降级后应被丢弃"} {
-		if strings.Contains(got, banned) {
-			t.Fatalf("被过滤的记录出现在文件: %q", banned)
-		}
-	}
-}
-
-func TestLevelParse(t *testing.T) {
-	cases := map[string]Level{
-		"debug": LevelDebug, "INFO": LevelInfo, " warn": LevelWarn,
-		"error": LevelError, "": LevelInfo, "bogus": LevelInfo,
-	}
-	for in, want := range cases {
-		if got := ParseLevel(in); got != want {
-			t.Fatalf("ParseLevel(%q) = %v, want %v", in, got, want)
+			t.Fatalf("缺 %q(全量记录被丢):\n%s", want, got)
 		}
 	}
 }
@@ -204,7 +188,7 @@ func TestStdLogRedirect(t *testing.T) {
 }
 
 func TestPackageLevelNilSafe(t *testing.T) {
-	// 未 Open 时包级调用零恐慌(单测环境常态)。
+	// 未 Open 时包级调用零恐慌(单测环境常态);级别固定全量。
 	if cur := std.Load(); cur != nil {
 		cur.Close()
 	}
@@ -212,12 +196,9 @@ func TestPackageLevelNilSafe(t *testing.T) {
 	Infof("noop")
 	Warnf("noop")
 	Errorf("noop")
-	// 级别是进程级状态:未 Open 也可调(面板保存即改);测完复位 info。
-	SetLevel(LevelError)
-	if Current() != LevelError {
-		t.Fatal("SetLevel 未生效")
+	if Current() != LevelDebug {
+		t.Fatal("级别应固定 DEBUG")
 	}
-	SetLevel(LevelInfo)
 	if Dir() != "" {
 		t.Fatal("未 Open 时 Dir 应为空")
 	}

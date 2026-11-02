@@ -660,7 +660,7 @@ func TestHarmDenyLineDirectDenyThenForcedRelease(t *testing.T) {
 		_ = json.Unmarshal(ev.Payload, &r)
 		if r.Type == rings.SwarmRecToolCall && strings.HasPrefix(r.UnitID, "fr-") {
 			frs++
-			if !strings.Contains(r.Note, denied.RequestID) || !strings.Contains(r.Note, "研判后放行") {
+			if !strings.Contains(r.Note, denied.RequestID) || !strings.Contains(r.Note, "规划后放行") {
 				t.Fatalf("放行执行留痕应回指审批请求: %+v", r)
 			}
 			if r.IsError || !strings.Contains(r.ResultHead, marker) {
@@ -971,7 +971,7 @@ func TestDesignDeferralClassification(t *testing.T) {
 	}{
 		{"该调用已提交面板审批(请求 ap-1),本回合暂挂;批准后将继续执行", "审批暂挂"},
 		{"Tool call was not permitted: 该调用已提交面板审批(请求 ap-2),本回合暂挂", "审批暂挂"},
-		{"本次调用已暂缓(未执行):有舵杆纠偏指令待你消化,见随后的指令消息", "舵杆注入暂缓"},
+		{"本次调用已暂缓(未执行):有纠偏指令待你消化,见随后的指令消息", "纠偏注入暂缓"},
 		{"本次调用已暂缓(未执行):单位挂起(暂停/任务冬眠),恢复后继续", "单位挂起暂缓"},
 		{"bash: command not found: nmap", ""},
 		{"工具返回的错误正文", ""},

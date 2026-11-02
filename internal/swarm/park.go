@@ -76,7 +76,7 @@ func (e *Executor) PauseUnit(ctx context.Context, taskID, stepID, by, reason str
 		e.mu.Lock()
 		delete(e.unitLatches, key)
 		e.mu.Unlock()
-		return fmt.Errorf("swarm: 步骤 %s 无在跑单位(领取竞态:单位刚落地)", stepID)
+		return fmt.Errorf("swarm: 步骤 %s 无在跑单位(领取竞态:单位刚干完)", stepID)
 	}
 	return e.recordUnitControl(taskID, rings.UnitControlRecord{
 		Target: "unit", StepID: stepID, UnitID: unitID,
@@ -129,7 +129,7 @@ func (e *Executor) dropUnitLatch(taskID, stepID string) {
 			_ = e.recordUnitControl(taskID, rings.UnitControlRecord{
 				Target: "unit", StepID: stepID, UnitID: unitID,
 				Action: rings.UnitCtlPauseLapse, By: "swarm:" + unitID,
-				Note: "单位在暂停生效前/期间自然落地,暂停失效",
+				Note: "单位在暂停生效前/期间自然干完,暂停失效",
 			})
 		}
 	}

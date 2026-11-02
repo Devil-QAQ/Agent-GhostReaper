@@ -701,8 +701,8 @@ func TestOnTerminalSummary(t *testing.T) {
 	if len(msg.ToolCalls) == 0 || msg.ToolCalls[0].Name != "read_progress" {
 		t.Fatalf("总结前应先查图: %+v", msg.ToolCalls)
 	}
-	if !strings.Contains(gotPrompt, "任务已到终态") || !strings.Contains(gotPrompt, "总结") {
-		t.Fatalf("注入模型的提示应含终态与总结指令: %q", gotPrompt)
+	if !strings.Contains(gotPrompt, "任务已结束") || !strings.Contains(gotPrompt, "总结") {
+		t.Fatalf("注入模型的提示应含结束与总结指令: %q", gotPrompt)
 	}
 	// 终态提示不是造物主发言:事件 actor=system。
 	for _, rec := range shepherdEvents(t, store, task) {

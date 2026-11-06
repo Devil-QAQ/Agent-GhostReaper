@@ -40,6 +40,10 @@ node_modules/
 *~
 .DS_Store
 
+# 扫描与工具
+.mimosa/
+tools/
+
 # 私有文档与环境
 AGENTS.md
 Process/

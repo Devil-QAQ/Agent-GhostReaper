@@ -8,6 +8,7 @@ import (
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 
+	"ghostreaper/internal/failover"
 	"ghostreaper/internal/rings"
 )
 
@@ -155,14 +156,9 @@ func sleepInterruptible(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// modelNowFunc Provider 支持按请求解析当前模型时返回其查询函数(failover
-// 链主备切换后 token 按模型分开记账);普通 Provider 返回 nil。
-func modelNowFunc(p llm.Provider) func() string {
-	type activeModeler interface{ ActiveModel() string }
-	if am, ok := p.(activeModeler); ok {
-		return am.ActiveModel
-	}
-	return nil
+// modelNowFunc 记账模型解析(failover.ModelNow 的薄封装,P4-41 统一入口)。
+func modelNowFunc(p llm.Provider, taskID, transcriptID string) func() string {
+	return failover.ModelNow(p, taskID, transcriptID)
 }
 
 // ModelFaultBlockedCount 图上模型故障归因的 blocked 步骤数(P4-27 ②:

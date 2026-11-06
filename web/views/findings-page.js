@@ -8,7 +8,7 @@ import { CopyIDButton } from "@/components/copy-id-button";
 import { ExportDialog } from "@/components/export-dialog";
 import { iconOf } from "@/components/icons";
 import { PageHeader } from "@/components/page-header";
-import { ReproStepsList } from "@/components/repro-steps";
+import { ReproStepsPaged } from "@/components/repro-steps";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -76,6 +76,79 @@ export function FindingsPage({ currentTask, focus }) {
     }
   }, [focus]);
 
+  // P4-47 A 未读红点(看过即消):成果与事实两个子页签独立记已读。
+  // 计数轮询由发现 / 任务两主题实时驱动(确认落账即变);进入成果或
+  // 事实子页签即向服务端盖"看过"戳(时刻为服务端时间,跨浏览器一致),
+  // 响应即刻灭点。修订(造物主 2026-11-06):"看过"扩为前台停留期间
+  // 持续看过——正停留的子页签新增红点亮起约 3 秒后自动盖戳消点,
+  // 详见下方停留盖戳。
+  const { data: unreadBody } = usePolling(
+    tid ? `/api/tasks/${tid}/unread` : "/api/healthz",
+    2000,
+    { immediate: Boolean(tid), live: tid ? [`claims:${tid}`, "tasks"] : null },
+  );
+  // 盖戳响应的瞬时覆盖:轮询周期 2 秒,覆盖 3 秒后交还轮询值(期间
+  // 任何轮询请求都发起于盖戳之后,值已一致,无新旧错判)。
+  const [seenOverride, setSeenOverride] = React.useState(null);
+  React.useEffect(() => {
+    setSeenOverride(null);
+    if (!tid || (tab !== "claims" && tab !== "facts")) return;
+    let alive = true;
+    postJSON(`/api/tasks/${tid}/seen`, { kind: tab }).then(({ ok, body }) => {
+      if (ok && alive) {
+        setSeenOverride({
+          claims: body?.claims ?? 0,
+          facts: body?.facts ?? 0,
+        });
+      }
+    });
+    return () => {
+      alive = false;
+    };
+  }, [tid, tab]);
+  React.useEffect(() => {
+    if (!seenOverride) return;
+    const t = setTimeout(() => setSeenOverride(null), 3000);
+    return () => clearTimeout(t);
+  }, [seenOverride]);
+  const unread = {
+    claims: seenOverride ? seenOverride.claims : unreadBody?.claims ?? 0,
+    facts: seenOverride ? seenOverride.facts : unreadBody?.facts ?? 0,
+  };
+
+  // 页面可见性(停留即已读的判据之一):浏览器标签页在前台才自动盖戳,
+  // 后台期间到达的未读保留,回前台停留满 3 秒才视为看过。
+  const [visible, setVisible] = React.useState(true);
+  React.useEffect(() => {
+    const onVis = () => setVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", onVis);
+    onVis();
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+
+  // 停留即已读(修订):停留在成果/事实子页签且页面可见、该分线有
+  // 未读时,亮起约 3 秒(给注意的时间)后自动盖戳消点——列表本身实时
+  // 刷新,正看着即已看。任一条件变化(跳走子页签/转后台/计数再变)
+  // 作废计时重新计:3 秒内跳走则不盖,红点保留,回来点一下才消。
+  const dwellKind = tab === "claims" || tab === "facts" ? tab : null;
+  const dwellUnread = dwellKind ? unread[dwellKind] : 0;
+  React.useEffect(() => {
+    if (!tid || !dwellKind || !visible || dwellUnread <= 0) return;
+    let alive = true;
+    const t = setTimeout(() => {
+      if (!alive || document.visibilityState !== "visible") return;
+      postJSON(`/api/tasks/${tid}/seen`, { kind: dwellKind }).then(({ ok, body }) => {
+        if (ok && alive) {
+          setSeenOverride({ claims: body?.claims ?? 0, facts: body?.facts ?? 0 });
+        }
+      });
+    }, 3000);
+    return () => {
+      alive = false;
+      clearTimeout(t);
+    };
+  }, [tid, dwellKind, visible, dwellUnread]);
+
   if (!tid) {
     return (
       <div className="flex flex-col gap-6">
@@ -115,7 +188,7 @@ export function FindingsPage({ currentTask, focus }) {
           <button
             key={v}
             className={
-              "rounded-md px-4 py-2 text-sm transition-colors cursor-pointer " +
+              "flex items-center rounded-md px-4 py-2 text-sm transition-colors cursor-pointer " +
               (tab === v
                 ? "bg-primary text-primary-foreground"
                 : "text-muted-foreground hover:text-foreground")
@@ -123,6 +196,21 @@ export function FindingsPage({ currentTask, focus }) {
             onClick={() => setTab(v)}
           >
             {label}
+            {/* 未读红点+计数(P4-47 A):看过即消,成果与事实各自独立;
+                假设页签不在未读语义内 */}
+            {(v === "claims" && unread.claims > 0) ||
+            (v === "facts" && unread.facts > 0) ? (
+              <span
+                className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold leading-none text-primary-foreground num"
+                title={
+                  v === "claims"
+                    ? `新增已确认成果 ${unread.claims} 条`
+                    : `新确认事实 ${unread.facts} 条`
+                }
+              >
+                {v === "claims" ? unread.claims : unread.facts}
+              </span>
+            ) : null}
           </button>
         ))}
       </div>
@@ -388,7 +476,6 @@ function ClaimRow({ tid, claim, checked, onToggle, onOpen }) {
     }
   };
 
-  const steps = detail?.repro?.steps;
   const retestVD = claim.retest_verdict ? RETEST_VERDICT[claim.retest_verdict] : null;
   const replayVD = claim.replay_verdict ? REPLAY_VERDICT[claim.replay_verdict] : null;
   return (
@@ -497,8 +584,8 @@ function ClaimRow({ tid, claim, checked, onToggle, onOpen }) {
             <div className="rounded-lg bg-muted/30 p-2">
               {detailError ? (
                 <span className="text-xs text-status-danger">读取失败:{detailError}</span>
-              ) : steps ? (
-                <ReproStepsList tid={tid} steps={steps} variants={(detail?.repro?.variants || []).length} />
+              ) : detail?.repro ? (
+                <ReproStepsPaged tid={tid} claimID={claim.id} repro={detail.repro} stepsTotal={claim.repro_steps} />
               ) : (
                 <span className="text-xs text-muted-foreground">读取复现步骤…</span>
               )}

@@ -134,7 +134,7 @@ func TestRoEIntentRulesAPI(t *testing.T) {
 	ctx := context.Background()
 
 	// 建任务 + 资产。
-	body := `{"title": "拦截规则任务", "goals": ["种子目标"], "roe": {"allowed_tools": [], "denied_tools": []}, "assets": [{"title": "http://t-a:8080", "class": "service"}]}`
+	body := `{"task_type":"redteam","title": "拦截规则任务", "goals": ["种子目标"], "roe": {"allowed_tools": [], "denied_tools": []}, "assets": [{"title": "http://t-a:8080", "class": "service"}]}`
 	var created struct {
 		ID string `json:"id"`
 	}
@@ -222,7 +222,7 @@ func TestRoERuleCRUDAPI(t *testing.T) {
 	var created struct {
 		ID string `json:"id"`
 	}
-	post(t, h, "POST", "/api/tasks", `{"goals":["种子目标"],"title": "逐条规则任务", "assets": [{"title": "http://t-a:8080", "class": "service"}, {"title": "http://t-b:90", "class": "service"}]}`,
+	post(t, h, "POST", "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"title": "逐条规则任务", "assets": [{"title": "http://t-a:8080", "class": "service"}, {"title": "http://t-b:90", "class": "service"}]}`,
 		http.StatusOK, &created)
 	taskID := created.ID
 	assets, _ := srv.Store.NodesByType(ctx, taskID, rings.NodeAsset, "")
@@ -312,7 +312,7 @@ func TestRoERulePatternsAPI(t *testing.T) {
 	var created struct {
 		ID string `json:"id"`
 	}
-	post(t, h, "POST", "/api/tasks", `{"goals":["种子目标"],"title": "生成任务", "assets": [{"title": "http://t-a:8080", "class": "service"}]}`,
+	post(t, h, "POST", "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"title": "生成任务", "assets": [{"title": "http://t-a:8080", "class": "service"}]}`,
 		http.StatusOK, &created)
 	taskID := created.ID
 
@@ -368,7 +368,7 @@ func TestRoERuleNotifyTargeted(t *testing.T) {
 	var created struct {
 		ID string `json:"id"`
 	}
-	post(t, h, "POST", "/api/tasks", `{"goals":["种子目标"],"title": "定向告知任务", "assets": [{"title": "http://t-a:8080", "class": "service"}, {"title": "http://t-b:90", "class": "service"}]}`,
+	post(t, h, "POST", "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"title": "定向告知任务", "assets": [{"title": "http://t-a:8080", "class": "service"}, {"title": "http://t-b:90", "class": "service"}]}`,
 		http.StatusOK, &created)
 	taskID := created.ID
 	assets, _ := srv.Store.NodesByType(ctx, taskID, rings.NodeAsset, "")

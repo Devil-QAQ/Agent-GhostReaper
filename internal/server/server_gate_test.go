@@ -214,7 +214,7 @@ func TestServerRoEAndGoalsAPI(t *testing.T) {
 
 	// 建任务(最小创建入口;种子表单归 P1-09)。
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"RoE 面板验证"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"RoE 面板验证"}`, http.StatusOK, &created)
 	task := created["id"]
 	if task == "" {
 		t.Fatalf("建任务未返回 id: %+v", created)
@@ -410,7 +410,7 @@ func TestServerApprovalGateE2E(t *testing.T) {
 
 	// 建任务(经面板 API)→ 种资产 → 目标(经面板 API,无谓词开放目标)→ 唤醒。
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"gate-e2e","title":"审批弹门 E2E"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"gate-e2e","title":"审批弹门 E2E"}`, http.StatusOK, &created)
 	if _, err := store.Append(ctx, "gate-e2e", rings.Event{
 		Kind: rings.EventNodeAdded, Actor: "creator",
 		Payload: rings.NodeAdded{NodeID: "web1", NodeType: rings.NodeAsset,
@@ -618,7 +618,7 @@ func TestServerApprovalReleaseAPI(t *testing.T) {
 
 	// 种任务:s1 危害类(数据销毁,直接拒绝);s2 弹门级(面板拒绝)。
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"rel-e2e","title":"研判后放行 E2E"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"rel-e2e","title":"研判后放行 E2E"}`, http.StatusOK, &created)
 
 	// 无执行器时如实 503(不降级;任务存在性先过)。
 	srvBare, err := New(store, mgr, gate)

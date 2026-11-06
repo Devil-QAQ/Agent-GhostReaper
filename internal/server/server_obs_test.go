@@ -42,7 +42,7 @@ func obsSetup(t *testing.T) (http.Handler, *rings.Store, string, string) {
 
 	mkTask := func(title string) string {
 		var created map[string]string
-		post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"`+title+`"}`, http.StatusOK, &created)
+		post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"`+title+`"}`, http.StatusOK, &created)
 		return created["id"]
 	}
 	taskA, taskB := mkTask("观测任务甲"), mkTask("观测任务乙")

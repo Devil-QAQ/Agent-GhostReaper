@@ -1,9 +1,12 @@
 // Package hiber 实现任务冬眠门(P2-08,第七章「任务冬眠(Hibernation)
-// 语义」):一个任务进入冬眠时,主宰循环、虫群单位、牧者会话、审批裁决
-// 全部在同一扇门上冻结;唤醒(close)即原地解冻。门只管"冻结/解冻"的
-// 运行时信号,生命周期记账(task.lifecycle hibernated/唤醒事件)由
-// Manager 权威落账——先记账后关闸、先记账后开闸,账本是审计权威,门是
-// 执行层的同步原语。
+// 语义」;P4-33 起冬眠改冻结收场):一个任务进入冬眠时,主宰循环、
+// 虫群单位在各自边界收场落地(与断点冻结同约定),牧者会话入口、
+// 审批裁决在同一扇门上冻结。门在收场完成后保持关闭至唤醒——期间
+// 面板只读、审批冻结;单位侧的门等待仅剩收场过渡(收场令与门同发,
+// 等待者带节拍复查见令即落地,不驻留门上过冬眠)。门只管"冻结/解冻"
+// 的运行时信号,生命周期记账(task.lifecycle hibernated/唤醒事件)由
+// Manager 权威落账——先记账后关闸、先记账后开闸,账本是审计权威,
+// 门是执行层的同步原语。
 //
 // 单位级暂停(P2-08,第四章 §7"单位级暂停为同款语义的细粒度版")不用
 // 本门:粒度是单个虫群单位,闩在 swarm.Executor 内(swarm 不需要感知
@@ -13,6 +16,7 @@ package hiber
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // Gate 任务冬眠门:taskID → 冬眠分片。分片的 ch 在运行期为已关闭通道
@@ -117,6 +121,15 @@ func (g *Gate) Pre(taskID string) string {
 // 调用方(虫群单位/主宰循环/牧者工作器)阻塞在此期间不消耗预算。
 // 复查循环保证"Exit 与下一次 Enter 竞速"时等待者不会凭旧通道漏跑。
 func (g *Gate) Wait(ctx context.Context, taskID string) bool {
+	return g.WaitTick(ctx, taskID, 0)
+}
+
+// WaitTick 带重查节拍的挂起等待:tick > 0 时每 tick 醒一次回到调用方
+// 复查(P4-33 冬眠收场——单位与循环的挂起等待用它复查断点令,防"检查
+// 完冬眠门刚要挂起、武装令恰好落下"的夹缝等待者错过收场信号无限滞留);
+// tick = 0 退化为一等到底(牧者工作器等真唤醒,无需节拍)。返回语义
+// 同 Wait:false = ctx 先结束。
+func (g *Gate) WaitTick(ctx context.Context, taskID string, tick time.Duration) bool {
 	for {
 		if !g.Active(taskID) {
 			return ctx.Err() == nil
@@ -129,6 +142,18 @@ func (g *Gate) Wait(ctx context.Context, taskID string) bool {
 		g.mu.Unlock()
 		if ch == nil {
 			return ctx.Err() == nil
+		}
+		if tick > 0 {
+			t := time.NewTimer(tick)
+			select {
+			case <-ch: // 唤醒关闭 → 回顶复查(可能立即又冬眠)
+			case <-t.C:
+				t.Stop() // 节拍到:回顶复查(断点令等收场信号)
+			case <-ctx.Done():
+				t.Stop()
+				return false
+			}
+			continue
 		}
 		select {
 		case <-ch: // 唤醒关闭 → 回顶复查(可能立即又冬眠)

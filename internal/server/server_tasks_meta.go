@@ -6,14 +6,18 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"ghostreaper/internal/rings"
+	"ghostreaper/internal/runlog"
+	"ghostreaper/internal/swarm"
 )
 
 // ---- 任务分类(清单 = 全局键值表;指派 = task.meta 事件) ----
@@ -252,12 +256,23 @@ func (s *Server) handleTaskMeta(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"id": taskID})
 }
 
-// ---- 墓碑删除(单删 + 批量)与批量熔断 ----
+// ---- 墓碑删除(单删 + 批量)与批量熔断;特权清除(P4-40 ⑥) ----
 
-// deleteTask 墓碑删除的单一权威路径:非终态任务先熔断(先记控制事件
-// 再 cancel,次序由 Manager 保证),再落 task.meta 墓碑标记。历史全部
-// 保留(R1);面板列表过滤墓碑,账本可查"谁·何时·为何删除"。
-func (s *Server) deleteTask(ctx context.Context, taskID, reason string) error {
+// purgeWaitCap 特权清除前的收场等待上限(删除前停止只令收场,运行件
+// 可能在写末笔账;对齐任务收尾宽限 90 秒惯例)。超时如实报错、数据不动,
+// 由操作者稍后再删。
+const purgeWaitCap = 90 * time.Second
+
+// deleteTask 删除任务的单一权威路径。purge=false 为墓碑删除:非终态
+// 任务先熔断(先记控制事件再 cancel,次序由 Manager 保证),再落
+// task.meta 墓碑标记,历史全部保留(R1);面板列表过滤墓碑,账本可查
+// "谁·何时·为何删除"。purge=true 为特权清除(第七章 §3"真正的数据
+// 销毁是造物主主动执行的特权清除操作"):先停次序照旧 → 等运行件收场
+// (末笔账不与清行竞态)→ 单事务删除该任务账本各表行 → 任务工作目录
+// 整目录删除 → 无主 blob 清除(P4-40 续做:扫剩余全部任务事件负载取
+// 引用全集,引用归零才删,有其他任务引用的一律保留)→ 运行日志一行
+// 留痕。
+func (s *Server) deleteTask(ctx context.Context, taskID, reason string, purge bool) error {
 	row, err := s.Store.Task(ctx, taskID)
 	if err != nil {
 		return fmt.Errorf("任务 %s 不存在", taskID)
@@ -270,9 +285,50 @@ func (s *Server) deleteTask(ctx context.Context, taskID, reason string) error {
 	}
 	if row.Status != "stopped" && row.Status != "completed" {
 		detail := map[string]any{"operator": "creator", "reason": "删除前停止: " + reason}
-		if err := s.Manager.StopBy(taskID, detail); err != nil {
+		// purge 走静默停止(不触发牧者终态总结:数据即将销毁,总结的
+		// 异步落账还会与清行竞态);墓碑路径停止语义一字不变。
+		stop := s.Manager.StopBy
+		if purge {
+			stop = s.Manager.StopForPurge
+		}
+		if err := stop(taskID, detail); err != nil {
 			return fmt.Errorf("删除前停止失败: %w", err)
 		}
+	}
+	if purge {
+		if err := s.Manager.WaitSettled(taskID, purgeWaitCap); err != nil {
+			return fmt.Errorf("%v,数据未动,稍后再删", err)
+		}
+		rows, err := s.Store.PurgeTask(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		dir := filepath.Join(s.RootDir, taskID)
+		dirNote := "无"
+		if _, serr := os.Stat(dir); serr == nil {
+			if rerr := os.RemoveAll(dir); rerr != nil {
+				return fmt.Errorf("删除任务目录 %s 失败: %w", dir, rerr)
+			}
+			dirNote = dir
+		}
+		// 无主原始数据清除(P4-40 续做 ①):删完账本行与任务目录后,
+		// 扫剩余全部任务的事件负载取 blob 引用全集,引用归零的 blob
+		// 删除——有其他任务引用的一律保留;扫描失败不回滚已清数据,
+		// 如实入留痕行(引用扫描可重试,Sweep 幂等)。
+		orphanNote := "未扫"
+		if referenced, rerr := s.Store.ReferencedBlobHashes(ctx); rerr != nil {
+			runlog.Warnf("特权清除: 任务 %s 无主原始数据扫描失败: %v", taskID, rerr)
+		} else {
+			blobs := swarm.NewBlobStore(filepath.Join(s.RootDir, "blobs"))
+			n, bytes, serr2 := blobs.Sweep(referenced)
+			if serr2 != nil {
+				runlog.Warnf("特权清除: 任务 %s 无主原始数据清除失败: %v", taskID, serr2)
+			} else {
+				orphanNote = fmt.Sprintf("%d 项 %d 字节", n, bytes)
+			}
+		}
+		runlog.Infof("特权清除: 任务 %s「%s」,账本 %d 行,目录 %s,无主数据 %s", taskID, row.Title, rows, dirNote, orphanNote)
+		return nil
 	}
 	if _, err := s.Store.Append(ctx, taskID, rings.Event{
 		Kind: rings.EventTaskMeta, Actor: "creator",
@@ -283,12 +339,14 @@ func (s *Server) deleteTask(ctx context.Context, taskID, reason string) error {
 	return nil
 }
 
-// handleTaskDelete DELETE /api/tasks/{id}:墓碑标记(第七章 §3,与 R1
-// 历史不删一致)。运行中的任务先停再埋。
+// handleTaskDelete DELETE /api/tasks/{id}:purge 缺省 false = 墓碑标记
+// (第七章 §3,与 R1 历史不删一致);purge=true = 特权清除(勾选"同时
+// 删除相关数据和账本")。运行中的任务先停再删(次序不变)。
 func (s *Server) handleTaskDelete(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 	var req struct {
 		Reason string `json:"reason"`
+		Purge  bool   `json:"purge"`
 	}
 	if !readJSON(w, r, &req) {
 		return
@@ -297,7 +355,7 @@ func (s *Server) handleTaskDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("删除理由不能为空(随账本留痕)"))
 		return
 	}
-	if err := s.deleteTask(r.Context(), taskID, strings.TrimSpace(req.Reason)); err != nil {
+	if err := s.deleteTask(r.Context(), taskID, strings.TrimSpace(req.Reason), req.Purge); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
@@ -340,7 +398,7 @@ func (s *Server) handleTaskBatch(w http.ResponseWriter, r *http.Request) {
 				"operator": "creator", "reason": "批量终止: " + reason,
 			})
 		case "delete":
-			err = s.deleteTask(r.Context(), id, "批量删除: "+reason)
+			err = s.deleteTask(r.Context(), id, "批量删除: "+reason, false)
 		case "hibernate":
 			err = s.Manager.Hibernate(id, map[string]any{
 				"by": "creator", "reason": "批量冬眠: " + reason,
@@ -373,33 +431,18 @@ type taskDigest struct {
 	GoalsTotal    int
 	GoalsAchieved int
 	RunningUnits  int
+	TaskType      string // pentest|redteam|""(存量未标,P4-44)
 }
 
-// digestOf 单任务派生数据(一次事件流扫描 + 两类节点查询)。
+// digestOf 单任务派生数据(P4-36 起读 task_extras 投影——描述与种子
+// 目标域由 created/creator 资产事件写侧同事务维护,不再扫描事件流;
+// 目标进度与运行中单位数仍读节点投影;任务类型(P4-44)随 created
+// 定格进 task_extras——建后不可改,读侧零事件流)。
 func (s *Server) digestOf(ctx context.Context, taskID string) taskDigest {
 	var d taskDigest
 	d.Targets = []string{}
-	evs, err := s.Store.Events(ctx, taskID, 0, 0)
-	if err == nil {
-		for _, ev := range evs {
-			switch {
-			case ev.Kind == rings.EventTaskLifecycle && d.Description == "":
-				var p rings.TaskLifecycle
-				if json.Unmarshal(ev.Payload, &p) == nil && p.Action == "created" {
-					if desc, ok := p.Detail["description"].(string); ok {
-						d.Description = desc
-					}
-				}
-			case ev.Kind == rings.EventNodeAdded && ev.Actor == "creator":
-				var p rings.NodeAdded
-				if json.Unmarshal(ev.Payload, &p) == nil && p.NodeType == rings.NodeAsset && p.Title != "" &&
-					rings.AssetSourceOf(p.Detail) != rings.AssetSourceManual {
-					// 任务列表 Targets 只收种子目标域;手动补入资产(P4-05)
-					// 是测试中途的授权扩大/自查补充,不属建任务划定的目标。
-					d.Targets = append(d.Targets, p.Title)
-				}
-			}
-		}
+	if extras, ok, err := s.Store.TaskExtras(ctx, taskID); err == nil && ok {
+		d.Description, d.Targets, d.TaskType = extras.Description, extras.Targets, extras.TaskType
 	}
 	if goals, err := s.Store.NodesByType(ctx, taskID, rings.NodeGoal, ""); err == nil {
 		d.GoalsTotal = len(goals)

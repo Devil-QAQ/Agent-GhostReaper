@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"strings"
 
-	"ghostreaper/internal/arbiter"
 	"ghostreaper/internal/mirror"
 	"ghostreaper/internal/rings"
 	"ghostreaper/internal/swarm"
@@ -61,10 +60,12 @@ type AltView struct {
 	Killed bool   `json:"killed"` // 当前战役内经结构化写回排除
 }
 
-// ReproStepView 复现步骤(收割定稿 + 原文回放):HTTP 交换摘要 + Burp
-// 风格原文(面板与报告同口径截断,全文在 blob/证据包)。TLSWord 为
-// https 交换的目标证书校验结论(P4-08 ⑥:证书结论是包外信息行,不进
-// 包文)。Op 不上面板/报告正文(P4-08 ⑤:证据包收)。
+// ReproStepView 复现步骤(收割定稿 + 原文回放):HTTP 交换摘要 + 三层
+// 结构(短名 Short/做什么 Desc/作用 Purpose,P4-35 ②;旧记录缺省
+// Short/Purpose,读侧退"步骤 N"/省略作用行)+ Burp 风格原文(面板与
+// 报告同口径截断,全文在 blob/证据包)。TLSWord 为 https 交换的目标
+// 证书校验结论(P4-08 ⑥:证书结论是包外信息行,不进包文)。Op 不上
+// 面板/报告正文(P4-08 ⑤:证据包收)。
 type ReproStepView struct {
 	rings.ReproStep
 	Raw     string `json:"raw,omitempty"`      // 请求/响应原文(Burp 风格,截断)
@@ -72,20 +73,76 @@ type ReproStepView struct {
 	TLSWord string `json:"tls_word,omitempty"` // https 交换的目标证书结论(包外信息行)
 }
 
+// FillRaw 按内容寻址文档回放原文(详情分段页与卷宗装配共用同一份;
+// 解码失败如实保持空,呈现层退步骤摘要)。
+func (sv *ReproStepView) FillRaw(doc []byte) {
+	var ex mirror.Exchange
+	if json.Unmarshal(doc, &ex) != nil {
+		return
+	}
+	sv.Raw, sv.RawClip = renderExchangeRaw(&ex)
+	if ex.Type == rings.MirrorRecHTTPS && ex.TLS != nil {
+		sv.TLSWord = mirror.TLSLabel(ex.TLS.Validity)
+	}
+}
+
+// reproStepHead 步骤标题(P4-35 ②):序号+短名("① 拿会话凭据"式)。
+// 序号按列表位置(pos,1 起)——P4-35 最小集是从候选池挑的子集,存储
+// Seq 保留候选编号(校对轮 seq 契约),呈现序号与存储解耦;旧记录
+// Seq 本就等于位置,呈现不变。1~20 用圈号,超出退"N.";旧记录无短名
+// 退"步骤 N"。面板与报告同款口径(前端 repro-steps 同式实现,所见
+// 即所印)。
+func reproStepHead(pos int, st ReproStepView) string {
+	if st.Short == "" {
+		return fmt.Sprintf("步骤 %d", pos)
+	}
+	return stepOrdinal(pos) + " " + st.Short
+}
+
+// stepOrdinal 步骤序号词形:1~20 圈号(①..⑳),超出"N."(数字精确,
+// 不编造超出 Unicode 圈号表的词形)。
+func stepOrdinal(n int) string {
+	if n >= 1 && n <= 20 {
+		return string(rune(0x245F + n))
+	}
+	return fmt.Sprintf("%d.", n)
+}
+
 // ReproFinal 收割定稿:最新 repro 记录(重开再确认后新定稿取代旧定稿)。
-// Steps 为去同型后的复现流程(P4-08 ③);Variants 为去重收起的变体
-// 交换(证据包全量收,面板/报告正文不显);Narrative 为定稿冻结的
-// 来龙去脉叙述(P4-13:模型生成人话,读定稿零 LLM;旧定稿无叙述为空,
-// 读侧如实标注不编造)。NarrativeUnpolished / Steps[].Unpolished 为
-// 文风校验未过的如实标注(P4-24 ②:校对+重写一次后仍含机器语特征,
+// P4-35 起最小复现集口径(问题清单 #57):Steps 为定稿时模型挑出的
+// 必要步骤(一步漏洞恰 1 条,链式 N 条;对比交换/反证变体/枚举试错
+// 不进),每步三层 = 短名 + 做什么(Desc) + 作用(Purpose);过程流量
+// 计数在案(ProcessCount/VariantsCount,面板与报告计数行的口径来源)。
+// P4-36 起 Variants/Process 大数组不进投影(巨记录瘦身):常规装配为
+// 空,证据包导出经 EnrichReproForEvent 按 rev 定向读事件补齐。Narrative
+// 为定稿冻结的来龙去脉叙述(P4-13:模型生成人话,读定稿零 LLM;旧定稿
+// 无叙述为空,读侧如实标注不编造)。NarrativeUnpolished / Steps[].Unpolished
+// 为文风校验未过的如实标注(P4-24 ②:校对+重写一次后仍含机器语特征,
 // 原文保留,读侧渲染一行说明)。
 type ReproFinal struct {
-	Rev                 int64             `json:"rev"`
-	Severity            string            `json:"severity"`
-	Narrative           string            `json:"narrative,omitempty"`
-	NarrativeUnpolished bool              `json:"narrative_unpolished,omitempty"`
-	Steps               []ReproStepView   `json:"steps"`
-	Variants            []rings.ReproStep `json:"variants,omitempty"`
+	Rev                 int64                   `json:"rev"`
+	Severity            string                  `json:"severity"`
+	Narrative           string                  `json:"narrative,omitempty"`
+	NarrativeUnpolished bool                    `json:"narrative_unpolished,omitempty"`
+	Steps               []ReproStepView         `json:"steps"`
+	Variants            []rings.ReproStep       `json:"variants,omitempty"` // 旧口径过程流量(存量;证据包导出补全,常规装配为空)
+	Process             []rings.ReproProcessRef `json:"process,omitempty"`  // 过程流量引用清单(P4-35;证据包导出补全,常规装配为空)
+	ProcessCount        int                     `json:"process_count"`      // 过程流量条数(计数行口径;新记录 = Process 长度)
+	VariantsCount       int                     `json:"variants_count"`     // 旧口径变体条数(存量)
+}
+
+// ProcessUnlisted 未进最小集的过程交换条数(面板与报告同口径计数行:
+// 新记录 = ProcessCount − Steps,旧记录 = VariantsCount,负值按 0;
+// 计数随投影落库,与事件原账一致)。
+func (r *ReproFinal) ProcessUnlisted() int {
+	if r == nil {
+		return 0
+	}
+	n := r.ProcessCount - len(r.Steps)
+	if n < 0 {
+		n = 0
+	}
+	return n + r.VariantsCount
 }
 
 // RetestFinal 最新复测结论(P3-06):修复状态是锤炼态之上的正交轴,
@@ -109,7 +166,10 @@ type ClaimCase struct {
 	ReportExcludedReason string `json:"report_excluded_reason,omitempty"`
 }
 
-// claimCases 一次事件流扫描装配全部声明卷宗(报告渲染与详情 API 共用)。
+// claimCases 装配全部声明卷宗(P4-36 起读 claim_cases 投影——写侧
+// applyEvent 同事务维护,重放重建同源;不再扫描事件流。面板详情与
+// 报告导出共用本装配,所见即所印)。Variants/Process 大数组不进投影:
+// 证据包导出经 enrichReproForEvent 按 rev 定向读事件补齐。
 func claimCases(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore, taskID string) (map[string]*ClaimCase, error) {
 	claims, err := store.NodesByType(ctx, taskID, rings.NodeTestClaim, "")
 	if err != nil {
@@ -121,99 +181,116 @@ func claimCases(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore,
 		cases[c.ID] = &ClaimCase{ClaimID: c.ID}
 		discoverer[c.ID], _ = c.Detail["unit_id"].(string)
 	}
-	evs, err := store.Events(ctx, taskID, 0, 0)
+	projs, err := store.ClaimCases(ctx, taskID)
 	if err != nil {
-		return nil, fmt.Errorf("report: 查事件流: %w", err)
+		return nil, fmt.Errorf("report: 查判断卷宗: %w", err)
 	}
-	for _, ev := range evs {
-		switch ev.Kind {
-		case rings.EventNodeAdded:
-			var p rings.NodeAdded
-			if json.Unmarshal(ev.Payload, &p) != nil || p.NodeType != rings.NodeTestClaim {
-				continue
-			}
-			if cs := cases[p.NodeID]; cs != nil {
-				cs.Timeline = append(cs.Timeline, CaseEntry{Rev: ev.Revision, Kind: "created", UnitID: discoverer[p.NodeID]})
-			}
-		case rings.EventNodeStateChanged:
-			var p rings.NodeStateChanged
-			if json.Unmarshal(ev.Payload, &p) != nil {
-				continue
-			}
-			if cs := cases[p.NodeID]; cs != nil {
-				cs.Timeline = append(cs.Timeline, CaseEntry{Rev: ev.Revision, Kind: "state", Status: p.Status})
-			}
-		case rings.EventTestClaimRecord:
-			var p rings.TestClaimRecord
-			if err := json.Unmarshal(ev.Payload, &p); err != nil || cases[p.ClaimID] == nil {
-				continue
-			}
-			// evidence 绑定记录(P3-02)与 retest 复测结论(P3-06)不进
-			// 反证时间线——绑定是证据管理事实(呈现走详情的流量证据区),
-			// 复测是修复状态轴(呈现走复测区),与锤炼状态机轨迹分列。
-			// report_review 复核标记(P4-30 ③)同列:报告治理轴,不进
-			// 锤炼轨迹;最新标记为准(取代语义)。
-			if p.Type == rings.TestClaimRecEvidence || p.Type == rings.TestClaimRecRetest {
-				continue
-			}
-			if p.Type == rings.TestClaimRecReportReview {
-				cases[p.ClaimID].ReportExcluded = true
-				cases[p.ClaimID].ReportExcludedReason = strings.TrimSpace(p.Reason)
-				continue
-			}
-			cases[p.ClaimID].Timeline = append(cases[p.ClaimID].Timeline, caseEntryOf(ev.Revision, p))
+	for _, proj := range projs {
+		cs, ok := cases[proj.ClaimID]
+		if !ok {
+			continue
 		}
-	}
-	for id, cs := range cases {
-		// 冻结解释 + 当前战役排除状态(仲裁者同口径:重开后全部复活)。
-		// 解析失败如实降级:不展示解释状态,但不拖垮定稿装配——解释是
-		// 审计侧富化,证据内容(复现步骤)不因它缺失而丢(审核迭代 2 修:
-		// 旧实现此处 continue,无冻结标准的声明连 Repro 定稿一起丢)。
-		frozen, err := arbiter.FrozenAlternatives(ctx, store, taskID, id)
-		if err != nil {
-			frozen = nil
+		if err := applyProjection(cs, proj, discoverer[proj.ClaimID], blobs); err != nil {
+			return nil, err
 		}
-		alive := map[string]bool{}
-		if list, err := arbiter.AliveAlternatives(ctx, store, taskID, id); err == nil {
-			for _, a := range list {
-				alive[a.ID] = true
-			}
-		}
-		labels := map[string]string{}
-		for _, a := range frozen {
-			cs.Alternatives = append(cs.Alternatives, AltView{ID: a.ID, Label: a.Label, Killed: !alive[a.ID]})
-			labels[a.ID] = a.Label
-		}
-		// 时间线 alt 结论只带 ID,按冻结清单回填内容(界面显示疑点
-		// 内容本身;旧数据无 label 时前端退显 ID)。
-		for i := range cs.Timeline {
-			for j := range cs.Timeline[i].AltResults {
-				cs.Timeline[i].AltResults[j].Label = labels[cs.Timeline[i].AltResults[j].ID]
-			}
-		}
-		// 最新 repro(取代语义)→ 定稿视图 + blob 原文回放 + 变体清单。
-		cs.Repro = reproStepsOf(blobs, evs, id)
-		// 最新复测结论(P3-06,取代语义同 repro:取最新一轮;时间线不含
-		// retest 记录——修复状态轴与锤炼轨迹分列呈现)。
-		cs.Retest = retestFinalOf(evs, id)
 	}
 	return cases, nil
 }
 
-// retestFinalOf 最新复测结论装配(事件流一次倒序扫描)。
-func retestFinalOf(evs []rings.RawEvent, claimID string) *RetestFinal {
-	for i := len(evs) - 1; i >= 0; i-- {
-		if evs[i].Kind != rings.EventTestClaimRecord {
-			continue
+// applyProjection 单条卷宗投影 → ClaimCase(时间线逐条映射,与既有
+// 事件扫描装配同义:created/state 自节点事件,记录类带原始负载,
+// repro 只存级别摘要;evidence/retest/review 不进反证时间线——复测走
+// 复测区,绑定走详情证据区,复核标记取代语义进 ReportExcluded)。
+func applyProjection(cs *ClaimCase, proj *rings.ClaimCaseProjection, discovererID string, blobs *swarm.BlobStore) error {
+	for _, ent := range proj.Timeline {
+		switch ent.K {
+		case "created":
+			cs.Timeline = append(cs.Timeline, CaseEntry{Rev: ent.Rev, Kind: "created", UnitID: discovererID})
+		case "state":
+			var p struct {
+				Status string `json:"status"`
+			}
+			if json.Unmarshal(ent.P, &p) == nil {
+				cs.Timeline = append(cs.Timeline, CaseEntry{Rev: ent.Rev, Kind: "state", Status: p.Status})
+			}
+		case "falsify", "verdict", "reopen":
+			var rec rings.TestClaimRecord
+			if json.Unmarshal(ent.P, &rec) == nil {
+				cs.Timeline = append(cs.Timeline, caseEntryOf(ent.Rev, rec))
+			}
+		case "repro":
+			var p struct {
+				Severity string `json:"severity"`
+			}
+			if json.Unmarshal(ent.P, &p) == nil {
+				cs.Timeline = append(cs.Timeline, CaseEntry{Rev: ent.Rev, Kind: "repro", Severity: p.Severity})
+			}
+		case "retest":
+			var rec rings.TestClaimRecord
+			if json.Unmarshal(ent.P, &rec) == nil {
+				cs.Retest = &RetestFinal{Rev: ent.Rev, Round: rec.Round, Verdict: rec.RetestVerdict}
+			}
 		}
-		var p rings.TestClaimRecord
-		if json.Unmarshal(evs[i].Payload, &p) != nil ||
-			p.ClaimID != claimID || p.Type != rings.TestClaimRecRetest {
-			continue
+	}
+	// 冻结解释 + 当前战役排除状态(重开后全部复活)。
+	labels := map[string]string{}
+	for _, a := range proj.Alternatives {
+		cs.Alternatives = append(cs.Alternatives, AltView{ID: a.ID, Label: a.Label, Killed: proj.AltKilled[a.ID]})
+		labels[a.ID] = a.Label
+	}
+	for i := range cs.Timeline {
+		for j := range cs.Timeline[i].AltResults {
+			cs.Timeline[i].AltResults[j].Label = labels[cs.Timeline[i].AltResults[j].ID]
 		}
-		return &RetestFinal{Rev: evs[i].Revision, Round: p.Round, Verdict: p.RetestVerdict}
+	}
+	cs.ReportExcluded, cs.ReportExcludedReason = proj.ReportExcluded, strings.TrimSpace(proj.ReportExcludedReason)
+	if proj.Repro != nil {
+		out := &ReproFinal{
+			Rev: proj.Repro.Rev, Severity: proj.Repro.Severity,
+			Narrative: proj.Repro.Narrative, NarrativeUnpolished: proj.Repro.NarrativeUnpolished,
+			ProcessCount: proj.Repro.ProcessCount, VariantsCount: proj.Repro.VariantsCount,
+		}
+		steps := make([]ReproStepView, 0, len(proj.Repro.Steps))
+		for _, st := range proj.Repro.Steps {
+			sv := ReproStepView{ReproStep: st}
+			if st.BlobRef != "" && blobs != nil {
+				if doc, err := blobs.Read(st.BlobRef); err == nil {
+					sv.FillRaw(doc)
+				}
+			}
+			steps = append(steps, sv)
+		}
+		out.Steps = steps
+		cs.Repro = out
 	}
 	return nil
+}
+
+// EnrichReproForEvent 证据包导出的定稿补全(P4-36:巨记录大数组不进
+// 投影——Variants(旧口径变体,含操作方法)与 Process(新口径引用
+// 清单)按定稿 rev 定向读事件;步骤操作方法 Op 同源补回)。导出路径
+// 专用,面板与报告 md 不消费(正文不显操作方法,P4-08 ⑤)。
+func EnrichReproForEvent(ctx context.Context, store *rings.Store, taskID string, cs *ClaimCase) {
+	if cs == nil || cs.Repro == nil {
+		return
+	}
+	ev, err := store.EventByRevision(ctx, taskID, cs.Repro.Rev)
+	if err != nil {
+		return // 定向读失败如实退投影形态(导出步骤原文按 blob 可用)
+	}
+	var rec rings.TestClaimRecord
+	if json.Unmarshal(ev.Payload, &rec) != nil || rec.Type != rings.TestClaimRecRepro {
+		return
+	}
+	for i := range cs.Repro.Steps {
+		if i < len(rec.Steps) {
+			st := cs.Repro.Steps[i]
+			st.Op = rec.Steps[i].Op
+			cs.Repro.Steps[i] = st
+		}
+	}
+	cs.Repro.Variants = rec.Variants
+	cs.Repro.Process = rec.Process
 }
 
 // caseEntryOf 状态机审计记录 → 时间线条目(旧数据兼容:无 Decision 的
@@ -247,57 +324,24 @@ func caseEntryOf(rev int64, p rings.TestClaimRecord) CaseEntry {
 	return e
 }
 
-// reproStepsOf 定稿装配:最新 repro 记录(重开再确认后新记录取代旧
-// 记录)→ 去同型步骤 + blob 原文回放 + 变体清单(证据包用);无定稿
-// 记录返回 nil。
-func reproStepsOf(blobs *swarm.BlobStore, evs []rings.RawEvent, claimID string) *ReproFinal {
-	var latest *rings.TestClaimRecord
-	var rev int64
-	for i := len(evs) - 1; i >= 0; i-- {
-		if evs[i].Kind != rings.EventTestClaimRecord {
-			continue
-		}
-		var p rings.TestClaimRecord
-		if json.Unmarshal(evs[i].Payload, &p) == nil && p.ClaimID == claimID && p.Type == rings.TestClaimRecRepro {
-			latest, rev = &p, evs[i].Revision
-			break
-		}
-	}
-	if latest == nil {
-		return nil
-	}
-	out := &ReproFinal{Rev: rev, Severity: latest.Severity, Narrative: latest.Narrative,
-		NarrativeUnpolished: latest.NarrativeUnpolished, Variants: latest.Variants}
-	steps := make([]ReproStepView, 0, len(latest.Steps))
-	for _, st := range latest.Steps {
-		sv := ReproStepView{ReproStep: st}
-		if st.BlobRef != "" && blobs != nil {
-			if doc, err := blobs.Read(st.BlobRef); err == nil {
-				var ex mirror.Exchange
-				if json.Unmarshal(doc, &ex) == nil {
-					sv.Raw, sv.RawClip = renderExchangeRaw(&ex)
-					if ex.Type == rings.MirrorRecHTTPS && ex.TLS != nil {
-						sv.TLSWord = mirror.TLSLabel(ex.TLS.Validity)
-					}
-				}
-			}
-		}
-		steps = append(steps, sv)
-	}
-	out.Steps = steps
-	return out
-}
-
-// ClaimCaseOf 单条声明卷宗(发现详情 API 入口;任务量级下与全量装配
-// 同为一次事件流扫描)。
+// ClaimCaseOf 单条声明卷宗(发现详情 API 入口;P4-36 起按条读投影,
+// 不再全量装配——详情按条取数,打开即回)。
 func ClaimCaseOf(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore, taskID, claimID string) (*ClaimCase, error) {
-	cases, err := claimCases(ctx, store, blobs, taskID)
+	node, err := store.Node(ctx, taskID, claimID)
+	if err != nil || node.Type != rings.NodeTestClaim {
+		return nil, fmt.Errorf("report: 发现 %s 不存在", claimID)
+	}
+	discoverer, _ := node.Detail["unit_id"].(string)
+	proj, ok, err := store.ClaimCaseOf(ctx, taskID, claimID)
 	if err != nil {
 		return nil, err
 	}
-	cs, ok := cases[claimID]
 	if !ok {
-		return nil, fmt.Errorf("report: 发现 %s 不存在", claimID)
+		proj = &rings.ClaimCaseProjection{ClaimDigest: rings.ClaimDigest{ClaimID: claimID}}
+	}
+	cs := &ClaimCase{ClaimID: claimID}
+	if err := applyProjection(cs, proj, discoverer, blobs); err != nil {
+		return nil, err
 	}
 	return cs, nil
 }

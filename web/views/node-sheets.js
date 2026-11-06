@@ -6,10 +6,11 @@ import { toast } from "sonner";
 import { ClaimChainGraph } from "@/components/claim-chain-graph";
 import { ClaimFollowupDialog } from "@/components/claim-followup-dialog";
 import { CopyIDButton } from "@/components/copy-id-button";
+import { DiveDialog } from "@/components/dive-dialog";
 import { NodeRefButton } from "@/components/node-ref-button";
 import { iconOf } from "@/components/icons";
 import { ExchangeRaw, statusVariant } from "@/components/exchange-raw";
-import { ReproStepsList } from "@/components/repro-steps";
+import { ReproStepsPaged } from "@/components/repro-steps";
 import { downloadExport } from "@/components/export-dialog";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
@@ -150,12 +151,15 @@ function detailValue(v) {
 
 // GenericNodeSheet 目标/步骤/事实详情:节点投影 + detail 字段逐项 +
 // 血缘上下文(上游/下游引用可下钻,fact# 跳转的抽屉侧落点)。
+// 事实带"深入"入口(P4-48:一切状态可深入,终态任务置灰)。
 export function GenericNodeSheet({ tid, nodeID, nodeType, graph, onClose, onSelectNode }) {
   const { data, error } = usePolling(
     nodeID ? `/api/tasks/${tid}/nodes/${nodeID}` : "/api/healthz",
     3000,
     { immediate: Boolean(nodeID) },
   );
+  // 深入指令窗(P4-48)。
+  const [dive, setDive] = React.useState(false);
   if (!nodeID) return null;
   const n = data?.id ? data : null;
   const type = nodeType || n?.type;
@@ -283,10 +287,42 @@ export function GenericNodeSheet({ tid, nodeID, nodeType, graph, onClose, onSele
                   </div>
                 </DetailSection>
               )}
+
+              {/* 深入区(P4-48):从该事实出发继续深入,一切状态可深入;
+                  终态任务置灰(悬停"任务已结束") */}
+              {type === "fact" && (
+                <section className="flex flex-col gap-1">
+                  <div className="text-xs font-medium tracking-wide text-muted-foreground">深入</div>
+                  <div className="flex flex-wrap items-center gap-2 rounded-md border border-border/55 bg-card px-3 py-2">
+                    <Button
+                      variant="outline"
+                      className="h-8 text-xs"
+                      disabled={Boolean(data?.dive_disabled)}
+                      title={data?.dive_disabled || "从该事实出发继续深入,方向可选"}
+                      onClick={() => setDive(true)}
+                    >
+                      {React.createElement(iconOf("zap"), { className: "size-3.5" })}
+                      深入
+                    </Button>
+                    <span className="text-xs text-muted-foreground">
+                      确定即唤醒主宰规划 · 方向由主宰判定
+                    </span>
+                  </div>
+                </section>
+              )}
             </div>
           </>
         )}
       </SheetContent>
+      {/* 深入指令窗(P4-48):从该事实出发继续深入 */}
+      {type === "fact" && (
+        <DiveDialog
+          tid={tid}
+          node={{ id: n?.id, title: n?.title, badge: FACT_STATUS[n?.status] }}
+          open={dive}
+          onClose={() => setDive(false)}
+        />
+      )}
     </Sheet>
   );
 }
@@ -472,6 +508,8 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
   // 成果追问大窗(P4-14):与描述 / 修复建议 / 数据与链路并列的追问区
   // 入口,一成果一会话、续接不新建。
   const [followup, setFollowup] = React.useState(false);
+  // 深入指令窗(P4-48):节点锚定的推动,与追问并排(问是问、令是令)。
+  const [dive, setDive] = React.useState(false);
   // 反证时间线展开态(P4-28 ④:默认折叠,点击展开)。
   const [tlOpen, setTlOpen] = React.useState(false);
   React.useEffect(() => {
@@ -623,10 +661,10 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
               </div>
             </section>
 
-            {/* 追问区(P4-14,问题清单 #24):与描述/修复建议/复现步骤/
-                攻击链条并列;一成果一会话,已有会话续接(已 N 问) */}
+            {/* 追问与深入(P4-14 追问 / P4-48 深入):问是问、令是令并排;
+                追问一成果一会话,深入是节点锚定指令(每次新事件可溯) */}
             <section className="flex flex-col gap-1">
-              <div className="text-xs font-medium tracking-wide text-muted-foreground">追问</div>
+              <div className="text-xs font-medium tracking-wide text-muted-foreground">追问与深入</div>
               <div className="flex flex-wrap items-center gap-2 rounded-md border border-border/55 bg-card px-3 py-2">
                 <Button
                   variant="outline"
@@ -638,8 +676,18 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
                     ? `继续追问(已 ${data.followup.questions} 问)`
                     : "向牧者追问"}
                 </Button>
+                <Button
+                  variant="outline"
+                  className="h-8 text-xs"
+                  disabled={Boolean(data.dive_disabled)}
+                  title={data.dive_disabled || "从该成果出发继续深入,方向可选"}
+                  onClick={() => setDive(true)}
+                >
+                  {React.createElement(iconOf("zap"), { className: "size-3.5" })}
+                  深入
+                </Button>
                 <span className="text-xs text-muted-foreground">
-                  牧者读账本作答 · 一成果一会话
+                  问归牧者 · 深入唤醒主宰
                 </span>
               </div>
             </section>
@@ -801,7 +849,7 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
             </SheetHeader>
             <div className="flex flex-col gap-5 p-5 text-sm">
               {repro ? (
-                <ReproStepsList tid={tid} steps={repro.steps} variants={(repro.variants || []).length} />
+                <ReproStepsPaged tid={tid} claimID={claim.id} repro={repro} stepsTotal={claim.repro_steps} />
               ) : (
                 <span className="text-xs text-muted-foreground">(反证轮未产生可复现的流量记录)</span>
               )}
@@ -1002,6 +1050,14 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
         claimID={claim.id}
         open={followup}
         onClose={() => setFollowup(false)}
+      />
+
+      {/* 深入指令窗(P4-48):从该成果出发继续深入 */}
+      <DiveDialog
+        tid={tid}
+        node={{ id: claim.id, title: claim.statement, badge: st }}
+        open={dive}
+        onClose={() => setDive(false)}
       />
     </>
   );

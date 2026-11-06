@@ -315,14 +315,14 @@ func TestIntentBlockSurvivesCompaction(t *testing.T) {
 // 摘除清单非空时追加"范围外资产(已从授权范围摘除,不测不派)"行并
 // 带资产标识与标题;空清单(历史语义)零新增行,虫群/主宰措辞不漂移。
 func TestRenderRoEConstraintExcluded(t *testing.T) {
-	base := RenderRoEConstraint("lead", nil, nil, "", nil)
+	base := RenderRoEConstraint("lead", nil, nil, "", nil, nil, "")
 	if strings.Contains(base, "范围外") {
 		t.Fatalf("空摘除清单不应渲染范围外行:\n%s", base)
 	}
 	with := RenderRoEConstraint("lead", nil, nil, "", []rings.ExcludedAssetView{
 		{ID: "a-1", Title: "10.10.0.6:8080"},
 		{ID: "a-2", Title: "old.example.com"},
-	})
+	}, nil, "")
 	for _, want := range []string{"范围外资产(已从授权范围摘除,不测不派)", "a-1(10.10.0.6:8080)", "a-2(old.example.com)"} {
 		if !strings.Contains(with, want) {
 			t.Fatalf("约束块缺 %q:\n%s", want, with)

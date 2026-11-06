@@ -34,7 +34,7 @@ func graphSetup(t *testing.T) (http.Handler, string, string) {
 	h := srv.Handler()
 
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],
 		"title":"图投影验证",
 		"assets":[{"class":"host","title":"web-01"},{"class":"service","title":"http://10.0.0.5"}]}`,
 		http.StatusOK, &created)
@@ -186,7 +186,7 @@ func TestServerTaskGraph(t *testing.T) {
 
 	// 任务隔离:另一任务的图不含本任务节点。
 	var created2 map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"隔离验证"}`, http.StatusOK, &created2)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"隔离验证"}`, http.StatusOK, &created2)
 	var body2 struct {
 		Nodes []struct {
 			ID string `json:"id"`

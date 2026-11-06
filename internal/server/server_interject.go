@@ -6,13 +6,10 @@
 package server
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
 
 	"ghostreaper/internal/failover"
@@ -65,15 +62,13 @@ type UnitRow struct {
 // 即倒序读)。paused/running 是进程内活状态(重启后按账本如实呈现)。
 // P4-02:末尾追加"排队中"条目(dispatched 步骤,派发即可见);拒绝线
 // 与 billable 随行携带。
+// P4-36 起读 unit_sessions 投影(session_started/finished 由写侧同事务
+// 维护,note 的终态/轮次/终因/计费在写入时机器解析入列)——不再扫描
+// 事件流,巨账本任务的虫群列表秒开。
 func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 	if !s.taskExists(taskID) {
 		writeErr(w, http.StatusNotFound, fmt.Errorf("任务 %s 不存在", taskID))
-		return
-	}
-	evs, err := s.Store.Events(r.Context(), taskID, 0, 0)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	steps := map[string]rings.NodeFull{}
@@ -82,60 +77,36 @@ func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 			steps[st.ID] = st
 		}
 	}
-	var out []UnitRow
-	bySession := map[string]int{} // step+transcript → 行位(单位序号每进程重排,跨进程同名会话不折叠)
-	// 拒绝线溯源(P4-02 ②):步骤 → 最近一次 denied 审批记录(approval_denied
-	// 终态的拒绝来源;事件序即最新在后的覆盖序)。
-	lastDeny := map[string]rings.ApprovalRecord{}
-	for _, ev := range evs {
-		var rec rings.SwarmRecord
-		isSwarm := ev.Kind == rings.EventSwarmRecord && json.Unmarshal(ev.Payload, &rec) == nil
-		if isSwarm && rec.TranscriptID == "" {
-			continue
+	sessions, err := s.Store.UnitSessions(r.Context(), taskID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	// 拒绝来源(P4-02 ②):步骤 → 最近一次 denied 记录(approval_records
+	// 投影,rev 升序留最后即最新)。
+	lastDeny, err := s.Store.StepDenyLatest(r.Context(), taskID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := make([]UnitRow, 0, len(sessions))
+	for _, sess := range sessions {
+		row := UnitRow{
+			UnitID: sess.UnitID, StepID: sess.StepID, SessionID: sess.Transcript,
+			Status: "running", Running: true, StartedAt: sess.StartedAt,
+			InterjectID: "u:" + sess.Transcript,
+			BillableSec: sess.BillableSec,
 		}
-		if ev.Kind == rings.EventApprovalRecord {
-			var ar rings.ApprovalRecord
-			if json.Unmarshal(ev.Payload, &ar) == nil && ar.Type == rings.ApprovalRecDenied && ar.StepID != "" {
-				lastDeny[ar.StepID] = ar
-			}
-			continue
+		if st, ok := steps[sess.StepID]; ok {
+			row.StepTitle = st.Title
 		}
-		if !isSwarm {
-			continue
+		if sess.EndStatus != "" {
+			row.Status, row.Running, row.FinishedAt = sess.EndStatus, false, sess.FinishedAt
+			row.Finish = &finishView{Turns: sess.Turns, Reason: sess.Reason}
+		} else if st, ok := steps[sess.StepID]; ok && st.Status != "running" {
+			row.Status, row.Running = st.Status, false
 		}
-		at := ev.OccurredAt.Local().Format("2006-01-02 15:04:05")
-		key := rec.StepID + "\x00" + rec.TranscriptID
-		switch rec.Type {
-		case rings.SwarmRecSessionStarted:
-			if _, dup := bySession[key]; dup {
-				continue
-			}
-			row := UnitRow{
-				UnitID: rec.UnitID, StepID: rec.StepID, SessionID: rec.TranscriptID,
-				Status: "running", Running: true, StartedAt: at,
-				InterjectID: "u:" + rec.TranscriptID,
-			}
-			if st, ok := steps[rec.StepID]; ok {
-				row.StepTitle = st.Title
-				if st.Status != "running" {
-					row.Status, row.Running = st.Status, false
-				}
-			}
-			bySession[key] = len(out)
-			out = append(out, row)
-		case rings.SwarmRecSessionEnd:
-			if i, ok := bySession[key]; ok {
-				out[i].Status, out[i].Running, out[i].FinishedAt =
-					recStepStatus(rec.Note), false, at
-				out[i].Finish = &finishView{
-					Turns:  noteInt(rec.Note, "turns"),
-					Reason: noteReason(rec.Note),
-				}
-				// P4-02 ④:原会话续跑链上每段落账一次 billable,
-				// 会话维度合计 = 各段之和。
-				out[i].BillableSec += noteSeconds(rec.Note, "billable")
-			}
-		}
+		out = append(out, row)
 	}
 	// 拒绝来源随行(approval_denied 终态才带;规则名从硬规则原因解析)。
 	for i := range out {
@@ -243,59 +214,9 @@ func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// recStepStatus 从 session_finished note 取步骤终态("status=…" 字段;
-// 缺失退 failed,如实)。
-func recStepStatus(note string) string {
-	if i := strings.Index(note, "status="); i >= 0 {
-		st := note[i+len("status="):]
-		if j := strings.IndexByte(st, ' '); j >= 0 {
-			st = st[:j]
-		}
-		if st != "" {
-			return st
-		}
-	}
-	return "failed"
-}
-
-// noteSeconds 从 session_finished note 取数值字段(如 "billable=3.5s",
-// P4-02 ④ 会话时长的账面来源);缺失或解析失败返回 0。
-func noteSeconds(note, field string) float64 {
-	i := strings.Index(note, field+"=")
-	if i < 0 {
-		return 0
-	}
-	v := note[i+len(field)+1:]
-	if j := strings.IndexAny(v, " s"); j >= 0 {
-		v = v[:j]
-	}
-	f, err := strconv.ParseFloat(v, 64)
-	if err != nil {
-		return 0
-	}
-	return f
-}
-
-// noteInt 从 session_finished note 取整数字段(turns);缺失或解析失败
-// 返回 0。
-func noteInt(note, field string) int {
-	return int(noteSeconds(note, field))
-}
-
-// noteReason 从 session_finished note 取终因(P4-06 ② 收场信息的字段):
-// reason= 到下一字段 turns= 之间——拒绝/受阻终因是自然语句含空格,
-// 不能按空格切。
-func noteReason(note string) string {
-	i := strings.Index(note, "reason=")
-	if i < 0 {
-		return ""
-	}
-	v := note[i+len("reason="):]
-	if j := strings.Index(v, " turns="); j >= 0 {
-		v = v[:j]
-	}
-	return v
-}
+// P4-36:session_finished note 的终态/轮次/终因/计费解析已收归 rings
+//(applySwarmSession 写入时机器解析入 unit_sessions 投影,NoteStatus/
+// NoteTurns/NoteReason/noteSeconds),server 侧原副本删除(铁律 10)。
 
 // ---- 插话子会话(问/改) ----
 

@@ -343,6 +343,7 @@ func createTaskWithGoal(t *testing.T, addr, title string, timeoutSeconds int) st
 	// 达成,任务完成终态仍由后面的谓词目标驱动。
 	code, b := apiJSON(t, "POST", addr, "/api/tasks", map[string]any{
 		"title":           title,
+		"task_type":       "redteam",
 		"timeout_seconds": timeoutSeconds,
 		"goals":           []string{"种子目标"},
 		"assets":          []map[string]any{{"class": "domain", "title": "mock.local"}},

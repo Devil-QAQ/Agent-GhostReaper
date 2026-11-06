@@ -8,11 +8,15 @@ import "ghostreaper/internal/rings"
 // 意图分级弹门等待面板批准,其余放行留痕。IntentRules 是任务级拦截
 // 规则(P2-08e,第四章 §4 v2.1):资产范围 × 动作类型 × 处置。数据
 // 从账本 roe.updated 事件流读当前值(overmind/swarm 不自持副本)。
+// CreatorNotes 是造物主注意事项(P4-49):对做法的软要求——随领取
+// 冻结进任务包(RoE 约束块行 + 任务包授权节 + 重锚定重申三处注入),
+// 管边界不管打法:侦察顺序/路径/工具选择/攻击链组合仍是模型自由。
 type RoE struct {
 	AllowedTools      []string
 	DeniedTools       []string
 	ApprovalThreshold rings.ActionLevel
 	IntentRules       []rings.IntentRule
+	CreatorNotes      string
 }
 
 // Allows 判定工具是否在边界内。

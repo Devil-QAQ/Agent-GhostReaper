@@ -6,14 +6,16 @@ import (
 	"testing"
 	"time"
 
+	"ghostreaper/internal/ckpt"
 	"ghostreaper/internal/hiber"
 	"ghostreaper/internal/rings"
 )
 
-// ---- P2-08 任务冬眠/唤醒 ----
+// ---- P2-08 任务冬眠/唤醒;P4-33 冻结收场、让位名额 ----
 
-// hiberTestEnv 最小装配:账本 + 冬眠门 + Manager(空循环体)。
-func hiberTestEnv(t *testing.T) (*Manager, *hiber.Gate, *rings.Store) {
+// hiberTestEnv 最小装配:账本 + 冬眠门 + 断点门(P4-33 收场依赖)+ Manager
+// (空转骨架循环体)。
+func hiberTestEnv(t *testing.T) (*Manager, *hiber.Gate, *ckpt.Gate, *rings.Store) {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := rings.Open(dir + "/test.db")
@@ -22,11 +24,12 @@ func hiberTestEnv(t *testing.T) (*Manager, *hiber.Gate, *rings.Store) {
 	}
 	t.Cleanup(func() { store.Close() })
 	gate := hiber.New()
-	mgr, err := New(Config{Store: store, RootDir: dir, Hiber: gate})
+	ckptGate := ckpt.New()
+	mgr, err := New(Config{Store: store, RootDir: dir, Hiber: gate, Checkpoint: ckptGate})
 	if err != nil {
 		t.Fatalf("建 Manager 失败: %v", err)
 	}
-	return mgr, gate, store
+	return mgr, gate, ckptGate, store
 }
 
 func createHiberTask(t *testing.T, mgr *Manager, id string) *Task {
@@ -39,9 +42,10 @@ func createHiberTask(t *testing.T, mgr *Manager, id string) *Task {
 }
 
 // TestHibernateWakeLifecycle 冬眠/唤醒的生命周期记账与状态语义:
-// started → hibernated → 唤醒恢复 started;非运行态不可冬眠;幂等。
+// started → hibernated(收场让位)→ 唤醒拉起恢复 started;非运行态不可
+// 冬眠;幂等。
 func TestHibernateWakeLifecycle(t *testing.T) {
-	mgr, gate, store := hiberTestEnv(t)
+	mgr, gate, _, store := hiberTestEnv(t)
 	task := createHiberTask(t, mgr, "hib-1")
 	if task.Status() != StatusStarted {
 		t.Fatalf("新任务应 started(有空位即拉起): %s", task.Status())
@@ -54,7 +58,20 @@ func TestHibernateWakeLifecycle(t *testing.T) {
 		t.Fatalf("冬眠后应 hibernated: %s", task.Status())
 	}
 	if !gate.Active("hib-1") {
-		t.Fatalf("冬眠门应关(执行层冻结)")
+		t.Fatalf("冬眠门应关(面板只读/审批冻结的运行时权威)")
+	}
+	// P4-33 收场锚点:无活 goroutine(收场锚点已关)、运行句柄已清——
+	// 进程内状态等价断电重启收养后。
+	task.mu.Lock()
+	rd := task.runDone
+	task.mu.Unlock()
+	select {
+	case <-rd:
+	default:
+		t.Fatalf("冬眠收场后运行锚点应已关闭(任务 goroutine 组退出)")
+	}
+	if task.Context() != context.Background() {
+		t.Fatalf("冬眠收场后运行 ctx 应已清空(无活 goroutine)")
 	}
 	// 幂等。
 	if err := mgr.Hibernate("hib-1", nil); err != nil {
@@ -114,10 +131,94 @@ func TestHibernateWakeLifecycle(t *testing.T) {
 	}
 }
 
-// TestHibernateFromSettling 收尾中亦可冬眠(收尾预算同步冻结),唤醒
-// 恢复 settling。
+// TestHibernateRetireReleasesSlot P4-33 锁死根治的确定性核:并发占满时
+// 冬眠让位名额,排队任务不重启进程被 FIFO 拉起开跑。
+func TestHibernateRetireReleasesSlot(t *testing.T) {
+	mgr, gate, _, store := hiberTestEnv(t)
+	t1 := createHiberTask(t, mgr, "hib-a")
+	t2 := createHiberTask(t, mgr, "hib-b")
+	t3 := createHiberTask(t, mgr, "hib-c")
+	if t1.Status() != StatusStarted || t2.Status() != StatusStarted {
+		t.Fatalf("前两个任务应运行中: %s %s", t1.Status(), t2.Status())
+	}
+	if t3.Status() != StatusQueued {
+		t.Fatalf("并发占满时第三个任务应排队中: %s", t3.Status())
+	}
+	// 冬眠 t1:名额让位 → t3 自动拉起(生命周期事件可证)。
+	if err := mgr.Hibernate("hib-a", nil); err != nil {
+		t.Fatalf("冬眠失败: %v", err)
+	}
+	if !gate.Active("hib-a") {
+		t.Fatalf("冬眠门应关")
+	}
+	waitFor(t, func() bool { return t3.Status() == StatusStarted }, "冬眠让位后排队任务应自动拉起")
+	// hib-c 生命周期序 created→queued→started(排队后被让位名额拉起)。
+	evs, _ := store.Events(context.Background(), "hib-c", 0, 0)
+	var actions []string
+	for _, ev := range evs {
+		if ev.Kind != rings.EventTaskLifecycle {
+			continue
+		}
+		var p rings.TaskLifecycle
+		if json.Unmarshal(ev.Payload, &p) == nil {
+			actions = append(actions, p.Action)
+		}
+	}
+	if len(actions) != 3 || actions[0] != StatusCreated || actions[1] != StatusQueued || actions[2] != StatusStarted {
+		t.Fatalf("hib-c 生命周期应 created/queued/started: %v", actions)
+	}
+	// 再冬眠 t2:让位后无排队任务,名额空置(唤醒分支另测)。
+	if err := mgr.Hibernate("hib-b", nil); err != nil {
+		t.Fatalf("冬眠失败: %v", err)
+	}
+}
+
+// TestWakeFullGoesQueued P4-33 唤醒满额分支:无空位 → 任务转排队中,
+// 名额空出按 FIFO 自动拉起。
+func TestWakeFullGoesQueued(t *testing.T) {
+	mgr, _, _, _ := hiberTestEnv(t)
+	t1 := createHiberTask(t, mgr, "hib-q1")
+	t2 := createHiberTask(t, mgr, "hib-q2")
+	t3 := createHiberTask(t, mgr, "hib-q3")
+	if t1.Status() != StatusStarted || t2.Status() != StatusStarted || t3.Status() != StatusQueued {
+		t.Fatalf("前置应为两跑一排: %s %s %s", t1.Status(), t2.Status(), t3.Status())
+	}
+	// 冬眠 t1 → 名额让位 → t3 占住(此时两名额被 t2/t3 持有)。
+	if err := mgr.Hibernate("hib-q1", nil); err != nil {
+		t.Fatalf("冬眠失败: %v", err)
+	}
+	waitFor(t, func() bool { return t3.Status() == StatusStarted }, "让位名额应被 t3 占住")
+	// 唤醒 t1:名额满 → 转排队中。
+	if err := mgr.Wake("hib-q1", nil); err != nil {
+		t.Fatalf("满额唤醒应转排队不报错: %v", err)
+	}
+	if t1.Status() != StatusQueued {
+		t.Fatalf("满额唤醒后应排队中: %s", t1.Status())
+	}
+	// 名额空出(t2 冬眠让位)→ 排队任务 FIFO 自动拉起。
+	if err := mgr.Hibernate("hib-q2", nil); err != nil {
+		t.Fatalf("冬眠失败: %v", err)
+	}
+	waitFor(t, func() bool { return t1.Status() == StatusStarted }, "名额空出后排队任务应自动拉起")
+}
+
+// waitFor 轮询等待条件成立(收场让位是异步让位,毫秒级)。
+func waitFor(t *testing.T, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("等待超时: %s", msg)
+}
+
+// TestHibernateFromSettling 收尾中亦可冬眠(收尾冻结),唤醒后恢复
+// settling(收尾续走)。
 func TestHibernateFromSettling(t *testing.T) {
-	mgr, _, _ := hiberTestEnv(t)
+	mgr, _, _, _ := hiberTestEnv(t)
 	task := createHiberTask(t, mgr, "hib-2")
 	if err := mgr.MarkSettling("hib-2", nil); err != nil {
 		t.Fatalf("进收尾失败: %v", err)
@@ -138,7 +239,7 @@ func TestHibernateFromSettling(t *testing.T) {
 
 // TestStopFromHibernated 冬眠中熔断:终态 stopped,门放行(不留悬挂)。
 func TestStopFromHibernated(t *testing.T) {
-	mgr, gate, _ := hiberTestEnv(t)
+	mgr, gate, _, _ := hiberTestEnv(t)
 	task := createHiberTask(t, mgr, "hib-3")
 	if err := mgr.Hibernate("hib-3", nil); err != nil {
 		t.Fatalf("冬眠失败: %v", err)
@@ -150,7 +251,7 @@ func TestStopFromHibernated(t *testing.T) {
 		t.Fatalf("熔断后应 stopped: %s", task.Status())
 	}
 	if gate.Active("hib-3") {
-		t.Fatalf("熔断后门应放行(挂起者醒来见 ctx 结束收场)")
+		t.Fatalf("熔断后门应放行")
 	}
 }
 
@@ -163,10 +264,11 @@ func TestRestartKeepsHibernated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("开账本失败: %v", err)
 	}
-	// 循环体阻塞在 ctx 上(不自然返回——返回即完成终态)。
-	blocking := func(ctx context.Context, taskID string, wake <-chan struct{}) { <-ctx.Done() }
+	// P4-33 起冬眠收场依赖断点令;空转骨架循环体(OnTaskRun=nil)遵守
+	// "武装即退出"契约,收场让位后重启。
 	gate := hiber.New()
-	mgr, err := New(Config{Store: store, RootDir: dir, Hiber: gate, OnTaskRun: blocking})
+	ckptGate := ckpt.New()
+	mgr, err := New(Config{Store: store, RootDir: dir, Hiber: gate, Checkpoint: ckptGate})
 	if err != nil {
 		t.Fatalf("建 Manager 失败: %v", err)
 	}
@@ -185,7 +287,8 @@ func TestRestartKeepsHibernated(t *testing.T) {
 	}
 	t.Cleanup(func() { store2.Close() })
 	gate2 := hiber.New()
-	mgr2, err := New(Config{Store: store2, RootDir: dir, Hiber: gate2, OnTaskRun: blocking})
+	ckpt2 := ckpt.New()
+	mgr2, err := New(Config{Store: store2, RootDir: dir, Hiber: gate2, Checkpoint: ckpt2})
 	if err != nil {
 		t.Fatalf("重建 Manager 失败: %v", err)
 	}
@@ -206,7 +309,7 @@ func TestRestartKeepsHibernated(t *testing.T) {
 
 // TestHibernatedTaskProjection 冬眠态在任务投影中可见(面板数据面)。
 func TestHibernatedTaskProjection(t *testing.T) {
-	mgr, _, store := hiberTestEnv(t)
+	mgr, _, _, store := hiberTestEnv(t)
 	createHiberTask(t, mgr, "hib-5")
 	if err := mgr.Hibernate("hib-5", nil); err != nil {
 		t.Fatalf("冬眠失败: %v", err)

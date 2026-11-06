@@ -255,11 +255,13 @@ func (rep *panoramaReplay) apply(ev rings.RawEvent) {
 	}
 }
 
-// snapshot 定格当前回放状态的在途全景:在跑+排队步骤按领取次序排
-// (调度器同一比较器,面板次序即可核对领取次序)。
-func (rep *panoramaReplay) snapshot() []PanoramaRow {
+// panoramaRows 在途全景行装配(历史快照与实时视图同一语义,P4-46 ①):
+// 在跑+排队步骤按领取次序排(调度器同一比较器,面板次序即可核对领取
+// 次序),等前置如实标注,行带 covers 资产归属。panoramaReplay 的按轮
+// 快照与 handlePanoramaLive 的当前投影实时视图共用本装配,两视图不漂移。
+func panoramaRows(steps map[string]rings.NodeFull, covers, deps map[string][]string, assetTitle map[string]string) []PanoramaRow {
 	var flight []rings.NodeFull
-	for _, st := range rep.steps {
+	for _, st := range steps {
 		if st.Status == "running" || st.Status == "dispatched" {
 			flight = append(flight, st)
 		}
@@ -268,18 +270,67 @@ func (rep *panoramaReplay) snapshot() []PanoramaRow {
 	rows := make([]PanoramaRow, 0, len(flight))
 	for _, st := range flight {
 		row := PanoramaRow{ID: st.ID, Title: st.Title, Status: st.Status}
-		for _, dep := range rep.deps[st.ID] {
-			if d, ok := rep.steps[dep]; !ok || d.Status != "done" { // 前置未完成/不存在:一律等待(依赖闸同口径)
+		for _, dep := range deps[st.ID] {
+			if d, ok := steps[dep]; !ok || d.Status != "done" { // 前置未完成/不存在:一律等待(依赖闸同口径)
 				row.Waiting = true
 				break
 			}
 		}
-		for _, a := range rep.covers[st.ID] {
-			row.Assets = append(row.Assets, PanoramaAsset{ID: a, Title: rep.assetTitle[a]})
+		for _, a := range covers[st.ID] {
+			row.Assets = append(row.Assets, PanoramaAsset{ID: a, Title: assetTitle[a]})
 		}
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+// snapshot 定格当前回放状态的在途全景(历史轮次卡的快照数据面)。
+func (rep *panoramaReplay) snapshot() []PanoramaRow {
+	return panoramaRows(rep.steps, rep.covers, rep.deps, rep.assetTitle)
+}
+
+// handlePanoramaLive 在途全景实时视图(P4-46 ①):当前投影的执行中/
+// 排队(含等前置)步骤——与虫群会话列表排队条目、工作台水位同源(同一
+// 账本投影,排序同一 StepLaunchLess),行装配与研判卡历史快照共用
+// panoramaRows。最新研判卡的实时数据面(历史轮次快照仍归 overmindRounds);
+// 读面只走投影(步骤含 detail 供排序,边与资产标题取统一图投影),
+// 供面板 tasks 主题事件驱动高频刷新,不扫事件流。
+func (s *Server) handlePanoramaLive(w http.ResponseWriter, r *http.Request) {
+	taskID := r.PathValue("id")
+	if !s.taskExists(taskID) {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("任务 %s 不存在", taskID))
+		return
+	}
+	steps := map[string]rings.NodeFull{}
+	list, err := s.Store.NodesByType(r.Context(), taskID, rings.NodeStep, "")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	for _, st := range list {
+		steps[st.ID] = st
+	}
+	g, err := s.Store.Graph(r.Context(), taskID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	assetTitle := map[string]string{}
+	covers, deps := map[string][]string{}, map[string][]string{}
+	for _, n := range g.Nodes {
+		if n.Type == rings.NodeAsset {
+			assetTitle[n.ID] = n.Title
+		}
+	}
+	for _, e := range g.Edges {
+		switch e.Type {
+		case rings.EdgeCovers:
+			covers[e.From] = append(covers[e.From], e.To)
+		case rings.EdgeDependsOn:
+			deps[e.From] = append(deps[e.From], e.To)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"panorama": panoramaRows(steps, covers, deps, assetTitle)})
 }
 
 // OvermindRound 一轮研判:五问结论 + 派发决策 + 本轮收割 + 在途全景。
@@ -291,6 +342,7 @@ type OvermindRound struct {
 	At             string                `json:"at"`
 	SessionID      string                `json:"session_id,omitempty"`
 	EvaluatedRev   int64                 `json:"evaluated_rev,omitempty"`
+	Triggers       []string              `json:"triggers,omitempty"` // 触发来源(P4-48 ④:深入指令人话行;其余触发在账本可溯)
 	QAccess        string                `json:"q_access,omitempty"`
 	QPrivilege     string                `json:"q_privilege,omitempty"`
 	QCombination   string                `json:"q_combination,omitempty"`
@@ -305,6 +357,31 @@ type OvermindRound struct {
 	ClaimsJudged   []RoundNode           `json:"claims_judged,omitempty"`
 	Hypotheses     []RoundNode           `json:"hypotheses,omitempty"`
 	Panorama       []PanoramaRow         `json:"panorama"`
+}
+
+// diveTriggerLines 本轮触发版本里的操作者深入指令行(P4-48 ④:研判记录
+// 体现触发来源,确定性装配零 LLM);方向留空如实呈"留空"。
+func diveTriggerLines(evs []rings.RawEvent, revs []int64) []string {
+	want := map[int64]bool{}
+	for _, r := range revs {
+		want[r] = true
+	}
+	var out []string
+	for _, ev := range evs {
+		if !want[ev.Revision] || ev.Kind != rings.EventOperatorDive {
+			continue
+		}
+		var p rings.OperatorDive
+		if json.Unmarshal(ev.Payload, &p) != nil {
+			continue
+		}
+		dir := "留空"
+		if d := strings.TrimSpace(p.Direction); d != "" {
+			dir = d
+		}
+		out = append(out, fmt.Sprintf("操作者深入指令：节点 %s，方向：%s", p.NodeID, dir))
+	}
+	return out
 }
 
 // overmindRounds 主宰研判轨迹:按账本顺序取全部 overmind.record
@@ -344,7 +421,8 @@ func (s *Server) overmindRounds(r *http.Request, taskID string) ([]OvermindRound
 		rounds = append(rounds, OvermindRound{
 			At:        ev.OccurredAt.Local().Format("2006-01-02 15:04:05"),
 			SessionID: rec.SessionID, EvaluatedRev: rec.EvaluatedRev,
-			QAccess: rec.QAccess, QPrivilege: rec.QPrivilege, QCombination: rec.QCombination,
+			Triggers: diveTriggerLines(evs, rec.TriggerRevisions),
+			QAccess:  rec.QAccess, QPrivilege: rec.QPrivilege, QCombination: rec.QCombination,
 			QUnlock: rec.QUnlock, QOverturn: rec.QOverturn, Note: rec.Note,
 			Dispatched: rec.Dispatched, Combined: rec.Combined, Queue: rec.Queue,
 		})

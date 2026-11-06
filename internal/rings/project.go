@@ -10,23 +10,30 @@ import (
 	"time"
 )
 
-// applyEvent 将单个事件应用到投影(nodes/edges)。事件插入与投影更新
-// 同处一个事务:任一步失败整体回滚,账本与投影不会脱节。
-// 追加路径与重放路径共用本函数,保证投影确定性。
-func applyEvent(tx *sql.Tx, taskID string, rev int64, kind EventKind, payload []byte) error {
+// applyEvent 将单个事件应用到投影(nodes/edges 与 v10 起的读侧汇总
+// 投影)。事件插入与投影更新同处一个事务:任一步失败整体回滚,账本与
+// 投影不会脱节。追加路径与重放路径共用本函数,保证投影确定性。
+// actor 与 occurredAt 为事件信封字段(副作用投影按事件序语义消费)。
+func applyEvent(tx *sql.Tx, taskID string, rev int64, kind EventKind, actor string, payload []byte, occurredAt time.Time) error {
 	switch kind {
 	case EventNodeAdded:
 		var p NodeAdded
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("rings: 解码 node.added 负载: %w", err)
 		}
-		return applyNodeAdded(tx, taskID, rev, p)
+		if err := applyNodeAdded(tx, taskID, rev, p, occurredAt); err != nil {
+			return err
+		}
+		return applyNodeAddedSide(tx, taskID, rev, actor, p, occurredAt)
 	case EventNodeStateChanged:
 		var p NodeStateChanged
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("rings: 解码 node.state_changed 负载: %w", err)
 		}
-		return applyNodeStateChanged(tx, taskID, rev, p)
+		if err := applyNodeStateChanged(tx, taskID, rev, p, occurredAt); err != nil {
+			return err
+		}
+		return applyCaseStateChanged(tx, taskID, rev, p, occurredAt)
 	case EventEdgeAdded:
 		var p EdgeAdded
 		if err := json.Unmarshal(payload, &p); err != nil {
@@ -38,7 +45,13 @@ func applyEvent(tx *sql.Tx, taskID string, rev int64, kind EventKind, payload []
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("rings: 解码 task.lifecycle 负载: %w", err)
 		}
-		return applyTaskLifecycle(tx, taskID, rev, p)
+		if err := applyTaskLifecycle(tx, taskID, rev, p); err != nil {
+			return err
+		}
+		if err := applyTaskExtrasCreated(tx, taskID, p); err != nil {
+			return err
+		}
+		return applyTaskLifecycleSide(tx, taskID, p, occurredAt)
 	case EventTaskMeta:
 		var p TaskMeta
 		if err := json.Unmarshal(payload, &p); err != nil {
@@ -56,7 +69,10 @@ func applyEvent(tx *sql.Tx, taskID string, rev int64, kind EventKind, payload []
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("rings: 解码 swarm.record 负载: %w", err)
 		}
-		return validateSwarmRecord(p)
+		if err := validateSwarmRecord(p); err != nil {
+			return err
+		}
+		return applySwarmSession(tx, taskID, rev, p, occurredAt)
 	case EventArbiterVerdict:
 		var p ArbiterVerdict
 		if err := json.Unmarshal(payload, &p); err != nil {
@@ -68,25 +84,37 @@ func applyEvent(tx *sql.Tx, taskID string, rev int64, kind EventKind, payload []
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("rings: 解码 approval.record 负载: %w", err)
 		}
-		return validateApprovalRecord(p)
+		if err := validateApprovalRecord(p); err != nil {
+			return err
+		}
+		return applyApprovalLog(tx, taskID, rev, p, occurredAt)
 	case EventTestClaimRecord:
 		var p TestClaimRecord
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("rings: 解码 testclaim.record 负载: %w", err)
 		}
-		return validateTestClaimRecord(tx, taskID, p)
+		if err := validateTestClaimRecord(tx, taskID, p); err != nil {
+			return err
+		}
+		return applyClaimRecord(tx, taskID, rev, p, json.RawMessage(payload), occurredAt)
 	case EventMirrorRecord:
 		var p MirrorRecord
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("rings: 解码 mirror.record 负载: %w", err)
 		}
-		return validateMirrorRecord(p)
+		if err := validateMirrorRecord(p); err != nil {
+			return err
+		}
+		return applyMirrorBrief(tx, taskID, p)
 	case EventHypothesisRecord:
 		var p HypothesisRecord
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("rings: 解码 hypothesis.record 负载: %w", err)
 		}
-		return validateHypothesisRecord(p)
+		if err := validateHypothesisRecord(p); err != nil {
+			return err
+		}
+		return applyHypState(tx, taskID, p)
 	case EventBlackboxRecord:
 		var p BlackboxRecord
 		if err := json.Unmarshal(payload, &p); err != nil {
@@ -104,13 +132,19 @@ func applyEvent(tx *sql.Tx, taskID string, rev int64, kind EventKind, payload []
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("rings: 解码 overmind.record 负载: %w", err)
 		}
-		return validateOvermindRecord(p)
+		if err := validateOvermindRecord(p); err != nil {
+			return err
+		}
+		return applyOvermindRoundSide(tx, taskID, p)
 	case EventShepherdRecord:
 		var p ShepherdRecord
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("rings: 解码 shepherd.record 负载: %w", err)
 		}
-		return validateShepherdRecord(p)
+		if err := validateShepherdRecord(p); err != nil {
+			return err
+		}
+		return applyClaimQA(tx, taskID, rev, p, occurredAt)
 	case EventUnitControl:
 		var p UnitControlRecord
 		if err := json.Unmarshal(payload, &p); err != nil {
@@ -140,16 +174,53 @@ func applyEvent(tx *sql.Tx, taskID string, rev int64, kind EventKind, payload []
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("rings: 解码 session.meta 负载: %w", err)
 		}
-		return validateSessionMeta(p)
+		if err := validateSessionMeta(p); err != nil {
+			return err
+		}
+		return applySessionLabel(tx, taskID, rev, p)
 	case EventClosureRecord:
 		var p ClosureRecord
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("rings: 解码 closure.record 负载: %w", err)
 		}
-		return validateClosureRecord(p)
+		if err := validateClosureRecord(p); err != nil {
+			return err
+		}
+		return applyClosureRecordSide(tx, taskID, p, occurredAt)
+	case EventOperatorDive:
+		var p OperatorDive
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return fmt.Errorf("rings: 解码 operator.dive 负载: %w", err)
+		}
+		return validateOperatorDive(p)
 	default:
 		return fmt.Errorf("%w: %s", ErrUnknownKind, string(kind))
 	}
+}
+
+// applyNodeAddedSide node.added 的副作用投影(v10):判断卷宗初始化、
+// 步骤战役登记、任务目标域(creator 种子资产)、收口新发现锚点
+// (事实/判断/非种子资产)。
+func applyNodeAddedSide(tx *sql.Tx, taskID string, rev int64, actor string, p NodeAdded, occurredAt time.Time) error {
+	switch NodeType(p.NodeType) {
+	case NodeTestClaim:
+		return applyClaimNodeAdded(tx, taskID, rev, p, occurredAt)
+	case NodeStep:
+		return applyStepNodeAdded(tx, taskID, p, occurredAt)
+	case NodeFact:
+		return closureAnchorFinding(tx, taskID, occurredAt)
+	case NodeAsset:
+		if actor == "creator" && AssetSourceOf(p.Detail) != AssetSourceManual {
+			if err := appendTaskTarget(tx, taskID, p.Title); err != nil {
+				return err
+			}
+		}
+		if AssetSourceOf(p.Detail) == AssetSourceSeed {
+			return nil // 种子资产随建任务表单入账,不算执行中的新发现
+		}
+		return closureAnchorFinding(tx, taskID, occurredAt)
+	}
+	return nil
 }
 
 // validateClosureRecord 校验收口信号记录(P4-18;审核迭代 1 扩 config)。
@@ -850,7 +921,8 @@ func boolToInt(b *bool) any {
 // applyRoeUpdated 维护 roe_state 投影:RoE 是"当前值"语义,每次变更整体覆盖。
 // ApprovalThreshold 非空时必须是合法意图分级(四级词汇表,受控入口校验);
 // IntentRules(P2-08e)整体覆盖并做词表校验;ExcludedAssets(P4-05)整体
-// 覆盖,条目须非空且不重复(资产存在性在 server 写入口查图);MaxActionLevel
+// 覆盖,条目须非空且不重复(资产存在性在 server 写入口查图);ScopeApproved
+// (P4-44 放行清单)整体覆盖,校验同款;MaxActionLevel
 // (P1-07 分级上限)已废止,仅读兼容——不再校验不再消费。
 func applyRoeUpdated(tx *sql.Tx, taskID string, rev int64, p RoeUpdated) error {
 	if p.ApprovalThreshold != "" && !actionLevels[p.ApprovalThreshold] {
@@ -868,6 +940,16 @@ func applyRoeUpdated(tx *sql.Tx, taskID string, rev int64, p RoeUpdated) error {
 			return fmt.Errorf("rings: 授权范围摘除清单重复资产 %s", id)
 		}
 		seenAsset[id] = true
+	}
+	seenApproved := map[string]bool{}
+	for _, id := range p.ScopeApproved {
+		if strings.TrimSpace(id) == "" {
+			return fmt.Errorf("rings: 范围外资产放行清单含空资产 ID")
+		}
+		if seenApproved[id] {
+			return fmt.Errorf("rings: 范围外资产放行清单重复资产 %s", id)
+		}
+		seenApproved[id] = true
 	}
 	allowed, err := json.Marshal(p.AllowedTools)
 	if err != nil {
@@ -894,6 +976,13 @@ func applyRoeUpdated(tx *sql.Tx, taskID string, rev int64, p RoeUpdated) error {
 	if p.ExcludedAssets == nil {
 		exAssets = []byte("[]")
 	}
+	scApproved, err := json.Marshal(p.ScopeApproved)
+	if err != nil {
+		return fmt.Errorf("rings: 序列化 scope_approved: %w", err)
+	}
+	if p.ScopeApproved == nil {
+		scApproved = []byte("[]")
+	}
 	if _, err := tx.Exec(
 		`INSERT INTO roe_state (task_id, allowed_tools, denied_tools, approval_threshold, intent_rules, excluded_assets, note, updated_rev)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -909,7 +998,43 @@ func applyRoeUpdated(tx *sql.Tx, taskID string, rev int64, p RoeUpdated) error {
 	); err != nil {
 		return fmt.Errorf("rings: 投影写入任务 %s RoE: %w", taskID, err)
 	}
+	// P4-44 放行清单列(v11)单独补写(同事务,行已由上面的 UPSERT 就位):
+	// 与 ExcludedAssets 同为"当前值"投影的组成部分,整体覆盖。
+	if _, err := tx.Exec(
+		`UPDATE roe_state SET scope_approved = ? WHERE task_id = ?`,
+		string(scApproved), taskID,
+	); err != nil {
+		return fmt.Errorf("rings: 投影写入任务 %s 放行清单: %w", taskID, err)
+	}
+	// P4-49 注意事项列(v12)逐笔叠加:指针 nil = 本次不动(COALESCE 保旧
+	// 值),非空指针整体覆盖(归一换行与首尾空白)。透传当前值的各
+	// roe.updated 写入口不带本字段即自然保持,建任务/RoE 面板显式写。
+	var creatorNotes any
+	if p.CreatorNotes != nil {
+		creatorNotes = NormalizeCreatorNotes(*p.CreatorNotes)
+	}
+	if _, err := tx.Exec(
+		`UPDATE roe_state SET creator_notes = COALESCE(?, creator_notes) WHERE task_id = ?`,
+		creatorNotes, taskID,
+	); err != nil {
+		return fmt.Errorf("rings: 投影写入任务 %s 注意事项: %w", taskID, err)
+	}
 	return nil
+}
+
+// NormalizeCreatorNotes 注意事项的归一形态:首尾空白去除、CRLF 统一
+// 为 LF、行内尾空白去除、空行折叠(多行要求的呈现与注入共用一份,
+// 防服务端写入口与投影各写一套漂移)。
+func NormalizeCreatorNotes(s string) string {
+	lines := strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(lines))
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if l != "" {
+			out = append(out, l)
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // validateSwarmRecord 校验虫群原始执行记录。它不进 nodes/edges 投影——
@@ -927,7 +1052,7 @@ func validateSwarmRecord(p SwarmRecord) error {
 	return nil
 }
 
-func applyNodeAdded(tx *sql.Tx, taskID string, rev int64, p NodeAdded) error {
+func applyNodeAdded(tx *sql.Tx, taskID string, rev int64, p NodeAdded, occurredAt time.Time) error {
 	nt := NodeType(p.NodeType)
 	if !nodeTypes[nt] {
 		return fmt.Errorf("%w: %s", ErrUnknownNodeType, p.NodeType)
@@ -952,16 +1077,17 @@ func applyNodeAdded(tx *sql.Tx, taskID string, rev int64, p NodeAdded) error {
 		return err
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO nodes (task_id, node_id, node_type, status, title, asset_class, detail, created_rev, updated_rev)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO nodes (task_id, node_id, node_type, status, title, asset_class, detail, created_rev, updated_rev, added_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		taskID, p.NodeID, string(nt), p.Status, p.Title, string(class), detail, rev, rev,
+		fmtTimeUTC(occurredAt),
 	); err != nil {
 		return fmt.Errorf("rings: 投影写入节点 %s: %w", p.NodeID, err)
 	}
 	return nil
 }
 
-func applyNodeStateChanged(tx *sql.Tx, taskID string, rev int64, p NodeStateChanged) error {
+func applyNodeStateChanged(tx *sql.Tx, taskID string, rev int64, p NodeStateChanged, occurredAt time.Time) error {
 	// P4-27 ⑥⑦:blocked 归因的机器标记(Note 恰为 model_fault/
 	// determinant)随状态迁移合并进节点 detail(blocked_class 键),
 	// 供受阻派生按归因过滤(确定性拒绝不计故障)。其余 Note(人工
@@ -992,7 +1118,7 @@ func applyNodeStateChanged(tx *sql.Tx, taskID string, rev int64, p NodeStateChan
 		); err != nil {
 			return fmt.Errorf("rings: 投影更新节点 %s 状态: %w", p.NodeID, err)
 		}
-		return nil
+		return markNodeConfirmed(tx, taskID, rev, p, occurredAt)
 	}
 	res, err := tx.Exec(
 		`UPDATE nodes SET status = ?, updated_rev = ? WHERE task_id = ? AND node_id = ?`,
@@ -1003,6 +1129,21 @@ func applyNodeStateChanged(tx *sql.Tx, taskID string, rev int64, p NodeStateChan
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("%w: task %s node %s", ErrNodeNotFound, taskID, p.NodeID)
+	}
+	return markNodeConfirmed(tx, taskID, rev, p, occurredAt)
+}
+
+// markNodeConfirmed 确认时刻列(v10):转 confirmed 的迁移记 confirmed_at/
+// confirmed_rev(事实列表的时刻小字段);其余状态不动。
+func markNodeConfirmed(tx *sql.Tx, taskID string, rev int64, p NodeStateChanged, occurredAt time.Time) error {
+	if p.Status != "confirmed" {
+		return nil
+	}
+	if _, err := tx.Exec(
+		`UPDATE nodes SET confirmed_at = ?, confirmed_rev = ? WHERE task_id = ? AND node_id = ?`,
+		fmtTimeUTC(occurredAt), rev, taskID, p.NodeID,
+	); err != nil {
+		return fmt.Errorf("rings: 投影更新节点 %s 确认时刻: %w", p.NodeID, err)
 	}
 	return nil
 }
@@ -1099,23 +1240,62 @@ func marshalDetail(d map[string]any) ([]byte, error) {
 // rebuildProjections 清空投影并按 (task_id, revision) 全量重放事件流,
 // 复用 applyEvent 的写入路径——增量维护与全量重放同一份代码,确定性有保证。
 func rebuildProjections(tx *sql.Tx) error {
-	for _, t := range []string{"edges", "nodes", "roe_state", "tasks"} {
-		if _, err := tx.Exec(`DELETE FROM ` + t); err != nil {
-			return fmt.Errorf("rings: 清空 %s 投影: %w", t, err)
-		}
+	if _, err := tx.Exec(`DELETE FROM edges`); err != nil {
+		return fmt.Errorf("rings: 清空 edges 投影: %w", err)
 	}
-	rows, err := tx.Query(`SELECT task_id, revision, kind, payload FROM events ORDER BY task_id, revision`)
+	if _, err := tx.Exec(`DELETE FROM nodes`); err != nil {
+		return fmt.Errorf("rings: 清空 nodes 投影: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM roe_state`); err != nil {
+		return fmt.Errorf("rings: 清空 roe_state 投影: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM tasks`); err != nil {
+		return fmt.Errorf("rings: 清空 tasks 投影: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM unit_sessions`); err != nil {
+		return fmt.Errorf("rings: 清空 unit_sessions 投影: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM session_labels`); err != nil {
+		return fmt.Errorf("rings: 清空 session_labels 投影: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM approval_records`); err != nil {
+		return fmt.Errorf("rings: 清空 approval_records 投影: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM claim_cases`); err != nil {
+		return fmt.Errorf("rings: 清空 claim_cases 投影: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM hyp_states`); err != nil {
+		return fmt.Errorf("rings: 清空 hyp_states 投影: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM task_extras`); err != nil {
+		return fmt.Errorf("rings: 清空 task_extras 投影: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM closure_states`); err != nil {
+		return fmt.Errorf("rings: 清空 closure_states 投影: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM claim_qa`); err != nil {
+		return fmt.Errorf("rings: 清空 claim_qa 投影: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM mirror_briefs`); err != nil {
+		return fmt.Errorf("rings: 清空 mirror_briefs 投影: %w", err)
+	}
+	rows, err := tx.Query(
+		`SELECT task_id, revision, kind, actor, payload, occurred_at FROM events ORDER BY task_id, revision`)
 	if err != nil {
 		return fmt.Errorf("rings: 读取事件流: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var taskID, kind, payload string
+		var taskID, kind, actor, payload, occurred string
 		var rev int64
-		if err := rows.Scan(&taskID, &rev, &kind, &payload); err != nil {
+		if err := rows.Scan(&taskID, &rev, &kind, &actor, &payload, &occurred); err != nil {
 			return fmt.Errorf("rings: 扫描事件: %w", err)
 		}
-		if err := applyEvent(tx, taskID, rev, EventKind(kind), []byte(payload)); err != nil {
+		at, err := time.Parse(time.RFC3339Nano, occurred)
+		if err != nil {
+			return fmt.Errorf("rings: 解析事件 occurred_at: %w", err)
+		}
+		if err := applyEvent(tx, taskID, rev, EventKind(kind), actor, []byte(payload), at); err != nil {
 			return fmt.Errorf("rings: 重放事件 task %s rev %d: %w", taskID, rev, err)
 		}
 	}

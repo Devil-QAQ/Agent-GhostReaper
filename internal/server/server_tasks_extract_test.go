@@ -111,7 +111,7 @@ func TestTaskCreateWithGoalsAndRules(t *testing.T) {
 	var created struct {
 		ID string `json:"id"`
 	}
-	body := `{"title": "提取确认任务", "goals": ["确认登录面暴露情况", "  "],
+	body := `{"task_type":"redteam","title": "提取确认任务", "goals": ["确认登录面暴露情况", "  "],
 		"assets": [{"title": "http://t-a:8080", "class": "service"}, {"title": "10.0.0.9", "class": "host"}],
 		"roe": {"intent_rules": [
 			{"action": "上传文件", "asset_ids": ["http://t-a:8080"], "disposition": "forbid", "note": "从授权描述提取:不允许上传"},
@@ -158,19 +158,19 @@ func TestTaskCreateWithGoalsAndRules(t *testing.T) {
 	var errNoGoal struct {
 		Error string `json:"error"`
 	}
-	post(t, h, "POST", "/api/tasks", `{"title": "仅目标任务", "goals": ["只要目标"]}`,
+	post(t, h, "POST", "/api/tasks", `{"task_type":"redteam","title": "仅目标任务", "goals": ["只要目标"]}`,
 		http.StatusBadRequest, &errNoGoal)
 	if !strings.Contains(errNoGoal.Error, "资产不能为空") {
 		t.Fatalf("缺资产应人话拒建: %s", errNoGoal.Error)
 	}
-	post(t, h, "POST", "/api/tasks", `{"title": "仅资产任务", "assets": [{"title": "10.0.0.8", "class": "host"}]}`,
+	post(t, h, "POST", "/api/tasks", `{"task_type":"redteam","title": "仅资产任务", "assets": [{"title": "10.0.0.8", "class": "host"}]}`,
 		http.StatusBadRequest, &errNoGoal)
 	if !strings.Contains(errNoGoal.Error, "目标不能为空") {
 		t.Fatalf("缺目标应人话拒建: %s", errNoGoal.Error)
 	}
 	// 任务名可选(P4-16):空标题 + 齐全目标资产照建。
 	post(t, h, "POST", "/api/tasks",
-		`{"title": "  ", "goals": ["只要目标"], "assets": [{"title": "10.0.0.8", "class": "host"}]}`,
+		`{"task_type":"redteam","title": "  ", "goals": ["只要目标"], "assets": [{"title": "10.0.0.8", "class": "host"}]}`,
 		http.StatusOK, &struct {
 			ID string `json:"id"`
 		}{})

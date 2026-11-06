@@ -149,6 +149,19 @@ func (h *liveHub) onCommit(taskID string, events []rings.Event) {
 	}
 }
 
+// markDirty 非账本来源的主题标脏(P4-47 A:已读线盖戳写键值表,不经
+// 账本事件——任务列表的未读汇总订阅方需被通知重拉;与 onCommit 同款
+// 标脏+poke 合并语义)。
+func (h *liveHub) markDirty(topic string) {
+	h.mu.Lock()
+	h.dirty[topic] = true
+	h.mu.Unlock()
+	select {
+	case h.poke <- struct{}{}:
+	default:
+	}
+}
+
 // payloadAs 事件负载的宽容取值:装配路径传类型化结构体,测试/历史路径
 // 可能传 JSON 字节——两种都认,认不出返回 false(按未知类型处理)。
 func payloadAs[T any](p any) (T, bool) {

@@ -58,7 +58,7 @@ func (l *Loop) newGenSession(system string) *genSession {
 		sess: agentcore.NewSession(opts),
 		usage: &swarm.UsageTracker{
 			Store: l.Store, TaskID: l.TaskID, Agent: ActorOvermind,
-			Model: l.Model, ModelOf: l.modelNow(), Transcript: sid, // MaxTurns=0:规划会话不落里程碑
+			Model: l.Model, ModelOf: l.modelNow(sid), Transcript: sid, // MaxTurns=0:规划会话不落里程碑
 		},
 		sid: sid,
 	}
@@ -112,11 +112,11 @@ const proofreadHumanStandard = `人话标准:平实书面白话,像写给同事�
 锚例:向 10.0.0.5 发 GET /admin,无需凭据;返回 200 且响应含"管理后台"字样即复现
 禁这些机器语:内部编号、解释编号、裸版本号数字、程序报错原文、英文状态词、无动词的压缩名词堆。`
 
-// reproProofreadAsk 步骤描述的校对续问(同会话,模型可见自己刚写的
-// 全部描述)。
-const reproProofreadAsk = `校对改写你刚写的全部步骤描述:只改文风,事实一字不动(方法、目标、路径、凭据、数字、状态码、特征全照抄);一步一句可照做的指令。
+// reproProofreadAsk 步骤三层描述的校对续问(同会话,模型可见自己刚写
+// 的全部步骤;P4-35 ② 起短名/做什么/作用三段同批校对)。
+const reproProofreadAsk = `校对改写你刚写的全部步骤(短名/描述/作用):只改文风,事实一字不动(方法、目标、路径、凭据、数字、状态码、特征全照抄);短名仍不超过 8 个字,描述仍是一步一句可照做的指令。
 ` + proofreadHumanStandard + `
-只输出 JSON:{"steps":[{"seq":1,"desc":"…"},…]},seq 与你上一轮一致,覆盖全部步骤。`
+只输出 JSON:{"steps":[{"seq":1,"short":"…","desc":"…","purpose":"…"},…]},seq 与你上一轮一致,覆盖全部选中步骤。`
 
 // narrativeProofreadAsk 叙述的校对续问。
 const narrativeProofreadAsk = `校对改写你刚写的叙述:只改文风,事实一字不动(单位、轮次、地址、数字全照抄);仍写清四件事——在哪发现、谁发现、怎么验证、怎么确认;一段不超过 150 字。
@@ -125,9 +125,10 @@ const narrativeProofreadAsk = `校对改写你刚写的叙述:只改文风,事�
 
 // ---- ② 模式闸门(扫描 + 退回重写一次 + 如实标注) ----
 
-// polishReproDescs 步骤描述的校对+闸门链:① 同会话校对改写(失败保留
-// 生成稿,如实 WARN);② 逐步特征扫描,命中则同会话退回重写一次并
-// 复扫,仍命中的步骤如实标注 Unpolished(原文保留,不阻塞定稿)。
+// polishReproDescs 步骤三层描述的校对+闸门链:① 同会话校对改写(失败
+// 保留生成稿,如实 WARN);② 逐步特征扫描(P4-35 ② 起扫短名/做什么/
+// 作用三段),命中则同会话退回重写一次并复扫,仍命中的步骤如实标注
+// Unpolished(原文保留,不阻塞定稿)。
 func (l *Loop) polishReproDescs(ctx context.Context, claimID string, gs *genSession, rec *rings.TestClaimRecord) {
 	if text, err := gs.ask(ctx, reproProofreadAsk); err != nil {
 		runlog.Warnf("定稿校对失败: 任务 %s 判断 %s 原因 %s(保留生成稿)",
@@ -136,7 +137,7 @@ func (l *Loop) polishReproDescs(ctx context.Context, claimID string, gs *genSess
 		runlog.Warnf("定稿校对解析失败: 任务 %s 判断 %s 原因 %s(保留生成稿)",
 			l.TaskID, claimID, clipEval(perr.Error()))
 	} else {
-		applyReproDescs(rec, descs)
+		applyReproTexts(rec, descs)
 	}
 	// 闸门:逐步扫;有命中 → 同会话重写一次 → 复扫;仍命中如实标注。
 	dirty := reproDescHits(rec)
@@ -148,7 +149,7 @@ func (l *Loop) polishReproDescs(ctx context.Context, claimID string, gs *genSess
 			l.TaskID, claimID, clipEval(err.Error()))
 	}
 	for i := range rec.Steps {
-		if hits := ScanMachineTalk(rec.Steps[i].Desc); len(hits) > 0 {
+		if hits := stepMachineHits(rec.Steps[i]); len(hits) > 0 {
 			rec.Steps[i].Unpolished = true
 			runlog.Warnf("定稿文字未过文风校验,按原文保留: 任务 %s 判断 %s 步骤 %d(%s)",
 				l.TaskID, claimID, rec.Steps[i].Seq, strings.Join(talkHitLines(hits), ";"))
@@ -156,11 +157,25 @@ func (l *Loop) polishReproDescs(ctx context.Context, claimID string, gs *genSess
 	}
 }
 
+// stepMachineHits 单步三层文本(短名/做什么/作用)的机器语特征扫描,
+// 任一段命中即记(短名本身是方法+路径的确定性兜底形态,方法词与路径
+// 属事实不在特征表,如实不误伤)。
+func stepMachineHits(st rings.ReproStep) []talkHit {
+	var hits []talkHit
+	for _, text := range []string{st.Short, st.Desc, st.Purpose} {
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		hits = append(hits, ScanMachineTalk(text)...)
+	}
+	return hits
+}
+
 // reproDescHits 逐步扫描,返回有命中的步骤(seq → 命中清单)。
 func reproDescHits(rec *rings.TestClaimRecord) map[int][]talkHit {
 	out := map[int][]talkHit{}
 	for _, st := range rec.Steps {
-		if hits := ScanMachineTalk(st.Desc); len(hits) > 0 {
+		if hits := stepMachineHits(st); len(hits) > 0 {
 			out[st.Seq] = hits
 		}
 	}
@@ -177,13 +192,14 @@ func (l *Loop) rewriteReproDescs(ctx context.Context, claimID string, gs *genSes
 		if !ok {
 			continue
 		}
-		fmt.Fprintf(&b, "步骤 %d(原文:%s):\n", st.Seq, clipLine(st.Desc, 60))
+		fmt.Fprintf(&b, "步骤 %d(原文:%s / %s / %s):\n", st.Seq,
+			clipLine(st.Short, 40), clipLine(st.Desc, 60), clipLine(st.Purpose, 60))
 		for _, line := range talkHitLines(hits) {
 			b.WriteString("- " + line + "\n")
 		}
 	}
 	b.WriteString(proofreadHumanStandard + "\n")
-	b.WriteString(`只输出 JSON:{"steps":[{"seq":1,"desc":"…"},…]},只含上面点名的步骤。`)
+	b.WriteString(`只输出 JSON:{"steps":[{"seq":1,"short":"…","desc":"…","purpose":"…"},…]},只含上面点名的步骤。`)
 	text, err := gs.ask(ctx, b.String())
 	if err != nil {
 		return err
@@ -192,7 +208,7 @@ func (l *Loop) rewriteReproDescs(ctx context.Context, claimID string, gs *genSes
 	if err != nil {
 		return err
 	}
-	applyReproDescs(rec, descs)
+	applyReproTexts(rec, descs)
 	return nil
 }
 

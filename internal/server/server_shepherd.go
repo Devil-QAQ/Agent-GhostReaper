@@ -325,7 +325,8 @@ func (s *Server) handleShepherdPost(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleNodeDetail 图上节点详情(fact# / claim / step / asset 引用的
-// 点击核对面;会话页与后续页面共用)。
+// 点击核对面;会话页与后续页面共用)。事实节点带深入按钮禁用态
+// (P4-48:成果详情走发现详情端点同款字段)。
 func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 	if !s.taskExists(taskID) {
@@ -337,9 +338,13 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, fmt.Errorf("节点不存在: %w", err))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	view := map[string]any{
 		"id": n.ID, "type": string(n.Type), "title": n.Title, "status": n.Status,
 		"asset_class": string(n.AssetClass), "detail": n.Detail,
 		"created_rev": n.CreatedRev, "updated_rev": n.UpdatedRev,
-	})
+	}
+	if n.Type == rings.NodeFact {
+		view["dive_disabled"] = s.diveDisabledOf(r.Context(), taskID)
+	}
+	writeJSON(w, http.StatusOK, view)
 }

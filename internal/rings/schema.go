@@ -144,7 +144,182 @@ var migrations = [][]string{
 		//(历史语义不变:图上资产即授权域)。
 		`ALTER TABLE roe_state ADD COLUMN excluded_assets TEXT NOT NULL DEFAULT '[]'`,
 	},
+	{
+		// v10:P4-36 面板按需取数——读侧汇总投影(问题清单 #57 ②):列表类
+		// 接口与详情按条取数改读小字段投影,不再触碰事件流全量扫描。全部
+		// 为事件流的确定性投影(重放重建可完整复原,与 nodes/edges/tasks
+		// 同一纪律),写路径在 applyEvent 同事务维护;升级旧库跨过本版本时
+		// 由 Open 触发一次 RebuildProjections 回填(见 store.go)。各表分工:
+		//   unit_sessions    虫群单位会话汇总(session_started/finished)
+		//   session_labels   会话组织信息(session.meta 末态)
+		//   approval_records 审批记录(approval.record 追加日志)
+		//   claim_cases      判断卷宗摘要 + 时间线索引(testclaim.record 等)
+		//   hyp_states       假设最新评估/验证结论(hypothesis.record)
+		//   task_extras      任务描述与种子目标域(created + creator 资产)
+		//   closure_states   收口信号状态机末态(closure.record 等)
+		//   claim_qa         成果追问会话计数(shepherd.record user_message)
+		//   mirror_briefs    镜留痕摘要(mirror.record,证据装配用)
+		// nodes 追加 added_at/confirmed_at/confirmed_rev 三列(事实列表的
+		// 时刻小字段;WITHOUT ROWID 表 ALTER ADD COLUMN 常量默认值可行)。
+		`
+		CREATE TABLE unit_sessions (
+			task_id      TEXT    NOT NULL,
+			step_id      TEXT    NOT NULL,
+			transcript_id TEXT   NOT NULL,
+			unit_id      TEXT    NOT NULL DEFAULT '',
+			started_at   TEXT    NOT NULL DEFAULT '',
+			start_rev    INTEGER NOT NULL DEFAULT 0,
+			end_status   TEXT    NOT NULL DEFAULT '',
+			finished_at  TEXT    NOT NULL DEFAULT '',
+			turns        INTEGER NOT NULL DEFAULT 0,
+			reason       TEXT    NOT NULL DEFAULT '',
+			billable     REAL    NOT NULL DEFAULT 0,
+			PRIMARY KEY (task_id, step_id, transcript_id)
+		) WITHOUT ROWID`,
+		`CREATE INDEX idx_unit_sessions_unit ON unit_sessions (task_id, unit_id, step_id, start_rev)`,
+		`
+		CREATE TABLE session_labels (
+			task_id    TEXT    NOT NULL,
+			session_id TEXT    NOT NULL,
+			title      TEXT    NOT NULL DEFAULT '',
+			note       TEXT    NOT NULL DEFAULT '',
+			pinned     INTEGER NOT NULL DEFAULT 0,
+			pinned_rev INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (task_id, session_id)
+		) WITHOUT ROWID`,
+		`
+		CREATE TABLE approval_records (
+			task_id      TEXT    NOT NULL,
+			rev          INTEGER NOT NULL,
+			request_id   TEXT    NOT NULL,
+			step_id      TEXT    NOT NULL DEFAULT '',
+			unit_id      TEXT    NOT NULL DEFAULT '',
+			type         TEXT    NOT NULL,
+			action_level TEXT    NOT NULL DEFAULT '',
+			harm_class   TEXT    NOT NULL DEFAULT '',
+			intent       TEXT    NOT NULL DEFAULT '',
+			tool_name    TEXT    NOT NULL DEFAULT '',
+			tool_args    TEXT    NOT NULL DEFAULT '',
+			note         TEXT    NOT NULL DEFAULT '',
+			deny_line    TEXT    NOT NULL DEFAULT '',
+			decided_by   TEXT    NOT NULL DEFAULT '',
+			reason       TEXT    NOT NULL DEFAULT '',
+			wait_millis  INTEGER NOT NULL DEFAULT 0,
+			occurred_at  TEXT    NOT NULL DEFAULT '',
+			PRIMARY KEY (task_id, rev)
+		) WITHOUT ROWID`,
+		`CREATE INDEX idx_approval_records_req ON approval_records (task_id, request_id, rev)`,
+		`
+		CREATE TABLE claim_cases (
+			task_id TEXT NOT NULL,
+			claim_id TEXT NOT NULL,
+			falsify_step TEXT NOT NULL DEFAULT '',
+			verifier TEXT NOT NULL DEFAULT '',
+			pending_reason TEXT NOT NULL DEFAULT '',
+			verdict_rev INTEGER NOT NULL DEFAULT 0,
+			severity TEXT NOT NULL DEFAULT '',
+			repro_steps INTEGER NOT NULL DEFAULT 0,
+			retest_verdict TEXT NOT NULL DEFAULT '',
+			retest_round INTEGER NOT NULL DEFAULT 0,
+			retest_at TEXT NOT NULL DEFAULT '',
+			replay_verdict TEXT NOT NULL DEFAULT '',
+			replay_round INTEGER NOT NULL DEFAULT 0,
+			replay_at TEXT NOT NULL DEFAULT '',
+			has_evidence INTEGER NOT NULL DEFAULT 0,
+			report_excluded INTEGER NOT NULL DEFAULT 0,
+			report_excluded_reason TEXT NOT NULL DEFAULT '',
+			evidence_binds INTEGER NOT NULL DEFAULT 0,
+			repro_events INTEGER NOT NULL DEFAULT 0,
+			timeline TEXT NOT NULL DEFAULT '[]',
+			alternatives TEXT NOT NULL DEFAULT '[]',
+			alt_killed TEXT NOT NULL DEFAULT '[]',
+			repro TEXT NOT NULL DEFAULT '',
+			evidence TEXT NOT NULL DEFAULT '[]',
+			discoverer TEXT NOT NULL DEFAULT '',
+			discover_step TEXT NOT NULL DEFAULT '',
+			discover_session TEXT NOT NULL DEFAULT '',
+			timing TEXT NOT NULL DEFAULT '{}',
+			PRIMARY KEY (task_id, claim_id)
+		) WITHOUT ROWID`,
+		`
+		CREATE TABLE hyp_states (
+			task_id TEXT NOT NULL,
+			hypothesis_id TEXT NOT NULL,
+			verify_step TEXT NOT NULL DEFAULT '',
+			verifier TEXT NOT NULL DEFAULT '',
+			decision TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT '',
+			verdict TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (task_id, hypothesis_id)
+		) WITHOUT ROWID`,
+		`
+		CREATE TABLE task_extras (
+			task_id TEXT NOT NULL PRIMARY KEY,
+			description TEXT NOT NULL DEFAULT '',
+			targets TEXT NOT NULL DEFAULT '[]'
+		) WITHOUT ROWID`,
+		`
+		CREATE TABLE closure_states (
+			task_id TEXT NOT NULL PRIMARY KEY,
+			anchor_at TEXT NOT NULL DEFAULT '',
+			anchor_kind TEXT NOT NULL DEFAULT '',
+			rounds INTEGER NOT NULL DEFAULT 0,
+			pending TEXT NOT NULL DEFAULT '',
+			pending_at TEXT NOT NULL DEFAULT '',
+			pending_parked INTEGER NOT NULL DEFAULT 0,
+			task_config TEXT NOT NULL DEFAULT ''
+		) WITHOUT ROWID`,
+		`
+		CREATE TABLE claim_qa (
+			task_id TEXT NOT NULL,
+			claim_id TEXT NOT NULL,
+			round INTEGER NOT NULL,
+			questions INTEGER NOT NULL DEFAULT 0,
+			started_at TEXT NOT NULL DEFAULT '',
+			last_at TEXT NOT NULL DEFAULT '',
+			first_rev INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (task_id, claim_id, round)
+		) WITHOUT ROWID`,
+		`
+		CREATE TABLE mirror_briefs (
+			task_id TEXT NOT NULL,
+			exchange_id TEXT NOT NULL,
+			type TEXT NOT NULL DEFAULT '',
+			method TEXT NOT NULL DEFAULT '',
+			url TEXT NOT NULL DEFAULT '',
+			status INTEGER NOT NULL DEFAULT 0,
+			tls TEXT NOT NULL DEFAULT '',
+			error TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (task_id, exchange_id)
+		) WITHOUT ROWID`,
+		`ALTER TABLE nodes ADD COLUMN added_at TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE nodes ADD COLUMN confirmed_at TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE nodes ADD COLUMN confirmed_rev INTEGER NOT NULL DEFAULT 0`,
+	},
+	{
+		// v11:P4-44 资产范围归属与任务类型(问题清单 #61 ①②)。放行
+		// 清单是 roe_state"当前值"投影的组成部分(渗透任务范围外发现
+		// 资产经面板放行后转范围内);任务类型随 created 定格进
+		// task_extras(建后不可改,读侧零事件流)。旧库默认空 = 无放行、
+		// 无类型(存量任务按未标呈现,行为等同红队不锁)——语义即正确,
+		// 无需回填。
+		`ALTER TABLE roe_state ADD COLUMN scope_approved TEXT NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE task_extras ADD COLUMN task_type TEXT NOT NULL DEFAULT ''`,
+	},
+	{
+		// v12:P4-49 建任务注意事项字段(问题清单 #70):造物主对做法的
+		// 软要求随 roe.updated 落账(指针语义,nil = 不动,见 RoeUpdated);
+		// 投影逐笔叠加(COALESCE),旧库默认空 = 无注意事项(历史语义
+		// 不变)。
+		`ALTER TABLE roe_state ADD COLUMN creator_notes TEXT NOT NULL DEFAULT ''`,
+	},
 }
+
+// projectionFloor 投影初次落库的 schema 版本(v10,P4-36):升级跨过本版本
+// 时旧库的新投影表为空,必须全量重放回填一次,否则面板列表呈现空数据
+// (重建语义同 RebuildProjections 的"换库迁移"用途;判定与触发在
+// store.go Open 内完成)。
+const projectionFloor = 10
 
 // migrate 将库结构推进到最新版本。仅在 Open 时、写者启动前调用,
 // 单进程单 Store 前提下无并发写者,无需排队。

@@ -650,3 +650,34 @@ func TestExchangeRawSide(t *testing.T) {
 		t.Fatalf("无响应形态的单侧拼接与全量不一致:%q", full)
 	}
 }
+
+// TestP446StepStatusWordsAligned 报告步骤状态词与面板口径一致(P4-46 ②
+// 状态总表):dispatched=排队中、aborted=已中止、approval_denied=审批拒绝
+// 终止——报告导出的状态词与 web/lib/api.js STEP_STATUS 同词,旧词零残留。
+func TestP446StepStatusWordsAligned(t *testing.T) {
+	for status, want := range map[string]string{
+		"dispatched": "排队中", "running": "执行中", "done": "已完成",
+		"exhausted": "预算耗尽", "blocked": "受阻", "approval_denied": "审批拒绝终止",
+		"cancelled": "已取消", "aborted": "已中止", "failed": "失败",
+	} {
+		if stepStatusWordsMap[status] != want {
+			t.Fatalf("报告步骤词 %s = %q,应为 %q", status, stepStatusWordsMap[status], want)
+		}
+	}
+	for _, old := range []string{"已派发", "已终止"} {
+		for status, word := range stepStatusWordsMap {
+			if strings.Contains(word, old) {
+				t.Fatalf("报告步骤词 %s 仍含旧词 %q: %q", status, old, word)
+			}
+		}
+	}
+	// 计数固定序清单必须覆盖词表全部键(P4-46 ②:approval_denied 曾漏列,
+	// 计数入总数而词被吞)。
+	if got := stepStatusWords(map[string]int{
+		"done": 1, "exhausted": 1, "failed": 1, "blocked": 1, "approval_denied": 1,
+		"aborted": 1, "cancelled": 1, "running": 1, "dispatched": 1,
+	}); !strings.Contains(got, "受阻 1") || !strings.Contains(got, "审批拒绝终止 1") ||
+		!strings.Contains(got, "排队中 1") || !strings.Contains(got, "已中止 1") {
+		t.Fatalf("步骤计数词应含全部九态词(受阻/审批拒绝终止/排队中/已中止),实际: %q", got)
+	}
+}

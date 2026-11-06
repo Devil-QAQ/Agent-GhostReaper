@@ -36,6 +36,7 @@ import {
   HARM_CLASS_LABELS,
   assetClassMeta,
   assetSourceMeta,
+  fetchJSON,
   levelVariant,
   postJSON,
   usePolling,
@@ -43,7 +44,8 @@ import {
 
 // RoE 授权面板(8.3 驾驶域):审批弹门(待决裁决+拒绝线记录的研判后
 // 放行)+ 操作约束(快照+变更弹窗,审批门槛)+ 任务级拦截 + 目标管理。
-// 增删改全部记账,下一轮生效;对话内容不能代替裁决(R9)。P2-13b
+// 增删改全部记账(资产范围摘除即时止损,P4-45;约束变更下一轮生效);
+// 对话内容不能代替裁决(R9)。P2-13b
 // 各区改 Card 组件、弹窗对齐 LLM配置/Agent 基准形态(Field 左标签 +
 // 高级折叠 + 无改动禁用保存)。
 
@@ -84,7 +86,7 @@ export function RoePage({ currentTask }) {
       <div className="flex flex-col gap-6">
         <PageHeader
           title="RoE · 授权面板"
-          subtitle="造物主画边界,虫群在边界内执行 · 增删改全部记账,下一轮生效"
+          subtitle="造物主画边界,虫群在边界内执行 · 增删改全部记账"
         />
         <EmptyState
           icon="scale"
@@ -100,7 +102,7 @@ export function RoePage({ currentTask }) {
     <div className="flex flex-col gap-6">
       <PageHeader
         title="RoE · 授权面板"
-        subtitle="造物主画边界,虫群在边界内执行 · 增删改全部记账,下一轮生效"
+        subtitle="造物主画边界,虫群在边界内执行 · 增删改全部记账"
       />
 
       <ApprovalSection taskID={tid} />
@@ -112,32 +114,89 @@ export function RoePage({ currentTask }) {
   );
 }
 
-// ---- 资产范围(P4-05,问题清单 #10) ----
+// ---- 资产范围(P4-05,问题清单 #10;P4-45 摘除即止损) ----
+
+// sameIDSet 两个 ID 集合是否一致(乐观覆盖交还判定用)。
+function sameIDSet(a, b) {
+  return a.size === b.size && [...a].every((x) => b.has(x));
+}
 
 // AssetScopeSection 授权资产范围:资产默认全部纳入授权范围,不勾即
-// 摘除——摘除的资产主宰不再派发覆盖它的意图(下一轮生效,在飞步骤
-// 自然收尾)。逐项即时生效,全部记账(roe.updated 事件带变更备注)。
+// 摘除——摘除即止损:覆盖该资产的在途单位立即终止、排队步骤取消,
+// 主宰下一轮不再派发覆盖它的意图。摘除先弹确认(告知将终止多少个
+// 在途单位),全部记账(roe.updated 事件带变更备注)。
+// P4-47 B ① 乐观更新:勾选点下即翻、后台提交、失败回弹+人话提示,
+// 界面不等网络往返;本地覆盖在服务端轮询跟上一致后自动交还。
 function AssetScopeSection({ taskID }) {
   const { data: roe, error } = usePolling(`/api/tasks/${taskID}/roe`, 2000);
   const { data: assetData } = usePolling(`/api/tasks/${taskID}/assets`, 5000);
   const assets = Array.isArray(assetData?.assets) ? assetData.assets : [];
-  const excluded = new Set(roe?.excluded_assets || []);
-  const [busy, setBusy] = React.useState(false);
+  const serverExcluded = new Set(roe?.excluded_assets || []);
+  const [overlay, setOverlay] = React.useState(null); // Set|null;null=跟随服务端
+  // 服务端已与本地说一致(轮询跟上)→ 交还服务端数据源。
+  React.useEffect(() => {
+    setOverlay((cur) => (cur && sameIDSet(cur, serverExcluded) ? null : cur));
+  }, [roe]);
+  const excluded = overlay ?? serverExcluded;
+  // 摘除确认弹窗(P4-45):pending = {asset, impact} 影响预览;null 关闭。
+  const [pending, setPending] = React.useState(null);
 
-  const toggle = async (asset, include) => {
-    const next = new Set(excluded);
-    if (include) next.delete(asset.id);
-    else next.add(asset.id);
-    setBusy(true);
-    const { ok, body } = await postJSON(`/api/tasks/${taskID}/roe/assets`, {
-      excluded: [...next],
-    });
-    setBusy(false);
+  const submit = async (asset, include, next, prevSet) => {
+    // 网络/服务端失败统一走回弹(postJSON 在网络不通时抛异常,一并兜住)。
+    let ok = false;
+    let body = null;
+    try {
+      ({ ok, body } = await postJSON(`/api/tasks/${taskID}/roe/assets`, {
+        excluded: [...next],
+      }));
+    } catch {
+      ok = false;
+    }
     if (!ok) {
-      toast.error(`被拒:${body.error || "原因未说明"}`);
+      // 失败回弹:还原到本次点击前的呈现;授权范围未被改动。
+      setOverlay(sameIDSet(prevSet, serverExcluded) ? null : prevSet);
+      toast.error(`未生效:${body?.error || "网络未连通"},已还原勾选`);
       return;
     }
-    toast.success(include ? `已纳入授权:${asset.title}` : `已摘除:${asset.title},不再派发`);
+    if (include) {
+      toast.success(`已纳入授权:${asset.title}`);
+      return;
+    }
+    const units = body?.stopped_units || 0;
+    const steps = body?.stopped_steps || 0;
+    toast.success(
+      units > 0 || steps > 0
+        ? `已摘除:${asset.title},终止 ${units} 个在途单位,取消 ${steps} 个排队步骤`
+        : `已摘除:${asset.title},无在途单位与排队步骤`
+    );
+  };
+
+  // 勾上(纳入)点下即翻、直接提交;取消勾(摘除)先取影响预览再弹
+  // 确认——确认按下时乐观翻勾并后台提交(确认才是决策时刻)。
+  const toggle = async (asset, include) => {
+    const prevSet = excluded;
+    const next = new Set(prevSet);
+    if (include) {
+      next.delete(asset.id);
+      setOverlay(next);
+      await submit(asset, true, next, prevSet);
+      return;
+    }
+    const r = await fetchJSON(
+      `/api/tasks/${taskID}/roe/assets/impact?assets=${encodeURIComponent(asset.id)}`
+    );
+    if (!r.ok) {
+      toast.error(`读取影响失败:${r.body?.error || "原因未说明"}`);
+      return;
+    }
+    next.add(asset.id);
+    setPending({
+      asset,
+      next,
+      prevSet,
+      units: r.body?.units?.length || 0,
+      steps: r.body?.queued?.length || 0,
+    });
   };
 
   const excludedCount = assets.filter((a) => excluded.has(a.id)).length;
@@ -147,7 +206,7 @@ function AssetScopeSection({ taskID }) {
       <CardContent className="flex flex-col gap-4 p-5">
         <SectionHeader title="资产范围">
           <span className="text-xs text-muted-foreground">
-            默认全部纳入授权;摘除的不再派发,下一轮生效
+            默认全部纳入授权;摘除即终止覆盖它的在途工作,不再派发
           </span>
           <span className="ml-auto num text-xs text-muted-foreground">
             摘除 {excludedCount}/{assets.length}
@@ -167,7 +226,6 @@ function AssetScopeSection({ taskID }) {
               >
                 <Checkbox
                   checked={!excluded.has(a.id)}
-                  disabled={busy}
                   onCheckedChange={(v) => toggle(a, Boolean(v))}
                 />
                 <span className="min-w-0 flex-1 truncate num text-xs" title={a.title}>
@@ -184,8 +242,52 @@ function AssetScopeSection({ taskID }) {
             ))}
           </div>
         )}
+        <ConfirmRemoveDialog
+          pending={pending}
+          onCancel={() => setPending(null)}
+          onConfirm={() => {
+            // 确认即决策时刻:关弹窗、乐观翻勾、后台提交(P4-47 B ①)。
+            if (!pending) return;
+            setPending(null);
+            setOverlay(pending.next);
+            submit(pending.asset, false, pending.next, pending.prevSet);
+          }}
+        />
       </CardContent>
     </Card>
+  );
+}
+
+// ConfirmRemoveDialog 摘除确认(P4-45):如实告知将终止的在途单位与排队
+// 步骤笔数(0 个也如实),确认后才执行止损。确认即翻勾并关窗(P4-47
+// B ① 乐观更新,提交转后台)。
+function ConfirmRemoveDialog({ pending, onCancel, onConfirm }) {
+  const open = !!pending;
+  return (
+    <Dialog open={open} onOpenChange={(v) => !v && onCancel()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>摘除资产</DialogTitle>
+          <DialogDescription>
+            {pending
+              ? pending.units > 0 || pending.steps > 0
+                ? `将摘除「${pending.asset.title}」,终止 ${pending.units} 个在途单位${
+                    pending.steps > 0 ? `,取消 ${pending.steps} 个排队步骤` : ""
+                  };主宰下一轮不再派发它。`
+                : `将摘除「${pending.asset.title}」,无在途单位与排队步骤;主宰下一轮不再派发它。`
+              : ""}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={onCancel}>
+            取消
+          </Button>
+          <Button variant="destructive" onClick={onConfirm}>
+            确认摘除
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -457,6 +559,18 @@ function ConstraintSection({ taskID }) {
             </div>
             <ConstraintRow label="禁止工具" values={roe.denied_tools} empty="无" />
             <ConstraintRow label="仅允许工具" values={roe.allowed_tools} empty="不设白名单" />
+            {/* 注意事项(P4-49):对做法的软要求,建后在变更约束弹窗改,
+                下一轮生效 */}
+            <div className="flex flex-wrap items-baseline gap-2">
+              <span className="text-muted-foreground">注意事项</span>
+              {roe.creator_notes ? (
+                <span className="min-w-0 whitespace-pre-line text-sm">
+                  {roe.creator_notes}
+                </span>
+              ) : (
+                <span className="text-xs text-muted-foreground">无</span>
+              )}
+            </div>
             {roe.note && (
               <div className="text-xs text-muted-foreground">最近变更说明:{roe.note}</div>
             )}
@@ -596,6 +710,7 @@ function ConstraintDialog({ taskID, roe }) {
         denied: (roe.denied_tools || []).join(", "),
         allowed: (roe.allowed_tools || []).join(", "),
         threshold: roe.approval_threshold || "修改与持久化",
+        notes: roe.creator_notes || "",
         note: "",
       });
     }
@@ -608,6 +723,7 @@ function ConstraintDialog({ taskID, roe }) {
       form.denied !== (roe.denied_tools || []).join(", ") ||
       form.allowed !== (roe.allowed_tools || []).join(", ") ||
       form.threshold !== roe.approval_threshold ||
+      form.notes.trim() !== (roe.creator_notes || "") ||
       form.note.trim() !== ""
     );
   })();
@@ -620,7 +736,9 @@ function ConstraintDialog({ taskID, roe }) {
       denied_tools: csv(form.denied),
       allowed_tools: csv(form.allowed),
       approval_threshold: form.threshold,
-      // 任务级规则有独立端点(逐条增删改),快照提交时透传当前值不动它。
+      // 注意事项显式提交(空 = 清空);任务级规则有独立端点(逐条增删改),
+      // 快照提交时透传当前值不动它。
+      creator_notes: form.notes.trim(),
       intent_rules: (roe.intent_rules || []).map((r) => ({
         id: r.id,
         action: r.action,
@@ -691,6 +809,20 @@ function ConstraintDialog({ taskID, roe }) {
                   </SelectContent>
                 </Select>
                 <span className="text-xs text-muted-foreground">该级及以上需批准</span>
+              </Field>
+              <Field label="注意事项" className="items-start" labelClassName="mt-2">
+                <div className="flex min-w-0 flex-1 flex-col gap-1">
+                  <Textarea
+                    rows={2}
+                    className="min-w-0 flex-1 resize-none bg-input-surface"
+                    value={form.notes}
+                    onChange={(e) => setForm({ ...form, notes: e.target.value })}
+                    placeholder="如：用小字典，不要用大字典；不要修改任何数据"
+                  />
+                  <span className="text-xs text-muted-foreground">
+                    对做法的要求,每行一条;清空即删除,下一轮生效
+                  </span>
+                </div>
               </Field>
               <Field label="变更说明">
                 <Input

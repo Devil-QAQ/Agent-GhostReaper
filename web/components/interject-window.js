@@ -139,7 +139,7 @@ export function InterjectWindow({ open, target, task, onClose }) {
       toast.error(body?.error || "终止失败");
       return;
     }
-    toast.success("单位已终止");
+    toast.success("单位已中止");
     onClose();
   };
 

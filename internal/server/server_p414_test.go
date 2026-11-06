@@ -29,7 +29,7 @@ func newP414Server(t *testing.T) (*Server, *http.ServeMux, *rings.Store) {
 func seedP414Claim(t *testing.T, store *rings.Store, h *http.ServeMux) string {
 	t.Helper()
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"P4-14 追问验证"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"P4-14 追问验证"}`, http.StatusOK, &created)
 	task := created["id"]
 	seedFullClaim(t, store, task)
 	// 确认定稿(叙述冻结)——预载包与预载摘要卡的数据源。

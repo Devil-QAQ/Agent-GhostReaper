@@ -1,10 +1,12 @@
-// 旧状态词残留检查(P4-28 ⑥,问题清单 #48):构建期闸门——状态显示层
-// 合并 12→6("待验证/反证中/待下轮反证"并入"锤炼中")后,旧状态词作为
-// 徽标/筛选/时间线显示词、机器状态词作为报告导出词均不得再出现;悬停
-// 细分句(api.js hint)与积压行口径词(findings-page)为规范内用法,
-// 按"词以显示位形态出现"的精确模式扫描,不误伤。由 Makefile web 目标
-// 在 npm build 前置调用(与 check-ui-words 同款挂法),go test 前同跑。
-// 零依赖。
+// 旧状态词残留检查(P4-28 ⑥,问题清单 #48;P4-46 ② 追加):构建期闸门——
+// 状态显示层合并 12→6("待验证/反证中/待下轮反证"并入"锤炼中")后,旧
+// 状态词作为徽标/筛选/时间线显示词、机器状态词作为报告导出词均不得再
+// 出现;悬停细分句(api.js hint)与积压行口径词(findings-page)为规范内
+// 用法,按"词以显示位形态出现"的精确模式扫描,不误伤。P4-46 ② 追加:
+// 步骤 dispatched 显示词统一"排队中"(旧词"已派发")、单位/步骤 aborted
+// 统一"已中止"(旧词"已终止")——显示文件零出现,词表正向断言就位。
+// 由 Makefile web 目标在 npm build 前置调用(与 check-ui-words 同款挂
+// 法),go test 前同跑。零依赖。
 //
 // 判定口径:
 //   - 旧词显示位模式(前端):`label: "旧词"`、筛选对 `["状态值", "旧词"]`、
@@ -70,6 +72,18 @@ for (const rel of feFiles) {
   }
 }
 
+// P4-46 ②:全站显示文件零出现(dispatched→排队中、aborted→已中止后,
+// "已派发/已终止"不再是任何界面词;toast/tooltip 文案同样不得回潮)。
+const P46_OLD_WORDS = ["已派发", "已终止"];
+for (const rel of feFiles) {
+  const src = read(rel);
+  for (const w of P46_OLD_WORDS) {
+    if (src.includes(w)) {
+      hit(`${rel}: 旧状态词 "${w}" 残留(P4-46 ②:dispatched→排队中、aborted→已终止→已中止)`);
+    }
+  }
+}
+
 // ---- 后端:Go 显示词 ----
 const GO_FILES = [
   "internal/rings/statuswords.go",
@@ -97,15 +111,21 @@ for (const rel of GO_FILES) {
   }
 }
 
-// ---- 正向断言:六词就位 ----
+// ---- 正向断言:六词就位 + P4-46 步骤词就位 ----
 const api = read("web/lib/api.js");
 for (const w of ["锤炼中", "已确认", "待确认", "成立", "不成立", "未能定论"]) {
   if (!api.includes(w)) hit(`web/lib/api.js: 六词之 "${w}" 缺失`);
 }
 if (!api.includes('label: "锤炼中"')) hit("web/lib/api.js: 合并词 锤炼中 未入词表");
+if (!/dispatched:\s*"排队中"/.test(api)) hit('web/lib/api.js: STEP_STATUS.dispatched 应为 "排队中"(P4-46 ②)');
+if (!/aborted:\s*"已中止"/.test(api)) hit('web/lib/api.js: STEP_STATUS.aborted 应为 "已中止"(P4-46 ②)');
 const rings = read("internal/rings/statuswords.go");
 for (const w of ["锤炼中", "已确认", "待确认", "已修复", "搁置", "成立", "已废弃"]) {
   if (!rings.includes(w)) hit(`internal/rings/statuswords.go: 状态词 "${w}" 缺失`);
+}
+const reportWords = read("internal/report/report.go");
+if (!/"dispatched":\s*"排队中"/.test(reportWords)) {
+  hit('internal/report/report.go: 报告步骤词 dispatched 应为 "排队中"(P4-46 ②)');
 }
 const findings = read("web/views/findings-page.js");
 if (!findings.includes("锤炼中：")) hit("web/views/findings-page.js: 积压行(锤炼中：)缺失");

@@ -21,7 +21,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"ghostreaper/internal/buildinfo"
 	"ghostreaper/internal/failover"
@@ -135,12 +134,15 @@ type ConfigView struct {
 		StallWindowSeconds int `json:"stall_window_seconds"` // 进度停滞判定窗口(秒)
 		BurnAnomalyTokens  int `json:"burn_anomaly_tokens"`  // 预算消耗异常阈值(token/拍)
 	} `json:"deviation"`
-	// System 系统级参数(系统设置页只读呈现;P2-08c 设置收窄为系统级,
-	// 装配层注入)。
+	// System 系统级参数(系统设置页呈现;监听/路径三项为启动只读装配
+	// 参数,P2-08c 设置收窄时注入;任务并发 P4-34 起入系统设置可改)。
 	System struct {
 		Addr     string `json:"addr"`      // HTTP 监听地址
 		DBPath   string `json:"db_path"`   // 年轮账本 SQLite 路径
 		TasksDir string `json:"tasks_dir"` // 任务工作目录根
+		// TaskConcurrency 任务并发(同时运行的任务数,P4-34):生效值 +
+		// 默认 + 覆盖审计;写入口 POST /api/config/system。
+		TaskConcurrency agentIntParam `json:"task_concurrency"`
 	} `json:"system"`
 	// Search 搜索配置(P3-03,系统设置「搜索配置」卡):key 与代理凭据
 	// 永不回显明文——只给打码视图与"是否已配置"。
@@ -271,6 +273,10 @@ func (s *Server) Handler() *http.ServeMux {
 	mux.HandleFunc("POST /api/task-categories", s.handleTaskCategoryCreate)
 	mux.HandleFunc("POST /api/task-categories/{id}", s.handleTaskCategoryRename)
 	mux.HandleFunc("DELETE /api/task-categories/{id}", s.handleTaskCategoryDelete)
+	// 任务草稿(P4-40):键值表存 JSON,不进年轮事件流。
+	mux.HandleFunc("GET /api/task-drafts", s.handleTaskDraftsList)
+	mux.HandleFunc("POST /api/task-drafts", s.handleTaskDraftSave)
+	mux.HandleFunc("DELETE /api/task-drafts/{id}", s.handleTaskDraftDelete)
 	mux.HandleFunc("GET /api/search", s.handleSearch) // P3-10 命令面板:跨任务搜任务与发现
 	mux.HandleFunc("GET /api/tasks/{id}/assets", s.handleAssetTree)
 	mux.HandleFunc("POST /api/tasks/{id}/assets", s.handleAssetCreate) // P4-05 手动新增资产(批量,来源=手动)
@@ -279,9 +285,10 @@ func (s *Server) Handler() *http.ServeMux {
 	// 唯一端点,进度图为首个接入方(年轮图 P2-11 接入)。
 	mux.HandleFunc("GET /api/tasks/{id}/graph", s.handleTaskGraph)
 	mux.HandleFunc("GET /api/config", s.handleConfig)
-	mux.HandleFunc("POST /api/config/search", s.handleSearchUpdate)   // P3-03 搜索配置(后端/key/独立出口代理)
-	mux.HandleFunc("POST /api/config/ua", s.handleUAUpdate)           // P3-13c UA 策略(随机池/固定自定义/模拟工具)
-	mux.HandleFunc("GET /api/diagnostics", s.handleDiagnosticsExport) // P3-13b ④ 诊断包(日志+版本+平台+脱敏配置 zip;P4-32 范围过滤与内容勾选)
+	mux.HandleFunc("POST /api/config/system", s.handleSystemParamsUpdate) // P4-34 任务并发写
+	mux.HandleFunc("POST /api/config/search", s.handleSearchUpdate)       // P3-03 搜索配置(后端/key/独立出口代理)
+	mux.HandleFunc("POST /api/config/ua", s.handleUAUpdate)               // P3-13c UA 策略(随机池/固定自定义/模拟工具)
+	mux.HandleFunc("GET /api/diagnostics", s.handleDiagnosticsExport)     // P3-13b ④ 诊断包(日志+版本+平台+脱敏配置 zip;P4-32 范围过滤与内容勾选)
 
 	// ---- Agent 配置(P2-08d):牧者/主宰/虫群三组——提示词可编辑正文
 	// (A 段保存/恢复默认,固定段只读)+ 运行参数(并发/重锚定/心跳/
@@ -311,14 +318,21 @@ func (s *Server) Handler() *http.ServeMux {
 	mux.HandleFunc("POST /api/tasks/{id}/recover", s.handleTaskRecover)
 	mux.HandleFunc("GET /api/tasks/{id}/roe", s.handleRoEGet)
 	mux.HandleFunc("POST /api/tasks/{id}/roe", s.handleRoEUpdate)
-	mux.HandleFunc("POST /api/tasks/{id}/roe/assets", s.handleRoEAssetScope) // P4-05 授权资产范围(纳入/摘除)
+	mux.HandleFunc("POST /api/tasks/{id}/roe/assets", s.handleRoEAssetScope)        // P4-05 授权资产范围(纳入/摘除;P4-45 摘除即止损)
+	mux.HandleFunc("GET /api/tasks/{id}/roe/assets/impact", s.handleRoEAssetImpact) // P4-45 摘除影响预览(确认弹窗)
+	mux.HandleFunc("POST /api/tasks/{id}/scope/approve", s.handleScopeApprove)      // P4-44 待批资产批量放行(渗透任务)
+	mux.HandleFunc("POST /api/tasks/{id}/scope/ignore", s.handleScopeIgnore)        // P4-44 待批资产批量忽略(渗透任务)
 	mux.HandleFunc("GET /api/tasks/{id}/goals", s.handleGoalsList)
 	mux.HandleFunc("POST /api/tasks/{id}/goals", s.handleGoalCreate)
 	mux.HandleFunc("POST /api/tasks/{id}/goals/{gid}/achieve", s.handleGoalAchieve)
 	mux.HandleFunc("GET /api/tasks/{id}/claims", s.handleClaimsList)
+	mux.HandleFunc("GET /api/tasks/{id}/unread", s.handleUnread)      // P4-47 A 发现未读红点
+	mux.HandleFunc("POST /api/tasks/{id}/seen", s.handleSeen)         // P4-47 A 子页签已读线(服务端盖戳)
+	mux.HandleFunc("POST /api/tasks/{id}/dive", s.handleOperatorDive) // P4-48 操作者深入指令(记账+唤醒)
 	mux.HandleFunc("POST /api/tasks/{id}/claims/{cid}/retest", s.handleClaimRetest)
 	mux.HandleFunc("POST /api/tasks/{id}/claims/{cid}/replay", s.handleClaimReplay)
 	mux.HandleFunc("GET /api/tasks/{id}/claims/{cid}", s.handleClaimDetail)
+	mux.HandleFunc("GET /api/tasks/{id}/claims/{cid}/repro", s.handleClaimRepro) // P4-36 ② 复现步骤分段取
 	mux.HandleFunc("POST /api/tasks/{id}/claims/{cid}/reopen", s.handleClaimReopen)
 	mux.HandleFunc("GET /api/tasks/{id}/hypotheses", s.handleHypothesesList)
 	mux.HandleFunc("GET /api/tasks/{id}/hypotheses/{hid}", s.handleHypothesisDetail)
@@ -376,6 +390,7 @@ func (s *Server) Handler() *http.ServeMux {
 	mux.HandleFunc("POST /api/tasks/{id}/units/{step}/pause", s.handleUnitPause)
 	mux.HandleFunc("POST /api/tasks/{id}/units/{step}/resume", s.handleUnitResume)
 	mux.HandleFunc("GET /api/tasks/{id}/overmind", s.handleOvermindStatus)
+	mux.HandleFunc("GET /api/tasks/{id}/panorama", s.handlePanoramaLive) // P4-46 ① 在途全景实时视图
 	mux.HandleFunc("POST /api/tasks/{id}/overmind/pause", s.handleOvermindPause)
 	mux.HandleFunc("POST /api/tasks/{id}/overmind/resume", s.handleOvermindResume)
 	mux.HandleFunc("POST /api/tasks/{id}/hibernate", s.handleTaskHibernate)
@@ -516,6 +531,7 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		Title         string             `json:"title"`
 		Description   string             `json:"description,omitempty"` // 描述(created 事件锚点)
 		Targets       []string           `json:"targets"`               // 目标(种子资产标识)
+		TaskType      string             `json:"task_type"`             // 任务类型(P4-44:pentest/redteam;空=存量未标)
 		Category      string             `json:"category,omitempty"`    // 分类 ID
 		Pinned        bool               `json:"pinned"`                // 置顶
 		Status        string             `json:"status"`                // Manager 运行态(进程内真值)
@@ -527,6 +543,9 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		GoalsTotal    int                `json:"goals_total"`           // 目标总数
 		RunningUnits  int                `json:"running_units"`         // 运行中虫群单位数(图上 running 步骤)
 		PendingAppr   int                `json:"pending_approvals"`     // 待审批笔数(P4-23:任务行与 RoE 标签红点计数,审批门现读)
+		PendingScope  int                `json:"pending_scope"`         // 待批资产数(P4-44 ③:任务行与侧栏任务入口红点计数,处理即消)
+		UnreadClaims  int                `json:"unread_claims"`         // 发现·成果未读数(P4-47 A:看过即消,任务行汇总红点数据源)
+		UnreadFacts   int                `json:"unread_facts"`          // 发现·事实未读数(P4-47 A:同上,与成果独立记已读)
 		Closure       *closurePromptView `json:"closure,omitempty"`     // 待决收口提醒(P4-18,仅运行中任务)
 		ClosureConfig *closureConfigView `json:"closure_config"`        // 收口配置生效值(审核迭代 1,常呈)
 	}
@@ -540,8 +559,13 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 			Category: row.Category, Pinned: row.Pinned,
 		}
 		d := s.digestOf(r.Context(), row.ID)
-		v.Description, v.Targets = d.Description, d.Targets
+		v.Description, v.Targets, v.TaskType = d.Description, d.Targets, d.TaskType
 		v.GoalsAchieved, v.GoalsTotal, v.RunningUnits = d.GoalsAchieved, d.GoalsTotal, d.RunningUnits
+		if v.TaskType == rings.TaskTypePentest {
+			if pending, err := s.Store.PendingScopeAssets(r.Context(), row.ID); err == nil {
+				v.PendingScope = len(pending)
+			}
+		}
 		if by, _ := row.Detail["settled_by"].(string); by == rings.SettleByTaskGate || by == rings.SettleByClosurePrompt {
 			v.Settled = true
 			v.SettledBy = by
@@ -554,6 +578,7 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 			v.BlockedSteps = s.blockedStepsOf(r.Context(), row.ID)
 		}
 		v.PendingAppr = len(s.Gate.Pending(row.ID))
+		v.UnreadClaims, v.UnreadFacts = s.unreadOf(r.Context(), row.ID)
 		v.Closure = s.closureViewOf(r, row.ID, v.Status)
 		v.ClosureConfig = s.closureConfigViewOf(r, row.ID)
 		out = append(out, v)
@@ -574,6 +599,7 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 		ID               string         `json:"id"`
 		Title            string         `json:"title"`
 		Description      string         `json:"description"` // 描述(可选)
+		TaskType         string         `json:"task_type"`   // 任务类型(P4-44:必填,渗透/红队,建后不可改)
 		Category         string         `json:"category"`    // 分类 ID(可选,P2-06h)
 		RoE              *roeBody       `json:"roe"`
 		Assets           []assetIn      `json:"assets"`
@@ -581,13 +607,20 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 		TimeoutSeconds   int            `json:"timeout_seconds"`    // 整体超时(秒);<=0 = 不限
 		AnchorEverySteps int            `json:"anchor_every_steps"` // 重锚定间隔(步);<=0 = Agent 页全局默认
 		Closure          *closureBodyIn `json:"closure"`            // 收口提醒任务级配置(审核迭代 1;缺省 = 开 + 用全局默认)
+		DraftID          string         `json:"draft_id"`           // 来源草稿(P4-40):创建成功后对应草稿删除
 	}
 	if !readJSON(w, r, &req) {
 		return
 	}
 	// P4-16:任务名可选(空 = 列表以任务 ID 呈现);目标与资产必填
 	//(无目标的永动任务与无资产的空转任务在建单口拒住,人话提示)。
+	// P4-44:任务类型必填(渗透=范围外发现资产待批锁定;红队=直接可测)。
 	title := strings.TrimSpace(req.Title)
+	taskType := strings.TrimSpace(req.TaskType)
+	if !rings.IsValidTaskType(taskType) {
+		writeErr(w, http.StatusBadRequest, errors.New("任务类型必填:选择渗透任务或红队任务"))
+		return
+	}
 	if req.TimeoutSeconds < 0 {
 		writeErr(w, http.StatusBadRequest, errors.New("整体超时不能为负"))
 		return
@@ -639,6 +672,13 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	roe := rings.RoeUpdated{}
 	if req.RoE != nil {
+		// 注意事项(P4-49):建任务表单携带,归一 + 长度校验(人话拒建)。
+		notes, nerr := normalizeCreatorNotesIn(req.RoE.CreatorNotes)
+		if nerr != nil {
+			writeErr(w, http.StatusBadRequest, nerr)
+			return
+		}
+		req.RoE.CreatorNotes = notes
 		roe = req.RoE.toRings()
 		// 提取确认的约束:补齐缺省规则 ID + 范围引用(资产标识)映射为
 		// 种子资产 ID(P2-08f:提取的约束以表单内资产圈范围,建任务时
@@ -646,8 +686,14 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 		roe.IntentRules = normalizeIntentRules(roe.IntentRules, seed.titleToID)
 	}
 	var detail map[string]any
+	if taskType != "" {
+		detail = map[string]any{"task_type": taskType}
+	}
 	if req.TimeoutSeconds > 0 {
-		detail = map[string]any{"timeout_seconds": req.TimeoutSeconds}
+		if detail == nil {
+			detail = map[string]any{}
+		}
+		detail["timeout_seconds"] = req.TimeoutSeconds
 	}
 	if req.AnchorEverySteps > 0 {
 		if detail == nil {
@@ -696,6 +742,13 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 		}); err != nil {
 			writeErr(w, http.StatusInternalServerError, fmt.Errorf("分类指引写入: %w", err))
 			return
+		}
+	}
+	// 来源草稿删除(P4-40 ①):创建成功即删对应草稿键(键值表,幂等);
+	// 删除失败不回滚任务,运行日志如实提示。
+	if draftID := strings.TrimSpace(req.DraftID); draftID != "" {
+		if err := s.Store.DeleteSetting(r.Context(), taskDraftKeyPrefix+draftID); err != nil {
+			runlog.Warnf("任务 %s 创建后草稿 %s 删除失败: %v", id, draftID, err)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"id": id})
@@ -865,9 +918,13 @@ func detailStr(detail map[string]any, key string) string {
 
 // assetTreeView 资产图最小投影的读模型:节点(覆盖标志 + 事实/假设
 // 计数)与 sub_of 层级边(from=子、to=父),前端据此渲染树。
+// P4-44:TaskType 供前端区分待批分组(渗透)与"发现的其他资产"分组
+// (红队/未标);ScopeState 为资产范围呈现态(pending=待批锁定,
+// out_open=范围外可测,""=范围内常规呈现)。
 type assetTreeView struct {
-	Assets []assetNodeJSON `json:"assets"`
-	Tree   []edgeJSON      `json:"hierarchy"`
+	Assets   []assetNodeJSON `json:"assets"`
+	Tree     []edgeJSON      `json:"hierarchy"`
+	TaskType string          `json:"task_type"`
 }
 
 type assetNodeJSON struct {
@@ -878,8 +935,10 @@ type assetNodeJSON struct {
 	Covered         bool   `json:"covered"`
 	FactCount       int    `json:"fact_count"`
 	HypothesisCount int    `json:"hypothesis_count"`
-	Source          string `json:"source"`   // 来源三态:seed/manual/discovered(P4-05)
-	Excluded        bool   `json:"excluded"` // 已从授权范围摘除(P4-05;范围外)
+	Source          string `json:"source"`      // 来源三态:seed/manual/discovered(P4-05)
+	Excluded        bool   `json:"excluded"`    // 已从授权范围摘除(P4-05;范围外)
+	ScopeOut        bool   `json:"scope_out"`   // 入图冻结的范围归属(P4-44:true=种子闭包外)
+	ScopeState      string `json:"scope_state"` // 范围呈现态(P4-44:pending/out_open/""=范围内)
 	CreatedRev      int64  `json:"created_rev"`
 	// 发现型资产的出生血缘(P4-12):发现单位/发现步骤/发现事实(收割入图时
 	// 冻结进 detail;非发现资产零值,如实断链)。
@@ -904,16 +963,26 @@ func (s *Server) handleAssetTree(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	var excluded map[string]bool
+	var excluded, approved map[string]bool
 	if roe, err := s.Store.CurrentRoE(r.Context(), taskID); err == nil {
 		excluded = roe.ExcludedAssetSet()
+		approved = roe.ScopeApprovedSet()
 	}
-	v := assetTreeView{Assets: []assetNodeJSON{}, Tree: []edgeJSON{}}
+	taskType := ""
+	if detail, err := s.Store.CreatedDetail(r.Context(), taskID); err == nil {
+		taskType = rings.TaskTypeOf(detail)
+	}
+	v := assetTreeView{Assets: []assetNodeJSON{}, Tree: []edgeJSON{}, TaskType: taskType}
 	for _, a := range ag.Assets {
+		frozen := rings.AssetScopeIn
+		if a.ScopeOut {
+			frozen = rings.AssetScopeOut
+		}
 		v.Assets = append(v.Assets, assetNodeJSON{
 			ID: a.ID, Title: a.Title, Class: string(a.AssetClass), Status: a.Status,
 			Covered: a.Covered, FactCount: a.FactCount, HypothesisCount: a.HypothesisCount,
-			Source: a.Source, Excluded: excluded[a.ID],
+			Source: a.Source, Excluded: excluded[a.ID], ScopeOut: a.ScopeOut,
+			ScopeState: rings.ScopeStateOf(taskType, a.Source, frozen, approved[a.ID], excluded[a.ID]),
 			CreatedRev: a.CreatedRev,
 		})
 	}
@@ -1197,13 +1266,76 @@ func (s *Server) effectiveBudget(ctx context.Context) BudgetView {
 	return b
 }
 
-// handleConfig 设置页读 API:LLM 注入状态、虫群并发上限(装配常量)。
-// 执行预算读写在 Agent 配置栏(/api/agents)。
-func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+// configView 设置页读模型(GET 与写路径同源返回):监听/路径为装配
+// 只读段;搜索/UA/任务并发自设置表每次活算。执行预算读写在 Agent 配置
+// 栏(/api/agents)。
+func (s *Server) configView(ctx context.Context) ConfigView {
 	v := s.Config
-	v.Search = s.effectiveSearch(r.Context())
-	v.UA = s.effectiveUA(r.Context())
-	writeJSON(w, http.StatusOK, v)
+	v.Search = s.effectiveSearch(ctx)
+	v.UA = s.effectiveUA(ctx)
+	v.System.TaskConcurrency = s.agentIntEffective(ctx,
+		manager.SettingKeyMaxConcurrentTasks, manager.DefaultMaxConcurrentTasks)
+	return v
+}
+
+// handleConfig 设置页读 API:LLM 注入状态、虫群并发上限(装配常量)、
+// 系统参数(含任务并发生效值)。
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.configView(r.Context()))
+}
+
+// 任务并发取值范围(P4-34 受控校验,与建任务表单等面板参数同款硬校验):
+// 1–16 的整数;越界人话拒改。
+const (
+	taskConcurrencyMin = 1
+	taskConcurrencyMax = 16
+)
+
+// systemParamsBody 系统参数写体(P4-34):现仅任务并发一项可改,字段
+// 缺省 = 不改。task_concurrency 原样提交:空串 = 清空配置回默认,非空
+// 须为 1–16 的整数。
+type systemParamsBody struct {
+	TaskConcurrency *string `json:"task_concurrency"`
+}
+
+// handleSystemParamsUpdate 系统参数写(P4-34 任务并发):写通用键值表
+// (SetSetting 自带"配置修改"运行日志行);改值对下一轮调度生效、在跑
+// 任务不硬杀;保存即触发一次队列扫描(等价 retire 的 FIFO 拉起),有空
+// 位立即拉起排队中任务并记 started。响应与 GET /api/config 同源。
+func (s *Server) handleSystemParamsUpdate(w http.ResponseWriter, r *http.Request) {
+	var body systemParamsBody
+	if !readJSON(w, r, &body) {
+		return
+	}
+	if body.TaskConcurrency == nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("未提交任何修改项"))
+		return
+	}
+	raw := strings.TrimSpace(*body.TaskConcurrency)
+	if raw == "" {
+		// 清空:删键回默认(与恢复默认正文同款落法)。
+		if err := s.Store.DeleteSetting(r.Context(), manager.SettingKeyMaxConcurrentTasks); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+	} else {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < taskConcurrencyMin || n > taskConcurrencyMax {
+			writeErr(w, http.StatusBadRequest,
+				fmt.Errorf("任务并发须为 %d–%d 的整数,清空恢复默认 %d",
+					taskConcurrencyMin, taskConcurrencyMax, manager.DefaultMaxConcurrentTasks))
+			return
+		}
+		if err := s.Store.SetSetting(r.Context(), manager.SettingKeyMaxConcurrentTasks,
+			strconv.Itoa(n), "creator"); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	// 调大保存即触发一次队列扫描;调小/清空为无操作(admitQueued 对照
+	// 当前生效上限自然空转,在跑任务不硬杀)。
+	s.Manager.ScanQueue()
+	writeJSON(w, http.StatusOK, s.configView(r.Context()))
 }
 
 // 执行预算取值范围(受控校验,/api/agents/params 消费):轮次 0–1000,
@@ -1275,6 +1407,8 @@ type roeBody struct {
 	ApprovalThreshold string         `json:"approval_threshold"` // 空 = 默认宽(仅增删改弹门)
 	IntentRules       []intentRuleIn `json:"intent_rules"`
 	ExcludedAssets    []string       `json:"excluded_assets"` // 授权范围摘除清单(P4-05;省略 = 保持现值)
+	ScopeApproved     []string       `json:"scope_approved"`  // 范围外资产放行清单(P4-44;省略 = 保持现值)
+	CreatorNotes      *string        `json:"creator_notes"`   // 造物主注意事项(P4-49;省略 = 保持现值,空串 = 清空)
 	Note              string         `json:"note"`
 }
 
@@ -1289,8 +1423,26 @@ func (b *roeBody) toRings() rings.RoeUpdated {
 		ApprovalThreshold: rings.ActionLevel(b.ApprovalThreshold),
 		IntentRules:       rules,
 		ExcludedAssets:    b.ExcludedAssets,
+		ScopeApproved:     b.ScopeApproved,
+		CreatorNotes:      b.CreatorNotes,
 		Note:              b.Note,
 	}
+}
+
+// creatorNotesMaxRunes 注意事项长度上限(多行合计)。
+const creatorNotesMaxRunes = 2000
+
+// normalizeCreatorNotesIn 提交体注意事项的归一与校验:空白/CRLF 归一
+// (投影同款),超长人话拒改。nil(省略)原样透传 = 本次不动。
+func normalizeCreatorNotesIn(p *string) (*string, error) {
+	if p == nil {
+		return nil, nil
+	}
+	v := rings.NormalizeCreatorNotes(*p)
+	if len([]rune(v)) > creatorNotesMaxRunes {
+		return nil, fmt.Errorf("注意事项过长(上限 %d 字)", creatorNotesMaxRunes)
+	}
+	return &v, nil
 }
 
 // roeView RoE 当前值(显式给出生效的审批门槛,面板不必懂默认值)。
@@ -1300,6 +1452,7 @@ type roeView struct {
 	ApprovalThreshold string          `json:"approval_threshold"` // 已归一的生效审批门槛
 	IntentRules       []intentRuleOut `json:"intent_rules"`       // 任务级拦截规则(带资产标题与已用次数)
 	ExcludedAssets    []string        `json:"excluded_assets"`    // 授权范围摘除清单(P4-05)
+	CreatorNotes      string          `json:"creator_notes"`      // 造物主注意事项(P4-49;空 = 无)
 	Note              string          `json:"note,omitempty"`
 	UpdatedRev        int64           `json:"updated_rev"`
 }
@@ -1315,6 +1468,7 @@ func (s *Server) currentRoE(taskID string) (roeView, error) {
 		ApprovalThreshold: string(swarm.NormalizeApprovalThreshold(st.ApprovalThreshold)),
 		IntentRules:       s.intentRuleViews(taskID, st.IntentRules),
 		ExcludedAssets:    st.ExcludedAssets,
+		CreatorNotes:      st.CreatorNotes,
 		Note:              st.Note,
 		UpdatedRev:        st.UpdatedRev,
 	}, nil
@@ -1350,11 +1504,26 @@ func (s *Server) handleRoEUpdate(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &body) {
 		return
 	}
+	// 注意事项(P4-49):省略 = 保持现值(指针透传),显式提交(空串 = 清空)
+	// 时归一校验;其余快照提交不携带即自然保持。
+	notes, nerr := normalizeCreatorNotesIn(body.CreatorNotes)
+	if nerr != nil {
+		writeErr(w, http.StatusBadRequest, nerr)
+		return
+	}
+	body.CreatorNotes = notes
 	roe := body.toRings()
 	roe.Note = strings.TrimSpace(roe.Note)
 	if body.ExcludedAssets == nil {
 		if st, err := s.Store.CurrentRoE(r.Context(), taskID); err == nil {
 			roe.ExcludedAssets = st.ExcludedAssets
+		}
+	}
+	// P4-44:放行清单由专用端点管理,其余快照提交不携带时保持现值
+	//(与摘除清单同款防误清)。
+	if body.ScopeApproved == nil {
+		if st, err := s.Store.CurrentRoE(r.Context(), taskID); err == nil {
+			roe.ScopeApproved = st.ScopeApproved
 		}
 	}
 	if err := s.validateAssetIDs(taskID, roe.ExcludedAssets); err != nil {
@@ -1578,59 +1747,13 @@ func (s *Server) handleClaimsList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	evs, err := s.Store.Events(r.Context(), taskID, 0, 0)
+	// 状态机审计流摘要(P4-36 起读 claim_cases 投影——latest-wins 小字段
+	// 由 applyClaimRecord 写侧同事务维护,列表不再扫描/解析事件流,巨
+	// 记录任务的发现列表分钟级 → 毫秒级)。
+	digests, err := s.Store.ClaimDigests(r.Context(), taskID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
-	}
-	// 状态机审计流:每声明取最新 falsify_result、verdict 与 repro(定稿
-	// 严重级别跟最新收割定稿走——重开再确认后新定稿取代旧定稿);复测
-	// 结论取最新(P3-06);重放结论取最新 + 绑定证据在场判定(P3-07,
-	// 事件流一次扫描内完成)。
-	falsifyLatest := map[string]rings.TestClaimRecord{}
-	verdictLatest := map[string]rings.RawEvent{}
-	reproLatest := map[string]rings.TestClaimRecord{}
-	type retestLatestRow struct {
-		rec rings.TestClaimRecord
-		at  string
-	}
-	retestLatest := map[string]retestLatestRow{}
-	type replayLatestRow struct {
-		rec rings.TestClaimRecord
-		at  string
-	}
-	replayLatest := map[string]replayLatestRow{}
-	reviewLatest := map[string]rings.TestClaimRecord{} // 复核标记(P4-30 ③,最新为准)
-	hasEvidence := map[string]bool{}
-	for _, ev := range evs {
-		if ev.Kind != rings.EventTestClaimRecord {
-			continue
-		}
-		var rec rings.TestClaimRecord
-		if err := json.Unmarshal(ev.Payload, &rec); err != nil {
-			writeErr(w, http.StatusInternalServerError, err)
-			return
-		}
-		switch rec.Type {
-		case rings.TestClaimRecFalsify:
-			falsifyLatest[rec.ClaimID] = rec
-		case rings.TestClaimRecVerdict:
-			verdictLatest[rec.ClaimID] = ev
-		case rings.TestClaimRecRepro:
-			reproLatest[rec.ClaimID] = rec
-		case rings.TestClaimRecRetest:
-			retestLatest[rec.ClaimID] = retestLatestRow{rec: rec,
-				at: ev.OccurredAt.Local().Format("2006-01-02 15:04:05")}
-		case rings.TestClaimRecReplay:
-			replayLatest[rec.ClaimID] = replayLatestRow{rec: rec,
-				at: ev.OccurredAt.Local().Format("2006-01-02 15:04:05")}
-		case rings.TestClaimRecEvidence:
-			if len(rec.Exchanges) > 0 {
-				hasEvidence[rec.ClaimID] = true
-			}
-		case rings.TestClaimRecReportReview:
-			reviewLatest[rec.ClaimID] = rec
-		}
 	}
 
 	out := make([]claimView, 0, len(claims))
@@ -1665,37 +1788,18 @@ func (s *Server) handleClaimsList(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		if fr, ok := falsifyLatest[c.ID]; ok {
-			v.FalsifyStep, v.Verifier = fr.StepID, fr.UnitID
-		}
-		if rp, ok := reproLatest[c.ID]; ok {
-			v.Severity = rp.Severity
-			v.ReproSteps = len(rp.Steps)
-		}
-		if ev, ok := verdictLatest[c.ID]; ok {
-			var rec rings.TestClaimRecord
-			if err := json.Unmarshal(ev.Payload, &rec); err == nil {
-				v.PendingReason = rec.PendingReason
-				if rec.StepID != "" {
-					v.FalsifyStep = rec.StepID
-				}
-				if rec.UnitID != "" {
-					v.Verifier = rec.UnitID
-				}
+		if d, ok := digests[c.ID]; ok {
+			v.FalsifyStep, v.Verifier = d.FalsifyStep, d.Verifier
+			v.Severity, v.ReproSteps = d.Severity, d.ReproSteps
+			v.PendingReason, v.VerdictRev = d.PendingReason, d.VerdictRev
+			v.RetestVerdict, v.RetestRound, v.RetestAt = d.RetestVerdict, d.RetestRound, d.RetestAt
+			v.ReplayVerdict, v.ReplayRound, v.ReplayAt = d.ReplayVerdict, d.ReplayRound, d.ReplayAt
+			if d.ReportExcluded {
+				v.ReportExcluded, v.ReportExcludedReason = true, d.ReportExcludedReason
 			}
-			v.VerdictRev = ev.Revision
+			v.Replayable = d.HasEvidence
 		}
 		v.Retestable = swarm.Retestable(c.Status)
-		if rt, ok := retestLatest[c.ID]; ok {
-			v.RetestVerdict, v.RetestRound, v.RetestAt = rt.rec.RetestVerdict, rt.rec.Round, rt.at
-		}
-		v.Replayable = hasEvidence[c.ID]
-		if rp, ok := replayLatest[c.ID]; ok {
-			v.ReplayVerdict, v.ReplayRound, v.ReplayAt = rp.rec.ReplayVerdict, rp.rec.Round, rp.at
-		}
-		if rv, ok := reviewLatest[c.ID]; ok {
-			v.ReportExcluded, v.ReportExcludedReason = true, rv.Reason
-		}
 		if exec := s.swarmExec(); exec != nil {
 			v.RetestRunning = exec.RetestRunning(taskID, c.ID)
 			v.ReplayRunning = exec.ReplayRunning(taskID, c.ID)
@@ -1782,44 +1886,30 @@ func (s *Server) handleApprovalsList(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// approvalRecords 事件流读侧:审批记录倒序(最新在先,面板近期记录),
-// 拒绝线记录标注可放行与否(已放行的 forced 记录在流里可见)。
+// approvalRecords 审批记录视图(P4-36 起读 approval_records 投影——
+// 追加日志由 applyApprovalLog 写侧同事务维护,不再扫描事件流;倒序
+// 最新在先,拒绝线记录标注可放行与否——已放行的 forced 记录按
+// request_id 存在性判定)。
 func (s *Server) approvalRecords(ctx context.Context, taskID string) ([]approvalRecordView, error) {
-	evs, err := s.Store.Events(ctx, taskID, 0, 0)
+	rows, err := s.Store.ApprovalRows(ctx, taskID)
 	if err != nil {
-		return nil, fmt.Errorf("查审批事件流: %w", err)
+		return nil, err
 	}
-	// 先扫一遍放行集合(forced),再组装视图——denied 在 forced 之前落账,
-	// 单遍会把已放行的拒绝线记录误标可放行。
 	forced := map[string]bool{} // requestID -> 已研判后放行
-	type parsedRec struct {
-		rec        rings.ApprovalRecord
-		occurredAt time.Time
-	}
-	var parsed []parsedRec
-	for _, ev := range evs {
-		if ev.Kind != rings.EventApprovalRecord {
-			continue
+	for _, r := range rows {
+		if r.Type == rings.ApprovalRecForced {
+			forced[r.RequestID] = true
 		}
-		var rec rings.ApprovalRecord
-		if err := json.Unmarshal(ev.Payload, &rec); err != nil {
-			return nil, fmt.Errorf("解码 approval.record: %w", err)
-		}
-		if rec.Type == rings.ApprovalRecForced {
-			forced[rec.RequestID] = true
-		}
-		parsed = append(parsed, parsedRec{rec: rec, occurredAt: ev.OccurredAt})
 	}
 	var recs []approvalRecordView
-	for _, pr := range parsed {
-		rec := pr.rec
+	for _, r := range rows {
 		recs = append(recs, approvalRecordView{
-			RequestID: rec.RequestID, StepID: rec.StepID, UnitID: rec.UnitID,
-			Type: rec.Type, ActionLevel: string(rec.ActionLevel), HarmClass: string(rec.HarmClass),
-			Intent: rec.Intent, ToolName: rec.ToolName, ToolArgs: string(rec.ToolArgs),
-			Note: rec.Note, DenyLine: rec.DenyLine, DecidedBy: rec.DecidedBy, Reason: rec.Reason,
-			WaitMillis: rec.WaitMillis, OccurredAt: pr.occurredAt.Local().Format("2006-01-02 15:04:05"),
-			Releasable: rec.Type == rings.ApprovalRecDenied && releasableDenyLines[rec.DenyLine] && !forced[rec.RequestID],
+			RequestID: r.RequestID, StepID: r.StepID, UnitID: r.UnitID,
+			Type: r.Type, ActionLevel: r.ActionLevel, HarmClass: r.HarmClass,
+			Intent: r.Intent, ToolName: r.ToolName, ToolArgs: r.ToolArgs,
+			Note: r.Note, DenyLine: r.DenyLine, DecidedBy: r.DecidedBy, Reason: r.Reason,
+			WaitMillis: r.WaitMillis, OccurredAt: r.OccurredAt,
+			Releasable: r.Type == rings.ApprovalRecDenied && releasableDenyLines[r.DenyLine] && !forced[r.RequestID],
 		})
 	}
 	// 倒序:最新在先。
@@ -1885,33 +1975,31 @@ func (s *Server) handleApprovalRelease(w http.ResponseWriter, r *http.Request) {
 	s.releaseMu.Lock()
 	defer s.releaseMu.Unlock()
 
-	// 从事件流找该请求的最新记录:须是拒绝线的 denied 且从未 forced
+	// 找该请求的最新记录:须是拒绝线的 denied 且从未 forced
 	//(拒绝线记录不经 Enter,无 requested 前导;弹门流有 requested 前导,
-	// 其 denied 的 DenyLine=panel 不可放行)。
+	// 其 denied 的 DenyLine=panel 不可放行)。P4-36 起按 request_id 读
+	// approval_records 投影,不再扫描事件流。
 	var target *rings.ApprovalRecord
-	evs, err := s.Store.Events(r.Context(), taskID, 0, 0)
+	reqRows, err := s.Store.ApprovalByRequest(r.Context(), taskID, rid)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	for i := range evs {
-		if evs[i].Kind != rings.EventApprovalRecord {
-			continue
-		}
-		var rec rings.ApprovalRecord
-		if err := json.Unmarshal(evs[i].Payload, &rec); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
-			return
-		}
-		if rec.RequestID != rid {
-			continue
+	for i := range reqRows {
+		row := reqRows[i]
+		rec := rings.ApprovalRecord{
+			RequestID: row.RequestID, StepID: row.StepID, UnitID: row.UnitID,
+			Type: row.Type, ActionLevel: rings.ActionLevel(row.ActionLevel),
+			HarmClass: rings.HarmClass(row.HarmClass), Intent: row.Intent,
+			ToolName: row.ToolName, ToolArgs: json.RawMessage(row.ToolArgs),
+			Note: row.Note, DenyLine: row.DenyLine, DecidedBy: row.DecidedBy,
+			Reason: row.Reason, WaitMillis: row.WaitMillis,
 		}
 		if rec.Type == rings.ApprovalRecForced {
 			writeErr(w, http.StatusConflict, errors.New("该请求已规划后放行过(逐次放行,不可重复)"))
 			return
 		}
-		c := rec
-		target = &c // 事件升序,留在最后的即最新
+		target = &rec // rev 升序,留在最后的即最新
 	}
 	if target == nil {
 		writeErr(w, http.StatusNotFound, swarm.ErrGateRequestNotFound)

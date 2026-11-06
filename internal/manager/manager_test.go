@@ -231,6 +231,12 @@ func TestPanicIsolation(t *testing.T) {
 				if err != nil {
 					t.Fatalf("崩溃后 Manager 应可用: %v", err)
 				}
+				// panic 记账先于 goroutine 尾部的 retire(名额释放),创建
+				// 可能先见 queued——等 retire→admitQueued 拉起即证名额可复用。
+				deadline2 := time.Now().Add(5 * time.Second)
+				for c.Status() != StatusStarted && time.Now().Before(deadline2) {
+					time.Sleep(10 * time.Millisecond)
+				}
 				if c.Status() != StatusStarted {
 					t.Fatalf("崩溃释放的名额应可被新任务使用,实际 %s", c.Status())
 				}
@@ -328,9 +334,16 @@ func TestTaskBodyReturnCompletes(t *testing.T) {
 		OnTaskRun: func(ctx context.Context, taskID string, wake <-chan struct{}) {
 			// 模拟主宰循环:等一次唤醒后自然返回(全部目标达成退出);
 			// 熔断则随 ctx 收尾退出(与 Loop.Run 的 select 语义同构)。
+			// P4-42 ⑤ 起 admitQueued 拉起带补踢:排队任务 B 被拉起即吃
+			// 到一脚唤醒——真实 Loop 吃唤醒只会跑一轮不会退出,B 分支
+			// 消费补踢后继续占用名额等 ctx,完成语义只留给 A 验证。
 			select {
 			case <-wake:
 			case <-ctx.Done():
+				return
+			}
+			if taskID != "done-a" {
+				<-ctx.Done()
 			}
 		}})
 	if err != nil {

@@ -349,6 +349,18 @@ export function assetSourceMeta(source) {
   return ASSET_SOURCES[source] || ASSET_SOURCES.seed;
 }
 
+// 任务类型(P4-44):渗透=范围外发现资产待批锁定;红队=直接可测;
+// 空=存量任务未标(行为等同红队,徽标如实呈现)。落账值不上面板,
+// 统一经此映射为操作者语言。
+export const TASK_TYPES = {
+  pentest: { label: "渗透任务", hint: "只测填写的域名或 IP;虫群发现的相邻资产待批准才可测" },
+  redteam: { label: "红队任务", hint: "虫群发现的相邻资产(同服务器其他端口、兄弟域名等)直接可测" },
+};
+
+export function taskTypeMeta(type) {
+  return TASK_TYPES[type] || { label: "未标", hint: "旧任务未记录类型:发现的相邻资产直接可测" };
+}
+
 // 六类图节点(账本 NodeType,P2-09 进度图/跳转协议共用):标签为操作者
 // 语言;icon 为节点视觉语言的图标配号;shape 为 CSS 形状徽记类
 //(globals.css,P2-11 年轮图卡片沿用同一套形状语义)。
@@ -366,8 +378,10 @@ export function nodeTypeMeta(type) {
 }
 
 // 步骤状态 → 操作者语言(原 findings-page 局部词汇,P2-09 起多页共用)。
+// P4-46 ② 对齐状态总表:dispatched 显示"排队中"(与虫群列表排队条目、
+// 工作台水位同词;等前置是行内标注非状态)、aborted 显示"已中止"。
 export const STEP_STATUS = {
-  dispatched: "已派发",
+  dispatched: "排队中",
   running: "执行中",
   pending: "待开始",
   done: "已完成",

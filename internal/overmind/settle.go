@@ -338,6 +338,11 @@ func (l *Loop) settle(ctx context.Context) {
 		if !l.parkGate(ctx) {
 			return // 冬眠唤醒后继续等;ctx 结束如实让位
 		}
+		if l.ckptArmed() {
+			// P4-33 冬眠收场:让位退出——在飞单位由虫群侧同令收场,
+			// 唤醒拉起后循环重新进收尾流程(收尾续走,终态不定两次)。
+			return
+		}
 		running, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeStep, "running")
 		if err != nil {
 			l.setErr(err)

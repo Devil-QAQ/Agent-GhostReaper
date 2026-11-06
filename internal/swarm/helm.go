@@ -47,6 +47,16 @@ func NewHelm(store *rings.Store) *Helm {
 
 func steerKey(taskID, stepID string) string { return taskID + "\x00" + stepID }
 
+// splitSteerKey 拆出 (taskID, stepID);格式不符如实报 false。
+func splitSteerKey(k string) (taskID, stepID string, ok bool) {
+	for i := 0; i < len(k); i++ {
+		if k[i] == '\x00' {
+			return k[:i], k[i+1:], true
+		}
+	}
+	return "", "", false
+}
+
 // steerID 生成指令稳定标识(st-*)。
 func steerID() string {
 	var b [4]byte

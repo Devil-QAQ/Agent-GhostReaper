@@ -44,7 +44,7 @@ func TestGoalAchieveGuards(t *testing.T) {
 
 	var created map[string]any
 	post(t, h, http.MethodPost, "/api/tasks",
-		`{"id":"ga-1","title":"人工标记达成守卫","goals":["确认暴露面"],
+		`{"task_type":"redteam","id":"ga-1","title":"人工标记达成守卫","goals":["确认暴露面"],
 		  "assets":[{"class":"host","title":"10.9.9.9"}]}`,
 		http.StatusOK, &created)
 
@@ -151,7 +151,7 @@ func TestGoalAchieveCompletesTask(t *testing.T) {
 
 	var created map[string]any
 	post(t, h, http.MethodPost, "/api/tasks",
-		`{"assets":[{"class":"host","title":"10.0.0.1"}],"id":"ga-2","title":"人工标记达成收场","goals":["拿到数据库凭据"]}`,
+		`{"task_type":"redteam","assets":[{"class":"host","title":"10.0.0.1"}],"id":"ga-2","title":"人工标记达成收场","goals":["拿到数据库凭据"]}`,
 		http.StatusOK, &created)
 
 	// 等第一轮真实拆解发生(无谓词目标 pending → 拆解空意图 → 静默)。

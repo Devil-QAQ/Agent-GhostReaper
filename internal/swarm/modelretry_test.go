@@ -93,6 +93,11 @@ func (p *activeModelProvider) ActiveModel() string {
 	return "stub-model"
 }
 
+// ActiveModelFor P4-41 起的逐请求解析入口(记账与压缩窗口经它取模型)。
+func (p *activeModelProvider) ActiveModelFor(context.Context) string {
+	return p.ActiveModel()
+}
+
 // seedBlockedGraph 最小图:目标 + 意图(只读探测)。
 func seedBlockedGraph(t *testing.T, store *rings.Store, task, intent string) {
 	t.Helper()

@@ -39,7 +39,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { fetchJSON, postJSON, taskStatusBadge, usePolling, useTaskContext } from "@/lib/api";
+import { fetchJSON, postJSON, taskStatusBadge, taskTypeMeta, usePolling, useTaskContext } from "@/lib/api";
 import { defaultTaskTab } from "@/lib/nav";
 import { cn } from "@/lib/utils";
 import { CategoryDialog } from "@/views/category-dialog";
@@ -83,6 +83,7 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
 
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [draft, setDraft] = React.useState(null); // 复制草稿(确认后创建)
+  const [taskDraft, setTaskDraft] = React.useState(null); // 服务端暂存草稿(P4-40,从列表行打开)
   const [categoryOpen, setCategoryOpen] = React.useState(false);
   const [statusFilter, setStatusFilter] = React.useState("all");
   const [categoryFilter, setCategoryFilter] = React.useState("all");
@@ -91,9 +92,23 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
   const [recovering, setRecovering] = React.useState(false);
   const [deleteTarget, setDeleteTarget] = React.useState(null); // 待确认删除的任务
   const [batch, setBatch] = React.useState(null); // {action:"stop"|"delete"} 待确认
+  const [draftDelete, setDraftDelete] = React.useState(null); // 待确认删除的草稿(P4-40)
 
   const { data: catBody } = usePolling("/api/task-categories", 8000);
   const categories = Array.isArray(catBody?.categories) ? catBody.categories : [];
+  // 任务草稿(P4-40):服务端键值表,换浏览器仍在;列表行呈现 + 搜索匹配,
+  // 不参与状态/分类筛选(草稿无生命周期态,恒显)。
+  const {
+    data: draftsBody,
+    setData: setDraftsBody,
+  } = usePolling("/api/task-drafts", 8000);
+  const drafts = Array.isArray(draftsBody?.drafts) ? draftsBody.drafts : [];
+
+  // 草稿清单即时刷新(暂存/删除/创建成功后不等下一拍轮询)。
+  const refreshDrafts = async () => {
+    const { ok, body } = await fetchJSON("/api/task-drafts");
+    if (ok) setDraftsBody(body);
+  };
 
   const recoverAll = async () => {
     setRecovering(true);
@@ -138,7 +153,8 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
   const doneCount = tasks.filter((t) => t.status === "completed").length;
 
   // 搜索(名称/描述)+ 状态筛选(按显示词归组)+ 分类筛选;排序沿用
-  // 服务端(置顶在前)。
+  // 服务端(置顶在前)。草稿行(P4-40)只参与搜索匹配,状态/分类筛选
+  // 不作用于草稿(恒显)。
   const filtered = tasks.filter((t) => {
     if (statusFilter !== "all") {
       const group = STATUS_FILTER_SETS[statusFilter];
@@ -150,6 +166,13 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
     if (q && !`${t.title || ""}${t.description || ""}`.toLowerCase().includes(q)) return false;
     return true;
   });
+
+  const q = textFilter.trim().toLowerCase();
+  const draftRows = drafts.filter(
+    (d) =>
+      !q ||
+      `${d.draft?.title || ""}${d.draft?.description || ""}`.toLowerCase().includes(q)
+  );
 
   const filteredIDs = filtered.map((t) => t.id);
   const allSelected = filteredIDs.length > 0 && filteredIDs.every((id) => selected.has(id));
@@ -199,6 +222,7 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
     let goals = [];
     const g = await fetchJSON(`/api/tasks/${t.id}/goals`);
     if (g.ok && Array.isArray(g.body)) goals = g.body.map((x) => x.title).filter(Boolean);
+    setTaskDraft(null);
     setDraft({
       title: `${t.title || t.id} 副本`,
       description: t.description || "",
@@ -207,21 +231,42 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
       category: t.category || "",
     });
     setDialogOpen(true);
+  }
+
+  // 打开草稿行继续编辑(P4-40):载入新建弹窗带全部字段。
+  const openTaskDraft = (d) => {
+    setDraft(null);
+    setTaskDraft(d);
+    setDialogOpen(true);
   };
 
-  // 删除(墓碑):确认后先停(在跑时)再标记,账本历史保留。
-  const doDelete = async (t, reason) => {
+  // 删除草稿(P4-40):二次确认后删键值表条目。
+  const doDeleteDraft = async (d) => {
+    const { ok, body } = await fetchJSON(`/api/task-drafts/${encodeURIComponent(d.id)}`, {
+      method: "DELETE",
+    });
+    if (!ok) {
+      toast.error(`删除草稿失败:${body.error || "原因未说明"}`);
+      return;
+    }
+    refreshDrafts();
+    toast.success(`已删除草稿「${d.draft?.title?.trim() || "未命名草稿"}」`);
+  };
+
+  // 删除(墓碑或特权清除,P4-40 ⑥):确认后先停(在跑时)再删;不勾
+  // "同时删除相关数据和账本" = 墓碑(账本历史保留),勾选 = 彻底清除。
+  const doDelete = async (t, reason, purge) => {
     const { ok, body } = await fetchJSON(`/api/tasks/${encodeURIComponent(t.id)}`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reason }),
+      body: JSON.stringify({ reason, purge: Boolean(purge) }),
     });
     if (!ok) {
       toast.error(`删除失败:${body.error || "原因未说明"}`);
       return;
     }
     clearIfGone(t.id);
-    toast.success(`已删除:${t.title || t.id}(账本历史保留)`);
+    toast.success(purge ? `已删除:${t.title || t.id}(数据已彻底清除)` : `已删除:${t.title || t.id}(账本历史保留)`);
   };
 
   // 批量操作(确认由对话框承担)。
@@ -239,7 +284,7 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
     if (action === "delete") selectedIDs.forEach((id) => clearIfGone(id));
     setSelected(new Set());
     const verb =
-      action === "stop" ? "已终止" : action === "hibernate" ? "已冬眠" : "已删除";
+      action === "stop" ? "已停止" : action === "hibernate" ? "已冬眠" : "已删除";
     toast.success(
       `${verb} ${body.done} 个任务${fails.length ? `,${fails.length} 个失败` : ""}`
     );
@@ -247,6 +292,7 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
 
   const openCreate = () => {
     setDraft(null);
+    setTaskDraft(null); // 「新建」打开空表单,草稿只从列表行进入(P4-40 ④)
     setDialogOpen(true);
   };
 
@@ -302,7 +348,7 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
       </div>
 
       {/* 工具栏:搜索(名称/描述)+ 状态/分类筛选 + 计数 + 恢复全部(P2-06e 归入) */}
-      {tasks.length === 0 ? (
+      {tasks.length === 0 && drafts.length === 0 ? (
         <EmptyState
           icon="listChecks"
           title="尚无任务"
@@ -407,6 +453,74 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
                 </TableRow>
               </TableHeader>
               <TableBody>
+                {/* 草稿行(P4-40):「草稿」徽标(静止样式无状态色)+ 标题
+                    (空则"未命名草稿")+ 创建时间;点击 = 打开新建弹窗继续
+                    编辑;不参与状态/分类筛选与批量操作 */}
+                {draftRows.map((d) => {
+                  const dTitle = d.draft?.title?.trim() || "未命名草稿";
+                  const dGoals = (d.draft?.goals || "")
+                    .split(/\r?\n/)
+                    .map((s) => s.trim())
+                    .filter(Boolean)
+                    .join("、");
+                  return (
+                    <TableRow key={`draft-${d.id}`} className="group h-16 bg-card/60">
+                      <TableCell />
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <Badge variant="secondary">草稿</Badge>
+                          <button
+                            className="min-w-0 truncate text-left font-medium underline-offset-4 hover:text-primary hover:underline cursor-pointer"
+                            title="点击继续编辑"
+                            onClick={() => openTaskDraft(d)}
+                          >
+                            {dTitle}
+                          </button>
+                          <span className="shrink-0 text-xs text-muted-foreground num" title="创建时间">
+                            {d.created_at || ""}
+                          </span>
+                        </div>
+                      </TableCell>
+                      <TableCell className="max-w-48" title={d.draft?.description || ""}>
+                        <span className="block truncate text-muted-foreground">
+                          {d.draft?.description?.trim() || "—"}
+                        </span>
+                      </TableCell>
+                      <TableCell className="max-w-44" title={dGoals || undefined}>
+                        <span className="block truncate num text-xs text-muted-foreground">
+                          {dGoals || "—"}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <span className="text-xs text-muted-foreground">—</span>
+                      </TableCell>
+                      <TableCell className="text-right num text-xs">—</TableCell>
+                      <TableCell className="text-right num text-xs">—</TableCell>
+                      <TableCell>
+                        <div className="flex items-center justify-end gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="size-8"
+                            title="继续编辑"
+                            onClick={() => openTaskDraft(d)}
+                          >
+                            {React.createElement(iconOf("fileText"), { className: "size-4" })}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="size-8 text-status-danger"
+                            title="删除草稿"
+                            onClick={() => setDraftDelete(d)}
+                          >
+                            {React.createElement(iconOf("trash2"), { className: "size-4" })}
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
                 {filtered.map((t) => {
                   const isCurrent = currentTask?.id === t.id;
                   const terminal = t.status === "stopped" || t.status === "completed";
@@ -438,6 +552,17 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
                               onClick={() => onReopenClosure?.(t.id)}
                             />
                           )}
+                          {/* 发现未读红点(P4-47 A):汇总位——成果或事实
+                              任一子页签有未读即亮,看过即消;点击进发现页 */}
+                          {(t.unread_claims > 0 || t.unread_facts > 0) && (
+                            <button
+                              className="size-2 shrink-0 cursor-pointer rounded-full bg-status-danger transition-transform duration-150 hover:scale-125"
+                              title={`发现未读:成果 ${t.unread_claims} 条 · 事实 ${t.unread_facts} 条`}
+                              onClick={() => {
+                                location.hash = `/task/${t.id}/findings`;
+                              }}
+                            />
+                          )}
                           {t.pinned &&
                             React.createElement(iconOf("star"), {
                               className: "size-3.5 shrink-0 text-status-warning",
@@ -452,6 +577,15 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
                           {/* P2-14b①:随机 ID 弱化为悬停可见的复制入口,
                               不再作行内主信息 */}
                           <CopyIDButton id={t.id} className="opacity-0 group-hover:opacity-100" />
+                          {/* 任务类型徽标(P4-44):渗透/红队/未标(存量任务),
+                              悬停说明范围行为;建后不可改 */}
+                          <Badge
+                            variant="outline"
+                            className="shrink-0 text-[10px] text-muted-foreground"
+                            title={taskTypeMeta(t.task_type).hint}
+                          >
+                            {taskTypeMeta(t.task_type).label}
+                          </Badge>
                           {isCurrent && (
                             <span className="shrink-0 text-xs text-primary">当前任务</span>
                           )}
@@ -501,6 +635,20 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
                               }}
                             >
                               {`待审批 ${t.pending_approvals} 笔`}
+                            </button>
+                          )}
+                          {/* 待批资产计数(P4-44 ③,与待审批同款形态):渗透任务
+                              发现的范围外资产待批准——处理即消(放行/忽略),
+                              点击进资产页待批分组 */}
+                          {t.pending_scope > 0 && (
+                            <button
+                              className="text-xs font-medium text-status-danger underline-offset-4 hover:underline cursor-pointer"
+                              title={`待批资产 ${t.pending_scope} 项`}
+                              onClick={() => {
+                                location.hash = `/task/${t.id}/assets`;
+                              }}
+                            >
+                              {`待批 ${t.pending_scope} 项`}
                             </button>
                           )}
                         </div>
@@ -574,7 +722,7 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
                     </TableRow>
                   );
                 })}
-                {filtered.length === 0 && (
+                {filtered.length === 0 && draftRows.length === 0 && (
                   <TableRow>
                     <TableCell colSpan={8} className="text-center text-muted-foreground">
                       无匹配任务
@@ -590,8 +738,13 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
       <NewTaskDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}
-        onCreated={(id) => setTaskID(id)}
+        onCreated={(id) => {
+          setTaskID(id);
+          refreshDrafts();
+        }}
         draft={draft}
+        taskDraft={taskDraft}
+        onDraftSaved={refreshDrafts}
       />
 
       <CategoryDialog
@@ -606,11 +759,37 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
       <ConfirmDeleteDialog
         target={deleteTarget}
         onClose={() => setDeleteTarget(null)}
-        onConfirm={(reason) => {
-          if (deleteTarget) doDelete(deleteTarget, reason);
+        onConfirm={(reason, purge) => {
+          if (deleteTarget) doDelete(deleteTarget, reason, purge);
           setDeleteTarget(null);
         }}
       />
+
+      {/* 草稿删除二次确认(P4-40) */}
+      <Dialog open={Boolean(draftDelete)} onOpenChange={(v) => !v && setDraftDelete(null)}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>删除草稿</DialogTitle>
+            <DialogDescription>
+              删除草稿「{draftDelete?.draft?.title?.trim() || "未命名草稿"}」？删除后不可恢复。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDraftDelete(null)}>
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                if (draftDelete) doDeleteDraft(draftDelete);
+                setDraftDelete(null);
+              }}
+            >
+              删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <ConfirmBatchDialog
         batch={batch}
@@ -626,11 +805,18 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
   );
 }
 
-// ConfirmDeleteDialog 单任务删除二次确认。
+// ConfirmDeleteDialog 单任务删除二次确认。默认墓碑(账本历史保留);
+// 勾选"同时删除相关数据和账本"(P4-40 ⑥,默认不勾)= 特权清除:该任务
+// 账本各表行与任务目录彻底删除,不可恢复;原始数据按引用清除——无
+// 其他任务引用的一并删除,有引用的保留(P4-40 续做)。
 function ConfirmDeleteDialog({ target, onClose, onConfirm }) {
   const [reason, setReason] = React.useState("面板删除");
+  const [purge, setPurge] = React.useState(false);
   React.useEffect(() => {
-    if (target) setReason("面板删除");
+    if (target) {
+      setReason("面板删除");
+      setPurge(false);
+    }
   }, [target]);
   return (
     <Dialog open={Boolean(target)} onOpenChange={(v) => !v && onClose()}>
@@ -638,11 +824,26 @@ function ConfirmDeleteDialog({ target, onClose, onConfirm }) {
         <DialogHeader>
           <DialogTitle>删除任务</DialogTitle>
           <DialogDescription>
-            删除后列表不再显示,账本历史全部保留;在跑任务先终止再删除。
+            {purge
+              ? "删除后列表不再显示，该任务的数据与账本将彻底删除；在跑任务先终止再删除。"
+              : "删除后列表不再显示,账本历史全部保留;在跑任务先终止再删除。"}
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-2">
-          <Label htmlFor="del-reason">删除理由(记录在账本)</Label>
+          <label className="flex items-start gap-2 text-sm" title="勾选后连同该任务的账本数据与任务目录一并彻底删除；原始数据按引用清除，无其他任务引用的一并删除">
+            <Checkbox
+              className="mt-0.5"
+              checked={purge}
+              onCheckedChange={(v) => setPurge(Boolean(v))}
+            />
+            同时删除相关数据和账本
+          </label>
+          {purge && (
+            <div className="rounded-md bg-status-danger-soft px-3 py-2 text-xs text-status-danger">
+              数据将彻底删除，无法恢复。将删除该任务相关、且无其他任务引用的原始数据。
+            </div>
+          )}
+          <Label htmlFor="del-reason">{purge ? "删除理由" : "删除理由(记录在账本)"}</Label>
           <Input id="del-reason" value={reason} onChange={(e) => setReason(e.target.value)} />
         </div>
         <DialogFooter>
@@ -652,7 +853,7 @@ function ConfirmDeleteDialog({ target, onClose, onConfirm }) {
           <Button
             variant="destructive"
             disabled={!reason.trim()}
-            onClick={() => onConfirm(reason.trim())}
+            onClick={() => onConfirm(reason.trim(), purge)}
           >
             确认删除
           </Button>

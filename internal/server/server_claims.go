@@ -16,8 +16,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
-	"time"
 
 	"ghostreaper/internal/overmind"
 	"ghostreaper/internal/report"
@@ -54,63 +54,42 @@ type claimOriginView struct {
 	Falsifiers []unitOriginView `json:"falsifiers"`
 }
 
-// claimOriginOf 成果溯源装配(P3-13b ①):事件流一遍扫描——
-// swarm.record session_started 维护"单位×步骤 → 会话锚"的当前值(事件
-// 序保证先起飞后写回),node.added 命中本声明时取发现单位(detail 的
-// 转录锚优先,旧数据缺省退当前会话表),falsify_result 命中时按当前
-// 会话表归位反证单位。失败如实返回空视图(详情其余区不受影响)。
+// claimOriginOf 成果溯源装配(P3-13b ①):P4-36 起读 claim_cases 投影的
+// 溯源列(发现单位锚由 applyClaimNodeAdded 在写入时定位——detail 的
+// 转录锚优先,缺省回退该单位×步骤最近的 session_started)与时间线的
+// falsify 条目;反证单位的会话锚按条目 rev 回查 unit_sessions。失败
+// 如实返回空视图(详情其余区不受影响)。
 func (s *Server) claimOriginOf(ctx context.Context, taskID, claimID string) claimOriginView {
-	evs, err := s.Store.Events(ctx, taskID, 0, 0)
-	if err != nil {
-		return claimOriginView{Falsifiers: []unitOriginView{}}
-	}
-	sessionOf := map[[2]string]string{}
 	view := claimOriginView{Falsifiers: []unitOriginView{}}
-	for _, ev := range evs {
-		switch ev.Kind {
-		case rings.EventSwarmRecord:
-			var rec rings.SwarmRecord
-			if json.Unmarshal(ev.Payload, &rec) != nil || rec.TranscriptID == "" {
-				continue
-			}
-			if rec.Type == rings.SwarmRecSessionStarted {
-				sessionOf[[2]string{rec.UnitID, rec.StepID}] = rec.TranscriptID
-			}
-		case rings.EventNodeAdded:
-			var p rings.NodeAdded
-			if json.Unmarshal(ev.Payload, &p) != nil || p.NodeID != claimID || p.NodeType != rings.NodeTestClaim {
-				continue
-			}
-			unit, _ := p.Detail["unit_id"].(string)
-			step, _ := p.Detail["step_id"].(string)
-			sid, _ := p.Detail["transcript_id"].(string)
-			if sid == "" {
-				sid = sessionOf[[2]string{unit, step}]
-			}
-			if unit != "" {
-				view.Discoverer = &unitOriginView{UnitID: unit, StepID: step, SessionID: sid}
-			}
-		case rings.EventTestClaimRecord:
-			var rec rings.TestClaimRecord
-			if json.Unmarshal(ev.Payload, &rec) != nil ||
-				rec.Type != rings.TestClaimRecFalsify || rec.ClaimID != claimID || rec.UnitID == "" {
-				continue
-			}
-			view.Falsifiers = append(view.Falsifiers, unitOriginView{
-				UnitID: rec.UnitID, StepID: rec.StepID,
-				SessionID: sessionOf[[2]string{rec.UnitID, rec.StepID}],
-				Round:     rec.Round,
-			})
+	proj, ok, err := s.Store.ClaimCaseOf(ctx, taskID, claimID)
+	if err != nil || !ok {
+		return view
+	}
+	if proj.Discoverer != "" {
+		view.Discoverer = &unitOriginView{
+			UnitID: proj.Discoverer, StepID: proj.DiscoverStep, SessionID: proj.DiscoverSess,
 		}
+	}
+	for _, ent := range proj.Timeline {
+		if ent.K != "falsify" {
+			continue
+		}
+		var rec rings.TestClaimRecord
+		if json.Unmarshal(ent.P, &rec) != nil || rec.UnitID == "" {
+			continue
+		}
+		sid, _ := s.Store.SessionAnchorOf(ctx, taskID, rec.UnitID, rec.StepID, ent.Rev)
+		view.Falsifiers = append(view.Falsifiers, unitOriginView{
+			UnitID: rec.UnitID, StepID: rec.StepID, SessionID: sid, Round: rec.Round,
+		})
 	}
 	return view
 }
 
 // claimTimingView 确认耗时拆解(P4-08 ②,问题清单 #17):发现落地 →
-// 终态的排队/执行/轮次——账本时间戳直读,零新增采集。落地 = 候选声明
-// 入账;终态 = 最近一次 Confirmed/待确认 迁移(进行中为空,如实不造);
-// 排队/执行/轮次只算当前战役的反证步骤(重开前的旧战役不混计,口径与
-// 复现步骤归因同源 overmind.ClaimFalsifySteps)。
+// 终态的排队/执行/轮次。P4-36 起读 claim_cases.timing 投影(写侧
+// applyCaseStateChanged 增量维护,战役边界=reopen 清游标,与事件回放
+// 同口径)。
 type claimTimingView struct {
 	LandedAt   string  `json:"landed_at"`             // 落地时刻(候选声明入账)
 	TerminalAt string  `json:"terminal_at,omitempty"` // 终态时刻(Confirmed/待确认;进行中缺省)
@@ -119,69 +98,17 @@ type claimTimingView struct {
 	Rounds     int     `json:"rounds"`                // 反证轮次(当前战役反证步骤数)
 }
 
-// claimTimingOf 耗时拆解装配:事件流一次扫描(声明入账/终态 + 战役反证
-// 步骤的状态段迁移)。失败如实返回零值视图(详情其余区不受影响)。
 func (s *Server) claimTimingOf(ctx context.Context, taskID, claimID string) claimTimingView {
 	var v claimTimingView
-	steps, err := overmind.ClaimFalsifySteps(ctx, s.Store, taskID, claimID)
-	if err != nil {
+	proj, ok, err := s.Store.ClaimCaseOf(ctx, taskID, claimID)
+	if err != nil || !ok {
 		return v
 	}
-	inCampaign := map[string]bool{}
-	for _, st := range steps {
-		inCampaign[st.ID] = true
-	}
-	evs, err := s.Store.Events(ctx, taskID, 0, 0)
-	if err != nil {
-		return v
-	}
-	v.Rounds = len(steps)
-	// 战役步骤的状态段游标(逐事件推进):dispatched→running 计排队,
-	// running→其余计执行(R14 重领的来回段如实累加)。
-	lastState := map[string]string{}
-	lastAt := map[string]time.Time{}
-	acc := func(from, to string, d time.Duration) {
-		switch {
-		case from == "dispatched" && to == "running":
-			v.QueueSec += d.Seconds()
-		case from == "running" && to != "running":
-			v.ExecSec += d.Seconds()
-		}
-	}
-	for _, ev := range evs {
-		switch ev.Kind {
-		case rings.EventNodeAdded:
-			var p rings.NodeAdded
-			if json.Unmarshal(ev.Payload, &p) != nil {
-				continue
-			}
-			if p.NodeType == rings.NodeTestClaim && p.NodeID == claimID {
-				v.LandedAt = ev.OccurredAt.Local().Format("2006-01-02 15:04:05")
-				continue
-			}
-			if p.NodeType == rings.NodeStep && inCampaign[p.NodeID] {
-				lastState[p.NodeID], lastAt[p.NodeID] = "dispatched", ev.OccurredAt
-			}
-		case rings.EventNodeStateChanged:
-			var p rings.NodeStateChanged
-			if json.Unmarshal(ev.Payload, &p) != nil {
-				continue
-			}
-			if p.NodeID == claimID {
-				if p.Status == rings.TestClaimConfirmed || p.Status == rings.TestClaimPending {
-					v.TerminalAt = ev.OccurredAt.Local().Format("2006-01-02 15:04:05")
-				}
-				continue
-			}
-			if !inCampaign[p.NodeID] {
-				continue
-			}
-			if prev, ok := lastState[p.NodeID]; ok {
-				acc(prev, p.Status, ev.OccurredAt.Sub(lastAt[p.NodeID]))
-			}
-			lastState[p.NodeID], lastAt[p.NodeID] = p.Status, ev.OccurredAt
-		}
-	}
+	v.LandedAt = proj.Timing.LandedAt
+	v.TerminalAt = proj.Timing.TerminalAt
+	v.QueueSec = proj.Timing.QueueSec
+	v.ExecSec = proj.Timing.ExecSec
+	v.Rounds = proj.Timing.Rounds
 	return v
 }
 
@@ -196,14 +123,15 @@ type claimDetailView struct {
 	Timeline        []report.CaseEntry  `json:"timeline"`
 	Remediation     []string            `json:"remediation"` // 查表修复建议(未命中为空,读侧如实呈现)
 	Repro           *report.ReproFinal  `json:"repro,omitempty"`
-	Evidence        []claimEvidenceView `json:"evidence"`         // 绑定的流量证据(首绑次序,去重)
-	EvidenceVersion int64               `json:"evidence_version"` // 声明证据版本(绑定+定稿累计)
-	Reopenable      bool                `json:"reopenable"`       // Confirmed/待确认 可重开(结论可反驳)
-	Retests         []retestView        `json:"retests"`          // 复测历史(第 1 轮起,最新在尾;P3-06)
-	Replays         []replayView        `json:"replays"`          // 重放校验历史(第 1 轮起,最新在尾;P3-07)
-	Origin          claimOriginView     `json:"origin"`           // 成果溯源:发现单位与反证单位(P3-13b ①)
-	Timing          claimTimingView     `json:"timing"`           // 确认耗时拆解(P4-08 ②:落地→终态 排队/执行/轮次)
-	Followup        claimFollowupView   `json:"followup"`         // 成果追问会话摘要(P4-14:入口按钮"已 N 问"的数据面)
+	Evidence        []claimEvidenceView `json:"evidence"`                // 绑定的流量证据(首绑次序,去重)
+	EvidenceVersion int64               `json:"evidence_version"`        // 声明证据版本(绑定+定稿累计)
+	Reopenable      bool                `json:"reopenable"`              // Confirmed/待确认 可重开(结论可反驳)
+	Retests         []retestView        `json:"retests"`                 // 复测历史(第 1 轮起,最新在尾;P3-06)
+	Replays         []replayView        `json:"replays"`                 // 重放校验历史(第 1 轮起,最新在尾;P3-07)
+	Origin          claimOriginView     `json:"origin"`                  // 成果溯源:发现单位与反证单位(P3-13b ①)
+	Timing          claimTimingView     `json:"timing"`                  // 确认耗时拆解(P4-08 ②:落地→终态 排队/执行/轮次)
+	Followup        claimFollowupView   `json:"followup"`                // 成果追问会话摘要(P4-14:入口按钮"已 N 问"的数据面)
+	DiveDisabled    string              `json:"dive_disabled,omitempty"` // 深入按钮禁用态(P4-48:空 = 可用;终态任务 = 悬停文案"任务已结束")
 }
 
 // claimFollowupView 成果追问摘要(P4-14):当前轮次(0 = 尚未追问)、
@@ -324,14 +252,21 @@ func (s *Server) handleClaimDetail(w http.ResponseWriter, r *http.Request) {
 		v.Claim.Chain = s.chainLinksOf(ctx, taskID, node)
 	}
 
-	cs, err := report.ClaimCaseOf(ctx, s.Store, s.blobStore(), taskID, claimID)
+	cs, err := report.ClaimCaseOf(ctx, s.Store, nil, taskID, claimID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	v.Alternatives = cs.Alternatives
 	v.Timeline = cs.Timeline
-	v.Repro = cs.Repro
+	// 定稿轻量视图(P4-36 ②:详情按条取,复现步骤按步分段取——步骝始终
+	// 走分段端点 /claims/{cid}/repro,详情只带小字段与计数,巨记录详情
+	// 打开不卡死;blob 原文回放随分段逐页渲染)。
+	if cs.Repro != nil {
+		light := *cs.Repro
+		light.Steps = nil
+		v.Repro = &light
+	}
 	v.Claim.Severity = cs.Severity()
 	v.Claim.Verifier = cs.Verifier()
 	v.Claim.FalsifyStep = cs.FalsifyStep()
@@ -369,32 +304,34 @@ func (s *Server) handleClaimDetail(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// 深入按钮禁用态(P4-48):一切状态都可深入,只有任务终态置灰。
+	v.DiveDisabled = s.diveDisabledOf(ctx, taskID)
 	writeJSON(w, http.StatusOK, v)
 }
 
-// claimRetestOf 声明复测历史装配(P3-06):事件流一次扫描,历史按轮次
-// 顺序(最新在尾);返回的最新三元组供列表字段同源填充。
+// claimRetestOf 声明复测历史装配(P3-06):P4-36 起读卷宗时间线的 retest
+// 条目(原始负载,事件序即历史序,最新在尾);返回的最新三元组供列表
+// 字段同源填充。
 func (s *Server) claimRetestOf(ctx context.Context, taskID, claimID string) ([]retestView, string, int, string) {
-	evs, err := s.Store.Events(ctx, taskID, 0, 0)
-	if err != nil {
-		return []retestView{}, "", 0, ""
-	}
 	out := []retestView{}
 	var lastVerdict string
 	var lastRound int
 	var lastAt string
-	for _, ev := range evs {
-		if ev.Kind != rings.EventTestClaimRecord {
+	proj, ok, err := s.Store.ClaimCaseOf(ctx, taskID, claimID)
+	if err != nil || !ok {
+		return out, "", 0, ""
+	}
+	for _, ent := range proj.Timeline {
+		if ent.K != "retest" {
 			continue
 		}
 		var rec rings.TestClaimRecord
-		if json.Unmarshal(ev.Payload, &rec) != nil ||
-			rec.Type != rings.TestClaimRecRetest || rec.ClaimID != claimID {
+		if json.Unmarshal(ent.P, &rec) != nil {
 			continue
 		}
 		rv := retestView{
 			Round: rec.Round, Verdict: rec.RetestVerdict,
-			At:           ev.OccurredAt.Local().Format("2006-01-02 15:04:05"),
+			At:           rings.FmtLocal(ent.At),
 			Note:         rec.Note,
 			EvidenceHead: rec.EvidenceHead, EvidenceRef: rec.EvidenceRef,
 			SessionID: rec.StepID, UnitID: rec.UnitID,
@@ -486,29 +423,28 @@ func (s *Server) handleClaimReplay(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// claimReplayOf 声明重放历史装配(P3-07):事件流一次扫描,历史按轮次
-// 顺序(最新在尾);返回的最新三元组供列表字段同源填充。
+// claimReplayOf 声明重放历史装配(P3-07):P4-36 起读卷宗时间线的 replay
+// 条目(事件序即历史序,最新在尾);返回的最新三元组供列表字段同源填充。
 func (s *Server) claimReplayOf(ctx context.Context, taskID, claimID string) ([]replayView, string, int, string) {
-	evs, err := s.Store.Events(ctx, taskID, 0, 0)
-	if err != nil {
-		return []replayView{}, "", 0, ""
-	}
 	out := []replayView{}
 	var lastVerdict string
 	var lastRound int
 	var lastAt string
-	for _, ev := range evs {
-		if ev.Kind != rings.EventTestClaimRecord {
+	proj, ok, err := s.Store.ClaimCaseOf(ctx, taskID, claimID)
+	if err != nil || !ok {
+		return out, "", 0, ""
+	}
+	for _, ent := range proj.Timeline {
+		if ent.K != "replay" {
 			continue
 		}
 		var rec rings.TestClaimRecord
-		if json.Unmarshal(ev.Payload, &rec) != nil ||
-			rec.Type != rings.TestClaimRecReplay || rec.ClaimID != claimID {
+		if json.Unmarshal(ent.P, &rec) != nil {
 			continue
 		}
 		rv := replayView{
 			Round: rec.Round, Verdict: rec.ReplayVerdict,
-			At:    ev.OccurredAt.Local().Format("2006-01-02 15:04:05"),
+			At:    rings.FmtLocal(ent.At),
 			Note:  rec.Note,
 			Items: replayItemViews(rec.ReplayResults),
 		}
@@ -533,60 +469,40 @@ func replayItemViews(rs []rings.ReplayResult) []replayItemView {
 	return out
 }
 
-// claimEvidenceOf 声明流量证据装配(P3-02):绑定事件展开(首绑次序去重)
-// + 交换摘要(账本 mirror.record 一次扫描建索引)+ 声明证据版本。
-// 悬空引用(留痕被特权清除等极端情形)如实跳过——绑定事实仍在事件流。
+// claimEvidenceOf 声明流量证据装配(P3-02):P4-36 起读卷宗投影的绑定
+// 清单(首绑次序,写侧 applyClaimRecord 同事务维护)+ mirror_briefs 摘要
+// + 声明证据版本(绑定 + 定稿计数)。悬空引用(留痕被特权清除等极端
+// 情形)如实跳过——绑定事实仍在事件流。
 func (s *Server) claimEvidenceOf(ctx context.Context, taskID, claimID string) ([]claimEvidenceView, int64) {
-	perClaim, _, err := s.Store.EvidenceVersions(ctx, taskID)
-	if err != nil {
+	proj, ok, err := s.Store.ClaimCaseOf(ctx, taskID, claimID)
+	if err != nil || !ok {
 		return []claimEvidenceView{}, 0
 	}
-	exchanges, _, err := s.Store.ClaimEvidence(ctx, taskID, claimID)
-	if err != nil || len(exchanges) == 0 {
-		return []claimEvidenceView{}, perClaim[claimID]
+	version := int64(proj.EvidenceBinds + proj.ReproEvents)
+	if len(proj.Evidence) == 0 {
+		return []claimEvidenceView{}, version
 	}
-	evs, err := s.Store.Events(ctx, taskID, 0, 0)
+	ids := make([]string, 0, len(proj.Evidence))
+	for _, b := range proj.Evidence {
+		ids = append(ids, b.ExchangeID)
+	}
+	briefs, err := s.Store.MirrorBriefs(ctx, taskID, ids)
 	if err != nil {
-		return []claimEvidenceView{}, perClaim[claimID]
+		return []claimEvidenceView{}, version
 	}
-	type mirrorBrief struct {
-		rec rings.MirrorRecord
-		rev int64
-	}
-	firstRev := map[string]int64{}
-	briefs := map[string]mirrorBrief{}
-	for _, ev := range evs {
-		switch ev.Kind {
-		case rings.EventMirrorRecord:
-			var m rings.MirrorRecord
-			if json.Unmarshal(ev.Payload, &m) == nil {
-				briefs[m.ExchangeID] = mirrorBrief{rec: m, rev: ev.Revision}
-			}
-		case rings.EventTestClaimRecord:
-			var tcr rings.TestClaimRecord
-			if json.Unmarshal(ev.Payload, &tcr) != nil || tcr.ClaimID != claimID || tcr.Type != rings.TestClaimRecEvidence {
-				continue
-			}
-			for _, ex := range tcr.Exchanges {
-				if _, ok := firstRev[ex]; !ok {
-					firstRev[ex] = ev.Revision
-				}
-			}
-		}
-	}
-	out := make([]claimEvidenceView, 0, len(exchanges))
-	for _, ex := range exchanges {
-		b, ok := briefs[ex]
+	out := make([]claimEvidenceView, 0, len(proj.Evidence))
+	for _, b := range proj.Evidence {
+		m, ok := briefs[b.ExchangeID]
 		if !ok {
 			continue
 		}
 		out = append(out, claimEvidenceView{
-			ExchangeID: ex, Type: b.rec.Type, Method: b.rec.Method,
-			URL: b.rec.URL, Status: b.rec.Status, TLS: b.rec.TLS, Error: b.rec.Error,
-			BoundRev: firstRev[ex],
+			ExchangeID: b.ExchangeID, Type: m.Type, Method: m.Method,
+			URL: m.URL, Status: m.Status, TLS: m.TLS, Error: m.Error,
+			BoundRev: b.Rev,
 		})
 	}
-	return out, perClaim[claimID]
+	return out, version
 }
 
 // handleClaimReopen 重开 API(POST /api/tasks/{id}/claims/{cid}/reopen):
@@ -620,4 +536,78 @@ func (s *Server) handleClaimReopen(w http.ResponseWriter, r *http.Request) {
 	}
 	s.wake(taskID)
 	writeJSON(w, http.StatusOK, map[string]string{"id": claimID, "status": rings.TestClaimTesting})
+}
+
+// ---- 复现步骤分段取(P4-36 ②,问题清单 #57) ----
+
+// reproPageSize 复现步骤分段页大小(定值;一步型/链式几页即完,存量
+// 巨记录去同型步骤数百条也逐页消化,单页含 blob 原文回放,页过大反而
+// 卡界面)。
+const reproPageSize = 8
+
+// reproStepsPage 分段页视图:步骤(含 blob 原文回放,与报告同源同一
+// 装配)+ 分段游标。
+type reproStepsPage struct {
+	Rev      int64                  `json:"rev"`
+	Severity string                 `json:"severity,omitempty"`
+	Steps    []report.ReproStepView `json:"steps"`
+	Offset   int                    `json:"offset"`
+	Total    int                    `json:"total"`
+	HasMore  bool                   `json:"has_more"`
+}
+
+// handleClaimRepro 复现步骤分段 API(GET /api/tasks/{id}/claims/{cid}/repro
+// ?offset=&limit=):定稿步骤按页下发,每步原文回放同报告装配(blob 截断
+// 同口径);offset/limit 缺省取首页/页大小。详情响应不带步骤(轻量),
+// 步骤始终经本端点分段拉取——存量巨记录(步骤数百条)详情打开不卡死。
+func (s *Server) handleClaimRepro(w http.ResponseWriter, r *http.Request) {
+	taskID, claimID := r.PathValue("id"), r.PathValue("cid")
+	if !s.taskExists(taskID) {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("任务 %s 不存在", taskID))
+		return
+	}
+	node, err := s.Store.Node(r.Context(), taskID, claimID)
+	if err != nil || node.Type != rings.NodeTestClaim {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("发现 %s 不存在", claimID))
+		return
+	}
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if offset < 0 {
+		offset = 0
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 100 {
+		limit = reproPageSize
+	}
+	proj, ok, err := s.Store.ClaimCaseOf(r.Context(), taskID, claimID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	page := reproStepsPage{Offset: offset, Steps: []report.ReproStepView{}}
+	if !ok || proj.Repro == nil {
+		writeJSON(w, http.StatusOK, page)
+		return
+	}
+	page.Rev, page.Severity = proj.Repro.Rev, proj.Repro.Severity
+	steps := proj.Repro.Steps
+	page.Total = len(steps)
+	if offset < len(steps) {
+		end := offset + limit
+		if end > len(steps) {
+			end = len(steps)
+		}
+		blobs := s.blobStore()
+		for _, st := range steps[offset:end] {
+			sv := report.ReproStepView{ReproStep: st}
+			if st.BlobRef != "" && blobs != nil {
+				if raw, rerr := blobs.Read(st.BlobRef); rerr == nil {
+					sv.FillRaw(raw)
+				}
+			}
+			page.Steps = append(page.Steps, sv)
+		}
+	}
+	page.HasMore = offset+len(page.Steps) < page.Total
+	writeJSON(w, http.StatusOK, page)
 }

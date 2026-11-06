@@ -450,8 +450,9 @@ func SetTaskOverride(ctx context.Context, store *rings.Store, taskID, role, name
 	return store.SetSetting(ctx, key, name, by)
 }
 
-// taskOverrideName 任务级覆盖读取(缺省回全局激活名)。
-func taskOverrideName(ctx context.Context, store *rings.Store, taskID, role string) (string, bool) {
+// TaskOverrideName 任务级覆盖读取(未绑定返回 false;P4-41 起导出供
+// 切换告知排除显式绑定任务)。
+func TaskOverrideName(ctx context.Context, store *rings.Store, taskID, role string) (string, bool) {
 	if taskID == "" {
 		return "", false
 	}

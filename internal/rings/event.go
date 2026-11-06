@@ -336,6 +336,7 @@ const (
 	EventReportRecord     EventKind = "report.record"
 	EventSessionMeta      EventKind = "session.meta"
 	EventClosureRecord    EventKind = "closure.record"
+	EventOperatorDive     EventKind = "operator.dive"
 )
 
 // Event 账本事件信封。Payload 按 Kind 对应 NodeAdded/NodeStateChanged/EdgeAdded。
@@ -388,8 +389,9 @@ type EdgeAdded struct {
 // checkpointed(P3-07,第七章「故障与恢复」断点续接)是手动断点存档态:
 // 操作者主动冻结(在跑单位到工具调用边界收拢、会话保留可续)后进程
 // 可关;重启收养把 checkpointed 与运行中同列自动重拉,原会话原地续跑。
-// 与 hibernated 的分工:冬眠=内存冻结(进程在、原地解冻),断点=进程级
-// (进程可亡、重启续跑)。
+// 与 hibernated 的分工(P4-33 起):冬眠=冻结收场让位名额、唤醒拉起
+// 续跑;断点=手动存档、重启自动续跑——两者收场同约定(边界落地、
+// 会话保留可续)。
 type TaskLifecycle struct {
 	Action string         `json:"action"` // created|queued|started|paused|resumed|stopped|completed|settling
 	Title  string         `json:"title,omitempty"`
@@ -442,12 +444,24 @@ type TaskMeta struct {
 // 全部纳入授权范围,摘除 = 提交含该资产 ID 的新快照;摘除的资产主宰
 // 不再派发覆盖它的意图(派发入口守卫拒绝,covers 判定),改动下一轮
 // 生效(不做硬中断,在飞单位跑完)。
+// ScopeApproved 是范围外资产放行清单(P4-44,问题清单 #61):渗透任务
+// 的待批资产经面板/牧者放行后转范围内可测;随快照整体提交,语义与
+// ExcludedAssets 同款(增删 = 提交新快照,条目须图上存在)。
+// CreatorNotes 是造物主注意事项(P4-49,问题清单 #70):对做法的软要求
+// (如"用小字典,不要用大字典""不要修改任何数据")——与拦截规则分工:
+// 方法偏好写这里,绝对红线配拦截规则。**指针语义**:nil = 本次变更不
+// 动它(其余字段是整体覆盖快照,透传当前值的各写入口极易漏带新字段
+// 造成误清空;本字段只有建任务与 RoE 面板两处显式写,nil 即保持)。
+// 非空指针整体覆盖(空串 = 清空注意事项)。投影按逐笔叠加(COALESCE),
+// 事件流重放仍确定。
 type RoeUpdated struct {
 	AllowedTools      []string     `json:"allowed_tools,omitempty"`      // 白名单(空=不设白名单)
 	DeniedTools       []string     `json:"denied_tools,omitempty"`       // 黑名单(优先于白名单)
 	ApprovalThreshold ActionLevel  `json:"approval_threshold,omitempty"` // 审批门槛(空=默认宽:仅增删改弹门)
 	IntentRules       []IntentRule `json:"intent_rules,omitempty"`       // 任务级拦截规则(P2-08e)
 	ExcludedAssets    []string     `json:"excluded_assets,omitempty"`    // 授权范围摘除清单(P4-05;空=全部纳入)
+	ScopeApproved     []string     `json:"scope_approved,omitempty"`     // 范围外资产放行清单(P4-44;随快照整体提交)
+	CreatorNotes      *string      `json:"creator_notes,omitempty"`      // 造物主注意事项(P4-49;nil=本次不动)
 	MaxActionLevel    ActionLevel  `json:"max_action_level,omitempty"`   // 已废止(P1-07 分级上限,读兼容)
 	Note              string       `json:"note,omitempty"`               // 变更说明(谁、为何)
 }
@@ -658,24 +672,24 @@ type ArbiterVerdict struct {
 
 // TestClaim 记录类型白名单(受控入口,P1-08 + P2-02 + P3-02 + P3-06)。
 const (
-	TestClaimRecFalsify  = "falsify_result" // 反证单位经 submit_falsify_result 写回的结构化反证结论
-	TestClaimRecVerdict  = "verdict"        // 仲裁者对声明的轮末评估/终审裁决(机器纯函数求值)
-	TestClaimRecReopen   = "reopen"         // P2-02:重开(结论可反驳/过期;追加事件,历史不删)
-	TestClaimRecRepro    = "repro"          // P2-02:收割定稿(复现步骤 + 严重级别,确认裁决同批落)
-	TestClaimRecEvidence = "evidence"       // P3-02:流量证据绑定/补绑(镜交换 ↔ 声明,面板操作入账)
-	TestClaimRecRetest   = "retest"         // P3-06:复测结论(已修复/未修复,复测会话受限工具写回)
-	TestClaimRecReplay   = "replay"         // P3-07:重放校验结论(绑定证据确定性重放,零 LLM)
-	TestClaimRecReportReview = "report_review" // P4-30:存量复核标记(信息性判断不纳入报告;追加事件,账本不涂改,判断保留可追溯)
+	TestClaimRecFalsify      = "falsify_result" // 反证单位经 submit_falsify_result 写回的结构化反证结论
+	TestClaimRecVerdict      = "verdict"        // 仲裁者对声明的轮末评估/终审裁决(机器纯函数求值)
+	TestClaimRecReopen       = "reopen"         // P2-02:重开(结论可反驳/过期;追加事件,历史不删)
+	TestClaimRecRepro        = "repro"          // P2-02:收割定稿(复现步骤 + 严重级别,确认裁决同批落)
+	TestClaimRecEvidence     = "evidence"       // P3-02:流量证据绑定/补绑(镜交换 ↔ 声明,面板操作入账)
+	TestClaimRecRetest       = "retest"         // P3-06:复测结论(已修复/未修复,复测会话受限工具写回)
+	TestClaimRecReplay       = "replay"         // P3-07:重放校验结论(绑定证据确定性重放,零 LLM)
+	TestClaimRecReportReview = "report_review"  // P4-30:存量复核标记(信息性判断不纳入报告;追加事件,账本不涂改,判断保留可追溯)
 )
 
 var testClaimRecordTypes = map[string]bool{
-	TestClaimRecFalsify:  true,
-	TestClaimRecVerdict:  true,
-	TestClaimRecReopen:   true,
-	TestClaimRecRepro:    true,
-	TestClaimRecEvidence: true,
-	TestClaimRecRetest:   true,
-	TestClaimRecReplay:   true,
+	TestClaimRecFalsify:      true,
+	TestClaimRecVerdict:      true,
+	TestClaimRecReopen:       true,
+	TestClaimRecRepro:        true,
+	TestClaimRecEvidence:     true,
+	TestClaimRecRetest:       true,
+	TestClaimRecReplay:       true,
 	TestClaimRecReportReview: true,
 }
 
@@ -787,13 +801,17 @@ type AltResult struct {
 // (变体流量不进复现步骤,证据包 zip 全量收,审计不丢)。P4-08 ④ 起
 // Desc 为定稿时模型生成的指令式人话(冻结入账本;生成失败回退确定性
 // 描述),报告导出与面板渲染零 LLM(R17 不破)。
+// P4-35 起最小复现集口径(问题清单 #57 ①):去同型结果只是候选池,
+// 定稿时模型从中挑出构成复现流程的必要步骤(对比交换/反证变体/枚举
+// 试错一条不进面板),未选中的交换只留在 Process 引用清单(全量在
+// 仓库与证据包)。
 type ReproStep struct {
 	Seq     int    `json:"seq,omitempty"`
 	Round   int    `json:"round,omitempty"` // 所属反证轮次
 	StepID  string `json:"step_id"`         // 反证 Step(归因)
 	UnitID  string `json:"unit_id"`
-	Op      string `json:"op,omitempty"`     // 操作方法:发起本步的工具与参数(证据包收,面板/报告正文不显)
-	Desc    string `json:"desc,omitempty"`   // 一句话描述(指令式人话,P4-08 ④;旧记录为确定性描述或缺省)
+	Op      string `json:"op,omitempty"`     // 操作方法:发起本步的工具与参数(证据包收,面板/报告正文不显;P4-35 起总量封顶,完整参数在 swarm.record 审计流)
+	Desc    string `json:"desc,omitempty"`   // 做什么(指令式人话,P4-08 ④;旧记录为确定性描述或缺省)
 	Method  string `json:"method,omitempty"` // HTTP 方法
 	URL     string `json:"url,omitempty"`
 	Status  int    `json:"status,omitempty"`
@@ -803,10 +821,24 @@ type ReproStep struct {
 	// 预渲染原文)。
 	ExchangeID string `json:"exchange_id,omitempty"`
 	Note       string `json:"note,omitempty"`
+	// Short 步骤短名(P4-35 ②,"① 拿会话凭据"式的标题段,≤8 字):定稿
+	// 时模型生成,与 Desc 同批同规矩(失败回退确定性短名);旧记录无本
+	// 字段,读侧退"步骤 N"。
+	Short string `json:"short,omitempty"`
+	// Purpose 该步在复现里的作用(P4-35 ②,"作用:为什么"行):定稿时
+	// 模型生成;旧记录无本字段,读侧省略该行。
+	Purpose string `json:"purpose,omitempty"`
 	// Unpolished 该步描述未过文风校验(P4-24 ②,问题清单 #39):模式
 	// 闸门拦截后退回重写一次仍含机器语特征,如实标注原文保留(读侧
 	// 渲染一行说明,不阻塞定稿)。旧记录无本字段。
 	Unpolished bool `json:"unpolished,omitempty"`
+}
+
+// ReproProcessRef 过程流量清单条目(P4-35 ④,问题清单 #57):引用形态,
+// 不内嵌原文——按编号从内容寻址仓库取回,字节一致(R18)。
+type ReproProcessRef struct {
+	ExchangeID string `json:"exchange_id"`
+	BlobRef    string `json:"blob_ref"`
 }
 
 // TestClaimRecord 是 EventTestClaimRecord 的负载(P1-08 + P2-02,第三章
@@ -885,7 +917,16 @@ type TestClaimRecord struct {
 	// Variants 去同型时被收起的变体交换(P4-08 ③):同方法+同路径+同
 	// 状态的重复交换不构成复现流程,不进 Steps;账本记录保留(证据包
 	// zip 全量收,审计不丢)。账次序与原交换次序一致,不编 Seq。
+	// P4-35 ④ 起新定稿不再填充(变体 Op 随步骤全量内嵌曾把单条记录
+	// 撑到百 MB 级,问题清单 #57 ②):过程流量改记 Process 引用清单;
+	// 字段保留以解码旧记录,读侧(证据包导出)新旧同收。
 	Variants []ReproStep `json:"variants,omitempty"`
+	// Process 过程流量清单(P4-35 ①④,问题清单 #57):定稿战役范围内
+	// 全部交换的引用(账次序,仅交换 ID 与内容寻址引用——请求/响应
+	// 原文大块头一律在仓库,数据库不内嵌,第六章 R18 精神)。对比交换、
+	// 反证变体、枚举试错不进面板复现步骤,但全量在此留档,证据包导出
+	// 照旧全量(审计不丢)。旧定稿记录无本字段(过程流量在 Variants)。
+	Process []ReproProcessRef `json:"process,omitempty"`
 
 	// evidence 侧(P3-02,绑定/补绑):本次追加绑定的镜交换 ID。绑定与
 	// 补绑是同一操作类型——声明已有证据再绑即补绑,读取侧按事件累计。
@@ -1034,6 +1075,11 @@ const (
 	BlackboxTaskResumed      = "task_resumed"       // P2-06e:任务受阻后模型调用恢复
 	BlackboxRestartAdoption  = "restart_adoption"   // P2-06f:进程重启收养(幽灵清理/重拉/重准入的系统级审计锚点)
 	BlackboxEnvObservation   = "env_observation"    // P4-25 ①:本机环回/测试环境自身设施的观察(镜自指排除),拒收原文留痕供排查
+	BlackboxBGOutputTrunc    = "bg_output_trunc"    // P4-37 ①:后台命令输出超限截断(100MB 闸,文件尾省略标记)
+	BlackboxBGLifespanKill   = "bg_lifespan_kill"   // P4-37 ②:后台命令寿命到点强杀(30 分钟闸,kill 留痕)
+	BlackboxToolSpill        = "tool_spill"         // P4-39 ①:超长工具输出落盘占位(30k 阈值,对话内只留截头+引用)
+	BlackboxMicroCompact     = "micro_compact"      // P4-39 ②:旧轮工具结果体清理(微压缩,清出条数与字节数)
+	BlackboxAssessTimeout    = "assess_timeout"     // P4-42 ②:主宰单轮研判墙钟超时中断(弃本轮,心跳/事件可再触发)
 )
 
 var blackboxRecordTypes = map[string]bool{
@@ -1043,6 +1089,9 @@ var blackboxRecordTypes = map[string]bool{
 	BlackboxUnitApprovalDeny: true,
 	BlackboxUnitBlocked:      true, BlackboxTaskBlocked: true, BlackboxTaskResumed: true,
 	BlackboxRestartAdoption: true, BlackboxEnvObservation: true,
+	BlackboxBGOutputTrunc: true, BlackboxBGLifespanKill: true,
+	BlackboxToolSpill: true, BlackboxMicroCompact: true,
+	BlackboxAssessTimeout: true,
 }
 
 // BlackboxRecord 是 EventBlackboxRecord 的负载(P2-04,第四章 §6):系统级
@@ -1107,6 +1156,26 @@ type SteerRecord struct {
 	By      string `json:"by,omitempty"`      // 下达者:creator(面板)/ overmind(心跳纠偏)
 	Reason  string `json:"reason,omitempty"`  // kill:止损理由
 	Note    string `json:"note,omitempty"`    // 送达侧补充(如注入时机)
+}
+
+// OperatorDive 是 EventOperatorDive 的负载(P4-48,问题清单 #67):操作者
+// 深入指令——从成果(TestClaim)或事实(Fact)节点出发"推一把"的节点
+// 锚定指令。落账即记账(R7 无旁路:任务/锚定节点/方向/造物主/时间在
+// 账本可审计),写入方负责经既有唤醒通道立即唤醒主宰;纳谏语义——
+// 立即规划是硬承诺,方向文本是建议,采纳由主宰裁决(研判记录说明
+// 理由)。不进 nodes/edges 投影(指令是审计流,锚定节点本就在图上)。
+// 同一节点可多次深入,每次一条事件、各自可溯。
+type OperatorDive struct {
+	NodeID    string `json:"node_id"`             // 锚定节点 ID(成果或事实)
+	Direction string `json:"direction,omitempty"` // 可选方向文本(留空 = 主宰自行判断)
+}
+
+// validateOperatorDive 负载结构校验:锚定节点必填。
+func validateOperatorDive(p OperatorDive) error {
+	if strings.TrimSpace(p.NodeID) == "" {
+		return fmt.Errorf("rings: 深入指令缺锚定节点")
+	}
+	return nil
 }
 
 // 主宰研判记录类型白名单(受控入口,P2-06)。

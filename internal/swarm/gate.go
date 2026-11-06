@@ -38,6 +38,11 @@ type GateDecision struct {
 	Approved bool
 	By       string // 裁决者标识(面板=creator)
 	Reason   string
+	// Released 冬眠收场放行(P4-33,非裁决):任务冬眠冻结收场时,票上
+	// 等待的单位经此令收场落地——票面保持待裁决冻结(不产生任何裁决
+	// 记录),唤醒后重领的单位重新过门时重新立票。Decide/Expire 永不
+	// 置位;单位侧见令先于 Approved 处理。
+	Released bool
 }
 
 // GateTicket 一笔在途弹门请求与其裁决送达通道(P2-06b 挂起/续跑形态)。
@@ -156,8 +161,10 @@ func (g *LedgerGate) Enter(req ApprovalRequest) (*GateTicket, error) {
 
 // Decide 面板裁决:记账在先、送达在后(账本先于一切副作用,R7 惯例)。
 // 等待时长随裁决落账——弹门等待期的时间账可对账(第四章 §3 v2)。
-// P2-08:任务冬眠中审批单冻结为只读——裁决被拒(唤醒后恢复可裁决);
-// 单位阻塞在票上闲等即原地冻结,与冬眠天然兼容(§3 v2 计时暂停)。
+// P2-08:任务冬眠中审批单冻结为只读——裁决被拒(唤醒后恢复可裁决)。
+// P4-33:冬眠收场时票上等待的单位经 RetireTickets 放行落地,票面保持
+// 待裁决冻结留待唤醒清出(无主票不可再裁);唤醒后重领的单位重新
+// 过门时重新立票。
 func (g *LedgerGate) Decide(_ context.Context, taskID, requestID string, d GateDecision) error {
 	if g.Hiber != nil && g.Hiber.Active(taskID) {
 		return ErrGateFrozen
@@ -240,4 +247,61 @@ func (g *LedgerGate) Pending(taskID string) []ApprovalRequest {
 		}
 	}
 	return out
+}
+
+// ---- P4-33 冬眠让位的票据配套 ----
+
+// RetireTickets 冬眠收场放行:任务下全部待裁决票向等待单位送达 Released
+// 令(单位收场落地,票面保持待裁决冻结——不产生任何裁决记录,面板
+// 冬眠中只读可见)。返回放行票数。
+func (g *LedgerGate) RetireTickets(taskID string) int {
+	g.mu.Lock()
+	var tickets []*GateTicket
+	for _, t := range g.pending {
+		if t.Req.TaskID == taskID {
+			tickets = append(tickets, t)
+		}
+	}
+	g.mu.Unlock()
+	for _, t := range tickets {
+		select {
+		case t.ch <- GateDecision{Released: true}:
+		default: // 票已先行送达(竞态):等待方自行处理
+		}
+	}
+	return len(tickets)
+}
+
+// DropTickets 唤醒清出:冬眠收场让位后遗留的待裁决票不可再裁(持有
+// 单位已退出)——清出待决表,零裁决记录,等价重启后的内存票据清空;
+// 账本 requested 原样留痕(审计),唤醒后重领的单位重新过门时重新
+// 立票。返回清出票数。
+func (g *LedgerGate) DropTickets(taskID string) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	n := 0
+	for id, t := range g.pending {
+		if t.Req.TaskID == taskID {
+			delete(g.pending, id)
+			n++
+		}
+	}
+	return n
+}
+
+// ExpireTickets 熔断结案:冬眠任务熔断时,遗留待裁决票逐笔按拒绝结案
+// 留痕(与挂起单位被任务收尾 cancel 的既有口径一致)。返回结案票数。
+func (g *LedgerGate) ExpireTickets(taskID, reason string) int {
+	g.mu.Lock()
+	var ids []string
+	for id, t := range g.pending {
+		if t.Req.TaskID == taskID {
+			ids = append(ids, id)
+		}
+	}
+	g.mu.Unlock()
+	for _, id := range ids {
+		_ = g.Expire(taskID, id, reason)
+	}
+	return len(ids)
 }

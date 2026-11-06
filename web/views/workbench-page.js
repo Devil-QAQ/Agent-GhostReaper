@@ -216,7 +216,10 @@ export function WorkbenchPage({ currentTask, focus }) {
               )}
             </span>
           </div>
-          {graph?.queue && (
+          {/* P4-43 ③ 终态任务隐藏水位行:清点后执行中/排队/等前置已清零,
+              还可新增/派发上限对已收场的任务无意义(隐藏而非清零,避免
+              "还可新增 8"误导)。 */}
+          {graph?.queue && currentTask?.status !== "stopped" && currentTask?.status !== "completed" && (
             <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground num" title="排队只计可领取步骤，等前置步骤预留容量；反证、假设验证与急活不受派发上限限制。反证优先领取下一个空位，不能保证立即起飞。">
               <span>执行中 {graph.queue.running}</span><span>排队 {graph.queue.queued}</span><span>等前置 {graph.queue.waiting}</span><span>还可新增 {graph.queue.available}</span><span>派发上限 {graph.queue.limit}</span>
               {graph.queue.available === 0 && <span>等待单位结果</span>}

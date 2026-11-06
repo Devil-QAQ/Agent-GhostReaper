@@ -46,10 +46,11 @@ export function statusVariant(code) {
 // ExchangeRaw 原文回放视图:元数据条(方法/URL/状态/证书结论/归因/原始
 // 数据摘要)+ 请求包/返回包分侧分段原文。隧道记录无原文,如实呈现元数据。
 // bare=素净模式(复现步骤内嵌用):省元数据条与微信息行,原始数据缩为
-// 一行大小摘要——步骤头已携带方法/URL/状态,不再重复。P3-11a ③:原始
-// 数据引用显示"原始数据 · 大小"式摘要,完整 hash 收进悬停(引用对账
-// 用途保留,不占主视觉)。
-export function ExchangeRaw({ tid, exID, bare = false }) {
+// 一行大小摘要——步骤头已携带方法/URL/状态,不再重复。respCopy=返回包
+// 复制开关(P4-35 ③:复现区请求包带复制、返回包无;流量页默认开)。
+// P3-11a ③:原始数据引用显示"原始数据 · 大小"式摘要,完整 hash 收进
+// 悬停(引用对账用途保留,不占主视觉)。
+export function ExchangeRaw({ tid, exID, bare = false, respCopy = true }) {
   const [meta, setMeta] = React.useState(null);
   const [error, setError] = React.useState(null);
 
@@ -138,7 +139,7 @@ export function ExchangeRaw({ tid, exID, bare = false }) {
           )}
           <RawSide tid={tid} exID={exID} side="req" label="请求包" />
           {(meta.response || meta.error) && (
-            <RawSide tid={tid} exID={exID} side="resp" label="返回包" />
+            <RawSide tid={tid} exID={exID} side="resp" label="返回包" copyable={respCopy} />
           )}
           {bare && meta.blob_ref && (
             <div
@@ -160,8 +161,9 @@ export function ExchangeRaw({ tid, exID, bare = false }) {
   );
 }
 
-// RawSide 单侧原文(请求包/返回包):分段读取 + 复制(复制按需拉全该侧)。
-function RawSide({ tid, exID, side, label }) {
+// RawSide 单侧原文(请求包/返回包):分段读取 + 复制(复制按需拉全该侧;
+// copyable=false 时无复制按钮——P4-35 ③ 复现区返回包不带复制)。
+function RawSide({ tid, exID, side, label, copyable = true }) {
   const [text, setText] = React.useState("");
   const [read, setRead] = React.useState(0); // 已读字节游标(与服务端同口径)
   const [total, setTotal] = React.useState(0);
@@ -263,11 +265,15 @@ function RawSide({ tid, exID, side, label }) {
     <div className="flex flex-col gap-1">
       <SideHeader
         label={label}
-        copy={{
-          onClick: copy,
-          busy: copying,
-          disabled: total === 0,
-        }}
+        copy={
+          copyable
+            ? {
+                onClick: copy,
+                busy: copying,
+                disabled: total === 0,
+              }
+            : null
+        }
         read={read}
         total={total}
         hasMore={hasMore}

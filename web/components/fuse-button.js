@@ -34,7 +34,7 @@ export function FuseButton({ taskID, taskTitle, onFused }) {
       return;
     }
     setOpen(false);
-    toast.success(`任务 ${taskTitle || taskID} 已终止(账本可审计)`);
+    toast.success(`任务 ${taskTitle || taskID} 已停止(账本可审计)`);
     if (onFused) onFused();
   };
 

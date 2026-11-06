@@ -39,7 +39,7 @@ func TestClosureDismissAPI(t *testing.T) {
 	h := srv.Handler()
 
 	post(t, h, http.MethodPost, "/api/tasks",
-		`{"goals":["测试目标"],"assets":[{"class":"host","title":"10.0.0.2"}],"id":"p423-dismiss","title":"搁置"}`,
+		`{"task_type":"redteam","goals":["测试目标"],"assets":[{"class":"host","title":"10.0.0.2"}],"id":"p423-dismiss","title":"搁置"}`,
 		http.StatusOK, nil)
 
 	// 无待决:dismiss 如实 409(与继续/结束同口径)。
@@ -104,7 +104,7 @@ func TestTasksPendingApprovals(t *testing.T) {
 	h := srv.Handler()
 
 	post(t, h, http.MethodPost, "/api/tasks",
-		`{"goals":["g"],"assets":[{"class":"host","title":"10.0.0.3"}],"id":"p423-appr","title":"计数"}`,
+		`{"task_type":"redteam","goals":["g"],"assets":[{"class":"host","title":"10.0.0.3"}],"id":"p423-appr","title":"计数"}`,
 		http.StatusOK, nil)
 	if v := taskOf(t, h, "p423-appr"); v["pending_approvals"] != float64(0) {
 		t.Fatalf("初始待审批应为 0: %v", v["pending_approvals"])

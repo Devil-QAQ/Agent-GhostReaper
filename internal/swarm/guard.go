@@ -242,6 +242,11 @@ func (g *toolGuard) guardReadOnlyCall(toolName string, in json.RawMessage) strin
 		g.env.denyGuard(g.pack, toolName, in, rings.DenyLineHardRule, reason)
 		return reason
 	}
+	// P4-44 ③ 范围外硬拦(渗透任务):只读探测的目标不在种子闭包内即
+	// 拒——denyScope 内部留痕+熔断(与审批门 ②b 同一挂点纪律)。
+	if reason := g.env.denyScope(g.pack, toolName, in); reason != "" {
+		return reason
+	}
 	if reason, deny := g.env.checkIntentRules(g.pack, toolName, in); deny {
 		// 任务级拦截:只留痕不熔断(同审批门路径的审核迭代定则)。
 		g.env.denyIntentRecord(g.pack, toolName, in, reason)
@@ -279,6 +284,16 @@ func (g *toolGuard) anchorMessage(nthBoundary int) string {
 	fmt.Fprintf(&b, "本步骤意图(只做这一条): %s\n", clipLine(p.StepIntent, 200))
 	if p.ExpectedObservation != "" {
 		fmt.Fprintf(&b, "预期观察: %s\n", clipLine(p.ExpectedObservation, 160))
+	}
+	// 造物主注意事项重申(P4-49 三处注入之三):长会话漂移防线——
+	// 与任务包同源的领取时冻结副本,每 N 步随锚重申一次。
+	if p.Authorization.CreatorNotes != "" {
+		b.WriteString("造物主注意事项(重申,须遵守):\n")
+		for _, line := range strings.Split(p.Authorization.CreatorNotes, "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				fmt.Fprintf(&b, "  · %s\n", line)
+			}
+		}
 	}
 	// 剩余预算读数(P4-01:0=不限的维度不显示"约剩 0/0"式误导读数,
 	// 如实呈现已用轮次/时长;两侧都设了才并排显示余量)。

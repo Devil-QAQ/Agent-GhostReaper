@@ -85,12 +85,12 @@ func TestTaskListFullProjection(t *testing.T) {
 	if catID == "" {
 		t.Fatalf("建分类未返回 id: %s", mustJSON(catCreated))
 	}
-	post(t, h, http.MethodPost, "/api/tasks", fmt.Sprintf(`{"goals":["种子目标"],
+	post(t, h, http.MethodPost, "/api/tasks", fmt.Sprintf(`{"task_type":"redteam","goals":["种子目标"],
 		"id":"full-a","title":"任务甲","description":"首轮边界测绘,两目标",
 		"category":%q,"timeout_seconds":600,
 		"assets":[{"class":"domain","title":"example.com"},
 		          {"class":"service","title":"http://10.10.0.5:8080"}]}`, catID), http.StatusOK, nil)
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"full-b","title":"任务乙"}`, http.StatusOK, nil)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"full-b","title":"任务乙"}`, http.StatusOK, nil)
 	seedStepAndGoals(t, store, "full-a")
 
 	// 置顶 full-b:排序应在 full-a 之前(置顶在前)。
@@ -167,8 +167,8 @@ func TestTaskCategoryCRUD(t *testing.T) {
 		t.Fatalf("分类清单 = %s", mustJSON(catList))
 	}
 
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"cat-t1","title":"分类验证"}`, http.StatusOK, nil)
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"cat-t2","title":"分类验证二"}`, http.StatusOK, nil)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"cat-t1","title":"分类验证"}`, http.StatusOK, nil)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"cat-t2","title":"分类验证二"}`, http.StatusOK, nil)
 	// 指派:合法 ID 通过;不存在拒;空串移出。
 	post(t, h, http.MethodPost, "/api/tasks/cat-t1/meta", fmt.Sprintf(`{"category":%q}`, catID), http.StatusOK, nil)
 	post(t, h, http.MethodPost, "/api/tasks/cat-t2/meta", `{"category":"cat-nope"}`, http.StatusBadRequest, nil)
@@ -220,7 +220,7 @@ func TestTaskTombstoneDelete(t *testing.T) {
 	srv, store, _ := metaSrv(t)
 	h := srv.Handler()
 
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"tomb-t","title":"删除验证"}`, http.StatusOK, nil)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"tomb-t","title":"删除验证"}`, http.StatusOK, nil)
 	// 无理由拒删。
 	post(t, h, http.MethodDelete, "/api/tasks/tomb-t", `{}`, http.StatusBadRequest, nil)
 	post(t, h, http.MethodDelete, "/api/tasks/tomb-t", `{"reason":"演练清理"}`, http.StatusOK, nil)
@@ -274,8 +274,8 @@ func TestTaskBatchOps(t *testing.T) {
 	srv, _, _ := metaSrv(t)
 	h := srv.Handler()
 
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"bat-1","title":"批量一"}`, http.StatusOK, nil)
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"bat-2","title":"批量二"}`, http.StatusOK, nil)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"bat-1","title":"批量一"}`, http.StatusOK, nil)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"bat-2","title":"批量二"}`, http.StatusOK, nil)
 
 	var res struct {
 		Done     int `json:"done"`
@@ -320,7 +320,7 @@ func TestTaskMetaReplayDeterminism(t *testing.T) {
 	post(t, h, http.MethodPost, "/api/task-categories", `{"name":"重放验证"}`, http.StatusOK, &catCreated)
 	catID, _ := catCreated["id"].(string)
 	post(t, h, http.MethodPost, "/api/tasks",
-		fmt.Sprintf(`{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"replay-t","title":"重放","category":%q}`, catID), http.StatusOK, nil)
+		fmt.Sprintf(`{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"replay-t","title":"重放","category":%q}`, catID), http.StatusOK, nil)
 	post(t, h, http.MethodPost, "/api/tasks/replay-t/meta", `{"pinned":true}`, http.StatusOK, nil)
 	post(t, h, http.MethodDelete, "/api/tasks/replay-t", `{"reason":"重放后删"}`, http.StatusOK, nil)
 

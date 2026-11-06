@@ -80,7 +80,7 @@ func TestServerAssetDetail(t *testing.T) {
 	ctx := context.Background()
 
 	var created map[string]any
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],
 		"id":"detail-t","title":"资产详情验证",
 		"assets":[
 			{"class":"service","title":"http://10.10.0.5:8080"},

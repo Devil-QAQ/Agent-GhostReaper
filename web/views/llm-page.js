@@ -165,7 +165,11 @@ export function LLMPage() {
       toast.error(`激活失败:${body.error || "原因未说明"}`);
       return;
     }
-    toast.success(`已激活 ${name} 为主用`);
+    const switching = Number(body?.switching_sessions);
+    const note = Number.isFinite(switching) && switching > 0
+      ? `${switching} 个在跑会话将换用新模型`
+      : "无在跑会话";
+    toast.success(`已激活 ${name} 为主用,${note}`);
     await refresh();
   };
 

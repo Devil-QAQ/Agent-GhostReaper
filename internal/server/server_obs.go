@@ -557,8 +557,11 @@ var obsLifeWords = map[string]string{
 }
 
 var obsTaskNowWords = map[string]string{
-	"created": "已创建", "queued": "排队中", "started": "运行中", "resumed": "运行中",
-	"paused": "已暂停", "hibernated": "冬眠中", "checkpointed": "断点存档",
+	// P4-46 ② 与任务状态七词同口径(web/lib/task-status.mjs 全状态矩阵):
+	// created 并入排队中、paused/checkpointed 并入冬眠中;resumed 为防御
+	// 值(任务态按 started 呈现)。
+	"created": "排队中", "queued": "排队中", "started": "运行中", "resumed": "运行中",
+	"paused": "冬眠中", "hibernated": "冬眠中", "checkpointed": "冬眠中",
 	"settling": "收尾中", "stopped": "已停止", "completed": "已完成",
 }
 

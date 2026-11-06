@@ -53,10 +53,11 @@ var goalStatusWords = map[string]string{
 }
 
 // stepStatusWordsMap 步骤状态 → 报告文案(裸状态词不上报告;exhausted
-// 按术语对照表译"预算耗尽";blocked=受阻,P4-27 ② 与面板同口径)。
+// 按术语对照表译"预算耗尽";blocked=受阻,P4-27 ② 与面板同口径;
+// dispatched=排队中,P4-46 ② 与面板/状态总表同口径)。
 var stepStatusWordsMap = map[string]string{
 	"done": "已完成", "exhausted": "预算耗尽", "failed": "失败",
-	"cancelled": "已取消", "aborted": "已中止", "running": "执行中", "dispatched": "已派发",
+	"cancelled": "已取消", "aborted": "已中止", "running": "执行中", "dispatched": "排队中",
 	"blocked":         "受阻",
 	"approval_denied": "审批拒绝终止",
 }
@@ -546,35 +547,38 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 		}
 		fmt.Fprintf(b, "- 其他可能原因(创建时冻结):%s\n", strings.Join(alts, ";"))
 	}
-	// 复现步骤(收割定稿):指令式描述 + Burp 可验证原文(与面板同口径)。
-	// P4-08 ⑤:操作方法(op 行)撤下报告正文,收进证据包;③:同型变体
-	// 计数如实标注(全量在证据包)。
+	// 复现步骤(收割定稿,P4-35 最小集口径):每步三层(短名/做什么/
+	// 作用)+ Burp 可验证原文(与面板同口径)。P4-08 ⑤:操作方法(op
+	// 行)撤下报告正文,收进证据包;P4-35:过程流量计数如实标注
+	// (未进最小集的交换全量在证据包)。
 	if cs != nil && cs.Repro != nil {
 		fmt.Fprintf(b, "- 复现步骤(检查归纳定稿")
 		if cs.Repro.Severity != "" {
 			fmt.Fprintf(b, " · 级别 %s", cs.Repro.Severity)
 		}
-		if n := len(cs.Repro.Variants); n > 0 {
-			fmt.Fprintf(b, " · 去同型后 %d 步(变体 %d 条见证据包)", len(cs.Repro.Steps), n)
+		if n := len(cs.Repro.Steps); n > 0 {
+			fmt.Fprintf(b, " · 最小集 %d 步", n)
+		}
+		if m := cs.Repro.ProcessUnlisted(); m > 0 {
+			fmt.Fprintf(b, " · 过程流量 %d 条见证据包", m)
 		}
 		fmt.Fprintf(b, "):\n")
 		if len(cs.Repro.Steps) == 0 {
 			b.WriteString("  - (反证轮未产生可复现的流量记录)\n")
 		}
-		for _, st := range cs.Repro.Steps {
-			fmt.Fprintf(b, "  - 步骤 %d", st.Seq)
-			if st.Round > 0 {
-				fmt.Fprintf(b, "(第 %d 轮反证 · 单位 `%s`)", st.Round, st.UnitID)
-			}
+		for i, st := range cs.Repro.Steps {
+			fmt.Fprintf(b, "  - %s\n", reproStepHead(i+1, st))
 			if st.Desc != "" {
-				fmt.Fprintf(b, ":%s", st.Desc)
+				fmt.Fprintf(b, "    做什么:%s\n", st.Desc)
 			} else if st.Method != "" || st.URL != "" {
-				fmt.Fprintf(b, ":%s %s → %d", st.Method, st.URL, st.Status)
+				fmt.Fprintf(b, "    做什么:%s %s → %d\n", st.Method, st.URL, st.Status)
+			}
+			if st.Purpose != "" {
+				fmt.Fprintf(b, "    作用:%s\n", st.Purpose)
 			}
 			if st.Unpolished { // P4-24:文风校验未过的如实标注(与面板同句)
-				b.WriteString("(文字未过文风校验,按原文保留)")
+				b.WriteString("    (文字未过文风校验,按原文保留)\n")
 			}
-			b.WriteString("\n")
 			if st.TLSWord != "" {
 				fmt.Fprintf(b, "    目标证书:%s(包外信息行,校验事实在原始数据)\n", st.TLSWord)
 			}
@@ -800,9 +804,15 @@ func retestVerdictWord(v string) string {
 }
 
 // stepStatusWords 步骤状态计数的报告文案(固定顺序,零计数省略)。
+// 顺序清单必须覆盖 stepStatusWordsMap 全部键(P4-46 ②:approval_denied
+// 曾漏列——计数入总数而词被吞,"7 条(已中止 5 · 已取消 1)"对不上账;
+// 测试逐键对账防再漏)。
 func stepStatusWords(byStatus map[string]int) string {
 	var words []string
-	for _, st := range []string{"done", "exhausted", "failed", "aborted", "cancelled", "running", "dispatched"} {
+	for _, st := range []string{
+		"done", "exhausted", "failed", "blocked", "approval_denied",
+		"aborted", "cancelled", "running", "dispatched",
+	} {
 		if n := byStatus[st]; n > 0 {
 			words = append(words, fmt.Sprintf("%s %d", stepStatusWordsMap[st], n))
 		}

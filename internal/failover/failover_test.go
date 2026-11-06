@@ -497,3 +497,135 @@ func TestTaskOverrideRouting(t *testing.T) {
 		t.Fatalf("未覆盖任务走全局: %s", routeOther.currentModel)
 	}
 }
+
+// TestActiveModelFollowsSwitch ActiveModel 逐次读当前路由(P4-41 ②④):
+// 主腿成功后主开闸 → 立即解析为备腿模型(不等备首次成功,主备切换同治);
+// 换主(新腿未成功过)→ 立即解析为新主模型(粘滞修复)。
+func TestActiveModelFollowsSwitch(t *testing.T) {
+	c, primary, _, _ := newTestChain(t)
+	primary.script = func(int64) ([]llm.StreamEvent, error) {
+		return []llm.StreamEvent{textEv("a")}, nil
+	}
+	if _, err := drain(context.Background(), c); err != nil {
+		t.Fatalf("主腿首请求应成功: %v", err)
+	}
+	if c.ActiveModel() != "model-a" {
+		t.Fatalf("主腿成功后 ActiveModel 应为主模型: %s", c.ActiveModel())
+	}
+	// 主开闸(备尚未服务过任何请求)——旧实现的粘滞点即在此。
+	c.mu.Lock()
+	c.lead.brk = breakerState{State: "open", OpenUntil: c.Now().Add(time.Hour)}
+	c.mu.Unlock()
+	if got := c.ActiveModel(); got != "model-b" {
+		t.Fatalf("主开闸后 ActiveModel 应为备腿模型(不等备首次成功): %s", got)
+	}
+	// 切主用(换腿重载,新主未成功过)。
+	c.mu.Lock()
+	c.lead.brk = breakerState{State: "closed", UpdatedAt: c.Now()}
+	c.lead, c.members[0] = c.members[0], c.lead
+	c.mu.Unlock()
+	if got := c.ActiveModel(); got != "model-b" {
+		t.Fatalf("切主用后 ActiveModel 应立即为新主模型(新主即原备): %s", got)
+	}
+}
+
+// TestServedModelPerSession 会话级记账精确归属(P4-41):轮转/换腿下,
+// 记账解析(ActiveModelFor 带会话键)返回该会话最近**实际服务**的模型,
+// 与轮转游标的当前位置无关;新会话无记录退当前路由;Reload 清记录
+//(切换后下一请求起记新配置的腿)。
+func TestServedModelPerSession(t *testing.T) {
+	c, primary, backup, _ := newTestChain(t)
+	// 同优先级第二备,构造轮转组(b1/b2 轮流打头)。
+	b2 := &stubProvider{model: "model-b2"}
+	b2.script = func(int64) ([]llm.StreamEvent, error) {
+		return []llm.StreamEvent{textEv("b2")}, nil
+	}
+	c.mu.Lock()
+	c.members = append(c.members, &leg{name: "lib-b2", model: b2.model, prov: b2,
+		priority: 1, brk: breakerState{State: "closed"}})
+	c.mu.Unlock()
+	primary.script = func(int64) ([]llm.StreamEvent, error) {
+		return []llm.StreamEvent{textEv("a")}, nil
+	}
+	backup.script = func(int64) ([]llm.StreamEvent, error) {
+		return []llm.StreamEvent{textEv("b")}, nil
+	}
+
+	s1 := WithLLMSession(context.Background(), "sess-1")
+	// 会话 s1 在主腿成功 → served 记主模型。
+	if _, err := drain(s1, c); err != nil {
+		t.Fatalf("主腿请求应成功: %v", err)
+	}
+	if got := c.ActiveModelFor(s1); got != "model-a" {
+		t.Fatalf("s1 应记实际服务的主模型: %s", got)
+	}
+	// 主开闸 → s1 下一请求轮转到首个备(b)成功 → served 记 b,即使
+	// 轮转游标已推进到 b2(记账时刻的当前路由 ≠ 实际服务腿)。
+	c.mu.Lock()
+	c.lead.brk = breakerState{State: "open", OpenUntil: c.Now().Add(time.Hour)}
+	c.mu.Unlock()
+	if _, err := drain(s1, c); err != nil {
+		t.Fatalf("备腿请求应成功: %v", err)
+	}
+	c.mu.Lock()
+	c.rr[1]++ // 人为推进轮转游标(模拟下一请求已轮到 b2)
+	cur := c.rr[1]
+	c.mu.Unlock()
+	if got := c.ActiveModelFor(s1); got != "model-b" {
+		t.Fatalf("s1 应记实际服务的备腿模型(与游标位置无关,游标=%d): %s", cur, got)
+	}
+	// 新会话无服务记录:退当前路由解析(将走的腿)。
+	s2 := WithLLMSession(context.Background(), "sess-2")
+	if got := c.ActiveModelFor(s2); got == "" {
+		t.Fatal("新会话应退当前路由解析")
+	}
+	// Reload(切主用)清服务记录:下一请求起记新配置的腿。
+	c.Reload(context.Background())
+	c.mu.Lock()
+	c.lead = &leg{name: "lib-a2", model: "model-a2", prov: primary,
+		brk: breakerState{State: "closed", UpdatedAt: c.Now()}}
+	c.mu.Unlock()
+	if got := c.ActiveModelFor(s1); got != "model-a2" {
+		t.Fatalf("Reload 后 served 应清空退当前路由(新主模型): %s", got)
+	}
+}
+
+// TestActiveModelForTaskBinding 带任务标记的模型解析(P4-41 ③):显式
+// 绑定任务呈现绑定腿的模型名,不随全局主用切换漂移;全局口径照常切换。
+func TestActiveModelForTaskBinding(t *testing.T) {
+	store, err := rings.Open(filepath.Join(t.TempDir(), "bind.db"))
+	if err != nil {
+		t.Fatalf("开库: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	for _, cfg := range []ModelConfig{
+		{Name: "g", Format: "openai", BaseURL: "http://127.0.0.1:1", APIKey: "k", Model: "global-m"},
+		{Name: "t", Format: "openai", BaseURL: "http://127.0.0.1:2", APIKey: "k", Model: "task-m"},
+		{Name: "n", Format: "openai", BaseURL: "http://127.0.0.1:3", APIKey: "k", Model: "new-m"},
+	} {
+		if err := SaveModelConfig(ctx, store, cfg, "creator"); err != nil {
+			t.Fatalf("存配置: %v", err)
+		}
+	}
+	_ = SetActive(ctx, store, RolePrimary, "g", "creator")
+	_ = SetTaskOverride(ctx, store, "tk1", RolePrimary, "t", "creator")
+
+	c := NewChain(store, EnvConfig{})
+	if got := c.ActiveModel(); got != "global-m" {
+		t.Fatalf("全局应走主用: %s", got)
+	}
+	taskCtx := WithTask(ctx, "tk1")
+	if got := c.ActiveModelFor(taskCtx); got != "task-m" {
+		t.Fatalf("绑定任务应走绑定腿: %s", got)
+	}
+	// 全局切主用:全局口径立即跟随,绑定任务不动(strict 隔离)。
+	_ = SetActive(ctx, store, RolePrimary, "n", "creator")
+	c.Reload(ctx)
+	if got := c.ActiveModel(); got != "new-m" {
+		t.Fatalf("切主用后全局应立即为新主: %s", got)
+	}
+	if got := c.ActiveModelFor(taskCtx); got != "task-m" {
+		t.Fatalf("切主用后绑定任务应仍走绑定腿: %s", got)
+	}
+}

@@ -162,9 +162,11 @@ func (s *Server) validateAssetIDs(taskID string, ids []string) error {
 
 // handleRoEAssetScope 授权资产范围(P4-05,问题清单 #10):提交新的摘除
 // 清单(整体快照语义,空数组 = 全部纳入)。审计:roe.updated 事件 +
-// 服务端自动备注本次摘除/纳入了什么(资产标识);改动下一轮生效——
-// 摘除的资产主宰不再派发覆盖它的意图(派发入口守卫拒绝,快照与 RoE
-// 约束块同标),在飞步骤自然收尾不做硬中断。
+// 服务端自动备注本次摘除/纳入了什么(资产标识)。摘除即止损(P4-45,
+// 造物主定案语义):落账后立即终止覆盖新摘除资产的在跑单位(熔断同款
+// 真中断)并取消覆盖它的排队步骤(留痕交主宰重排),主宰下一轮不再派
+// 覆盖它的意图(派发入口守卫既有);终止笔数随响应如实返回。面板确认
+// 弹窗的预计数走 /roe/assets/impact。
 func (s *Server) handleRoEAssetScope(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 	if !s.taskExists(taskID) {
@@ -192,8 +194,8 @@ func (s *Server) handleRoEAssetScope(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	note := strings.TrimSpace(req.Note)
-	if note == "" {
-		// 自动备注:新旧清单差集(资产标识),审计可直读"这次动了什么"。
+	var removed []string // 本次新摘除(止损对象)
+	{
 		oldSet := map[string]bool{}
 		for _, id := range st.ExcludedAssets {
 			oldSet[id] = true
@@ -202,26 +204,29 @@ func (s *Server) handleRoEAssetScope(w http.ResponseWriter, r *http.Request) {
 		for _, id := range req.Excluded {
 			newSet[id] = true
 		}
-		var removed, added []string
 		for _, id := range req.Excluded {
 			if !oldSet[id] {
 				removed = append(removed, id)
 			}
 		}
-		for _, id := range st.ExcludedAssets {
-			if !newSet[id] {
-				added = append(added, id)
+		if note == "" {
+			// 自动备注:新旧清单差集(资产标识),审计可直读"这次动了什么"。
+			var added []string
+			for _, id := range st.ExcludedAssets {
+				if !newSet[id] {
+					added = append(added, id)
+				}
 			}
-		}
-		switch {
-		case len(removed) > 0 && len(added) > 0:
-			note = fmt.Sprintf("摘除 %s;纳入 %s", strings.Join(removed, "、"), strings.Join(added, "、"))
-		case len(removed) > 0:
-			note = fmt.Sprintf("摘除 %s", strings.Join(removed, "、"))
-		case len(added) > 0:
-			note = fmt.Sprintf("纳入 %s", strings.Join(added, "、"))
-		default:
-			note = "范围未变化"
+			switch {
+			case len(removed) > 0 && len(added) > 0:
+				note = fmt.Sprintf("摘除 %s;纳入 %s", strings.Join(removed, "、"), strings.Join(added, "、"))
+			case len(removed) > 0:
+				note = fmt.Sprintf("摘除 %s", strings.Join(removed, "、"))
+			case len(added) > 0:
+				note = fmt.Sprintf("纳入 %s", strings.Join(added, "、"))
+			default:
+				note = "范围未变化"
+			}
 		}
 	}
 	if _, err := s.Store.Append(ctx, taskID, rings.Event{
@@ -229,11 +234,21 @@ func (s *Server) handleRoEAssetScope(w http.ResponseWriter, r *http.Request) {
 		Payload: rings.RoeUpdated{
 			AllowedTools: st.AllowedTools, DeniedTools: st.DeniedTools,
 			ApprovalThreshold: st.ApprovalThreshold, IntentRules: st.IntentRules,
-			ExcludedAssets: req.Excluded, Note: note,
+			ExcludedAssets: req.Excluded, ScopeApproved: st.ScopeApproved, Note: note,
 		},
 	}); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
+	}
+	// 在途止损(P4-45 ①:roe.updated 先落账,守卫生效后再终止在途)。
+	var killed, aborted []swarm.ScopeHit
+	if len(removed) > 0 {
+		killed, aborted, err = swarm.StopLossForAssets(ctx, s.Store, s.helmOf(), taskID, removed, "creator")
+		if err != nil {
+			// 终态已落账,止损失败如实报错不回滚(终止笔数以账本为准)
+			writeErr(w, http.StatusInternalServerError, fmt.Errorf("摘除已落账,在途止损失败: %w", err))
+			return
+		}
 	}
 	s.wake(taskID)
 	v, err := s.currentRoE(taskID)
@@ -241,7 +256,41 @@ func (s *Server) handleRoEAssetScope(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, v)
+	// 响应 = RoE 视图原字段(既有消费面零破坏)+ 止损笔数(前端 toast
+	// 如实呈现终止了多少在途单位)。
+	out := map[string]any{"stopped_units": len(killed), "stopped_steps": len(aborted)}
+	if raw, merr := json.Marshal(v); merr == nil {
+		_ = json.Unmarshal(raw, &out)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleRoEAssetImpact GET /api/tasks/{id}/roe/assets/impact?assets=a,b
+// 摘除影响预览(P4-45 确认弹窗"将终止 N 个在途单位"的数据面;纯读
+// 不落账,执行时按当下状态止损——竞态下以执行结果为准)。
+func (s *Server) handleRoEAssetImpact(w http.ResponseWriter, r *http.Request) {
+	taskID := r.PathValue("id")
+	if !s.taskExists(taskID) {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("任务 %s 不存在", taskID))
+		return
+	}
+	assets := strings.Split(r.URL.Query().Get("assets"), ",")
+	var ids []string
+	for _, id := range assets {
+		if id = strings.TrimSpace(id); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		writeErr(w, http.StatusBadRequest, errors.New("assets 参数为空(至少一个资产 ID)"))
+		return
+	}
+	impact, err := swarm.ScopeImpactOf(r.Context(), s.Store, taskID, ids)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, impact)
 }
 
 // intentRuleOut RoE 读侧的任务级规则视图(带资产标题与已用次数,面板

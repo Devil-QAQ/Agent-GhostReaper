@@ -97,6 +97,9 @@ func ClaimExport(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore
 	if err != nil {
 		return nil, err
 	}
+	if format == FormatZip {
+		EnrichReproForEvent(ctx, store, taskID, cs) // 证据包:Variants/Process/操作方法按定稿 rev 定向读事件
+	}
 	md, err := claimMD(ctx, store, taskID, *node, cs)
 	if err != nil {
 		return nil, err
@@ -248,6 +251,11 @@ func taskZipInto(zw *zip.Writer, ctx context.Context, store *rings.Store, blobs 
 		if err := zipAdd(zw, prefix+"claims/"+tag+idx+"-"+c.ID+".md", []byte(cmd), at); err != nil {
 			return err
 		}
+		if blobs != nil {
+			// 证据包:Variants/Process/操作方法按定稿 rev 定向读事件补全
+			//(巨记录大数组不进投影,P4-36)。
+			EnrichReproForEvent(ctx, store, taskID, cases[c.ID])
+		}
 		if err := zipEvidence(zw, blobs, cases[c.ID], prefix+"evidence", at); err != nil {
 			return err
 		}
@@ -255,49 +263,126 @@ func taskZipInto(zw *zip.Writer, ctx context.Context, store *rings.Store, blobs 
 	return nil
 }
 
-// zipEvidence 证据包(P4-08 ③⑤⑥:维持全量,审计不丢):单声明去同型
-// 后的复现步骤 + 去重收起的变体交换,全部镜留痕原文全文(字节级保真,
-// Burp 可验证);文件头注明步骤、操作方法(工具调用,面板/报告正文不
-// 显、证据包收)、目标证书结论(包外信息)与 blob 引用。
+// zipEvidence 证据包(P4-35 ①:维持全量,审计不丢):最小集复现步骤 +
+// 全部过程流量(未进面板的对比交换/反证变体/枚举试错),原文全文从
+// 仓库按编号取回(字节级保真,Burp 可验证);文件头注明步骤、操作方法
+// (工具调用,面板/报告正文不显、证据包收)、目标证书结论(包外信息)
+// 与 blob 引用。过程流量两代口径同收:新定稿读 Process 引用清单
+// (P4-35,事件只存编号——数据库不内嵌原文,R18),旧定稿读 Variants
+// (存量不动,字段保留)。
 func zipEvidence(zw *zip.Writer, blobs *swarm.BlobStore, cs *ClaimCase, dir string, at time.Time) error {
 	if cs == nil || cs.Repro == nil {
 		return nil
 	}
-	writeOne := func(st rings.ReproStep, label, name string) error {
+	// writeStep 定稿步骤条目(带操作方法行)。
+	writeStep := func(st rings.ReproStep, label, name string) error {
 		if st.BlobRef == "" || blobs == nil {
 			return nil
 		}
-		doc, err := blobs.Read(st.BlobRef)
-		if err != nil {
+		ex, ok := readExchange(blobs, st.BlobRef)
+		if !ok {
 			return nil // 引用悬空如实跳过(报告 md 已带引用,审计可下钻)
 		}
-		var ex mirror.Exchange
-		if err := json.Unmarshal(doc, &ex); err != nil {
-			return nil
+		head := exchangeHead{
+			Label: label, Method: st.Method, URL: st.URL, Status: st.Status,
+			Op: st.Op, TLSWord: exchangeTLSWord(ex), BlobRef: st.BlobRef,
 		}
-		var b strings.Builder
-		fmt.Fprintf(&b, "# 证据 · %s · %s %s → %d\n", label, st.Method, st.URL, st.Status)
-		if st.Op != "" {
-			fmt.Fprintf(&b, "# 操作 %s\n", st.Op)
-		}
-		if ex.Type == rings.MirrorRecHTTPS && ex.TLS != nil {
-			fmt.Fprintf(&b, "# 目标证书: %s\n", mirror.TLSLabel(ex.TLS.Validity))
-		}
-		fmt.Fprintf(&b, "# 原始数据 %s(内容寻址,字节级保真)\n\n", st.BlobRef)
-		b.WriteString(renderExchangeFull(&ex))
-		return zipAdd(zw, name, []byte(b.String()), at)
+		return zipExchange(zw, name, at, head, ex)
 	}
-	for _, st := range cs.Repro.Steps {
-		if err := writeOne(st.ReproStep, fmt.Sprintf("步骤 %d", st.Seq), path.Join(dir, cs.ClaimID, fmt.Sprintf("step-%d.txt", st.Seq))); err != nil {
+	for i, st := range cs.Repro.Steps {
+		if err := writeStep(st.ReproStep, fmt.Sprintf("步骤 %d", i+1),
+			path.Join(dir, cs.ClaimID, fmt.Sprintf("step-%d.txt", i+1))); err != nil {
 			return err
 		}
 	}
+	// 过程流量(旧口径):Variants 逐条(带操作方法行,账次序)。
 	for i, st := range cs.Repro.Variants {
-		if err := writeOne(st, fmt.Sprintf("变体 %d", i+1), path.Join(dir, cs.ClaimID, fmt.Sprintf("variant-%d.txt", i+1))); err != nil {
+		if err := writeStep(st, fmt.Sprintf("变体 %d", i+1), path.Join(dir, cs.ClaimID, fmt.Sprintf("variant-%d.txt", i+1))); err != nil {
+			return err
+		}
+	}
+	// 过程流量(新口径):Process 引用清单逐条(账次序;事件只存编号,
+	// 方法/URL/状态从仓库原文解出,操作方法不随清单携带——过程命令的
+	// 完整参数在 swarm.record 审计流)。
+	if blobs == nil {
+		return nil
+	}
+	for i, ref := range cs.Repro.Process {
+		if ref.BlobRef == "" {
+			continue
+		}
+		ex, ok := readExchange(blobs, ref.BlobRef)
+		if !ok {
+			continue // 引用悬空如实跳过(审计可下钻)
+		}
+		var method, uurl string
+		var status int
+		if ex.Request != nil {
+			method, uurl = ex.Request.Method, ex.Request.URL
+		}
+		if ex.Response != nil {
+			status = ex.Response.Status
+		}
+		head := exchangeHead{
+			Label: fmt.Sprintf("过程 %d", i+1), Method: method, URL: uurl, Status: status,
+			TLSWord: exchangeTLSWord(ex), BlobRef: ref.BlobRef,
+		}
+		name := path.Join(dir, cs.ClaimID, fmt.Sprintf("process-%d.txt", i+1))
+		if err := zipExchange(zw, name, at, head, ex); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// exchangeHead 证据文件头的事实行(与方法/操作/证书行解耦,新旧口径
+// 共用同一装配)。
+type exchangeHead struct {
+	Label   string
+	Method  string
+	URL     string
+	Status  int
+	Op      string
+	TLSWord string
+	BlobRef string
+}
+
+// readExchange 按编号从仓库取回交换文档(失败返回 ok=false,调用方如实
+// 跳过)。
+func readExchange(blobs *swarm.BlobStore, blobRef string) (*mirror.Exchange, bool) {
+	doc, err := blobs.Read(blobRef)
+	if err != nil {
+		return nil, false
+	}
+	var ex mirror.Exchange
+	if err := json.Unmarshal(doc, &ex); err != nil {
+		return nil, false
+	}
+	return &ex, true
+}
+
+// exchangeTLSWord https 交换的目标证书结论(包外信息行;http 为空)。
+func exchangeTLSWord(ex *mirror.Exchange) string {
+	if ex.Type == rings.MirrorRecHTTPS && ex.TLS != nil {
+		return mirror.TLSLabel(ex.TLS.Validity)
+	}
+	return ""
+}
+
+// zipExchange 单条证据文件落 zip:头注(标签/操作/证书/原始数据引用)
+// + 全文(不截断,字节级保真)。
+func zipExchange(zw *zip.Writer, name string, at time.Time, head exchangeHead, ex *mirror.Exchange) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# 证据 · %s · %s %s → %d\n", head.Label, head.Method, head.URL, head.Status)
+	if head.Op != "" {
+		fmt.Fprintf(&b, "# 操作 %s\n", head.Op)
+	}
+	if head.TLSWord != "" {
+		fmt.Fprintf(&b, "# 目标证书: %s\n", head.TLSWord)
+	}
+	fmt.Fprintf(&b, "# 原始数据 %s(内容寻址,字节级保真)\n\n", head.BlobRef)
+	b.WriteString(renderExchangeFull(ex))
+	return zipAdd(zw, name, []byte(b.String()), at)
 }
 
 // claimMD 单条发现的独立 md:与任务报告的发现小节同一 writeClaim 装配

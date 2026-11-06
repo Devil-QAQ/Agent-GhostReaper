@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"ghostreaper/internal/ckpt"
 	"ghostreaper/internal/hiber"
 	"ghostreaper/internal/interject"
 	"ghostreaper/internal/manager"
@@ -28,7 +29,8 @@ func newInterjectTestServer(t *testing.T) (*Server, *http.ServeMux, *hiber.Gate)
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	gate := hiber.New()
-	mgr, err := manager.New(manager.Config{Store: store, RootDir: dir, Hiber: gate})
+	ckptGate := ckpt.New() // P4-33 冬眠收场依赖断点信号门
+	mgr, err := manager.New(manager.Config{Store: store, RootDir: dir, Hiber: gate, Checkpoint: ckptGate})
 	if err != nil {
 		t.Fatalf("建 Manager 失败: %v", err)
 	}

@@ -173,31 +173,32 @@ func hostOf(rec *MirrorRecord) string {
 // 定稿)——按声明累计计数;任务级总数 = 各声明之和。报告存档写入携
 // 带当时的任务证据版本(乐观锁),证据再更新后:旧版本写入被写入口
 // 拒(409),已存档的报告推导为"待更新"。
+// P4-36:改读 claim_cases 摘要投影(evidence_binds + repro_events 计数,
+// 写侧 applyClaimRecord 同事务维护)——不再扫描事件流解析全部
+// testclaim.record 负载。
 func (s *Store) EvidenceVersions(ctx context.Context, taskID string) (map[string]int64, int64, error) {
 	if taskID == "" {
 		return nil, 0, ErrEmptyTaskID
 	}
-	evs, err := s.Events(ctx, taskID, 0, 0)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT claim_id, evidence_binds, repro_events FROM claim_cases WHERE task_id = ?`, taskID,
+	)
 	if err != nil {
-		return nil, 0, fmt.Errorf("rings: 证据版本查事件 %s: %w", taskID, err)
+		return nil, 0, fmt.Errorf("rings: 证据版本查摘要 %s: %w", taskID, err)
 	}
+	defer rows.Close()
 	perClaim := map[string]int64{}
 	var total int64
-	for _, ev := range evs {
-		if ev.Kind != EventTestClaimRecord {
-			continue
+	for rows.Next() {
+		var claimID string
+		var binds, reproEvents int64
+		if err := rows.Scan(&claimID, &binds, &reproEvents); err != nil {
+			return nil, 0, fmt.Errorf("rings: 扫描证据版本 %s: %w", taskID, err)
 		}
-		var r TestClaimRecord
-		if err := json.Unmarshal(ev.Payload, &r); err != nil {
-			return nil, 0, fmt.Errorf("rings: 证据版本解码 testclaim.record: %w", err)
-		}
-		switch r.Type {
-		case TestClaimRecEvidence, TestClaimRecRepro:
-			perClaim[r.ClaimID]++
-			total++
-		}
+		perClaim[claimID] = binds + reproEvents
+		total += binds + reproEvents
 	}
-	return perClaim, total, nil
+	return perClaim, total, rows.Err()
 }
 
 // ClaimEvidence 声明的流量证据装配(P3-02):全部 evidence 绑定事件按

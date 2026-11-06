@@ -79,14 +79,15 @@ const (
 // Logger 滚动文件日志器。并发安全;Write 实现 io.Writer(标准 log 库
 // 重定向入口,行文按 INFO 落盘)。
 type Logger struct {
-	mu      sync.Mutex
-	dir     string
-	f       *os.File
-	size    int64
-	day     string // 活动文件开档日期(本地;跨日滚动)
-	opts    Options
-	stderr  io.Writer
-	lowDisk bool // 磁盘不足已告警(恢复静默,避免刷屏)
+	mu          sync.Mutex
+	dir         string
+	f           *os.File
+	size        int64
+	day         string // 活动文件开档日期(本地;跨日滚动)
+	opts        Options
+	stderr      io.Writer
+	stderrTaken bool // 标准错误已接管进活动文件(P4-47 C;滚动后重绑)
+	lowDisk     bool // 磁盘不足已告警(恢复静默,避免刷屏)
 }
 
 var std atomic.Pointer[Logger]
@@ -218,6 +219,8 @@ func (l *Logger) rollIfDue(incoming int64) {
 			fmt.Fprintf(l.stderr, "runlog: 重开日志文件失败: %v\n", err)
 		}
 	}
+	// 接管态下 fd 2 重绑到新活动文件(标准错误跟随滚动,P4-47 C)。
+	l.rebindStderrFDLocked()
 }
 
 // pruneRolled 清理超限旧档(须持锁):文件名序即时间序;超出保留个数删

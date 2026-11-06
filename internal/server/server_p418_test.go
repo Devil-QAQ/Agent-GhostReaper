@@ -78,7 +78,7 @@ func TestClosureAPI(t *testing.T) {
 	// 建任务(经面板 API,目标/资产必填口径)——自动拉起(started)。
 	var created map[string]string
 	post(t, h, http.MethodPost, "/api/tasks",
-		`{"goals":["测试目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"p418-api","title":"收口 E2E"}`,
+		`{"task_type":"redteam","goals":["测试目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"p418-api","title":"收口 E2E"}`,
 		http.StatusOK, &created)
 
 	// 无待决:列表无 closure 字段;两键动作如实 409。
@@ -202,7 +202,7 @@ func TestClosureConfigAPI(t *testing.T) {
 	// 建任务带收口组(3 轮/2 分钟)→ created detail 落库,投影生效值
 	// 优先于全局默认。
 	post(t, h, http.MethodPost, "/api/tasks",
-		`{"goals":["g"],"assets":[{"class":"host","title":"10.0.0.9"}],"id":"p418-cfg","title":"配置","closure":{"enabled":true,"rounds":3,"minutes":2}}`,
+		`{"task_type":"redteam","goals":["g"],"assets":[{"class":"host","title":"10.0.0.9"}],"id":"p418-cfg","title":"配置","closure":{"enabled":true,"rounds":3,"minutes":2}}`,
 		http.StatusOK, nil)
 	v := taskOf(t, h, "p418-cfg")
 	c, _ := v["closure_config"].(map[string]any)
@@ -238,7 +238,7 @@ func TestClosureConfigAPI(t *testing.T) {
 	post(t, h, http.MethodPost, "/api/tasks/p418-cfg/closure/config", `{"enabled":true,"rounds":101}`, http.StatusBadRequest, nil)
 	post(t, h, http.MethodPost, "/api/tasks/p418-cfg/closure/config", `{"enabled":true,"minutes":-1}`, http.StatusBadRequest, nil)
 	post(t, h, http.MethodPost, "/api/tasks",
-		`{"goals":["g"],"assets":[{"class":"host","title":"10.0.0.9"}],"id":"p418-bad","closure":{"rounds":999}}`,
+		`{"task_type":"redteam","goals":["g"],"assets":[{"class":"host","title":"10.0.0.9"}],"id":"p418-bad","closure":{"rounds":999}}`,
 		http.StatusBadRequest, nil)
 }
 

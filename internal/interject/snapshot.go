@@ -105,7 +105,7 @@ func (s *Service) unitSnapshot(ctx context.Context, taskID, sessionID string) (s
 	}
 	b.WriteString("\n【目标的系统提示(按当前配置重建)】\n")
 	b.WriteString(swarm.RenderRoEConstraint("你的探索手段受此框定。",
-		roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, nil))
+		roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, nil, nil, roe.CreatorNotes))
 	b.WriteString("\n")
 	b.WriteString(strings.Join(swarm.WorkerPromptSpec.Assemble(ctx, s.Store), "\n\n"))
 
@@ -179,8 +179,12 @@ func (s *Service) overmindSnapshot(ctx context.Context, taskID string) (string, 
 		excluded = nil
 	}
 	b.WriteString("\n【目标的系统提示(按当前配置重建)】\n")
+	pending, perr := s.Store.PendingScopeAssets(ctx, taskID)
+	if perr != nil {
+		pending = nil
+	}
 	b.WriteString(swarm.RenderRoEConstraint("派发的意图与采用的手段不得越出此边界。",
-		roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, excluded))
+		roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, excluded, pending, roe.CreatorNotes))
 	b.WriteString("\n")
 	b.WriteString(strings.Join(overmind.OvermindPromptSpec.Assemble(ctx, s.Store), "\n\n"))
 	b.WriteString("\n\n【目标的可用工具(只读目录)】研判会话无工具(态势快照经 user turn 注入,重放里可见)。\n")

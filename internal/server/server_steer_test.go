@@ -38,7 +38,7 @@ func TestServerTaskCreateAnchorField(t *testing.T) {
 	ctx := context.Background()
 
 	var created map[string]any
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],
 		"id":"anchor-opt","title":"重锚定间隔随任务透出","anchor_every_steps":3}`,
 		http.StatusOK, &created)
 	detail, err := store.CreatedDetail(ctx, "anchor-opt")
@@ -49,7 +49,7 @@ func TestServerTaskCreateAnchorField(t *testing.T) {
 		t.Fatalf("anchor_every_steps 应随 created 事件透出: %+v", detail)
 	}
 
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],
 		"id":"anchor-default","title":"缺省走默认十步"}`,
 		http.StatusOK, &created)
 	detail, err = store.CreatedDetail(ctx, "anchor-default")
@@ -60,7 +60,7 @@ func TestServerTaskCreateAnchorField(t *testing.T) {
 		t.Fatalf("缺省不应写入锚间隔(默认在 guard 归一): %+v", detail)
 	}
 
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],
 		"id":"anchor-bad","title":"坏值","anchor_every_steps":1001}`,
 		http.StatusBadRequest, &created)
 	if _, err := store.Task(ctx, "anchor-bad"); err == nil {
@@ -93,7 +93,7 @@ func TestServerSteerEndpoints(t *testing.T) {
 	ctx := context.Background()
 
 	var created map[string]any
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"steer-api","title":"舵杆端点契约"}`,
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"id":"steer-api","title":"舵杆端点契约"}`,
 		http.StatusOK, &created)
 	// 种一个 running 步骤(执行器未装配,直接事件置 running——端点
 	// 只做投影校验与舵杆下达)。

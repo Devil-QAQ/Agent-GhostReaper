@@ -266,7 +266,45 @@ func (s *Server) handleModelActivate(w http.ResponseWriter, r *http.Request) {
 	if b, ok, _ := failover.ActiveName(r.Context(), s.Store, failover.RoleBackup); ok {
 		v.Active.Backup = b
 	}
-	writeJSON(w, http.StatusOK, v.Active)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"active": v.Active,
+		// 切换告知(P4-41 ④):随全局主用切换的在跑会话数(在跑单位 +
+		// 活的主宰循环;显式绑定模型的任务不随全局切换,不计入)。
+		"switching_sessions": s.switchingSessions(r.Context()),
+	})
+}
+
+// switchingSessions 将随主用切换的在跑会话数:started/settling 任务每
+// 个计一个主宰会话,其图上 running 步骤各计一个单位会话(与任务列表
+// running_units 同源查询);显式绑定模型配置的任务不计(不随全局切换)。
+func (s *Server) switchingSessions(ctx context.Context) int {
+	rows, err := s.Store.Tasks(ctx)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, row := range rows {
+		if row.Deleted {
+			continue
+		}
+		if _, bound := failover.TaskOverrideName(ctx, s.Store, row.ID, failover.RolePrimary); bound {
+			continue
+		}
+		status := row.Status
+		if t := s.Manager.Task(row.ID); t != nil {
+			status = t.Status()
+		}
+		switch status {
+		case "started", "settling":
+			n++
+		default:
+			continue
+		}
+		if steps, err := s.Store.NodesByType(ctx, row.ID, rings.NodeStep, "running"); err == nil {
+			n += len(steps)
+		}
+	}
+	return n
 }
 
 // reloadChain 装配了链时重载(模型库变更消费);未装配(未配 LLM 的

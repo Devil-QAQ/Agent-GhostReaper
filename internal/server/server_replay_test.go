@@ -40,7 +40,7 @@ func TestServerClaimReplay(t *testing.T) {
 	h := srv.Handler()
 
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"重放端点验证"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"重放端点验证"}`, http.StatusOK, &created)
 	task := created["id"]
 
 	// 铺垫:已确认声明(先无绑定证据)。
@@ -194,7 +194,7 @@ func TestServerTaskCheckpoint(t *testing.T) {
 	h := srv.Handler()
 
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"断点端点验证"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"断点端点验证"}`, http.StatusOK, &created)
 	task := created["id"]
 	select {
 	case <-started:

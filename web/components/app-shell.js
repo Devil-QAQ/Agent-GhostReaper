@@ -289,6 +289,10 @@ function Shell() {
                         !["paused", "hibernated", "checkpointed", "stopped", "completed"].includes(t.status)
                     ).length
                   : 0;
+              // 待批资产任务红点(P4-44 ③,与受阻同款形态):渗透任务有
+              // 待批资产(范围外发现,等放行/忽略)的任务数——处理即消。
+              const scopeTasks =
+                item.id === "tasks" ? list.filter((t) => t.pending_scope > 0).length : 0;
               return (
                 <button
                   key={item.id}
@@ -306,13 +310,22 @@ function Shell() {
                   )}
                   <span className="relative shrink-0">
                     <Icon className="size-4" />
-                    {/* 收起态文字隐藏,计数保留在图标角(信息不丢) */}
+                    {/* 收起态文字隐藏,计数保留在图标角(信息不丢);
+                        受阻与待批并排两个角标 */}
                     {collapsed && blockedTasks > 0 && (
                       <span
                         className="absolute -top-1.5 -right-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold text-primary-foreground"
                         title={`受阻任务 ${blockedTasks} 个`}
                       >
                         {blockedTasks}
+                      </span>
+                    )}
+                    {collapsed && scopeTasks > 0 && (
+                      <span
+                        className="absolute top-3 -right-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold text-primary-foreground ring-2 ring-background"
+                        title={`待批资产任务 ${scopeTasks} 个`}
+                      >
+                        {scopeTasks}
                       </span>
                     )}
                   </span>
@@ -324,6 +337,15 @@ function Shell() {
                       title={`受阻任务 ${blockedTasks} 个`}
                     >
                       {blockedTasks}
+                    </span>
+                  )}
+                  {/* 待批资产任务计数(P4-44):受阻计数之后(展开态) */}
+                  {!collapsed && scopeTasks > 0 && (
+                    <span
+                      className="-ml-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold text-primary-foreground"
+                      title={`待批资产任务 ${scopeTasks} 个`}
+                    >
+                      {scopeTasks}
                     </span>
                   )}
                 </button>

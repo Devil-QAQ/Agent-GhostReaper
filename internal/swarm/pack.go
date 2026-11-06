@@ -57,6 +57,29 @@ func (e *Executor) Claim(ctx context.Context, taskID, stepID string) (*TaskPack,
 		pack.AnchorEverySteps = n
 	}
 
+	// 任务类型与范围闭包(P4-44):类型从 created 定格(建后不可改);
+	// 渗透任务冻结种子闭包(权限管线命令级硬拦的判定面)与待批清单
+	// (RoE 约束块渲染)。红队/未标任务两 nil——现状行为,不拦。
+	pack.TaskType = rings.TaskTypeOf(createdDetail)
+	if pack.TaskType == rings.TaskTypePentest {
+		if roe, err := e.Store.CurrentRoE(ctx, taskID); err != nil {
+			return nil, fmt.Errorf("swarm: 领取: 查 RoE 范围: %w", err)
+		} else {
+			approved := roe.ScopeApprovedSet()
+			if approved == nil {
+				approved = map[string]bool{}
+			}
+			if assets, err := e.Store.NodesByType(ctx, taskID, rings.NodeAsset, ""); err != nil {
+				return nil, fmt.Errorf("swarm: 领取: 查资产(范围闭包): %w", err)
+			} else {
+				pack.ScopeClosure = rings.BuildScopeClosure(rings.ScopeSeedsOf(assets), approved)
+			}
+		}
+		if pending, err := e.Store.PendingScopeAssets(ctx, taskID); err == nil {
+			pack.PendingScope = pending
+		}
+	}
+
 	// ① 目标:step.detail.goal_id 指定,缺省取图上最新目标。
 	goalID, _ := step.Detail["goal_id"].(string)
 	if goalID == "" {
@@ -166,7 +189,10 @@ func (e *Executor) Claim(ctx context.Context, taskID, stepID string) (*TaskPack,
 		pack.PriorAttempts = append(pack.PriorAttempts, att)
 	}
 
-	// ⑥ 授权边界(RoE 当前值:工具清单 + 审批门槛 + 任务级拦截规则)。
+	// ⑥ 授权边界(RoE 当前值:工具清单 + 审批门槛 + 任务级拦截规则 +
+	// 注意事项)。注意事项(P4-49)随授权冻结进任务包——约束块行/授权节/
+	// 重锚定重申三处同读这份副本;面板改注意事项对下一批领取生效(与
+	// 操作约束同款次序,不硬中断在飞单位)。
 	roe, err := e.Store.CurrentRoE(ctx, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("swarm: 领取: 查 RoE: %w", err)
@@ -176,6 +202,7 @@ func (e *Executor) Claim(ctx context.Context, taskID, stepID string) (*TaskPack,
 		DeniedTools:       roe.DeniedTools,
 		ApprovalThreshold: roe.ApprovalThreshold,
 		IntentRules:       roe.IntentRules,
+		CreatorNotes:      roe.CreatorNotes,
 	}
 
 	// ⑦ 图版本。

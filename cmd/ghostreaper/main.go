@@ -59,6 +59,9 @@ func main() {
 	// 运行日志(P3-13b ③):logs/ 目录滚动文件,日志头带版本 / 平台 /
 	// 启动配置;标准 log 库重定向进来(既有散点 log.Printf 行按 INFO 落)。
 	// 开档失败不致命(降级为仅标准错误),其余启动照常。
+	// P4-47 C:开档成功即接管标准错误——panic 堆栈与 runtime 致命错误
+	// 直写运行日志(崩溃现场不丢,随诊断包导出);接管失败降级为不接管,
+	// 如实提示,退出码语义(P3-12)不动。
 	logDir := filepath.Join(filepath.Dir(*dbPath), "logs")
 	if rl, err := runlog.Open(logDir, runlog.Options{StartupConfig: []string{
 		"监听: " + *addr,
@@ -69,6 +72,9 @@ func main() {
 	} else {
 		defer rl.Close()
 		log.SetOutput(rl)
+		if terr := runlog.TakeoverStderr(rl); terr != nil {
+			runlog.Warnf("标准错误接管失败(%v)——panic 堆栈不进运行日志,仅标准错误", terr)
+		}
 	}
 
 	if dir := filepath.Dir(*dbPath); dir != "" && dir != "." {
@@ -136,16 +142,32 @@ func main() {
 	// 呈现)。先于 Manager 构建:其终态回调(P2-08f 收尾总结)随 Config
 	// 注入,避免启动后改写配置;Wake 闭包引用的 mgr 在任务拉起前必已赋值。
 	// ModelOf 恒注入(链未就绪时返回空串,如实走"模型未配置"路径;链
-	// 就绪后自动生效,免重启)。
+	// 就绪后自动生效,免重启);记账模型按会话逐请求解析(P4-41)。
+	// 执行器装配态(P3-05b ⑤ 两段装配的共享指针;先于牧者声明——
+	// 牧者 HelmOf 闭包读当前装配的舵杆,P4-45)。
+	var (
+		assembleMu sync.Mutex
+		exec       *swarm.Executor
+	)
 	shep := &shepherd.Service{
 		Store: store, Provider: provider, RootDir: *tasksDir,
 		Model: chain.ActiveModel(), Hiber: hiberGate,
-		ModelOf:  chain.ActiveModel,
 		WindowOf: func() int { return failover.ContextWindowFor(context.Background(), store, chain.ActiveModel()) },
 		Wake: func(taskID string) {
 			if t := mgr.Task(taskID); t != nil {
 				t.Wake()
 			}
+		},
+		// P4-45 资产范围工具的摘除止损经舵杆终止在途单位:闭包读当前
+		// 装配的执行器舵杆(与面板 helmOf 同一实例;未装配时 nil——
+		// 无在跑单位可停,止损只剩排队步骤取消,如实执行)。
+		HelmOf: func() *swarm.Helm {
+			assembleMu.Lock()
+			defer assembleMu.Unlock()
+			if exec == nil {
+				return nil
+			}
+			return exec.Helm
 		},
 	}
 	// 文风 skill 包(P3-11,第四章 §10 按需层):内嵌 SKILL.md 物化到
@@ -167,10 +189,6 @@ func main() {
 	// 发生在 manager.New 之前——重启收养的拉起判定(OnTaskRun 非空)
 	// 据此走重拉路径;启动时未就绪的,面板激活主用模型后经 06e 配置写
 	// 触发链重载的既有路径运行时补装配(免重启)。
-	var (
-		assembleMu sync.Mutex
-		exec       *swarm.Executor
-	)
 	buildExec := func() {
 		assembleMu.Lock()
 		defer assembleMu.Unlock()
@@ -205,11 +223,20 @@ func main() {
 	if exec != nil {
 		startupLoop = taskLoopOf(exec)
 	}
+	// P4-33 冬眠让位的执行层配套:同执行器/审批门实例(闭包读当前
+	// 装配——启动未就绪、面板激活后运行时装配同样生效);未装配时为
+	// nil(无执行层挂起者,冬眠收场无票可放行)。
+	hibSink := &hibernateSink{execOf: func() *swarm.Executor {
+		assembleMu.Lock()
+		defer assembleMu.Unlock()
+		return exec
+	}}
 	mgr, err = manager.New(manager.Config{
 		Store: store, RootDir: *tasksDir, Hiber: hiberGate,
-		Checkpoint: ckptGate,
-		OnTerminal: shep.OnTerminal, // P2-08f:任务终态 → 牧者一句进展总结
-		OnTaskRun:  startupLoop,     // 启动时就绪:重启收养按重拉路径收养
+		Checkpoint:    ckptGate,
+		OnTerminal:    shep.OnTerminal, // P2-08f:任务终态 → 牧者一句进展总结
+		OnTaskRun:     startupLoop,     // 启动时就绪:重启收养按重拉路径收养
+		HibernateSink: hibSink,         // P4-33:冬眠收场放行挂起者/票据善后
 	})
 	if err != nil {
 		startupFatalf("构建 Manager: %v", err)
@@ -227,7 +254,7 @@ func main() {
 	// 运行时装配换入(steer 排队照常、kill 如实报无单位)。
 	ij := &interject.Service{
 		Store: store, Provider: provider, RootDir: *tasksDir,
-		Model: chain.ActiveModel(), ModelOf: chain.ActiveModel,
+		Model: chain.ActiveModel(),
 		Hiber: hiberGate,
 		Wake: func(taskID string) {
 			if t := mgr.Task(taskID); t != nil {
@@ -306,4 +333,30 @@ func envConfigFromOS() failover.EnvConfig {
 		format = string(llm.FormatAnthropic)
 	}
 	return failover.EnvConfig{Configured: true, Format: format, BaseURL: baseURL, APIKey: apiKey, Model: model}
+}
+
+// hibernateSink P4-33 冬眠让位的执行层配套(manager.HibernateSink 的
+// 装配实现):收场放行与票据善后全走虫群执行器/审批门既有实例;执行器
+// 未装配时静默无动作(无挂起者可放行、无票可善后)。execOf 读当前装配
+// ——启动未就绪、面板激活后运行时装配同样生效。
+type hibernateSink struct {
+	execOf func() *swarm.Executor
+}
+
+func (h *hibernateSink) FlushSuspended(taskID string) {
+	if e := h.execOf(); e != nil {
+		e.FlushSuspended(taskID)
+	}
+}
+
+func (h *hibernateSink) DropPending(taskID string) {
+	if e := h.execOf(); e != nil {
+		e.DropPendingApprovals(taskID)
+	}
+}
+
+func (h *hibernateSink) ExpirePending(taskID, reason string) {
+	if e := h.execOf(); e != nil {
+		e.ExpirePendingApprovals(taskID, reason)
+	}
 }

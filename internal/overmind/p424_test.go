@@ -72,8 +72,9 @@ func TestP424ReproProofreadSameSession(t *testing.T) {
 	if len(reqs) != 2 {
 		t.Fatalf("成本有界:恰 2 次请求(生成+校对),得到 %d", len(reqs))
 	}
-	// 同会话铁证:校对请求携带第一轮的助手回复(机器语原稿)与校对续问。
-	if !strings.Contains(reqs[1].System, "复现步骤写描述") ||
+	// 同会话铁证:校对请求携带第一轮的助手回复(机器语原稿)与校对续问
+	//(P4-35 起系统段为最小集选择+三层说明契约)。
+	if !strings.Contains(reqs[1].System, "复现最小集") ||
 		!assistantCarries(reqs[1], "tc-8f2a1b3c") ||
 		!strings.Contains(reqs[1].LastUser, "校对改写") {
 		t.Fatalf("校对应为同会话续问(system/助手原稿/续问): %+v", reqs[1])

@@ -14,6 +14,7 @@ import (
 
 	"ghostreaper/internal/overmind"
 	"ghostreaper/internal/rings"
+	"ghostreaper/internal/swarm"
 )
 
 // 牧者工具集(第四章 §1:不干活,只装三类工具——看/说/答;答即回复
@@ -43,6 +44,7 @@ func (s *Service) toolset(taskID, messageID string) []tool.CoreTool {
 		s.urgentIntentTool(taskID),
 		s.addGoalTool(taskID),
 		s.addConstraintTool(taskID),
+		s.setAssetScopeTool(taskID),
 	}
 }
 
@@ -428,6 +430,100 @@ func (s *Service) addConstraintTool(taskID string) tool.CoreTool {
 			return tool.Text(fmt.Sprintf("约束已记录:禁用 %v(下一轮生效)。", args.DenyTools)), nil
 		},
 	})
+}
+
+// setAssetScopeTool 资产范围操作(P4-45 ②,问题清单 #61 ④):纳入/摘除
+// 两向,与 RoE 面板同源——同一 roe.updated 账本状态、同一条止损链路
+// (swarm 资产范围操作),面板实时可见,无旁路(R7)。纳入=渗透任务放行
+// 待批资产/移回已摘除;摘除=立即终止覆盖该资产的在途单位(熔断同款)
+// 并取消排队步骤,主宰下一轮不再派发。
+func (s *Service) setAssetScopeTool(taskID string) tool.CoreTool {
+	return tool.Build(tool.Spec{
+		Name: "set_asset_scope",
+		Description: "调整资产的测试范围(与 RoE 面板同源,面板实时可见)。纳入=让资产可测:渗透任务的待批资产放行、已摘除的移回范围;红队任务本就全部可测,如实答复。摘除=资产不再测试:覆盖它的在途单位立即终止、排队步骤取消,主宰不再派发它。造物主说「把 X 纳入范围/可以测了」用 include,「X 不能测了/摘除」用 exclude。资产 ID 从 read_progress 查。",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"action": map[string]any{"type": "string", "enum": []string{"include", "exclude"},
+					"description": "include=纳入(可测) / exclude=摘除(不测,止损终止在途)"},
+				"assets": map[string]any{"type": "array", "items": map[string]any{"type": "string"},
+					"description": "任务内资产 ID 清单(read_progress 结果里的 a-* 标识)"},
+			},
+			"required": []string{"action", "assets"},
+		},
+		Permissions: allowAll,
+		Run: func(ctx context.Context, in json.RawMessage, _ *tool.ToolContext) (tool.Result, error) {
+			var args struct {
+				Action string   `json:"action"`
+				Assets []string `json:"assets"`
+			}
+			if err := json.Unmarshal(in, &args); err != nil {
+				return tool.Errorf("bad input: " + err.Error()), nil
+			}
+			args.Assets = trimAll(args.Assets)
+			if len(args.Assets) == 0 {
+				return tool.Errorf("assets 不能为空:给出任务内资产 ID(read_progress 可查)"), nil
+			}
+			title := func(id string) string {
+				if a, err := s.Store.Node(ctx, taskID, id); err == nil && a.Type == rings.NodeAsset {
+					return fmt.Sprintf("%s(%s)", id, a.Title)
+				}
+				return id
+			}
+			switch args.Action {
+			case "include":
+				res, err := swarm.IncludeAssets(ctx, s.Store, taskID, args.Assets, ActorShepherd)
+				if err != nil {
+					return tool.Errorf("纳入失败: " + err.Error()), nil
+				}
+				s.wake(taskID)
+				var b strings.Builder
+				for _, id := range res.Approved {
+					fmt.Fprintf(&b, "已放行待批资产 %s;\n", title(id))
+				}
+				for _, id := range res.Reincluded {
+					fmt.Fprintf(&b, "已纳入 %s,移回测试范围;\n", title(id))
+				}
+				for _, id := range res.AlreadyIn {
+					if s.taskTypeIs(ctx, taskID, rings.TaskTypePentest) {
+						fmt.Fprintf(&b, "%s 本就在测试范围内,无需纳入;\n", title(id))
+					} else {
+						fmt.Fprintf(&b, "%s 本就全部可测(红队任务不设待批),无需纳入;\n", title(id))
+					}
+				}
+				return tool.Text(strings.TrimRight(b.String(), ";\n") + "。RoE 面板同步可见,主宰已被通知。"), nil
+			case "exclude":
+				res, err := swarm.ExcludeAssets(ctx, s.Store, s.helm(), taskID, args.Assets, ActorShepherd)
+				if err != nil {
+					return tool.Errorf("摘除失败: " + err.Error()), nil
+				}
+				s.wake(taskID)
+				var b strings.Builder
+				for _, id := range res.AlreadyOut {
+					fmt.Fprintf(&b, "%s 已在范围外,无需再摘除;\n", title(id))
+				}
+				if len(res.Excluded) > 0 {
+					for _, id := range res.Excluded {
+						fmt.Fprintf(&b, "已摘除 %s;\n", title(id))
+					}
+					fmt.Fprintf(&b, "终止在途单位 %d 个,取消排队步骤 %d 个,主宰不再派发覆盖它的意图。\n",
+						len(res.KilledUnits), len(res.AbortedSteps))
+				}
+				return tool.Text(strings.TrimRight(b.String(), ";\n") + "。RoE 面板同步可见,主宰已被通知。"), nil
+			default:
+				return tool.Errorf("action 须为 include 或 exclude"), nil
+			}
+		},
+	})
+}
+
+// taskTypeIs 任务类型判定(created 定格;读失败按非渗透,如实走保守分支)。
+func (s *Service) taskTypeIs(ctx context.Context, taskID string, want string) bool {
+	detail, err := s.Store.CreatedDetail(ctx, taskID)
+	if err != nil {
+		return false
+	}
+	return rings.TaskTypeOf(detail) == want
 }
 
 func trimAll(in []string) []string {

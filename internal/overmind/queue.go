@@ -190,14 +190,71 @@ func queueLine(w QueueWatermark) string {
 	return fmt.Sprintf("执行中 %d / 排队 %d / 等前置 %d / 本轮还可新增 %d（派发上限 %d）", w.Running, w.Queued, w.Waiting, w.Available, w.Limit)
 }
 
-// planningTriggers 只消费真实增量。主宰自己派发/取消、领取、记研判和
-// 心跳到点都不是新规划依据；心跳仍会唤醒循环做机器巡检与收割。
-func (l *Loop) planningTriggers(ctx context.Context) ([]int64, error) {
-	evs, err := l.Store.Events(ctx, l.TaskID, l.lastPlanRev, 0)
+// diveRevisionsBetween (from, to] 窗口内落账的操作者深入指令版本号
+// (P4-48:触发扫描与快照读取之间落账的指令补正用——快照读到的指令
+// 同样算本轮触发,研判记录触发行与急活豁免同源归属)。
+func diveRevisionsBetween(ctx context.Context, store *rings.Store, taskID string, from, to int64) []int64 {
+	if to <= from {
+		return nil
+	}
+	evs, err := store.Events(ctx, taskID, from, 0)
 	if err != nil {
-		return nil, err
+		return nil
 	}
 	var out []int64
+	for _, ev := range evs {
+		if ev.Kind == rings.EventOperatorDive && ev.Revision > from && ev.Revision <= to {
+			out = append(out, ev.Revision)
+		}
+	}
+	return out
+}
+
+// idleFloorDue 0 意图硬底线的求值前提(P4-42 ⑤,问题清单 #72):触发
+// 门收紧后,"无新触发事件"会跳过拆解——但图上无待执行/在跑步骤且仍有
+// active 目标时,硬底线(无 open/running 且目标未达成 → 必派 ≥1)恰好
+// 只能在拆解轮里被求值;跳过它,任务就静止在"运行中"(SIGQUIT 实证:
+// 循环活着、补踢到达、被触发门短路,零研判零外联)。空闲即评:每拍
+// 心跳、每次拉起踢达都给主宰一轮拆解。有在跑或可领取步骤时不评(等
+// 结果,P4-29 触发收紧照旧);收尾中/完成后不评;无目标不评(拆解
+// 治理的开放任务由既有事件路径驱动)。
+func (l *Loop) idleFloorDue(ctx context.Context) bool {
+	if l.isSettling() {
+		return false
+	}
+	l.mu.Lock()
+	fin := l.finished
+	l.mu.Unlock()
+	if fin {
+		return false
+	}
+	steps, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeStep, "")
+	if err != nil {
+		return false
+	}
+	for _, s := range steps {
+		if s.Status == "dispatched" || s.Status == "running" {
+			return false
+		}
+	}
+	goals, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeGoal, GoalStatusActive)
+	if err != nil {
+		return false
+	}
+	return len(goals) > 0
+}
+
+// planningTriggers 只消费真实增量。主宰自己派发/取消、领取、记研判和
+// 心跳到点都不是新规划依据；心跳仍会唤醒循环做机器巡检与收割。
+// 第二返回值 = 触发里含操作者深入指令(P4-48:该轮派生意图按急活
+// 来源享背压豁免)。
+func (l *Loop) planningTriggers(ctx context.Context) ([]int64, bool, error) {
+	evs, err := l.Store.Events(ctx, l.TaskID, l.lastPlanRev, 0)
+	if err != nil {
+		return nil, false, err
+	}
+	var out []int64
+	dive := false
 	for _, ev := range evs {
 		trigger := false
 		switch ev.Kind {
@@ -224,10 +281,14 @@ func (l *Loop) planningTriggers(ctx context.Context) ([]int64, error) {
 		case rings.EventNodeStateChanged:
 			var p rings.NodeStateChanged
 			trigger = ev.Actor == "creator" && json.Unmarshal(ev.Payload, &p) == nil
+		case rings.EventOperatorDive:
+			// 操作者深入指令(P4-48):硬承诺——立即唤醒规划。
+			trigger = true
+			dive = true
 		}
 		if trigger {
 			out = append(out, ev.Revision)
 		}
 	}
-	return out, nil
+	return out, dive, nil
 }

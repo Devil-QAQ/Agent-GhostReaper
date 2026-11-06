@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/Autumn-27/norma/llm"
+
+	"ghostreaper/internal/rings"
 )
 
 // extractAssetIn / extractConstraintIn / extractGoalIn 提取结果的候选项
@@ -42,11 +44,13 @@ type extractConstraintIn struct {
 }
 
 type extractReply struct {
-	Title       string                `json:"title,omitempty"`
-	Assets      []extractAssetIn      `json:"assets"`
-	Goals       []extractGoalIn       `json:"goals"`
-	Constraints []extractConstraintIn `json:"constraints"`
-	Issues      []string              `json:"issues"` // 带问题被丢弃/修正的条目(如实呈现,不静默丢)
+	Title        string                `json:"title,omitempty"`
+	TaskType     string                `json:"task_type,omitempty"` // 任务类型预选(P4-44:按描述倾向,可改)
+	Assets       []extractAssetIn      `json:"assets"`
+	Goals        []extractGoalIn       `json:"goals"`
+	CreatorNotes []string              `json:"creator_notes"` // 注意事项候选(P4-49;仅预填,确认才落库)
+	Constraints  []extractConstraintIn `json:"constraints"`
+	Issues       []string              `json:"issues"` // 带问题被丢弃/修正的条目(如实呈现,不静默丢)
 }
 
 // handleTaskExtract 建任务前的描述提取(单发短调用;跑完即弃)。
@@ -90,16 +94,25 @@ func (s *Server) handleTaskExtract(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, reply)
 }
 
-// taskExtractSystem 提取提示词:结构化目标(带判定口径建议)/操作约束/
-// 种子资产;反向规则(不编造)逐条钉死。
+// taskExtractSystem 提取提示词:结构化目标(带判定口径建议)/注意事项/
+// 操作约束/种子资产/任务类型倾向(P4-44);反向规则(不编造)逐条钉死。
+// 注意事项(P4-49 ②)凭语义辨认不靠标志词,正反例定口径。
 func taskExtractSystem() string {
 	return `你是渗透测试任务建单的提取器。操作者粘贴一段授权描述,你从中提取建任务表单的候选内容,输出且只输出一个 JSON 对象(不要围栏、不要解释):
-{"title":"推断的任务标题(15字内)","assets":[{"class":"资产类","title":"资产标识"}],"goals":[{"title":"目标","pred":"判定口径"}],"constraints":[{"action":"动作描述","disposition":"forbid|allow","quota":N,"assets":["资产标识"],"patterns":["RE2正则"],"basis":"描述里的原句"}]}
+{"title":"推断的任务标题(15字内)","task_type":"pentest|redteam","assets":[{"class":"资产类","title":"资产标识"}],"goals":[{"title":"目标","pred":"判定口径"}],"creator_notes":["注意事项"],"constraints":[{"action":"动作描述","disposition":"forbid|allow","quota":N,"assets":["资产标识"],"patterns":["RE2正则"],"basis":"描述里的原句"}]}
 提取纪律(违反即失职):
 - 只提取描述明确表达的内容,一律不编造、不推测、不补全:描述没写的约束、目标、次数上限一律不出现。
+- task_type 按描述倾向二选一:只针对单个站点/网址/域名("对这个网站""测这个系统")→ pentest(渗透任务:范围外发现的相邻资产待批准才可测);全面评估/整站/内网横向/多目标/给 IP 段或一批 IP("全面""整站""这些 IP""内网")→ redteam(红队任务:发现的相邻资产直接可测)。倾向不明默认 pentest。
 - 资产类 12 词:domain 域名 / subdomain 子域名 / host 主机 / service 服务 / api 接口 / organization 组织 / miniprogram 小程序 / app 应用 / wechat_account 公众号 / person 人员 / leak_info 泄露信息 / other 其他。URL、IP:端口 → service;纯 IP → host;点分域名 → subdomain 或 domain。
 - goals = 可核验的最终目标(描述里的任务目的),不是步骤。每条目标尽量写成可判定的完成条件:给出明确的完成判据(拿到什么产出、达到什么数量或状态算完成,如"提取 users 表全部账号与口令哈希"),不用"评估/了解/摸清"这类说不清何时算完成的表述。
 - pred 用一句话写清该目标怎样算完成(判定口径,面向证据:产出物、数量、可观察状态);判据只能来自描述里的任务目的,描述没给就留空,不编造。
+- creator_notes = 注意事项(对做法的软要求:怎么测的要求与偏好),凭语义辨认,不靠"不要/禁止"这类标志词——只要句子在对做法提要求或表达偏好就提取,每条一句话、贴描述原意转写、不添义:
+  正例:"用小字典就行" → 提取(如"爆破用小字典"——无标志词的做法偏好照样认);
+  正例:"站很脆弱,温柔点" → 提取(转写为"目标脆弱,动作放轻");
+  正例:"先只读探测,别改任何数据" → 提取(可拆"先只读探测""不要修改任何数据"两条);
+  反例:"拿下管理权限"(说要拿到什么 = 目标) → 只进 goals,不进 creator_notes;
+  反例:"测试 example.com 这个站点"(背景陈述,不对做法提要求) → 两者都不进;
+  描述没表达做法要求就留空数组,不硬凑。
 - 约束 = 授权边界(只许/不许做什么):disposition 用 forbid(禁止)或 allow(允许);quota 只在描述明确给了次数数字时填,否则不填;范围 assets 引用提取出的资产标识,描述未限定到具体资产的留空(= 全部)。
 - patterns 是该动作的命令参数匹配正则(RE2 语法,无前后瞻,留意大小写加 (?i)),匹配"执行该动作的命令文本"的典型形态(bash 的 curl/sqlmap/hydra 等);生成不了就不填。
 - 每条约束带 basis(描述原句截取),供操作者核对是不是真的写了。
@@ -112,23 +125,33 @@ func taskExtractSystem() string {
 // 裸串按无判定口径建议收)。
 func parseTaskExtract(reply string) (*extractReply, []string) {
 	var issues []string
-	out := &extractReply{Assets: []extractAssetIn{}, Goals: []extractGoalIn{}, Constraints: []extractConstraintIn{}}
+	out := &extractReply{Assets: []extractAssetIn{}, Goals: []extractGoalIn{}, CreatorNotes: []string{}, Constraints: []extractConstraintIn{}}
 	raw := strings.TrimSpace(reply)
 	start, end := strings.Index(raw, "{"), strings.LastIndex(raw, "}")
 	if start < 0 || end <= start {
 		return out, []string{"回复里没有 JSON 对象,提取为空(可重试或手填)"}
 	}
 	var parsed struct {
-		Title       string                `json:"title"`
-		Assets      []extractAssetIn      `json:"assets"`
-		Goals       []json.RawMessage     `json:"goals"`
-		Constraints []extractConstraintIn `json:"constraints"`
+		Title        string                `json:"title"`
+		TaskType     string                `json:"task_type"`
+		Assets       []extractAssetIn      `json:"assets"`
+		Goals        []json.RawMessage     `json:"goals"`
+		CreatorNotes json.RawMessage       `json:"creator_notes"`
+		Constraints  []extractConstraintIn `json:"constraints"`
 	}
 	if err := json.Unmarshal([]byte(raw[start:end+1]), &parsed); err != nil {
 		return out, []string{"JSON 解析失败,提取为空(可重试或手填): " + err.Error()}
 	}
 	if t := strings.TrimSpace(parsed.Title); t != "" && len([]rune(t)) <= 64 {
 		out.Title = t
+	}
+	// 任务类型倾向(P4-44):词表外的值丢弃如实入 issues(仅预选,表单可改)。
+	if tt := strings.TrimSpace(parsed.TaskType); tt != "" {
+		if rings.IsValidTaskType(tt) {
+			out.TaskType = tt
+		} else {
+			issues = append(issues, fmt.Sprintf("任务类型 %q 不在词表内(须 pentest|redteam),已丢弃,默认渗透", tt))
+		}
 	}
 	seen := map[string]bool{}
 	for _, a := range parsed.Assets {
@@ -161,6 +184,36 @@ func parseTaskExtract(reply string) (*extractReply, []string) {
 				pred = string(r[:200])
 			}
 			out.Goals = append(out.Goals, extractGoalIn{Title: title, Pred: pred})
+		}
+	}
+	// 注意事项(P4-49 ②):数组为主形态;模型偶发单串时按一条收
+	//(多行串拆行)。逐条修剪、去空、去重、限 200 字(超长丢弃入
+	// issues,与目标同款如实呈现)。
+	if len(parsed.CreatorNotes) > 0 {
+		var candidates []string
+		if parsed.CreatorNotes[0] == '[' {
+			var arr []string
+			if err := json.Unmarshal(parsed.CreatorNotes, &arr); err == nil {
+				candidates = arr
+			}
+		} else if parsed.CreatorNotes[0] == '"' {
+			var one string
+			if err := json.Unmarshal(parsed.CreatorNotes, &one); err == nil {
+				candidates = strings.Split(one, "\n")
+			}
+		}
+		seenNote := map[string]bool{}
+		for _, n := range candidates {
+			n = strings.TrimSpace(n)
+			if n == "" || seenNote[n] {
+				continue
+			}
+			if len([]rune(n)) > 200 {
+				issues = append(issues, fmt.Sprintf("注意事项 %q 超过 200 字,已丢弃", clipExtract(n, 30)))
+				continue
+			}
+			seenNote[n] = true
+			out.CreatorNotes = append(out.CreatorNotes, n)
 		}
 	}
 	for _, c := range parsed.Constraints {
@@ -210,4 +263,13 @@ func ringsAssetClass(c string) string {
 		}
 	}
 	return ""
+}
+
+// clipExtract 超长条目入 issues 时的截头(人话呈现,不撑爆提示行)。
+func clipExtract(s string, n int) string {
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
 }

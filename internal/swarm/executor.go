@@ -73,16 +73,17 @@ type Executor struct {
 	// server(与审批门同一装配形态)。nil 不会被替换——零值 Helm 也会
 	// 自建,舵杆永远可用。
 	Helm *Helm
-	// Hiber 任务冬眠门(P2-08,第七章「任务冬眠」):门关(任务冬眠)时
-	// 单位在工具调用边界/段间挂起(不退出、会话冻结、计时停),门开
-	// 原地续跑(R14 复检前提)。装配层与 Manager/主宰循环/牧者/审批门
-	// 共持同一实例。nil = 无门(单测:无冬眠语义)。
+	// Hiber 任务冬眠门(P2-08;P4-33 起为冻结收场):门关(任务冬眠)
+	// 期间面板只读、审批冻结、牧者入口冻结;单位侧门等待仅剩收场过渡
+	// (P4-33:收场令与门同发,等待者带节拍复查见令即落地,不再驻留
+	// 门上过冬眠)。装配层与 Manager/主宰循环/牧者/审批门共持同一
+	// 实例。nil = 无门(单测:无冬眠语义)。
 	Hiber *hiber.Gate
 	// Ckpt 断点冻结信号(P3-07,第七章「故障与恢复」断点续接):武装后
 	// 单位在工具调用边界收场——当前调用完成后落地,session_finished 带
-	// checkpointed 标记(会话保留可续),步骤回可领取。与冬眠的分工:
-	// 冬眠=挂起等待原地解冻,断点=落地收场进程可亡。装配层与 Manager/
-	// 主宰循环共持同一实例;nil = 无断点语义(单测)。
+	// checkpointed 标记(会话保留可续),步骤回可领取。P4-33 冬眠收场
+	// 复用同一约定(武装即收场)。装配层与 Manager/主宰循环共持同一
+	// 实例;nil = 无断点语义(单测)。
 	Ckpt *ckpt.Gate
 
 	mu      sync.Mutex
@@ -331,6 +332,29 @@ func (e *Executor) beginUnit(ctx context.Context, pack *TaskPack) (*unitEnv, Bud
 			},
 		})
 		return nil, Budget{}, &RunResult{UnitID: unitID, StepStatus: "dispatched", Stale: true}, ErrStaleGraph
+	}
+
+	// ---- 领取只领 dispatched(P4-45 防复活) ----
+	// 调度选中与领取之间存在他方收场窗口(范围摘除止损取消排队步骤、
+	// 模型取消同类):此刻复查步骤现状态,非 dispatched 拒领——领到
+	// 已收场的步骤会把终态覆写回 running(复活),步骤状态机物理保证
+	// 终态不再领取。R14 挡不住"选中后落账、领取前读到新版"的时序,
+	// 状态复查补上这一面。
+	if step, nerr := e.Store.Node(ctx, pack.TaskID, pack.StepID); nerr == nil && step.Status != "dispatched" {
+		e.mu.Lock()
+		e.unitSeq++
+		n := e.unitSeq
+		e.mu.Unlock()
+		unitID := fmt.Sprintf("u%d", n)
+		_, _ = e.Store.Append(ledgerCtx, pack.TaskID, rings.Event{
+			Kind: rings.EventSwarmRecord, Actor: "swarm:" + unitID,
+			Payload: rings.SwarmRecord{
+				StepID: pack.StepID, UnitID: unitID, Type: rings.SwarmRecStaleRefused,
+				GraphVersion: pack.GraphVersion,
+				Note:         fmt.Sprintf("领取时步骤已为 %s,不再领取", step.Status),
+			},
+		})
+		return nil, Budget{}, &RunResult{UnitID: unitID, StepStatus: step.Status, Stale: true}, ErrStaleGraph
 	}
 
 	env := e.newUnit(pack)
@@ -611,6 +635,18 @@ func (e *Executor) stepDir(taskID, stepID string) string {
 // run_seconds;批准后经转录 Resume 原会话续跑,新段预算 = 剩余预算
 // (轮次与墙钟都按已耗扣减)。billable 只累计各执行段时长,弹门等待
 // 计入 gateWait——时间账随 session_finished 留痕可对账。
+// unitModelName 单位会话当前服务模型名(压缩窗口按服务腿取):链支持
+// 逐请求解析时取实时值(任务绑定+会话语境——绑定任务按绑定腿的模型,
+// 会话按实际服务腿,P4-41 ③),否则退装配层注入的静态名。
+func unitModelName(e *Executor, taskID, transcriptID string) string {
+	if f := modelNowFunc(e.Provider, taskID, transcriptID); f != nil {
+		if m := f(); m != "" {
+			return m
+		}
+	}
+	return e.Model
+}
+
 func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budget Budget) (*RunResult, error) {
 	res := &RunResult{UnitID: env.UnitID, TranscriptID: env.TranscriptID}
 
@@ -638,7 +674,9 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 	// 工具后在调用边界生效(锚间隔随任务包,面板建任务可调)。段化执行
 	// 下锚的剩余预算读数逐段刷新(挂起等待不计入)。
 	guard := newToolGuard(env, pack, e.Helm, pack.AnchorEverySteps, time.Time{}, budget.MaxTurns)
-	tools := guard.wrapAll(filterTools(env.toolset(), pack.Authorization))
+	// 落盘守卫(P4-39 ①)在门卫之外再包一层:单次工具输出超 30,000 字符
+	// 即整段落 blob,对话内只留截头+存档引用(read 按引用回读)。
+	tools := wrapSpillGuard(env, guard.wrapAll(filterTools(env.toolset(), pack.Authorization)))
 
 	// 工具调用实时记账:KindToolUse 记名与参数,KindToolResult 落账
 	//(大结果整段入 blob,账本只存引用与截头,R18);KindUsage 逐轮切
@@ -649,7 +687,7 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 	toolArgs := map[string]json.RawMessage{} // toolUseID -> args
 	usage := &UsageTracker{
 		Store: e.Store, TaskID: pack.TaskID, Agent: "swarm:" + env.UnitID,
-		Model: e.Model, ModelOf: modelNowFunc(e.Provider), Transcript: env.TranscriptID,
+		Model: e.Model, ModelOf: modelNowFunc(e.Provider, pack.TaskID, env.TranscriptID), Transcript: env.TranscriptID,
 		MaxTurns: budget.MaxTurns, StepID: pack.StepID, UnitID: env.UnitID,
 	}
 	var usageErr error // 用量/里程碑记账失败:不中断执行,收尾时如实带回
@@ -740,10 +778,12 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 			res.Reason, res.StepStatus, res.Checkpointed = "checkpointed", "dispatched", true
 			break
 		}
-		// ---- P2-08 段间挂起:单位暂停闩/任务冬眠门任一在即原地冻结 ----
+		// ---- P2-08 段间挂起:单位暂停闩在即原地冻结;冬眠门在即收场 ----
 		// 工具边界的挂起由 guard 收段后经 continue 回到这里统一处理;
-		// 审批续跑/模型重试回到段首的路径同样在此冻结(无死角)。
-		if env.parkArmed || e.hibernating(pack.TaskID) {
+		// 审批续跑/模型重试回到段首的路径同样在此处理(无死角)。
+		// P4-33:复测单位豁免冬眠冻结(与断点豁免同款——侧会话跑完自然
+		// 落地,不给冬眠收场添等待者)。
+		if env.parkArmed || (env.retest == nil && e.hibernating(pack.TaskID)) {
 			env.parkArmed = false
 			hibernatingNow := e.hibernating(pack.TaskID)
 			anchor := e.parkAnchorRev(ledgerCtx, pack.TaskID)
@@ -820,7 +860,11 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 		env.segCancel = cancelSeg
 		env.park = nil
 
-		sess := agentcore.NewSession(agentcore.Options{
+		// 单位会话压缩器(P4-39 ②):旧轮工具结果体微压缩(宿主实现,
+		// 覆盖本项目工具名)+ 摘要压缩(引擎默认时机与参数,摘要器
+		// 从同一 Provider 构造)。窗口未配置(0)不挂——与牧者同款
+		// 装配纪律;模型名按当前服务腿解析,主备切换后逐段跟随。
+		unitOpts := agentcore.Options{
 			Provider:       e.Provider,
 			SystemPrompt:   workerSegments,
 			Tools:          tools,
@@ -837,7 +881,14 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 			Transcript:             transcriptStore,
 			SessionID:              env.TranscriptID,
 			DisableBackgroundTasks: true,
-		})
+		}
+		if uc := newUnitCompactor(e.Store, pack.TaskID, pack.StepID, env.UnitID,
+			failover.ContextWindowFor(ctx, e.Store, unitModelName(e, pack.TaskID, env.TranscriptID)), 4096, e.Provider); uc != nil {
+			// 判空再挂:nil *unitCompactor 塞进接口是非 nil 值,引擎会
+			// 照调方法(空指针崩溃),必须只在真挂时赋值。
+			unitOpts.Compactor = uc
+		}
+		sess := agentcore.NewSession(unitOpts)
 		if seg > 0 {
 			// 批准续跑:从转录恢复原会话(消息与累计用量),同一份会话
 			// 原地继续——被挂起的调用由模型重新发起,审批门的单次放行
@@ -1048,7 +1099,7 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 		// 完成的是落地(真实终态,暂停闩随落地清理留痕);ctx 已结束
 		//(kill/熔断)不进挂起,维持 aborted 落地语义。
 		if ctx.Err() == nil &&
-			(env.parkArmed || e.hibernating(pack.TaskID)) &&
+			(env.parkArmed || (env.retest == nil && e.hibernating(pack.TaskID))) &&
 			res.StepStatus != "done" && res.StepStatus != "exhausted" &&
 			res.StepStatus != StepApprovalDenied {
 			continue
@@ -1085,6 +1136,14 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 				env.park = nil
 				res.Reason, res.StepStatus = "aborted", "aborted"
 				return res, fmt.Errorf("swarm: 审批等待被中断: %w", ctx.Err())
+			}
+			if d.Released {
+				// P4-33 冬眠收场放行:票面保持待裁决冻结(零裁决记录),
+				// 单位收场落地——步骤回可领取、会话保留可续;唤醒后重领
+				// 原会话续跑,重新过门(与断点收场同款落地)。
+				env.park = nil
+				res.Reason, res.StepStatus, res.Checkpointed = "checkpointed", "dispatched", true
+				break
 			}
 			if d.Approved {
 				// 冬眠跨弹门(P2-08:唤醒后批准的单位继续执行,继续前按 R14
@@ -1421,6 +1480,12 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 			}
 			return denyUnit(rings.DenyLineHardRule, hardRuleDenyReason(r, m))
 		}
+		// ②b 范围外硬拦(P4-44 ③):渗透任务的命令目标不在种子闭包内
+		// 即拒(留痕+熔断,与硬规则同纪律;只读探测工具在门卫补口同判,
+		// bash 经由本回调)。denyScope 内部完成留痕与熔断。
+		if reason := env.denyScope(pack, toolName, input); reason != "" {
+			return permission.Denied(reason)
+		}
 		// ③ 任务级意图拦截(P2-08e,审核迭代:现读+范围过滤+不熔断):
 		// 禁止命中 / 超额只拒本次调用并留痕,单位继续其余工作(告知走
 		// 舵杆定向投递,见 server 侧规则变更端点);允许 + 次数上限在此
@@ -1649,9 +1714,13 @@ func (e *Executor) bgNotes(unitID string) []string {
 			continue
 		}
 		r.notified = true
+		trunc := ""
+		if r.proc.out.Truncated() {
+			trunc = "输出已超上限截断(文件尾有省略标记);"
+		}
 		out = append(out, fmt.Sprintf(
-			"%s%s 已结束(%s);输出文件在本步骤工作目录,可用 read 或 bash(tail) 读取。",
-			BGNoteMarker, r.outFile, exitLineOf(r.proc.waitErr)))
+			"%s%s 已结束(%s);%s输出文件在本步骤工作目录,可用 read 或 bash(tail) 读取。",
+			BGNoteMarker, r.outFile, exitLineOf(r.proc.waitErr), trunc))
 	}
 	return out
 }

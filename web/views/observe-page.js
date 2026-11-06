@@ -106,14 +106,14 @@ const HIT_OUTCOME_VARIANTS = {
 };
 
 // 被拒走向:换路成功继续 / 卡死 / 任务已停止 为主态,任务完成是最强
-// 换路,继续中与已暂停为未定态(冻结中)。
+// 换路,继续中与冬眠中为未定态(冻结中,任务状态七词口径 P4-46 ②)。
 const FOLLOW_LABELS = {
   rerouted_complete: "换路成功·任务完成",
   rerouted: "换路成功继续",
   task_stopped: "任务已停止",
   stalled: "卡死",
   active: "继续中",
-  paused: "已暂停",
+  paused: "冬眠中",
 };
 
 const FOLLOW_VARIANTS = {
@@ -134,7 +134,7 @@ function followSummary(follows) {
   const parts = [
     ["换路成功", rerouted],
     ["继续中", follows.active || 0],
-    ["已暂停", follows.paused || 0],
+    ["冬眠中", follows.paused || 0],
     ["卡死", follows.stalled || 0],
     ["任务停止", follows.task_stopped || 0],
   ].filter(([, n]) => n > 0);
@@ -504,7 +504,7 @@ function ThroughputSection({ body, taskList, tpTask, onTask }) {
       <SectionTitle
         icon="activity"
         title="吞吐"
-        note="意图从派发到被领取的等待时长 · 已派发未领取的意图数(队列深度)"
+        note="意图从派发到被领取的等待时长 · 排队未领取的意图数(队列深度)"
         right={
           <TaskSelect taskList={taskList} value={tpTask} onChange={onTask} />
         }

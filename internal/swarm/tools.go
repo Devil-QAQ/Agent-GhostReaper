@@ -47,6 +47,13 @@ type unitEnv struct {
 	stepPass     *gateStepPass      // P4-27 ⑧ 同步骤放行(审批门槛批准一次后武装,本步骤后续命令不再逐条弹门)
 	deniedReason string             // 拒绝即熔断:非空 = 单位以 approval_denied 终态收场
 
+	// P4-44 范围判定的 DNS 缓存(种子给 IP 的闭包下,域名目标按解析到
+	// 闭包 IP 判同机):单位生命周期内 host → 是否在闭包内,解析一次
+	// 不再重复(并行工具调用下加锁)。
+	scopeMu    sync.Mutex
+	scopeHits  map[string]bool
+	scopeTried map[string]bool
+
 	// P2-08 单位暂停/任务冬眠的段状态(暂停请求由 guard 在调用边界置位,
 	// drive 消费;审批挂起锚点在进票时记录)。
 	parkArmed      bool          // 工具边界已请求挂起(单位暂停/任务冬眠):段收拢后回段循环顶挂起
@@ -133,6 +140,9 @@ func shortID(prefix string) string {
 // 后台子进程与前台同一构造(镜代理注入照旧,流量经镜留痕)。
 // 后台进程登记在执行器(单位粒度),单位落地/硬停/止损时整组回收,
 // 输出文件保留供审计。
+// P4-37 失控防护两道闸(定值,不做配置项):输出文件写满 100MB 停写
+// (尾部追加省略标记,截断记黑匣子);后台进程挂钟超 30 分钟强制结束
+// (kill 记黑匣子,尾行与 [exit] 同款)。
 
 const (
 	bashDefaultTimeout = 120 * time.Second
@@ -169,10 +179,14 @@ func bashAutoBackgroundAllowed(command string) bool {
 
 // bashProc 一条已启动的 bash 进程:输出流式落文件。前台完成即删文件、
 // 输出走返回文本;转后台则文件保留,退出后追加 [exit: N] 尾行。
+// out 是带上限的输出写入器(P4-37 ①:写满 100MB 停写+省略标记);
+// started 锚定挂钟起点(P4-37 ② 寿命闸自进程启动起算)。
 type bashProc struct {
 	cmd     *exec.Cmd
 	f       *os.File
+	out     *capWriter
 	outPath string
+	started time.Time
 	waitErr error // 仅在 exited 关闭后读(通道关闭先行发生保证)
 	exited  chan struct{}
 }
@@ -207,21 +221,24 @@ func (r *bgRun) Finished() bool {
 	}
 }
 
-// startBash 启动一条 bash 进程(输出落文件,waiter 协程守退出)。
+// startBash 启动一条 bash 进程(输出经带上限的写入器落文件,waiter 协程
+// 守退出;P4-37 ① 输出闸自进程启动即生效——前台段与转后台共用同一
+// 输出文件,闸门必须横跨两个阶段)。
 func (env *unitEnv) startBash(command, dir string) (*bashProc, error) {
 	outPath := env.reserveBGPath()
 	f, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return nil, err
 	}
+	cw := newCapWriter(f, bgOutputCapBytes)
 	cmd := env.newBashCmd(command, dir)
-	cmd.Stdout, cmd.Stderr = f, f
+	cmd.Stdout, cmd.Stderr = cw, cw
 	if err := cmd.Start(); err != nil {
 		f.Close()
 		os.Remove(outPath)
 		return nil, err
 	}
-	p := &bashProc{cmd: cmd, f: f, outPath: outPath, exited: make(chan struct{})}
+	p := &bashProc{cmd: cmd, f: f, out: cw, outPath: outPath, started: time.Now(), exited: make(chan struct{})}
 	go func() {
 		p.waitErr = cmd.Wait()
 		close(p.exited)
@@ -251,8 +268,12 @@ func (env *unitEnv) newBashCmd(command, dir string) *exec.Cmd {
 }
 
 // handoverBG 转后台交接:进程不杀、输出续写;退出后追加尾行并入册
-// (单位落地/硬停/止损整组回收)。
+// (单位落地/硬停/止损整组回收)。P4-37:输出截断在此刻武装黑匣子回记
+// (纯前台路径不记闸账),寿命闸看门狗同步上岗(覆盖显式后台与超时转
+// 后台两条路径——全部后台进程都经此交接)。
 func (env *unitEnv) handoverBG(p *bashProc) *bgRun {
+	p.out.armCapped(func() { env.recordBGGuard(rings.BlackboxBGOutputTrunc, p) })
+	go env.bgLifespanGuard(p)
 	go func() {
 		<-p.exited
 		p.f.Close()
@@ -264,6 +285,15 @@ func (env *unitEnv) handoverBG(p *bashProc) *bgRun {
 	run := &bgRun{proc: p, outFile: filepath.Base(p.outPath)}
 	env.Executor.registerBG(env.UnitID, run)
 	return run
+}
+
+// bgTruncNote 输出已截断时的话术追加(P4-37 ①:如实回传截断状态,
+// 模型据此自行换法);未截断返回空串。
+func bgTruncNote(p *bashProc) string {
+	if p.out.Truncated() {
+		return "输出已达上限被截断(文件尾有省略标记),需要完整输出请改用输出更少的方式(如写文件后分段读取)。"
+	}
+	return ""
 }
 
 // bashTool 执行 shell 命令的通道:真实进程、真实超时、合并 stdout/stderr。
@@ -279,7 +309,7 @@ func (env *unitEnv) bashTool() tool.CoreTool {
 			"properties": map[string]any{
 				"command":           map[string]any{"type": "string", "description": "要执行的 shell 命令(单条或管道)"},
 				"timeout_ms":        map[string]any{"type": "integer", "description": "限时毫秒(默认 120000,上限 600000):长任务(扫描/爆破/批量验证)按预估时长自行调大;超时未完成自动转后台继续跑,不会掐断"},
-				"run_in_background": map[string]any{"type": "boolean", "description": "true = 不等结果直接后台运行,立即返回;输出写本步骤工作目录 bg-N.output,用 read 或 bash(tail) 读取,结束后有后台完成提醒"},
+				"run_in_background": map[string]any{"type": "boolean", "description": "true = 不等结果直接后台运行,立即返回;输出写本步骤工作目录 bg-N.output,用 read 或 bash(tail) 读取,结束后有后台完成提醒;后台命令输出上限 100MB(超出省略)、最长运行 30 分钟(到点强制结束)"},
 			},
 			"required": []string{"command"},
 		},
@@ -354,8 +384,8 @@ func (env *unitEnv) runBashFG(ctx context.Context, command, dir string, timeout 
 		}
 		run := env.handoverBG(p)
 		return tool.Text(fmt.Sprintf(
-			"命令超时(>%s),已转后台继续运行:输出写入本步骤工作目录 %s,结束后文件末尾出现 [exit: N] 行。期间可先做其他事,用 read 或 bash(tail %s) 查看进度;命令结束后会有后台完成提醒。",
-			timeout, run.outFile, run.outFile)), nil
+			"命令超时(>%s),已转后台继续运行:输出写入本步骤工作目录 %s,结束后文件末尾出现 [exit: N] 行。期间可先做其他事,用 read 或 bash(tail %s) 查看进度;命令结束后会有后台完成提醒。%s",
+			timeout, run.outFile, run.outFile, bgTruncNote(p))), nil
 	case <-ctx.Done():
 		killBashGroup(p.cmd)
 		<-p.exited
@@ -371,8 +401,8 @@ func (env *unitEnv) runBashBG(command, dir string) (tool.Result, error) {
 	}
 	run := env.handoverBG(p)
 	return tool.Text(fmt.Sprintf(
-		"已在后台启动:输出写入本步骤工作目录 %s,结束后文件末尾出现 [exit: N] 行;用 read 或 bash(tail %s) 查看进度;命令结束后会有后台完成提醒。",
-		run.outFile, run.outFile)), nil
+		"已在后台启动:输出写入本步骤工作目录 %s,结束后文件末尾出现 [exit: N] 行;用 read 或 bash(tail %s) 查看进度;命令结束后会有后台完成提醒。%s",
+		run.outFile, run.outFile, bgTruncNote(p))), nil
 }
 
 // ---- 探测工具 ----
@@ -535,7 +565,7 @@ func stripProxyEnv(env []string) []string {
 // 快照直问用)共用同一批常量,两处不得漂移。
 
 const (
-	toolDescBash                   = "在授权范围内执行 shell 命令(单条或管道),返回合并输出。单条命令默认限时 120 秒,可用 timeout_ms 自行调整(上限 600 秒);超时未完成的命令自动转入后台继续运行(输出落文件可稍后读取,sleep 类等待命令除外),也可用 run_in_background 直接后台跑。大输出会被存档并截断,需要全文时按存档引用查阅。"
+	toolDescBash                   = "在授权范围内执行 shell 命令(单条或管道),返回合并输出。单条命令默认限时 120 秒,可用 timeout_ms 自行调整(上限 600 秒);超时未完成的命令自动转入后台继续运行(输出落文件可稍后读取,sleep 类等待命令除外),也可用 run_in_background 直接后台跑。后台命令输出上限 100MB(超出省略)、最长运行 30 分钟。大输出会被存档并截断,需要全文时按存档引用查阅。"
 	toolDescPortProbe              = "只读探测:检测 host:port 的 TCP 开放状态并尝试读取服务 banner。banner 只取前 256 字节且可能静默——勿据此认为已测完;需要更多服务特征时改用 http_probe 或 bash 通道。"
 	toolDescHTTPProbe              = "只读 HTTP 探测:对指定 URL 发起 HTTP 请求(GET 或 HEAD),返回状态码、关键响应头(Server/Content-Type/Content-Length)与响应体开头内容。响应体只返回前 1536 字节——勿据此认为已读全,需要完整响应时改用 bash(curl)并注意该意图的审批分级。"
 	toolDescSubmitCandidateFact    = "提交一条待确认事实(你本次真实观察到的结论)。须经主宰检查归纳后才成为正式事实。陈述须有本次执行取得的证据。观察到图上没有的对象(新域名/主机/服务/接口/泄漏信息等)时,随本条事实一并申报 new_asset(12 类选型+标识)——检查归纳时对象入图,后续工作可锚定它;已知对象用 asset_id 锚定,两者不得同时给。本机回环(127.0.0.1/localhost/::1)与镜等测试环境自身设施不是发现对象——对它们的观察会被拒收并记为环境观察;任务资产清单内的目标不受此限。"

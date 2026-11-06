@@ -193,6 +193,7 @@ func (e *Executor) BeginRetest(ctx context.Context, taskID, claimID string) (*Re
 		DeniedTools:       withoutTool(roe.DeniedTools, "submit_retest_result"),
 		ApprovalThreshold: roe.ApprovalThreshold,
 		IntentRules:       roe.IntentRules,
+		CreatorNotes:      roe.CreatorNotes, // 注意事项随授权透传(P4-49):复测重放同样受做法要求约束(如"不要修改任何数据")
 	}
 	if len(auth.AllowedTools) > 0 {
 		auth.AllowedTools = append(auth.AllowedTools, "submit_retest_result")
@@ -604,7 +605,7 @@ const retestWrapupPrompt = `运行预算即将耗尽。立即收尾:已取得可
 //	[6] 启动指令(最后一句)
 func RetestSystemSegments(ctx context.Context, store *rings.Store, roe RoE, rt *retestBinding) []string {
 	segs := []string{RenderRoEConstraint(
-		"你的复测手段受此框定。", roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, nil)}
+		"你的复测手段受此框定。", roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, nil, nil, roe.CreatorNotes)}
 	segs = append(segs, RetestPromptSpec.Assemble(ctx, store)...)
 	segs = append(segs, retestIntentBlock(rt), retestStartupInstruction)
 	return segs

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -294,6 +295,8 @@ type RoeState struct {
 	ApprovalThreshold ActionLevel
 	IntentRules       []IntentRule // 任务级拦截规则(P2-08e)
 	ExcludedAssets    []string     // 授权范围摘除清单(P4-05;空=全部纳入)
+	ScopeApproved     []string     // 范围外资产放行清单(P4-44;渗透任务待批资产放行后转范围内)
+	CreatorNotes      string       // 造物主注意事项(P4-49;空=无)
 	MaxActionLevel    ActionLevel  // 已废止(P1-07 分级上限,读兼容)
 	Note              string
 	UpdatedRev        int64
@@ -306,6 +309,18 @@ func (r RoeState) ExcludedAssetSet() map[string]bool {
 	}
 	m := make(map[string]bool, len(r.ExcludedAssets))
 	for _, id := range r.ExcludedAssets {
+		m[id] = true
+	}
+	return m
+}
+
+// ScopeApprovedSet 放行清单的集合形态(P4-44 消费侧判定用;空返回 nil)。
+func (r RoeState) ScopeApprovedSet() map[string]bool {
+	if len(r.ScopeApproved) == 0 {
+		return nil
+	}
+	m := make(map[string]bool, len(r.ScopeApproved))
+	for _, id := range r.ScopeApproved {
 		m[id] = true
 	}
 	return m
@@ -348,11 +363,11 @@ func (s *Store) CurrentRoE(ctx context.Context, taskID string) (RoeState, error)
 		return RoeState{}, ErrEmptyTaskID
 	}
 	var r RoeState
-	var allowed, denied, maxLevel, threshold, rules, exAssets string
+	var allowed, denied, maxLevel, threshold, rules, exAssets, scApproved string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT allowed_tools, denied_tools, max_action_level, approval_threshold, intent_rules, excluded_assets, note, updated_rev
+		SELECT allowed_tools, denied_tools, max_action_level, approval_threshold, intent_rules, excluded_assets, scope_approved, creator_notes, note, updated_rev
 		FROM roe_state WHERE task_id = ?`, taskID,
-	).Scan(&allowed, &denied, &maxLevel, &threshold, &rules, &exAssets, &r.Note, &r.UpdatedRev)
+	).Scan(&allowed, &denied, &maxLevel, &threshold, &rules, &exAssets, &scApproved, &r.CreatorNotes, &r.Note, &r.UpdatedRev)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RoeState{}, nil
 	}
@@ -370,6 +385,9 @@ func (s *Store) CurrentRoE(ctx context.Context, taskID string) (RoeState, error)
 	}
 	if err := json.Unmarshal([]byte(exAssets), &r.ExcludedAssets); err != nil {
 		return RoeState{}, fmt.Errorf("rings: 解码任务 %s excluded_assets: %w", taskID, err)
+	}
+	if err := json.Unmarshal([]byte(scApproved), &r.ScopeApproved); err != nil {
+		return RoeState{}, fmt.Errorf("rings: 解码任务 %s scope_approved: %w", taskID, err)
 	}
 	r.MaxActionLevel = ActionLevel(maxLevel)
 	r.ApprovalThreshold = ActionLevel(threshold)
@@ -398,13 +416,16 @@ type EdgeView struct {
 // AssetNodeView 资产图节点:层级由 sub_of 边表达(R5);
 // Covered 表示是否有 Step─covers→该资产(覆盖查询"哪些资产还没测过");
 // FactCount/HypothesisCount 为挂在该资产上的事实数与假设数(about 边按来源类型计);
-// Source 为来源三态(seed/manual/discovered,Detail 归一,P4-05)。
+// Source 为来源三态(seed/manual/discovered,Detail 归一,P4-05);
+// ScopeOut 为入图冻结的范围归属(P4-44:收割入图时对照种子闭包判定,
+// true=范围外;种子/手动与存量资产恒 false)。
 type AssetNodeView struct {
 	NodeView
 	Covered         bool
 	FactCount       int
 	HypothesisCount int
 	Source          string
+	ScopeOut        bool
 }
 
 // AssetGraphView 资产图最小投影:目标环境真值库的读模型。
@@ -465,6 +486,7 @@ func (s *Store) AssetGraph(ctx context.Context, taskID string) (*AssetGraphView,
 		a.FactCount = factCount
 		a.HypothesisCount = hypCount
 		a.Source = detailSource(detail)
+		a.ScopeOut = detailScopeOut(detail)
 		view.Assets = append(view.Assets, a)
 	}
 	if err := rows.Err(); err != nil {
@@ -491,6 +513,21 @@ func detailSource(detail string) string {
 		return AssetSourceSeed
 	}
 	return d.Source
+}
+
+// detailScopeOut 节点 detail JSON 的范围归属归一(P4-44:入图冻结的
+// scope=out 才为范围外;查询侧免整包反序列化)。
+func detailScopeOut(detail string) bool {
+	if detail == "" {
+		return false
+	}
+	var d struct {
+		Scope string `json:"scope"`
+	}
+	if json.Unmarshal([]byte(detail), &d) != nil {
+		return false
+	}
+	return d.Scope == AssetScopeOut
 }
 
 // EdgeGoal 派生边类型(P2-09 统一图投影的投影层补边,不入账本):
@@ -743,10 +780,15 @@ func queryEdges(ctx context.Context, tx *sql.Tx, taskID, predicate string) ([]Ed
 }
 
 // NodeFull 节点带自由细节的完整投影(P1-04 起虫群任务包/主宰研判需要
-// 读 detail:goal_id、预期观察、证据引用等)。
+// 读 detail:goal_id、预期观察、证据引用等)。AddedAt/ConfirmedAt 为
+// 时刻小字段投影(P4-36:事实列表的入账/确认时刻;呈现格式已换算,
+// 非事实节点 Confirmed* 为零值)。
 type NodeFull struct {
 	NodeView
-	Detail map[string]any
+	Detail       map[string]any
+	AddedAt      string
+	ConfirmedAt  string
+	ConfirmedRev int64
 }
 
 // Node 按 ID 取单个节点(含 detail)。跨任务隔离:taskID 必须匹配。
@@ -755,11 +797,13 @@ func (s *Store) Node(ctx context.Context, taskID, nodeID string) (*NodeFull, err
 		return nil, ErrEmptyTaskID
 	}
 	var n NodeFull
-	var nt, class, detail string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT node_id, node_type, title, status, asset_class, detail, created_rev, updated_rev
-		FROM nodes WHERE task_id = ? AND node_id = ?`, taskID, nodeID,
-	).Scan(&n.ID, &nt, &n.Title, &n.Status, &class, &detail, &n.CreatedRev, &n.UpdatedRev)
+	var nt, class, detail, addedAt, confirmedAt string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT node_id, node_type, title, status, asset_class, detail, created_rev, updated_rev,
+		   added_at, confirmed_at, confirmed_rev
+		 FROM nodes WHERE task_id = ? AND node_id = ?`, taskID, nodeID,
+	).Scan(&n.ID, &nt, &n.Title, &n.Status, &class, &detail, &n.CreatedRev, &n.UpdatedRev,
+		&addedAt, &confirmedAt, &n.ConfirmedRev)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: task %s node %s", ErrNodeNotFound, taskID, nodeID)
 	}
@@ -771,6 +815,7 @@ func (s *Store) Node(ctx context.Context, taskID, nodeID string) (*NodeFull, err
 	if err := json.Unmarshal([]byte(detail), &n.Detail); err != nil {
 		return nil, fmt.Errorf("rings: 解码节点 %s detail: %w", nodeID, err)
 	}
+	n.AddedAt, n.ConfirmedAt = FmtLocal(addedAt), FmtLocal(confirmedAt)
 	return &n, nil
 }
 
@@ -780,7 +825,8 @@ func (s *Store) NodesByType(ctx context.Context, taskID string, nt NodeType, sta
 		return nil, ErrEmptyTaskID
 	}
 	q := `
-		SELECT node_id, title, status, asset_class, detail, created_rev, updated_rev
+		SELECT node_id, title, status, asset_class, detail, created_rev, updated_rev,
+		  added_at, confirmed_at, confirmed_rev
 		FROM nodes WHERE task_id = ? AND node_type = ?`
 	args := []any{taskID, string(nt)}
 	if status != "" {
@@ -796,8 +842,9 @@ func (s *Store) NodesByType(ctx context.Context, taskID string, nt NodeType, sta
 	var out []NodeFull
 	for rows.Next() {
 		var n NodeFull
-		var class, detail string
-		if err := rows.Scan(&n.ID, &n.Title, &n.Status, &class, &detail, &n.CreatedRev, &n.UpdatedRev); err != nil {
+		var class, detail, addedAt, confirmedAt string
+		if err := rows.Scan(&n.ID, &n.Title, &n.Status, &class, &detail, &n.CreatedRev, &n.UpdatedRev,
+			&addedAt, &confirmedAt, &n.ConfirmedRev); err != nil {
 			return nil, fmt.Errorf("rings: 扫描任务 %s 节点: %w", taskID, err)
 		}
 		n.Type = nt
@@ -805,9 +852,54 @@ func (s *Store) NodesByType(ctx context.Context, taskID string, nt NodeType, sta
 		if err := json.Unmarshal([]byte(detail), &n.Detail); err != nil {
 			return nil, fmt.Errorf("rings: 解码节点 %s detail: %w", n.ID, err)
 		}
+		n.AddedAt, n.ConfirmedAt = FmtLocal(addedAt), FmtLocal(confirmedAt)
 		out = append(out, n)
 	}
 	return out, rows.Err()
+}
+
+// UnreadConfirms 已读线之后的"新确认"计数(P4-47 A 未读红点):成果
+// (testclaim 状态 confirmed/fixed,与发现页签成果视图同口径)与事实
+// (fact 状态 confirmed,与事实页签同口径)分开计数;判定时刻取
+// nodes 投影的确认时刻列(confirmed_at,转 confirmed 的写侧同事务
+// 维护;历史空值回退入账时刻 added_at,与事实列表呈现同口径),在
+// Go 侧解析比较——RFC3339Nano 变长小数位的字符串序不保时序,不进
+// SQL 比较。since 零值(从未看过)= 全部已确认计为未读。
+func (s *Store) UnreadConfirms(ctx context.Context, taskID string, claimsSince, factsSince time.Time) (claims, facts int, err error) {
+	if taskID == "" {
+		return 0, 0, ErrEmptyTaskID
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT node_type, confirmed_at, added_at FROM nodes
+		WHERE task_id = ?
+		  AND ((node_type = ? AND status IN (?, ?))
+		    OR (node_type = ? AND status = ?))`,
+		taskID, string(NodeTestClaim), TestClaimConfirmed, TestClaimFixed, string(NodeFact), "confirmed")
+	if err != nil {
+		return 0, 0, fmt.Errorf("rings: 查询任务 %s 已确认节点: %w", taskID, err)
+	}
+	defer rows.Close()
+	confirmedAt := func(confirmed, added string) time.Time {
+		if t := parseTimeCol(confirmed); !t.IsZero() {
+			return t
+		}
+		return parseTimeCol(added)
+	}
+	for rows.Next() {
+		var nt, confirmed, added string
+		if err := rows.Scan(&nt, &confirmed, &added); err != nil {
+			return 0, 0, fmt.Errorf("rings: 扫描任务 %s 已确认节点: %w", taskID, err)
+		}
+		at := confirmedAt(confirmed, added)
+		if NodeType(nt) == NodeTestClaim {
+			if at.After(claimsSince) {
+				claims++
+			}
+		} else if at.After(factsSince) {
+			facts++
+		}
+	}
+	return claims, facts, rows.Err()
 }
 
 // ClaimSearchRow 跨任务声明搜索结果行(P3-10 命令面板):声明定位四元组,
@@ -1000,36 +1092,68 @@ type SessionLabel struct {
 	PinnedRev int64
 }
 
-// SessionLabels 会话组织信息投影:扫该任务的全部 session.meta 事件,
-// 按事件序应用(指针字段语义:携带即改,空串清除)。无事件返回空表。
+// SessionLabels 会话组织信息投影:读 session_labels 投影表(P4-36 起
+// 替代事件流扫描;写侧 applySessionLabel 同事务维护)。无行返回空表。
 func (s *Store) SessionLabels(ctx context.Context, taskID string) (map[string]SessionLabel, error) {
 	if taskID == "" {
 		return nil, ErrEmptyTaskID
 	}
-	evs, err := s.Events(ctx, taskID, 0, 0)
+	return s.sessionLabelsOf(ctx, taskID)
+}
+
+// EventByRevision 按 (任务, 版本号) 定向读单条事件(巨记录的按需取回:
+// 证据包导出读旧定稿 Variants 等;UNIQUE(task_id, revision) 直查)。
+func (s *Store) EventByRevision(ctx context.Context, taskID string, revision int64) (RawEvent, error) {
+	var e RawEvent
+	if taskID == "" {
+		return e, ErrEmptyTaskID
+	}
+	var kind, occurred, recorded string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT seq, task_id, revision, kind, actor, payload, occurred_at, recorded_at
+		 FROM events WHERE task_id = ? AND revision = ?`, taskID, revision,
+	).Scan(&e.Seq, &e.TaskID, &e.Revision, &kind, &e.Actor, &e.Payload, &occurred, &recorded)
+	if errors.Is(err, sql.ErrNoRows) {
+		return e, fmt.Errorf("rings: 事件 rev %d 不存在: %w", revision, err)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("rings: 会话标签查事件 %s: %w", taskID, err)
+		return e, fmt.Errorf("rings: 定向读事件 rev %d: %w", revision, err)
 	}
-	out := map[string]SessionLabel{}
-	for _, ev := range evs {
-		if ev.Kind != EventSessionMeta {
-			continue
-		}
-		var p SessionMeta
-		if json.Unmarshal(ev.Payload, &p) != nil {
-			continue
-		}
-		l := out[p.SessionID]
-		if p.Title != nil {
-			l.Title = *p.Title
-		}
-		if p.Note != nil {
-			l.Note = *p.Note
-		}
-		if p.Pinned != nil {
-			l.Pinned, l.PinnedRev = *p.Pinned, ev.Revision
-		}
-		out[p.SessionID] = l
+	e.Kind = EventKind(kind)
+	if e.OccurredAt, err = time.Parse(time.RFC3339Nano, occurred); err != nil {
+		return e, fmt.Errorf("rings: 解析 occurred_at: %w", err)
 	}
-	return out, nil
+	if e.RecordedAt, err = time.Parse(time.RFC3339Nano, recorded); err != nil {
+		return e, fmt.Errorf("rings: 解析 recorded_at: %w", err)
+	}
+	return e, nil
+}
+
+// blobRefPattern 事件负载里的 blob 引用形态(R18:账本只存 "sha256:<hex>"
+// 引用;存储侧 hash 恒小写)。
+var blobRefPattern = regexp.MustCompile(`sha256:[0-9a-f]{64}`)
+
+// ReferencedBlobHashes 全部任务事件负载引用的 blob hash 全集(P4-40
+// 续做 ①:特权清除的无主 blob 判定输入——特权清除在删完任务各表行后
+// 调用,此时"全部任务"即全部剩余任务)。instr 子串预筛下推给 SQLite
+// ——无引用行不回传(实测本驱动 LIKE 在含 UTF-8 负载的库上不可靠,
+// instr 为字节级子串查找,语义等价);流式逐行正则提取,不在 Go 侧
+// 整表缓存。巨负载行(P4-35 前存量)逐行载入,低频清除路径可承受。
+func (s *Store) ReferencedBlobHashes(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT payload FROM events WHERE instr(payload, 'sha256:') > 0`)
+	if err != nil {
+		return nil, fmt.Errorf("rings: 扫 blob 引用: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return nil, fmt.Errorf("rings: 扫 blob 引用读行: %w", err)
+		}
+		for _, m := range blobRefPattern.FindAllString(payload, -1) {
+			out[strings.TrimPrefix(m, "sha256:")] = true
+		}
+	}
+	return out, rows.Err()
 }

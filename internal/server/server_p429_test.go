@@ -23,7 +23,7 @@ func TestP429QueuePanelSameGraphAndConfig(t *testing.T) {
 		post(t, h, "POST", "/api/agents/params", body, http.StatusBadRequest, nil)
 	}
 	var task map[string]string
-	post(t, h, "POST", "/api/tasks", `{"title":"水位对账","goals":["目标"],"assets":[{"class":"host","title":"127.0.0.1"}]}`, http.StatusOK, &task)
+	post(t, h, "POST", "/api/tasks", `{"task_type":"redteam","title":"水位对账","goals":["目标"],"assets":[{"class":"host","title":"127.0.0.1"}]}`, http.StatusOK, &task)
 	tid := task["id"]
 	appendEvents(t, store, tid,
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{NodeID: "s1", NodeType: rings.NodeStep, Status: "running"}},

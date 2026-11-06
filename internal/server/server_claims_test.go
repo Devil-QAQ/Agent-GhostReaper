@@ -33,7 +33,7 @@ func TestServerClaimsList(t *testing.T) {
 	h := srv.Handler()
 
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"发现列表验证"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"发现列表验证"}`, http.StatusOK, &created)
 	task := created["id"]
 
 	// 铺垫:资产 + 发现步骤(u1)+ 两条候选声明(与 submit_test_claim
@@ -157,7 +157,7 @@ func TestServerClaimsList(t *testing.T) {
 	// 不存在的任务 404;无发现任务返回空列表。
 	var errBody map[string]string
 	get(t, h, "/api/tasks/no-such/claims", http.StatusNotFound, &errBody)
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"空发现任务"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"空发现任务"}`, http.StatusOK, &created)
 	var empty []map[string]any
 	get(t, h, "/api/tasks/"+created["id"]+"/claims", http.StatusOK, &empty)
 	if len(empty) != 0 {

@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"runtime/debug"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,9 +29,11 @@ import (
 // 仲裁者终局判定后经 FinishSettling 定终态(completed|stopped)。
 // checkpointed(P3-07,第七章「故障与恢复」断点续接)是手动断点存档态:
 // 操作者主动冻结(在跑单位到边界收拢、会话保留可续),进程可关;重启
-// 收养与运行中同列自动重拉,单位重领步骤后原会话续跑。与 hibernated
-// 的分工:冬眠=内存冻结(进程在、唤醒原地解冻),断点=进程级收场
-// (进程可亡、重启续跑)。
+// 收养与运行中同列自动重拉,单位重领步骤后原会话续跑。
+// hibernated(P2-08 任务冬眠;P4-33 起改冻结收场语义)是冻结让位态:
+// 对外表现不变(面板只读、审批冻结、计时停走),进程内与断点收场
+// 同一约定——单位与循环在各自边界收场落地、任务 goroutine 组退出、
+// 并发名额让位;唤醒经拉起路径续跑(与重启收养的唤醒同一条路)。
 const (
 	StatusCreated      = "created"
 	StatusQueued       = "queued"
@@ -42,6 +46,18 @@ const (
 	StatusCompleted    = "completed"
 )
 
+// P4-34 任务并发上限入系统设置:全局键覆盖优先、缺省 DefaultMaxConcurrentTasks。
+// 生效语义与虫群并发/心跳间隔等运行参数同一模式——各准入判定点每次活读
+// 当前生效值,改值对下一轮调度生效、在跑任务不硬杀;运营数据入键值表不
+// 走事件流(读写均通用配置表,SetSetting 自带"配置修改"运行日志行)。
+const (
+	// SettingKeyMaxConcurrentTasks 任务并发上限全局键(同时运行的任务数)。
+	SettingKeyMaxConcurrentTasks = "manager.tasks.max_concurrent"
+	// DefaultMaxConcurrentTasks 任务并发默认值(P4-34 前的硬编码值,自此
+	// 成为缺省值:未配置/清空/值非法均按此跑)。
+	DefaultMaxConcurrentTasks = 2
+)
+
 // TaskRunFunc 任务循环体,与 Config.OnTaskRun 同签名:任务 goroutine 的
 // 运行件入口,返回即任务让位(自然返回=完成终态,由 Manager 记账)。
 type TaskRunFunc func(ctx context.Context, taskID string, wake <-chan struct{})
@@ -50,7 +66,7 @@ type TaskRunFunc func(ctx context.Context, taskID string, wake <-chan struct{})
 type Config struct {
 	Store              *rings.Store // 年轮账本(进程级单例,第七章 §1)
 	RootDir            string       // 任务工作目录根(如 "tasks");零值 "tasks"
-	MaxConcurrentTasks int          // 任务级并发上限;超出的任务 FIFO 排队;零值 2
+	MaxConcurrentTasks int          // 任务级并发上限;超出的任务 FIFO 排队;零值时各准入判定点活读全局键 SettingKeyMaxConcurrentTasks,缺省 DefaultMaxConcurrentTasks(显式正值仅测试/演示确定性场景用,P4-34)
 	// Hiber 任务冬眠门(P2-08,第七章「任务冬眠」):Hibernate/Wake 的
 	// 执行层同步原语,与虫群执行器/主宰循环/牧者/审批门共持同一实例。
 	// nil = 冬眠不可用(Hibernate 如实报错;单测用)。
@@ -59,8 +75,14 @@ type Config struct {
 	// Checkpoint(存档断点)的执行层同步原语——武装后虫群单位与主宰
 	// 循环(OnTaskRun 挂接的循环体须遵守"武装即退出"契约)在各自边界
 	// 收场,进程可关;与虫群执行器/主宰循环共持同一实例。拉起(launch)
-	// 时统一解除。nil = 断点不可用(Checkpoint 如实报错;单测用)。
+	// 时统一解除。P4-33 起冬眠收场复用同一约定(武装即收场)。nil =
+	// 断点不可用(Checkpoint 与 Hibernate 均如实报错;单测用)。
 	Checkpoint *ckpt.Gate
+	// HibernateSink P4-33 冬眠让位的执行层配套(装配层注入,同虫群
+	// 执行器与审批门实例;nil = 无执行层挂起者,如未配模型的纯生命
+	// 周期测试):Hibernate 收场时放行任务下全部挂起等待者;Wake 与
+	// StopBy 对收场让位后遗留的待裁决审批票善后。
+	HibernateSink HibernateSink
 	// OnTaskRun 任务 goroutine 的全局循环体(P1-05 主宰循环挂接点)。设置后,
 	// 任务拉起即把循环交给它:ctx 为任务专属 ctx(熔断/暂停 cancel 即
 	// 收尾),wake 为事件唤醒通道(外部经 Task.Wake() 触发,容量 1 合并
@@ -71,6 +93,21 @@ type Config struct {
 	// OnTerminal 任务终态回调(P2-08f,装配层注入牧者收尾总结):任务
 	// 落 completed|stopped 终态记账后异步触发一次。nil = 无收尾动作。
 	OnTerminal func(taskID, status string)
+}
+
+// HibernateSink P4-33 冬眠让位的执行层配套接口(装配层以虫群执行器
+// 满足;Manager 只依赖此窄面):
+//   - FlushSuspended:冬眠收场放行——审批票上等待的单位与暂停闩上的
+//     单位全部放行落地(票面保持待裁决冻结、闩清);
+//   - DropPending:唤醒前清出任务下全部待裁决票(持有单位已随收场
+//     让位,票不可再裁;零裁决记录——等价重启后的内存票据清空,账本
+//     requested 原样留痕);
+//   - ExpirePending:熔断冬眠任务时全部待决票按拒绝结案留痕(与挂起
+//     单位被任务收尾 cancel 的既有口径一致)。
+type HibernateSink interface {
+	FlushSuspended(taskID string)
+	DropPending(taskID string)
+	ExpirePending(taskID, reason string)
 }
 
 // Manager 单进程多任务的管理者:持全局共享资源,管理任务生命周期与
@@ -142,9 +179,6 @@ func New(cfg Config) (*Manager, error) {
 	}
 	if cfg.RootDir == "" {
 		cfg.RootDir = "tasks"
-	}
-	if cfg.MaxConcurrentTasks <= 0 {
-		cfg.MaxConcurrentTasks = 2
 	}
 	m := &Manager{cfg: cfg, tasks: map[string]*Task{}, loops: map[string]TaskRunFunc{}}
 	rows, err := cfg.Store.Tasks(context.Background())
@@ -220,15 +254,19 @@ func New(cfg Config) (*Manager, error) {
 	}
 	// ⑤⑥ 名额分配:原运行任务优先保名额(它们崩溃前占着),余下按原
 	// 状态落定次序 FIFO 重准入;溢出任务进等待队列,名额由 retire 释放
-	// 时自动拉起(与运行期排队同一动态,无死锁)。
+	// 时自动拉起(与运行期排队同一动态,无死锁)。收尾中任务收养为
+	// started(账本如记;循环按收尾线重派生收尾)。
 	sort.SliceStable(runnable, func(i, j int) bool { return anchors[runnable[i].t.ID] < anchors[runnable[j].t.ID] })
 	sort.SliceStable(waiting, func(i, j int) bool { return anchors[waiting[i].t.ID] < anchors[waiting[j].t.ID] })
 	ordered := append(append([]candidate(nil), runnable...), waiting...)
 	m.mu.Lock()
 	var toStart []candidate
 	for _, c := range ordered {
-		if m.running < m.cfg.MaxConcurrentTasks {
+		if m.running < m.maxTasks() {
 			m.running++
+			c.t.mu.Lock()
+			c.t.status = StatusStarted
+			c.t.mu.Unlock()
 			toStart = append(toStart, c)
 		} else {
 			c.t.mu.Lock()
@@ -390,6 +428,39 @@ func (m *Manager) onTaskRun() TaskRunFunc {
 	return m.cfg.OnTaskRun
 }
 
+// maxTasks 当前生效的任务并发上限(P4-34):装配显式值优先(测试/演示
+// 的确定性场景不受全局值干扰),零值时全局键覆盖,再退代码默认——读
+// 失败/缺省/值非法一律退默认(fail-safe,配置故障不挡运行,与虫群并发/
+// 心跳间隔同一模式)。各准入判定点(建任务/retire 拉队/唤醒/恢复/重启
+// 收养)每次活读:改值对下一轮调度生效、在跑任务不硬杀。可在 m.mu 持有
+// 下调用(内部不取 m.mu)。
+func (m *Manager) maxTasks() int {
+	if m.cfg.MaxConcurrentTasks > 0 {
+		return m.cfg.MaxConcurrentTasks
+	}
+	if n, ok := settingPositiveInt(context.Background(), m.cfg.Store, SettingKeyMaxConcurrentTasks); ok {
+		return n
+	}
+	return DefaultMaxConcurrentTasks
+}
+
+// settingPositiveInt 读一条应为正整数的配置;读失败/缺省/非法值返回
+// ok=false(fail-safe 退默认,与 swarm/overmind 包同语义)。
+func settingPositiveInt(ctx context.Context, store *rings.Store, key string) (int, bool) {
+	if store == nil {
+		return 0, false
+	}
+	e, ok, err := store.Setting(ctx, key)
+	if err != nil || !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(e.Value))
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
 // Wake 唤醒任务的主宰循环(事件驱动:种子完成、边界变更、面板操作等
 // 事件方调用;P1-05 起由主宰循环消费)。
 func (t *Task) Wake() {
@@ -428,8 +499,9 @@ func (m *Manager) CreateTask(ctx context.Context, taskID, title string, roe ring
 			Payload: rings.TaskLifecycle{Action: StatusCreated, Title: title, Detail: detail}},
 	}
 	// P2-08f:提取确认的任务级拦截规则(IntentRules)也是 RoE 的一部分,
-	// 单独携带时同样落 roe.updated(建任务即生效)。
-	if len(roe.AllowedTools) > 0 || len(roe.DeniedTools) > 0 || len(roe.IntentRules) > 0 || roe.Note != "" {
+	// 单独携带时同样落 roe.updated(建任务即生效)。P4-49:注意事项
+	// (CreatorNotes)同款——仅携带注意事项(无规则)也要落账。
+	if len(roe.AllowedTools) > 0 || len(roe.DeniedTools) > 0 || len(roe.IntentRules) > 0 || roe.CreatorNotes != nil || roe.Note != "" {
 		events = append(events, rings.Event{Kind: rings.EventRoeUpdated, Actor: "manager", Payload: roe})
 	}
 	if _, err := m.cfg.Store.Append(ctx, taskID, events...); err != nil {
@@ -444,7 +516,7 @@ func (m *Manager) CreateTask(ctx context.Context, taskID, title string, roe ring
 	t := &Task{m: m, ID: taskID, Title: title, status: StatusCreated, wake: make(chan struct{}, 1)}
 	m.tasks[taskID] = t
 	// 空位判定在锁内,与 retire 的释放路径互斥。
-	if m.running < m.cfg.MaxConcurrentTasks {
+	if m.running < m.maxTasks() {
 		m.running++ // start 无失败路径会回滚名额(见 start)
 		m.mu.Unlock()
 		if err := m.record(taskID, StatusStarted, nil); err != nil {
@@ -471,8 +543,9 @@ func (m *Manager) CreateTask(ctx context.Context, taskID, title string, roe ring
 
 // launch 为任务建独立 ctx 并起 goroutine 组(panic 隔离边界,第七章
 // 实现注意)。名额已由调用方占好。拉起即解除断点信号(P3-07):新
-// 循环体出生不带收场令——重启收养/暂停恢复/排队腾位同享本入口,
-// "checkpointed 任务重拉即续跑"由此统一成立。
+// 循环体出生不带收场令——重启收养/暂停恢复/排队腾位/冬眠唤醒同享本
+// 入口,"checkpointed|hibernated 任务重拉即续跑"由此统一成立。收尾中
+// 的唤醒拉起保持收尾中(Wake 先置 pre 再 launch,循环进收尾续走)。
 func (m *Manager) launch(t *Task) {
 	if m.cfg.Checkpoint != nil {
 		m.cfg.Checkpoint.Clear(t.ID)
@@ -482,7 +555,9 @@ func (m *Manager) launch(t *Task) {
 	t.mu.Lock()
 	t.ctx, t.cancel = ctx, cancel
 	t.runDone = rd
-	t.status = StatusStarted
+	if t.status != StatusSettling {
+		t.status = StatusStarted
+	}
 	t.mu.Unlock()
 	m.wg.Add(1)
 	go func() {
@@ -559,18 +634,13 @@ func (m *Manager) runTask(ctx context.Context, t *Task, runDone chan struct{}) {
 			t.mu.Unlock()
 			_ = m.record(t.ID, StatusStopped,
 				map[string]any{"reason": "收尾流程异常退出,如实记为已停止"})
-		case StatusCheckpointed:
-			// 断点收场(P3-07):checkpointed 已由 Checkpoint 记账,不发
-			// 完成终态;收掉任务 ctx 停掉随行 goroutine(收尾线看护/心跳
-			// 巡检),句柄清空(恢复走 Resume 同款拉起路径;重启收养走
-			// relaunch)。名额由 retire 释放。
-			t.mu.Lock()
-			c := t.cancel
-			t.ctx, t.cancel = nil, nil
-			t.mu.Unlock()
-			if c != nil {
-				c()
-			}
+		case StatusCheckpointed, StatusHibernated:
+			// 断点/冬眠收场(P3-07/P4-33):checkpointed|hibernated 已由
+			// 操控方记账,不发完成终态;收掉任务 ctx 停掉随行 goroutine
+			//(收尾线看护/心跳巡检),句柄清空(断点走 Resume、冬眠走 Wake
+			// 的拉起路径;重启收养走 relaunch)。名额由 retire 释放并按
+			// FIFO 拉起排队中任务。
+			m.releaseRunHandle(t)
 		}
 		return
 	}
@@ -583,8 +653,30 @@ func (m *Manager) runTask(ctx context.Context, t *Task, runDone chan struct{}) {
 			// 无运行件可收,让位即冻结完成(账本已记 checkpointed)。
 		}
 		if m.cfg.Checkpoint != nil && m.cfg.Checkpoint.Armed(t.ID) {
+			// 骨架路径的收场件与挂接循环体同款(断点/冬眠收场均收 ctx
+			// 清句柄——冬眠的空转骨架形态同受 P4-33 语义覆盖)。
+			t.mu.Lock()
+			st := t.status
+			t.mu.Unlock()
+			if st == StatusCheckpointed || st == StatusHibernated {
+				m.releaseRunHandle(t)
+			}
 			return
 		}
+	}
+}
+
+// releaseRunHandle 收场件的共用段(P4-33 提取,断点/冬眠同一约定):
+// 收掉任务 ctx(停掉收尾线看护/心跳巡检等随行 goroutine)并清空运行
+// 句柄。调用时运行件已全部落地(run 循环体已返回),ctx 取消只收随行
+// 看护 goroutine,无在飞工作可打断。
+func (m *Manager) releaseRunHandle(t *Task) {
+	t.mu.Lock()
+	c := t.cancel
+	t.ctx, t.cancel = nil, nil
+	t.mu.Unlock()
+	if c != nil {
+		c()
 	}
 }
 
@@ -592,14 +684,26 @@ func (m *Manager) runTask(ctx context.Context, t *Task, runDone chan struct{}) {
 func (m *Manager) retire() {
 	m.mu.Lock()
 	m.running--
-	var next *Task
-	if len(m.queue) > 0 && m.running < m.cfg.MaxConcurrentTasks {
-		next = m.queue[0]
+	m.mu.Unlock()
+	m.admitQueued()
+}
+
+// admitQueued 有空位即按 FIFO 拉起排队任务(P4-34 提取,retire 与配置
+// 调大后的队列扫描共用):锁内对照当前生效上限占位、锁外记账起动,记账
+// 失败回滚名额与队位并停止本轮(不连环试错,与既有 retire 同口径)。
+// 调小上限后 running ≥ 上限时循环自然空转——在跑任务不硬杀,名额由
+// 自然终态逐个回落。
+func (m *Manager) admitQueued() {
+	for {
+		m.mu.Lock()
+		if len(m.queue) == 0 || m.running >= m.maxTasks() {
+			m.mu.Unlock()
+			return
+		}
+		next := m.queue[0]
 		m.queue = m.queue[1:]
 		m.running++
-	}
-	m.mu.Unlock()
-	if next != nil {
+		m.mu.Unlock()
 		if err := m.record(next.ID, StatusStarted, nil); err != nil {
 			m.mu.Lock()
 			m.running--
@@ -611,7 +715,19 @@ func (m *Manager) retire() {
 			return
 		}
 		m.launch(next)
+		// 拉起即保证一轮(P4-42 ⑤):admitQueued 此前缺补踢——队列腾位
+		// 拉起后循环静默等首拍心跳(默认 600 秒),期间零研判(问题清单
+		// #72 实测形态)。与重启接管/暂停恢复/冬眠唤醒同语义:拉起后
+		// 立即一轮 cycle,不依赖通道残留。
+		next.Wake()
 	}
+}
+
+// ScanQueue 队列扫描(P4-34:任务并发调大保存即触发一次,等价 retire 的
+// FIFO 拉起):有空位立即拉起排队中任务并记 started;无空位/无排队为
+// 无操作。
+func (m *Manager) ScanQueue() {
+	m.admitQueued()
 }
 
 // Stop 熔断(停止):先追加控制事件、再 cancel 任务 ctx(P1-09 面板
@@ -628,6 +744,18 @@ func (m *Manager) Stop(taskID string) error {
 // 门——挂起的单位与循环从冻结中醒来即见 ctx 结束,按中止收场,不留
 // 悬挂 goroutine。
 func (m *Manager) StopBy(taskID string, detail map[string]any) error {
+	return m.stopBy(taskID, detail, true)
+}
+
+// StopForPurge 特权清除前的停止(P4-40 ⑥):停止语义与次序同 StopBy,
+// 但不触发牧者终态总结回调——该任务数据即将整体销毁,总结是无谓的
+// 写入与 LLM 开销,且其异步落账会与清行竞态;运行件收场等待由调用方
+// 经 WaitSettled 衔接。
+func (m *Manager) StopForPurge(taskID string, detail map[string]any) error {
+	return m.stopBy(taskID, detail, false)
+}
+
+func (m *Manager) stopBy(taskID string, detail map[string]any, terminalNotify bool) error {
 	t := m.Task(taskID)
 	if t == nil {
 		return fmt.Errorf("manager: 任务 %s 不存在", taskID)
@@ -641,7 +769,7 @@ func (m *Manager) StopBy(taskID string, detail map[string]any) error {
 	case StatusStarted, StatusSettling:
 		// 名额由 goroutine 退出时的 retire 释放。
 		m.mu.Unlock()
-		if err := m.record(taskID, StatusStopped, detail); err != nil {
+		if err := m.recordWith(taskID, StatusStopped, detail, terminalNotify); err != nil {
 			return err
 		}
 		t.mu.Lock()
@@ -654,18 +782,23 @@ func (m *Manager) StopBy(taskID string, detail map[string]any) error {
 		return nil
 	case StatusHibernated:
 		m.mu.Unlock()
-		if err := m.record(taskID, StatusStopped, detail); err != nil {
+		if err := m.recordWith(taskID, StatusStopped, detail, terminalNotify); err != nil {
 			return err
+		}
+		// 无主待裁决票结案(P4-33):持有单位已随冬眠收场让位,按拒绝
+		// 结案留痕——与挂起单位被任务收尾 cancel 的既有口径一致。
+		if m.cfg.HibernateSink != nil {
+			m.cfg.HibernateSink.ExpirePending(taskID, "任务冬眠中被终止,按拒绝结案")
 		}
 		t.mu.Lock()
 		t.status = StatusStopped
 		c := t.cancel
 		t.mu.Unlock()
 		if c != nil {
-			c()
+			c() // 收场竞态兜底:组尚在收拢时熔断,cancel 令在飞成员中止
 		}
 		if m.cfg.Hiber != nil {
-			m.cfg.Hiber.Exit(taskID) // 放行挂起者:醒来即见 ctx 结束,按中止收场
+			m.cfg.Hiber.Exit(taskID) // 开闸复位(收场后无挂起者)
 		}
 		return nil
 	default: // created/queued/paused:从未在跑或已让位
@@ -674,7 +807,31 @@ func (m *Manager) StopBy(taskID string, detail map[string]any) error {
 		t.mu.Lock()
 		t.status = StatusStopped
 		t.mu.Unlock()
-		return m.record(taskID, StatusStopped, detail)
+		return m.recordWith(taskID, StatusStopped, detail, terminalNotify)
+	}
+}
+
+// WaitSettled 等待任务运行件收场退出(特权清除 P4-40 ⑥ 用):StopBy 的
+// cancel 只令收场,goroutine 组可能仍在写末笔账;不等就清库,末笔写会
+// 与清行竞态、留下残行。runDone 已闭(从未拉起 / 冬眠断点已让位 / 收场
+// 已完成)或句柄不存在(重启收养前)立即返回;超时如实报错,由调用方
+// 决定不执行清除。
+func (m *Manager) WaitSettled(taskID string, timeout time.Duration) error {
+	t := m.Task(taskID)
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	runDone := t.runDone
+	t.mu.Unlock()
+	if runDone == nil {
+		return nil
+	}
+	select {
+	case <-runDone:
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("manager: 任务 %s 收场等待超时(上限 %.0f 秒)", taskID, timeout.Seconds())
 	}
 }
 
@@ -770,7 +927,7 @@ func (m *Manager) Resume(taskID string) error {
 		m.mu.Unlock()
 		return fmt.Errorf("manager: 任务 %s 状态 %s 不可恢复", taskID, st)
 	}
-	if m.running < m.cfg.MaxConcurrentTasks {
+	if m.running < m.maxTasks() {
 		m.running++
 		m.mu.Unlock()
 		if err := m.record(taskID, StatusStarted, nil); err != nil {
@@ -802,15 +959,24 @@ func (m *Manager) Resume(taskID string) error {
 	return nil
 }
 
-// ---- 任务冬眠/唤醒(P2-08,第七章「任务冬眠(Hibernation)语义」) ----
+// ---- 任务冬眠/唤醒(P2-08;P4-33 起改冻结收场语义) ----
 
-// Hibernate 冬眠:记账在先(hibernated 生命周期事件,审计权威)、关闸
-// 在后(执行层同步原语)。生效后主宰循环在轮次边界挂起、虫群单位在
-// 当前工具调用完成后挂起(不退出、会话原地冻结)、牧者会话与审批裁决
-// 冻结、全部计时器停走(冬眠时长由账本配对扫描抵扣任务总闸墙钟)。
-// 任务 ctx 不取消——与 Pause(让位退出)的本质区别;并发名额保持
-// 占用(单位与循环仍驻留内存,原地冻结)。settling 亦可冬眠(收尾
-// 预算同步冻结),唤醒后恢复收尾流程。
+// hibernateRetireCap 冬眠收场的等待上限:在跑单位到边界收场(bash 长命
+// 令限时 600 秒、模型故障退避最长 15 分钟梯度),上限给足余量。超时走
+// 硬收兜底(ctx 取消,未落地成员按中止收场,崩溃等价)——收场必须完成,
+// 并发名额才能让位;硬收的损失如实留痕。
+const hibernateRetireCap = 20 * time.Minute
+
+// Hibernate 冬眠(P4-33 冻结收场):记账 hibernated 在先(次序不变,
+// 审计权威)→ 武装断点收场令(单位在当前工具调用完成后落地、主宰循环
+// 在轮次边界收住、待裁决审批照旧冻结)→ 关闸(面板只读、审批冻结、
+// 牧者入口冻结、计时停走——对外表现与 P4-33 前一字不变)→ 放行挂起
+// 等待者(审批票上/暂停闩上的单位)→ 等待任务 goroutine 组收场退出。
+// 收场完成后的进程内状态等同"该任务断电重启并完成收养后的状态":无活
+// goroutine(收 ctx 停随行看护)、任务句柄在册、账本 hibernated、冬眠
+// 门保持关闭——Wake/熔断/面板只读分支已覆盖这种态,复用既有路径。
+// 名额由组退出的 retire 释放并按 FIFO 拉起排队中任务。settling 亦可
+// 冬眠(收尾冻结),唤醒后恢复收尾流程。
 func (m *Manager) Hibernate(taskID string, detail map[string]any) error {
 	t := m.Task(taskID)
 	if t == nil {
@@ -818,6 +984,9 @@ func (m *Manager) Hibernate(taskID string, detail map[string]any) error {
 	}
 	if m.cfg.Hiber == nil {
 		return fmt.Errorf("manager: 冬眠门未装配,冬眠不可用")
+	}
+	if m.cfg.Checkpoint == nil {
+		return fmt.Errorf("manager: 断点信号门未装配,冬眠收场不可用")
 	}
 	switch st := t.Status(); st {
 	case StatusHibernated:
@@ -827,26 +996,56 @@ func (m *Manager) Hibernate(taskID string, detail map[string]any) error {
 			detail = map[string]any{}
 		}
 		if _, ok := detail["reason"]; !ok {
-			detail["reason"] = "任务冬眠:主宰与虫群挂起、牧者会话冻结、计时器停走(唤醒可恢复)"
+			detail["reason"] = "任务冬眠:单位与循环边界收场、并发名额让位;面板只读、审批冻结、计时停走(唤醒可恢复)"
 		}
 		if err := m.record(taskID, StatusHibernated, detail); err != nil {
 			return err
 		}
+		// 先武装后关门:武装后到边界的成员见令即落地,不再进门挂起;
+		// 关门使面板/审批/牧者即时冻结(对外表现不变)。武装与关门之间
+		// 恰好夹住的等待者由 WaitTick 节拍复查救回(见 hiber.WaitTick)。
+		m.cfg.Checkpoint.Arm(taskID)
 		m.cfg.Hiber.Enter(taskID, st)
 		t.mu.Lock()
 		t.status = StatusHibernated
+		runDone := t.runDone
 		t.mu.Unlock()
-		return nil
+		// 放行挂起等待者:审批票上的单位(票面保持待裁决冻结,单位收场
+		// 落地)与暂停闩上的单位(清闩——闩是进程内控制,过不了收场)。
+		if m.cfg.HibernateSink != nil {
+			m.cfg.HibernateSink.FlushSuspended(taskID)
+		}
+		t.Wake() // 静默中的循环立即见令收场
+		if runDone == nil {
+			return nil // 无活组(防御;started/settling 恒有运行件)
+		}
+		select {
+		case <-runDone:
+			return nil // 收场完成:名额已让位,进程内状态等价重启收养后
+		case <-time.After(hibernateRetireCap):
+			// 硬收兜底(崩溃等价):未到边界的成员按中止收场,组随后
+			// 退出让位名额;损失如实留痕,不静默。
+			runlog.Errorf("任务冬眠: %s 收场等待超时(%.0f 分钟),硬收兜底:未收拢的单位按中止处理(崩溃等价续跑)",
+				taskID, hibernateRetireCap.Minutes())
+			t.mu.Lock()
+			c := t.cancel
+			t.mu.Unlock()
+			if c != nil {
+				c()
+			}
+			return nil
+		}
 	default:
 		return fmt.Errorf("manager: 任务 %s 状态 %s 不可冬眠", taskID, st)
 	}
 }
 
-// Wake 唤醒(唯一恢复入口):记账在先(恢复冬眠前状态 started|settling,
-// detail 带 woken 标记——账本配对扫描 hibernated→唤醒即冬眠时长)、
-// 开闸在后。进程内挂起的任务原地解冻(单位与循环从挂起点继续,R14
-// 复检在单位侧挂起路径执行);重启后唤醒的走 Resume 同款拉起路径
-// (空窗期无活循环,幽灵步骤已被启动序列重置,重领后原会话续)。
+// Wake 唤醒(唯一恢复入口;P4-33 后冬眠收场已让位,与重启收养的唤醒
+// 同一条路):记账在先(恢复冬眠前状态 started|settling,detail 带
+// woken 标记——账本配对扫描 hibernated→唤醒即冬眠时长)、开闸在后。
+// 拉起续跑:读账本断点 → 拉主宰循环 → 未完意图续跑 + R14 复检、原会话
+// 续走(Checkpointed 会话保留/pendingSession 机制,既有);无并发空位
+// → 任务转排队中,名额空出按 FIFO 自动拉起(retire 路径,既有)。
 func (m *Manager) Wake(taskID string, detail map[string]any) error {
 	t := m.Task(taskID)
 	if t == nil {
@@ -863,33 +1062,40 @@ func (m *Manager) Wake(taskID string, detail map[string]any) error {
 		detail = map[string]any{}
 	}
 	detail["woken"] = true
-	detail["reason"] = "任务唤醒:主宰与虫群原地继续、牧者会话解冻、计时器恢复(挂起期间冬眠时长已抵扣)"
+	detail["reason"] = "任务唤醒:拉起续跑(原会话续、未完意图继续)、牧者会话解冻、计时器恢复(冬眠时长已抵扣)"
+	// 收场竞态兜底:组尚在收拢(Hibernate 等待超时硬收后未及退出)时,
+	// 等收场锚点关闭再拉起;等不到如实报错,任务保持冬眠可重试。
 	t.mu.Lock()
 	live := t.ctx != nil
+	runDone := t.runDone
 	t.mu.Unlock()
 	if live {
-		if err := m.record(taskID, pre, detail); err != nil {
-			return err
+		select {
+		case <-runDone:
+		case <-time.After(hibernateRetireCap):
+			return fmt.Errorf("manager: 任务 %s 冬眠收场尚未完成,稍后再唤醒", taskID)
 		}
-		m.cfg.Hiber.Exit(taskID)
-		t.mu.Lock()
-		t.status = pre
-		t.mu.Unlock()
-		// 解冻的主宰循环可能停在 select:补一脚唤醒(容量 1 合并)。
-		t.Wake()
-		return nil
 	}
-	// 重启后唤醒:同 Resume 的拉起路径(名额有空位即拉起,否则排队)。
+	// 无主待裁决票清出:持有单位已随收场让位,票不可再裁;零裁决记录
+	// (等价重启后的内存票据清空,账本 requested 原样留痕,唤醒后重领
+	// 的单位重新过门时重新立票)。
+	if m.cfg.HibernateSink != nil {
+		m.cfg.HibernateSink.DropPending(taskID)
+	}
+	m.cfg.Hiber.Exit(taskID) // 开闸(收场后无人挂起,纯状态复位)
 	m.mu.Lock()
-	if m.running < m.cfg.MaxConcurrentTasks {
+	if m.running < m.maxTasks() {
 		m.running++
 		m.mu.Unlock()
-		if err := m.record(taskID, StatusStarted, detail); err != nil {
+		if err := m.record(taskID, pre, detail); err != nil {
 			m.mu.Lock()
 			m.running--
 			m.mu.Unlock()
 			return err
 		}
+		t.mu.Lock()
+		t.status = pre
+		t.mu.Unlock()
 		m.launch(t)
 		// 执行侧拉起补一脚唤醒(P3-05c ①):拉起即跑一轮 cycle——领取
 		// dispatched 步骤(含受阻重开回可领取的),不依赖通道里恰好有
@@ -937,9 +1143,8 @@ const checkpointFreezeCap = 15 * time.Minute
 // 静默中的循环立即见到信号。等待冻结完成(在跑单位落地、循环退出让
 // 位、名额释放)后返回——此刻账本状态一致,进程可关;重启收养把
 // checkpointed 与运行中同列自动重拉,任务原地续跑(账本/transcript
-// 可证)。与冬眠的分工:冬眠=内存冻结(进程在,原地解冻);断点=
-// 进程级收场(单位落地,进程可亡,重启续跑)。恢复不重启进程也行:
-// Resume 对 checkpointed 同款可恢复。
+// 可证)。P4-33 起冬眠收场复用同一约定(单位与循环边界收场、runDone
+// 关闭);恢复不重启进程也行:Resume 对 checkpointed 同款可恢复。
 func (m *Manager) Checkpoint(taskID string, detail map[string]any) (frozen bool, err error) {
 	if m.cfg.Checkpoint == nil {
 		return false, fmt.Errorf("manager: 断点信号门未装配,存档断点不可用")
@@ -983,6 +1188,13 @@ func (m *Manager) Checkpoint(taskID string, detail map[string]any) (frozen bool,
 // 同步记账;账本排队语义保证入队后必然提交。P3-13b ③:任务生命周期
 // 在此单点落运行日志 INFO(创建/受阻恢复外的状态迁移/冬眠/熔断/完成)。
 func (m *Manager) record(taskID, action string, detail map[string]any) error {
+	return m.recordWith(taskID, action, detail, true)
+}
+
+// recordWith record 的全参形态:terminalNotify=false 时不触发牧者终态
+// 总结回调(特权清除的停止专用,P4-40 ⑥——清除将销毁该任务全部数据,
+// 总结是无谓的写入与 LLM 开销,且其异步落账会与清行竞态)。
+func (m *Manager) recordWith(taskID, action string, detail map[string]any, terminalNotify bool) error {
 	_, err := m.cfg.Store.Append(context.Background(), taskID, rings.Event{
 		Kind: rings.EventTaskLifecycle, Actor: "manager",
 		Payload: rings.TaskLifecycle{Action: action, Detail: detail},
@@ -990,6 +1202,16 @@ func (m *Manager) record(taskID, action string, detail map[string]any) error {
 	if err != nil {
 		runlog.Errorf("账本写入失败: 任务生命周期 %s/%s: %v", taskID, action, err)
 		return fmt.Errorf("manager: 记账 %s/%s: %w", taskID, action, err)
+	}
+	// P4-43 任务终局清点:终态记账后紧邻执行(终止路径与收尾时序的终局
+	// 判定都经本入口记账,天然各挂一次);失败如实报错,不阻塞终态本身
+	//(终态事件已落账,清点缺位走运行日志可查)。特权清除
+	//(terminalNotify=false)不清点——数据即将整体销毁,清点写入徒增
+	// 与清行的竞态(与牧者总结同批豁免)。
+	if terminalNotify && (action == StatusCompleted || action == StatusStopped) {
+		if serr := m.sweepAtTerminal(taskID, action); serr != nil {
+			runlog.Errorf("任务终局清点失败: %s(%s): %v", taskID, action, serr)
+		}
 	}
 	msg := fmt.Sprintf("任务生命周期: %s %s", action, taskID)
 	if t := m.Task(taskID); t != nil && t.Title != "" {
@@ -1002,7 +1224,7 @@ func (m *Manager) record(taskID, action string, detail map[string]any) error {
 	// P2-08f:终态记账后异步通知(牧者出一句进展总结)。异步防回调阻塞
 	// 终态流程(牧者应答是一次完整 LLM 轮);终态是任务生命周期终点,
 	// 每任务至多触发一次(终态记账本身幂等前置)。
-	if action == StatusCompleted || action == StatusStopped {
+	if terminalNotify && (action == StatusCompleted || action == StatusStopped) {
 		if fn := m.cfg.OnTerminal; fn != nil {
 			go fn(taskID, action)
 		}

@@ -6,36 +6,47 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"ghostreaper/internal/rings"
 )
 
-// ---- 单位级暂停与任务冬眠的执行层落地(P2-08,第四章 §7 / 第七章) ----
+// ---- 单位级暂停与任务冬眠的执行层落地(P2-08,第四章 §7 / 第七章;
+// 任务冬眠 P4-33 起改冻结收场语义) ----
 //
-// 暂停语义(单位级 = 任务冬眠的细粒度版):当前工具调用完成后挂起——
-// 单位不退出、goroutine 与 Norma 会话原地冻结(transcript 不中断,续跑
-// 经转录 Resume 原会话继续)、计时停走(挂起等待计入 pause_wait,不进
-// billable);继续 = 原地接着干,继续前按 R14 复检图版本(挂起期间
-// RoE/前置事实变过则拒绝旧计划,步骤回可领取交主宰重判)。
+// 暂停语义(单位级):当前工具调用完成后挂起——单位不退出、goroutine
+// 与 Norma 会话原地冻结(transcript 不中断,续跑经转录 Resume 原会话
+// 继续)、计时停走(挂起等待计入 pause_wait,不进 billable);继续 =
+// 原地接着干,继续前按 R14 复检图版本(挂起期间 RoE/前置事实变过则
+// 拒绝旧计划,步骤回可领取交主宰重判)。
 //
 // 生效点:工具调用边界(与舵杆注入同点,guard.go)——暂停请求到达时
 // 正在执行的工具调用照常完成,边界处收拢当前执行段(被暂缓的调用未
-// 执行),单位挂在暂停闩(单位级)或冬眠门(任务级)上等继续/唤醒。
-// 段间路径(审批续跑/模型重试回到段循环顶)同样检查冬眠门,无死角。
+// 执行),单位挂在暂停闩(单位级)上等继续。段间路径(审批续跑/模型
+// 重试回到段循环顶)同样检查,无死角。
+// 任务冬眠(P4-33):不再原地驻留——收场令与门同发,门等待仅剩收场
+// 过渡(节拍复查见令即落地);暂停闩由收场放行统一清闩(闩是进程内
+// 控制,过不了收场)。
 
 // hibernating 任务当前是否冬眠中(nil 门 = 否)。
 func (e *Executor) hibernating(taskID string) bool {
 	return e.Hiber != nil && e.Hiber.Active(taskID)
 }
 
+// hiberRecheckTick 冬眠门等待的重查节拍(P4-33):防"检查完断点令刚要
+// 进冬眠门、武装令恰好落下"的夹缝等待者错过收场信号无限滞留——每秒
+// 回到检查顶,见武装令即落地收场。
+const hiberRecheckTick = time.Second
+
 // unitShouldPark 单位此刻是否应挂起:单位暂停闩在、任务冬眠中,或断点
 // 已武装(P3-07:边界即收——被暂缓的调用不执行,收段后段循环顶落地;
-// 复测单位豁免,侧会话跑完自然落地)。
+// 复测单位豁免,侧会话跑完自然落地)。P4-33:冬眠冻结同样豁免复测
+// 单位(收场不等侧会话挂起;其审批票经 RetireTickets 放行)。
 func (e *Executor) unitShouldPark(env *unitEnv) bool {
 	if e.unitLatch(env.TaskID, env.StepID) != nil {
 		return true
 	}
-	if e.hibernating(env.TaskID) {
+	if env.retest == nil && e.hibernating(env.TaskID) {
 		return true
 	}
 	return env.retest == nil && e.ckptArmed(env.TaskID)
@@ -167,16 +178,19 @@ func (e *Executor) recordUnitControl(taskID string, rec rings.UnitControlRecord)
 // P3-07:断点武装即放行(true)——挂起中的单位回段循环顶落地收场
 // (进程级收场不等闩开:闩是进程内控制,过不了夜;工作经 Checkpointed
 // 会话保留)。
+// P4-33:冬眠门等待带重查节拍(WaitTick)——收场武装与关门的夹缝
+// 等待者每秒回顶复查,见武装令即落地;复测单位不等冬眠门(侧会话
+// 跑完自然落地)。
 func (e *Executor) waitUnpark(ctx context.Context, env *unitEnv) bool {
 	for {
 		if env.retest == nil && e.ckptArmed(env.TaskID) {
 			return true
 		}
-		if e.hibernating(env.TaskID) {
-			if e.Hiber == nil || !e.Hiber.Wait(ctx, env.TaskID) {
+		if env.retest == nil && e.hibernating(env.TaskID) {
+			if e.Hiber == nil || !e.Hiber.WaitTick(ctx, env.TaskID, hiberRecheckTick) {
 				return false
 			}
-			continue // 唤醒后重查单位暂停闩
+			continue // 唤醒/节拍到:回顶复查(断点令已武装即落地收场)
 		}
 		latch := e.unitLatch(env.TaskID, env.StepID)
 		if latch == nil {
@@ -187,6 +201,46 @@ func (e *Executor) waitUnpark(ctx context.Context, env *unitEnv) bool {
 			return false
 		case <-latch: // 继续指令开闩 → 重查冬眠(暂停期间任务可能已冬眠)
 		}
+	}
+}
+
+// FlushSuspended 冬眠收场放行(P4-33,装配层经 manager.HibernateSink
+// 调用):任务下全部挂起等待者放行——暂停闩上的单位清闩(等待者回
+// 检查顶见断点令即落地;闩是进程内控制,过不了收场,与重启后闩自然
+// 蒸发等价)、审批票上的单位经 RetireTickets 送达放行令(票面保持
+// 待裁决冻结)。
+func (e *Executor) FlushSuspended(taskID string) {
+	if rel, ok := e.Gate.(interface{ RetireTickets(string) int }); ok {
+		rel.RetireTickets(taskID)
+	}
+	e.mu.Lock()
+	var keys []string
+	for k := range e.unitLatches {
+		if id, _, ok := splitSteerKey(k); ok && id == taskID {
+			keys = append(keys, k)
+		}
+	}
+	e.mu.Unlock()
+	for _, k := range keys {
+		if id, stepID, ok := splitSteerKey(k); ok {
+			e.clearUnitLatch(id, stepID) // 静默清闩:收场解除,不是暂停失效
+		}
+	}
+}
+
+// DropPendingApprovals 唤醒清出(P4-33,装配层经 manager.HibernateSink
+// 调用):收场让位后遗留的待裁决票清出待决表(零裁决记录,重启等价)。
+func (e *Executor) DropPendingApprovals(taskID string) {
+	if drop, ok := e.Gate.(interface{ DropTickets(string) int }); ok {
+		drop.DropTickets(taskID)
+	}
+}
+
+// ExpirePendingApprovals 熔断结案(P4-33,装配层经 manager.HibernateSink
+// 调用):遗留待裁决票按拒绝结案留痕。
+func (e *Executor) ExpirePendingApprovals(taskID, reason string) {
+	if exp, ok := e.Gate.(interface{ ExpireTickets(string, string) int }); ok {
+		exp.ExpireTickets(taskID, reason)
 	}
 }
 

@@ -136,8 +136,14 @@ const roeConstraintHeader = "【授权约束 · RoE】本块为授权硬边界,�
 // 结构,两处不得漂移)。lead 为面向角色的凌驾补充句(虫群侧重"不做",
 // 主宰侧重"不派")。excluded 为授权范围摘除的资产(P4-05;空 = 全部
 // 纳入,行为与历史一致),非空时追加"范围外资产"行——主宰侧读它不派
-// 覆盖这些资产的意图(派发入口守卫同判,covers 判定)。
-func RenderRoEConstraint(lead string, allowed, denied []string, threshold rings.ActionLevel, excluded []rings.ExcludedAssetView) string {
+// 覆盖这些资产的意图(派发入口守卫同判,covers 判定)。pending 为渗透
+// 任务的范围外待批资产(P4-44;空 = 无待批或非渗透任务),非空时追加
+// "待批资产"行——锁定不测,面板放行后转范围内(命令级硬拦在权限管线
+// 与只读工具补口兜底)。notes 为造物主注意事项(P4-49;空 = 无,行不
+// 出现——留空任务行为与历史一致),非空时逐行追加"造物主注意事项"行:
+// 对做法的软要求,与工具边界/审批门槛同处凌驾区;管边界不管打法——
+// 注意事项之外的侦察顺序/路径/工具选择/攻击链组合仍是读者自由。
+func RenderRoEConstraint(lead string, allowed, denied []string, threshold rings.ActionLevel, excluded []rings.ExcludedAssetView, pending []rings.ExcludedAssetView, notes string) string {
 	var b strings.Builder
 	b.WriteString(roeConstraintHeader)
 	if lead != "" {
@@ -157,6 +163,14 @@ func RenderRoEConstraint(lead string, allowed, denied []string, threshold rings.
 	fmt.Fprintf(&b, "\n- 审批门槛: %s(达到该级的动作逐次需批准,等待造物主批准,被拒不重试)\n",
 		string(NormalizeApprovalThreshold(threshold)))
 	b.WriteString("- 授权范围: 仅限本任务授权目标;本系统仅供授权测试。\n")
+	if notes != "" {
+		b.WriteString("- 造物主注意事项(对做法的要求,须遵守;未提及的做法你自主选择):\n")
+		for _, line := range strings.Split(notes, "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				fmt.Fprintf(&b, "  · %s\n", line)
+			}
+		}
+	}
 	if len(excluded) > 0 {
 		parts := make([]string, 0, len(excluded))
 		for _, a := range excluded {
@@ -164,15 +178,24 @@ func RenderRoEConstraint(lead string, allowed, denied []string, threshold rings.
 		}
 		fmt.Fprintf(&b, "- 范围外资产(已从授权范围摘除,不测不派): %s\n", strings.Join(parts, "、"))
 	}
+	if len(pending) > 0 {
+		parts := make([]string, 0, len(pending))
+		for _, a := range pending {
+			parts = append(parts, fmt.Sprintf("%s(%s)", a.ID, a.Title))
+		}
+		fmt.Fprintf(&b, "- 待批资产(渗透任务范围外,锁定不测;面板放行后才可测): %s\n", strings.Join(parts, "、"))
+	}
 	return b.String()
 }
 
 // roeConstraintBlock 虫群侧 RoE 约束块(从任务包的领取时授权渲染;
 // 资产摘除是规划级约束——入口守卫保证摘除资产不会再被派发覆盖它的
-// 意图,单位领到的任务包不会锚定它们,虫群侧不重复渲染)。
-func roeConstraintBlock(roe RoE) string {
+// 意图,单位领到的任务包不会锚定它们,虫群侧不重复渲染;待批清单
+// (P4-44)从任务包冻结副本渲染——单位自发越界测待批资产前读到锁定
+// 声明,硬拦在权限管线兜底;注意事项(P4-49)同样从领取时授权渲染)。
+func roeConstraintBlock(roe RoE, pending []rings.ExcludedAssetView) string {
 	return RenderRoEConstraint(
-		"你的探索手段受此框定。", roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, nil)
+		"你的探索手段受此框定。", roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, nil, pending, roe.CreatorNotes)
 }
 
 // 意图块/锚定资产/启动指令(§11 不可变块,追加顺序固定:意图块 →
@@ -226,7 +249,7 @@ const startupInstruction = "【启动指令】现在开始执行上述意图:先
 // 任务包七要素全文仍是首条 user turn;system 尾只锚定意图核心——被
 // 压缩的是 user turn 的细节,压不掉的是"这条单位该干什么"。
 func WorkerSystemSegments(ctx context.Context, store *rings.Store, roe RoE, pack *TaskPack) []string {
-	segs := []string{roeConstraintBlock(roe)}
+	segs := []string{roeConstraintBlock(roe, pack.PendingScope)}
 	segs = append(segs, WorkerPromptSpec.Assemble(ctx, store)...)
 	segs = append(segs, intentBlock(pack), anchorAssetsBlock(pack), startupInstruction)
 	return segs

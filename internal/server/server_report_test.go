@@ -252,7 +252,7 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 	// ---- 经面板建任务(种子表单,service 资产)+ 补谓词目标 ----
 	var created map[string]any
 	post(t, h, http.MethodPost, "/api/tasks", fmt.Sprintf(
-		`{"goals":["种子目标"],"id":%q,"title":"P1 总验收试跑","assets":[{"class":"service","title":%q}]}`, task, mainURL),
+		`{"task_type":"redteam","goals":["种子目标"],"id":%q,"title":"P1 总验收试跑","assets":[{"class":"service","title":%q}]}`, task, mainURL),
 		http.StatusOK, &created)
 	var tree struct {
 		Assets []struct {

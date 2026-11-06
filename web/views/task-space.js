@@ -122,6 +122,17 @@ export function TaskSpace({ tasks, taskID, tab, focus, unit }) {
                   {roePending}
                 </span>
               )}
+              {/* 发现未读红点+计数(P4-47 A):汇总位——成果或事实任一
+                  有未读即亮,两个子页签全看过才灭;点击进发现页 */}
+              {t.id === "findings" &&
+                (current.unread_claims > 0 || current.unread_facts > 0) && (
+                  <span
+                    className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold leading-none text-primary-foreground num"
+                    title={`未读:成果 ${current.unread_claims ?? 0} 条 · 事实 ${current.unread_facts ?? 0} 条`}
+                  >
+                    {(current.unread_claims ?? 0) + (current.unread_facts ?? 0)}
+                  </span>
+                )}
             </button>
           ))}
         </div>

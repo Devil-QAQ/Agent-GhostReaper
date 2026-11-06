@@ -41,6 +41,9 @@ const DefaultMaxConcurrentUnits = 5
 // 收尾 90 秒,超时硬停)。
 const DefaultSettleGraceSeconds = 90
 
+// DefaultAssessWall 单轮研判墙钟默认值(P4-42 ②):15 分钟。
+const DefaultAssessWall = 15 * time.Minute
+
 // SettleController 任务级总闸的收尾操控面(P2-04,第四章 §6):主宰循环
 // 经它驱动 Manager 的任务生命周期——进入收尾(状态可见)与收尾定终态。
 // 装配层注入 Manager 实现;nil = 无操控面(单测用:黑匣子与账本事件照记,
@@ -99,6 +102,14 @@ type Loop struct {
 	// 收尾宽限随冬眠时长顺延;门开原地继续研判。装配层与 Manager/虫群/
 	// 牧者/审批门共持同一实例。nil = 无冬眠语义(单测)。
 	Hiber *hiber.Gate
+
+	// AssessWall 单轮研判的墙钟上限(P4-42 ②,问题清单 #69:模型流式
+	// 调用挂死的循环活性兜底):从发起到回包超时即弃本轮,黑匣子记
+	// "研判超时中断",由下拍心跳或事件重触发——超时不是"无活可派",
+	// 0 意图硬底线语义不破,循环必须能继续。链上单请求已有读超时
+	// (failover.ReadFirst 三限),此墙钟兜的是整轮(链内多腿重放/
+	// 退避叠加可能远超单请求上限)的形态。零值 DefaultAssessWall。
+	AssessWall time.Duration
 
 	// Ckpt 断点冻结信号(P3-07,第七章「故障与恢复」断点续接):武装后
 	// 循环在轮次边界退出(不再拆解派发,在飞单位由虫群侧同一信号收场
@@ -227,6 +238,14 @@ func (l *Loop) taskBlockedThreshold() int {
 	return DefaultTaskBlockedThreshold
 }
 
+// assessWall 单轮研判墙钟(零值取默认)。
+func (l *Loop) assessWall() time.Duration {
+	if l.AssessWall > 0 {
+		return l.AssessWall
+	}
+	return DefaultAssessWall
+}
+
 // deterministicErr 是否确定性拒绝(4xx/超长,P4-27 ⑦)——重试与换腿
 // 都无意义,不计任务级故障计数(程序缺陷非模型故障)。
 func deterministicErr(err error) bool {
@@ -283,6 +302,27 @@ func (l *Loop) noteLLMSuccess() {
 		})
 }
 
+// noteAssessTimeout 研判墙钟中断留痕(P4-42 ②):黑匣子记"规划超时
+// 中断"(界面词,条目原文"研判超时中断")——超时不是"无活可派",
+// 0 意图硬底线语义不破,循环由下拍心跳或事件重触发。wall=false 无
+// 操作。留痕走独立 ctx(不随任务熔断断链)。
+func (l *Loop) noteAssessTimeout(wall bool, sid string) {
+	if !wall {
+		return
+	}
+	runlog.Warnf("规划超时中断: 任务 %s 会话 %s(单轮墙钟 %.0f 秒,弃本轮待重触发)",
+		l.TaskID, sid, l.assessWall().Seconds())
+	_ = blackbox.Record(context.Background(), l.Store, l.TaskID, ActorOvermind,
+		rings.BlackboxRecord{
+			Type: rings.BlackboxAssessTimeout,
+			Detail: map[string]any{
+				"session_id":   sid,
+				"wall_seconds": int(l.assessWall().Seconds()),
+				"note":         "规划超时中断:弃本轮,心跳或事件重触发",
+			},
+		})
+}
+
 // unitLimit 虫群单位并发上限:装配显式值优先,零值时全局键覆盖
 // (P2-08d Agent 栏可写),再退代码默认。每轮派发决策活读——改值对
 // 下一轮派发生效,在飞单位不硬中断(与预算同纪律)。
@@ -330,6 +370,14 @@ func (l *Loop) Run(ctx context.Context, wake <-chan struct{}) {
 	defer l.unitsWG.Wait()
 	go l.heartbeatLoop(ctx)
 	l.loadDeadline(ctx)
+	// P4-33 收尾续走:任务生命周期已是收尾中(冬眠唤醒拉起的 settling
+	// 续收尾)——新循环直接进收尾流程,不回运行态重新拆解。
+	if by := l.ledgerSettling(ctx); by != "" {
+		l.mu.Lock()
+		l.settling = true
+		l.settleBy = by
+		l.mu.Unlock()
+	}
 	if !l.currentDeadline().IsZero() {
 		go l.settleWatch(ctx)
 		l.armHardStop(ctx)
@@ -372,22 +420,65 @@ func (l *Loop) ckptArmed() bool {
 	return l.Ckpt != nil && l.Ckpt.Armed(l.TaskID)
 }
 
+// ledgerSettling 任务生命周期当前是否收尾中(读账本任务投影,与重启
+// 收养同源);返回收尾发起方 settled_by(空 = 非收尾中,取缺省
+// task_gate)。P4-33:冬眠唤醒拉起 settling 任务时,新循环据此直接进
+// 收尾流程(收尾续走),发起方如实保留。
+func (l *Loop) ledgerSettling(ctx context.Context) string {
+	rows, err := l.Store.Tasks(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, r := range rows {
+		if r.ID != l.TaskID {
+			continue
+		}
+		if r.Status != "settling" {
+			return ""
+		}
+		by := rings.SettleByTaskGate
+		evs, err := l.Store.Events(ctx, l.TaskID, 0, 0)
+		if err != nil {
+			return by
+		}
+		for i := len(evs) - 1; i >= 0; i-- {
+			if evs[i].Kind != rings.EventTaskLifecycle {
+				continue
+			}
+			var p rings.TaskLifecycle
+			if json.Unmarshal(evs[i].Payload, &p) == nil {
+				if v, ok := p.Detail["settled_by"].(string); ok && v != "" {
+					by = v
+				}
+			}
+			break
+		}
+		return by
+	}
+	return ""
+}
+
 // ---- P2-08 主宰循环的挂起与暂停 ----
 
 // parkGate 轮次边界的挂起检查:任务冬眠门与循环暂停闩任一在即挂起,
 // 全开放行(false = ctx 结束,循环退出)。唤醒后顺延收尾线(冬眠期间
 // 任务总闸墙钟停走);两源都复查,先唤醒又立刻暂停的次序不漏。
+// P4-33:冬眠收场令(断点信号)优先——见令即放行,调用方随即收场
+// 退出;门等待带节拍重查,防武装与关门的夹缝等待者错过收场令。
 func (l *Loop) parkGate(ctx context.Context) bool {
 	for {
 		if ctx.Err() != nil {
 			return false
 		}
+		if l.ckptArmed() {
+			return true
+		}
 		if l.Hiber != nil && l.Hiber.Active(l.TaskID) {
-			if !l.Hiber.Wait(ctx, l.TaskID) {
+			if !l.Hiber.WaitTick(ctx, l.TaskID, loopRecheckTick) {
 				return false
 			}
 			l.extendDeadline()
-			continue
+			continue // 唤醒/节拍到:回顶复查(收场令已武装即放行)
 		}
 		l.mu.Lock()
 		ch := l.pauseCh
@@ -407,6 +498,10 @@ func (l *Loop) parkGate(ctx context.Context) bool {
 		}
 	}
 }
+
+// loopRecheckTick 冬眠门等待的重查节拍(P4-33,与虫群侧 hiberRecheckTick
+// 同义):夹缝等待者每秒回顶复查收场令。
+const loopRecheckTick = time.Second
 
 // PauseLoop 主宰循环暂停(P2-08 单位控制·主宰循环粒度):轮次边界挂起
 // (无状态轮次,天然可重入)。幂等。
@@ -533,12 +628,21 @@ func (l *Loop) cycle(ctx context.Context) bool {
 		if l.isSettling() {
 			return false // 在飞单位由 settle 流程等齐;终局判定由 settle 做
 		}
-		triggers, err := l.planningTriggers(ctx)
+		triggers, diveTriggered, err := l.planningTriggers(ctx)
 		if err != nil {
 			l.setErr(err)
 			return false
 		}
 		shouldPlan := !l.planned || len(triggers) > 0
+		// 空轮求值(P4-42 ⑤,问题清单 #72):触发门无新事件时,0 意图
+		// 硬底线的求值前提仍须检查——图上无待执行/在跑步骤且仍有未达成
+		// 目标时,本轮必须给主宰一轮拆解(硬底线写在拆解提示词里,不被
+		// 求值即永久停摆:补踢到达、循环活着、零研判零外联的实测形态)。
+		// 拉起轮与心跳轮由此不再被"无新触发事件"短路;有在跑/排队工作
+		// 时照旧等结果(P4-29 触发收紧不破)。
+		if !shouldPlan && l.idleFloorDue(ctx) {
+			shouldPlan = true
+		}
 		// ① TestClaim 确认判定:反证轮已到终态的声明交仲裁者机器裁决
 		// (R2/R3:执行成功 ≠ 结论成立,确认只认机器求值)。先于收割与
 		// Goal 判定——目标达成停派时不得把反证中的声明永久搁置。
@@ -583,12 +687,28 @@ func (l *Loop) cycle(ctx context.Context) bool {
 		var combinedIDs []string
 		if !done && shouldPlan {
 			l.planTriggers = triggers
+			prevPlanRev := l.lastPlanRev
 			reply, evalRev, err := l.decompose(ctx)
 			if err != nil {
 				l.setErr(err)
 				return false
 			}
 			l.planned, l.lastPlanRev = true, evalRev
+			// 深入指令竞态补正(P4-48):指令在触发扫描后、快照读取前落账
+			// 时,快照已读到并研判——触发登记(研判记录触发行)与派生
+			// 步骤急活豁免同补;已在触发集内的不重复登记。
+			if late := diveRevisionsBetween(ctx, l.Store, l.TaskID, prevPlanRev, evalRev); len(late) > 0 {
+				seen := map[int64]bool{}
+				for _, r := range l.planTriggers {
+					seen[r] = true
+				}
+				for _, r := range late {
+					if !seen[r] {
+						l.planTriggers = append(l.planTriggers, r)
+					}
+				}
+				diveTriggered = true
+			}
 			for _, cp := range reply.CancelSteps {
 				if err := l.cancelQueued(ctx, cp, evalRev); err != nil {
 					l.noteGuardReject(fmt.Sprintf("取消步骤 %s 被拒：%v", cp.StepID, err))
@@ -621,8 +741,15 @@ func (l *Loop) cycle(ctx context.Context) bool {
 				}
 				combinedIDs = append(combinedIDs, cid)
 			}
+			// 深入指令轮的派生意图按"操作者急活"来源落账(P4-48 ③):
+			// 背压豁免与取消保护同急活(受控来源,模型自报无效);意图
+			// 校验与审批门照走。
+			intentSource := sourceExplore
+			if diveTriggered {
+				intentSource = sourceUrgent
+			}
 			for _, p := range reply.NewIntents {
-				if err := l.dispatch(ctx, p); err != nil {
+				if err := l.dispatch(ctx, p, intentSource); err != nil {
 					// 单条派发失败(如 covers 指向不存在的资产被账本整批拒)
 					// 不拖垮其余意图;失败如实留在 LastErr,拒因回流进简报
 					//(P2-06c,同上)。
@@ -784,9 +911,10 @@ func (l *Loop) judgeClaims(ctx context.Context) (int, error) {
 		if j.Status == rings.TestClaimConfirmed {
 			// 收割定稿(P2-02):复现步骤(镜留痕交换+操作方法)与
 			// 严重级别(末轮影响面定级)随确认同批落库,报告与面板
-			// 只读这份定稿(R17:智能发生在写回时)。P4-08 ④:落账前
-			// 用模型把保留步骤的描述改写为指令式人话并冻结(失败回退
-			// 确定性描述,不阻塞裁决);重开再确认随新定稿重新生成。
+			// 只读这份定稿(R17:智能发生在写回时)。P4-35:落账前由
+			// 模型从候选池挑最小复现集并写三层(短名/做什么/作用)冻结
+			// (失败回退候选池确定性兜底,不阻塞裁决);重开再确认随新
+			// 定稿重新生成。
 			repro, rerr := AssembleRepro(ctx, l.Store, l.TaskID, c.ID, j.Severity)
 			if rerr != nil {
 				l.setErr(fmt.Errorf("overmind: 定稿判断 %s: %w", c.ID, rerr))
@@ -868,12 +996,12 @@ func (a *AssessmentPlan) hasContent() bool {
 }
 
 type decomposeReply struct {
-	CancelSteps    []cancelPlan `json:"cancel_steps"`
-	queue          *QueueWatermark
-	Assessment     *AssessmentPlan        `json:"assessment"`
-	NewIntents     []IntentPlan           `json:"new_intents"`
-	CombinedClaims []CombinedClaimPlan    `json:"combined_claims"`
-	Advices        []adviceVerdictPlan    `json:"advices"` // 待裁决建议的裁决(P2-07 纳谏)
+	CancelSteps      []cancelPlan `json:"cancel_steps"`
+	queue            *QueueWatermark
+	Assessment       *AssessmentPlan       `json:"assessment"`
+	NewIntents       []IntentPlan          `json:"new_intents"`
+	CombinedClaims   []CombinedClaimPlan   `json:"combined_claims"`
+	Advices          []adviceVerdictPlan   `json:"advices"`           // 待裁决建议的裁决(P2-07 纳谏)
 	ReportExclusions []reportExclusionPlan `json:"report_exclusions"` // 信息性判断复核标记(P4-30 ③)
 
 	sessionID string // 研判会话锚点(研判记录下钻转录用;不参与 JSON)
@@ -920,7 +1048,8 @@ const overmindDisciplineRules = `态势规划标准五问(逐问给一句结论,
 14. 待判定建议(纳谏):快照「待判定建议」区每条都必须在 advices 里判定——adopt=true 须在本轮意图中体现或在理由中写明何时体现;adopt=false 的理由必须基于图上事实(不空泛)。牧者的建议是规划输入,不是命令;判定后规划随之改变,建议状态随之更新。
 15. 本机回环(127.0.0.1 / localhost / ::1)与镜等测试环境自身设施不是目标攻击面:不对其派发探测或验证意图,也不把虫群对它们的观察当作发现规划后续;虫群的相关提交会被入口拒收并记为环境观察。任务资产清单内的目标(含操作者声明的本机测试靶标)不受此限。
 16. 队列治理:先读队列水位，等前置步骤也预留容量，避免前置完成时集中转排队突破上限。普通探索最多提交本轮还可新增数；容量满是正常等待，不是模型故障，不重复提交。反证、假设验证与操作者急活由各自入口豁免。每轮审视全部未领取步骤，结合最新证据取消重复、过时、前提失败的普通探索；用 cancel_steps 给步骤 ID、具体理由与图上依据 ID。反证、假设验证、急活及它们的关键前置保留，程序会复检并连带取消普通后继；不取消正在执行的步骤。刚派发新步骤不是继续规划的依据；一只单位结果落地就处理新结果，不等整批。
-17. 立判危害门槛:` + swarm.ClaimHarmGate + `(虫群的漏洞提交与你的组合立判同守此门)。对图上按旧口径已立的信息性判断(纯前置条件/环境特性/无害观察,含已确认的),用 report_exclusions 提交 {claim_id, reason} 标记"不纳入报告"——理由基于判断内容与影响面证据,写明为何无直接危害;已标记的不重复标记;无可标记时省略该字段。报告只收已确认且非信息性判断。`
+17. 立判危害门槛:` + swarm.ClaimHarmGate + `(虫群的漏洞提交与你的组合立判同守此门)。对图上按旧口径已立的信息性判断(纯前置条件/环境特性/无害观察,含已确认的),用 report_exclusions 提交 {claim_id, reason} 标记"不纳入报告"——理由基于判断内容与影响面证据,写明为何无直接危害;已标记的不重复标记;无可标记时省略该字段。报告只收已确认且非信息性判断。
+18. 操作者深入指令(节点锚定的推动):快照「操作者深入指令」区每条都是造物主从该节点出发的推动——本轮必须基于锚定节点立即研判并规划下一步(新方向/深挖/组合;硬承诺,不得空轮跳过)。方向文本是建议不是命令:采纳与否由你裁决,违反 RoE 或不可行时不执行并在 assessment 写明理由;方向留空时由你自行判断。已废弃/被推翻等终态节点同样可被锚定——作为线索重新探索,采纳方式由你裁决。由此派发的意图照常走校验与审批门。`
 
 // overmindOutputContract 主宰基线 C 段(代码固定,输出规约):JSON
 // 契约是机器解析接口,配置不可移除。P4-11 ①:契约内带 intent 等结构化
@@ -971,9 +1100,14 @@ func (l *Loop) overmindSystemSegments(ctx context.Context) []string {
 		l.setErr(fmt.Errorf("overmind: 读授权范围摘除清单: %w", err))
 		excluded = nil
 	}
+	pending, perr := l.Store.PendingScopeAssets(ctx, l.TaskID)
+	if perr != nil {
+		l.setErr(fmt.Errorf("overmind: 读待批资产清单: %w", perr))
+		pending = nil
+	}
 	segs := []string{swarm.RenderRoEConstraint(
 		"派发的意图与采用的手段不得越出此边界。",
-		roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, excluded)}
+		roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, excluded, pending, roe.CreatorNotes)}
 	return append(segs, OvermindPromptSpec.Assemble(ctx, l.Store)...)
 }
 
@@ -1020,14 +1154,25 @@ func (l *Loop) decompose(ctx context.Context) (*decomposeReply, int64, error) {
 	defer sess.Close()
 	usage := &swarm.UsageTracker{
 		Store: l.Store, TaskID: l.TaskID, Agent: ActorOvermind,
-		Model: l.Model, ModelOf: l.modelNow(), Transcript: sid, // MaxTurns=0:规划会话不落里程碑
+		Model: l.Model, ModelOf: l.modelNow(sid), Transcript: sid, // MaxTurns=0:规划会话不落里程碑
 	}
 	var term *harness.Terminal
-	for ev, err := range sess.Prompt(ctx, snapshot) {
+	// 单轮研判墙钟(P4-42 ②):发起到回包超时即弃本轮——链上单请求
+	// 有读超时,但链内多腿重放/退避叠加可远超单请求上限,整轮兜底由此
+	// 把关。超时后黑匣子记"研判超时中断"(独立 ctx,不随任务熔断断链),
+	// 循环回静默等下拍心跳/事件重触发,不永久卡死。
+	sctx, cancelWall := context.WithTimeout(ctx, l.assessWall())
+	defer cancelWall()
+	wallHit := false
+	for ev, err := range sess.Prompt(sctx, snapshot) {
 		if err != nil {
+			if sctx.Err() != nil && ctx.Err() == nil {
+				wallHit = true
+			}
 			if !deterministicErr(err) {
 				l.noteLLMFailure(ctx, err.Error())
 			}
+			l.noteAssessTimeout(wallHit, sid)
 			return nil, rev, fmt.Errorf("overmind: 拆解会话: %w", err)
 		}
 		if ev.Kind == harness.KindUsage && ev.Usage != nil {
@@ -1037,13 +1182,24 @@ func (l *Loop) decompose(ctx context.Context) (*decomposeReply, int64, error) {
 		}
 		if ev.Kind == harness.KindResult && ev.Terminal != nil {
 			if ev.Terminal.Err != nil {
+				if sctx.Err() != nil && ctx.Err() == nil {
+					wallHit = true
+				}
 				if !deterministicErr(ev.Terminal.Err) {
 					l.noteLLMFailure(ctx, ev.Terminal.Err.Error())
 				}
+				l.noteAssessTimeout(wallHit, sid)
 				return nil, rev, fmt.Errorf("overmind: 拆解终止: %w", ev.Terminal.Err)
 			}
 			term = ev.Terminal
 		}
+	}
+	if term == nil && sctx.Err() != nil && ctx.Err() == nil {
+		// 引擎在墙钟截断下未送出错误事件(如已停在等待模型回包):墙钟
+		// 到点即中断,与收到错误同口径留痕。终态已送达(term 在手)则
+		// 结果完整,不判超时。
+		l.noteAssessTimeout(true, sid)
+		return nil, rev, fmt.Errorf("overmind: 拆解会话: 单轮墙钟 %.0f 秒到点,弃本轮", l.assessWall().Seconds())
 	}
 	l.noteLLMSuccess()
 	reply, err := parseDecomposeTerminal(term)
@@ -1227,6 +1383,15 @@ func (l *Loop) buildSnapshot(ctx context.Context) (string, int64, QueueWatermark
 		b.WriteString("  (无;首轮或上轮规划后账本无新变化)\n")
 	}
 
+	// 操作者深入指令(P4-48):每条指令注入锚定节点完整内容与血缘;
+	// 纳谏语义见拆解规则 18——立即规划是硬承诺,方向是建议。
+	if dives := l.diveBriefs(ctx); len(dives) > 0 {
+		b.WriteString("\n操作者深入指令(造物主从该节点出发的推动;本轮必须逐条处理):\n")
+		for _, line := range dives {
+			fmt.Fprintf(&b, "%s\n", line)
+		}
+	}
+
 	b.WriteString("\n目标:\n")
 	if len(goals) == 0 {
 		b.WriteString("  (无)\n")
@@ -1241,15 +1406,32 @@ func (l *Loop) buildSnapshot(ctx context.Context) (string, int64, QueueWatermark
 	}
 	// 授权范围摘除清单(P4-05):摘除的资产标"范围外"——主宰不派覆盖
 	// 它们的意图(派发入口守卫同判,双保险);覆盖缺口只看在范围内的。
+	// P4-44:范围外待批资产(渗透任务)标"待批"——锁定不测,面板放行
+	// 后转范围内;红队/未标任务的范围外发现资产标"范围外(可测)"。
 	excludedSet := map[string]bool{}
+	approvedSet := map[string]bool{}
+	taskType := ""
 	if roe, err := l.Store.CurrentRoE(ctx, l.TaskID); err != nil {
 		b.WriteString("  (授权范围读取失败,按全部纳入处理)\n")
 	} else {
 		excludedSet = roe.ExcludedAssetSet()
+		approvedSet = roe.ScopeApprovedSet()
+	}
+	if detail, err := l.Store.CreatedDetail(ctx, l.TaskID); err == nil {
+		taskType = rings.TaskTypeOf(detail)
 	}
 	for _, a := range ag.Assets {
 		if excludedSet[a.ID] {
 			fmt.Fprintf(&b, "  - %s [%s] %s (范围外,不派发)\n", a.ID, a.AssetClass, a.Title)
+			continue
+		}
+		frozen := rings.AssetScopeIn
+		if a.ScopeOut {
+			frozen = rings.AssetScopeOut
+		}
+		state := rings.ScopeStateOf(taskType, a.Source, frozen, approvedSet[a.ID], false)
+		if state == rings.ScopeStatePending {
+			fmt.Fprintf(&b, "  - %s [%s] %s (待批,锁定不测:范围外资产未放行,不派发也不测)\n", a.ID, a.AssetClass, a.Title)
 			continue
 		}
 		mark := "未覆盖"
@@ -1258,6 +1440,9 @@ func (l *Loop) buildSnapshot(ctx context.Context) (string, int64, QueueWatermark
 		}
 		if a.Source == rings.AssetSourceManual {
 			mark += ",手动补入"
+		}
+		if state == rings.ScopeStateOutOpen {
+			mark = "范围外,可测(红队相邻资产)," + mark
 		}
 		fmt.Fprintf(&b, "  - %s [%s] %s (%s)\n", a.ID, a.AssetClass, a.Title, mark)
 	}
@@ -1436,19 +1621,7 @@ func (l *Loop) deltaSinceLastAssessment(ctx context.Context) []string {
 	if err != nil {
 		return nil
 	}
-	var since int64 = -1 // -1 = 无研判记录(首轮):全部历史作为变化集
-	for _, ev := range evs {
-		if ev.Kind != rings.EventOvermindRecord {
-			continue
-		}
-		var r rings.OvermindRecord
-		if json.Unmarshal(ev.Payload, &r) != nil {
-			continue
-		}
-		if r.Type == rings.OvermindRecAssessment && r.EvaluatedRev > since {
-			since = r.EvaluatedRev
-		}
-	}
+	since := lastAssessmentRev(evs)
 	nodeTitle := map[string]string{}
 	var lines []string
 	for _, ev := range evs {
@@ -1518,9 +1691,172 @@ func (l *Loop) deltaSinceLastAssessment(ctx context.Context) []string {
 			if json.Unmarshal(ev.Payload, &rp) == nil && len(rp.ExcludedAssets) > 0 {
 				lines = append(lines, fmt.Sprintf("授权范围摘除 %d 个资产 → 不再派发覆盖它们的意图", len(rp.ExcludedAssets)))
 			}
+		case rings.EventOperatorDive:
+			// 触发行(P4-48):节点完整内容与血缘在「操作者深入指令」区。
+			var p rings.OperatorDive
+			if json.Unmarshal(ev.Payload, &p) != nil {
+				continue
+			}
+			lines = append(lines, fmt.Sprintf("操作者深入指令:节点 %s(%s) → 本轮必须处理,见「操作者深入指令」区", p.NodeID, diveDirectionWord(p.Direction)))
 		}
 	}
 	return lines
+}
+
+// lastAssessmentRev 事件流里最近一条研判记录(assessment)的
+// EvaluatedRev;-1 = 无研判记录(首轮,全部历史作为变化集)。
+func lastAssessmentRev(evs []rings.RawEvent) int64 {
+	since := int64(-1)
+	for _, ev := range evs {
+		if ev.Kind != rings.EventOvermindRecord {
+			continue
+		}
+		var r rings.OvermindRecord
+		if json.Unmarshal(ev.Payload, &r) != nil {
+			continue
+		}
+		if r.Type == rings.OvermindRecAssessment && r.EvaluatedRev > since {
+			since = r.EvaluatedRev
+		}
+	}
+	return since
+}
+
+// diveDirectionWord 深入指令方向的快照措辞(留空 = 主宰自行判断)。
+func diveDirectionWord(direction string) string {
+	if d := strings.TrimSpace(direction); d != "" {
+		return "方向:" + clipEval(d)
+	}
+	return "方向留空,由你自行判断"
+}
+
+// diveBriefs 快照「操作者深入指令」区(P4-48,问题清单 #67):自上轮
+// 研判以来的每条指令注入锚定节点完整内容与血缘——主宰读到的不是裸
+// 指令,是该节点(成果/事实)的全貌:判断/影响面/证据、谁发现的
+// (单位与步骤)、锚定哪些资产、(组合判断的)链环节。血缘走图上边
+// (derived_from/produces/about),断链如实缺省不编造。
+func (l *Loop) diveBriefs(ctx context.Context) []string {
+	evs, err := l.Store.Events(ctx, l.TaskID, 0, 0)
+	if err != nil {
+		return nil
+	}
+	since := lastAssessmentRev(evs)
+	if since < 0 {
+		since = 0
+	}
+	var out []string
+	for _, ev := range evs {
+		if ev.Kind != rings.EventOperatorDive || ev.Revision <= since {
+			continue
+		}
+		var p rings.OperatorDive
+		if json.Unmarshal(ev.Payload, &p) != nil {
+			continue
+		}
+		out = append(out, l.diveNodeBrief(ctx, p)...)
+	}
+	return out
+}
+
+// diveNodeBrief 一条深入指令的锚定节点全貌(指令行 + 内容 + 血缘)。
+func (l *Loop) diveNodeBrief(ctx context.Context, p rings.OperatorDive) []string {
+	n, err := l.Store.Node(ctx, l.TaskID, p.NodeID)
+	if err != nil {
+		return []string{fmt.Sprintf("  - 指令:锚定节点 %s(读取失败:%v)· %s", p.NodeID, err, diveDirectionWord(p.Direction))}
+	}
+	var lines []string
+	switch n.Type {
+	case rings.NodeTestClaim:
+		lines = append(lines, fmt.Sprintf("  - 指令:锚定发现 %s [%s] %s", n.ID, n.Status, diveDirectionWord(p.Direction)))
+		lines = append(lines, fmt.Sprintf("    判断:%s", n.Title))
+		if imp, _ := n.Detail["impact"].(string); imp != "" {
+			lines = append(lines, fmt.Sprintf("    影响面:%s", clipEval(imp)))
+		}
+		if v, _ := n.Detail["vulnclass"].(string); v != "" {
+			lines = append(lines, fmt.Sprintf("    类别:%s", v))
+		}
+		if u, _ := n.Detail["unit_id"].(string); u != "" {
+			lines = append(lines, fmt.Sprintf("    发现单位:%s", u))
+		}
+		// 血缘:发现步骤(derived_from→Step)/组合链环节(detail.chain
+		// 角色逐环节引用事实)/资产锚点(about→Asset)。
+		if derived, derr := l.Store.Edges(ctx, l.TaskID, rings.EdgeDerivedFrom); derr == nil {
+			for _, e := range derived {
+				if e.From != n.ID {
+					continue
+				}
+				if t, terr := l.Store.Node(ctx, l.TaskID, e.To); terr == nil && t.Type == rings.NodeStep {
+					lines = append(lines, fmt.Sprintf("    发现步骤:%s %s", e.To, clipEval(t.Title)))
+				}
+			}
+		}
+		if raw, ok := n.Detail["chain"].([]any); ok {
+			for _, item := range raw {
+				m, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				fid, _ := m["fact_id"].(string)
+				role, _ := m["role"].(string)
+				if fid != "" {
+					lines = append(lines, fmt.Sprintf("    链环节:%s(%s) %s", fid, role, clipEval(l.diveNodeTitle(ctx, fid))))
+				}
+			}
+		}
+		lines = append(lines, l.diveAssetAnchors(ctx, n.ID)...)
+	case rings.NodeFact:
+		lines = append(lines, fmt.Sprintf("  - 指令:锚定事实 %s [%s] %s", n.ID, n.Status, diveDirectionWord(p.Direction)))
+		lines = append(lines, fmt.Sprintf("    内容:%s", n.Title))
+		if eh, _ := n.Detail["evidence_head"].(string); eh != "" {
+			lines = append(lines, fmt.Sprintf("    证据:%s", clipEval(eh)))
+		} else if ev, _ := n.Detail["evidence"].(string); ev != "" {
+			lines = append(lines, fmt.Sprintf("    证据:%s", clipEval(ev)))
+		}
+		if u, _ := n.Detail["unit_id"].(string); u != "" {
+			lines = append(lines, fmt.Sprintf("    发现单位:%s", u))
+		}
+		// 血缘:产出步骤(produces←Step)。
+		if produces, perr := l.Store.Edges(ctx, l.TaskID, rings.EdgeProduces); perr == nil {
+			for _, e := range produces {
+				if e.To != n.ID {
+					continue
+				}
+				if t, terr := l.Store.Node(ctx, l.TaskID, e.From); terr == nil && t.Type == rings.NodeStep {
+					lines = append(lines, fmt.Sprintf("    产出步骤:%s %s", e.From, clipEval(t.Title)))
+				}
+			}
+		}
+		lines = append(lines, l.diveAssetAnchors(ctx, n.ID)...)
+	default:
+		// 非成果/事实节点入口已拒;历史脏数据如实呈现不编造。
+		lines = append(lines, fmt.Sprintf("  - 指令:锚定节点 %s(%s)[%s] %s", n.ID, n.Type, n.Status, diveDirectionWord(p.Direction)))
+		lines = append(lines, fmt.Sprintf("    内容:%s", n.Title))
+	}
+	return lines
+}
+
+// diveAssetAnchors 锚定节点的资产锚点行(about→Asset)。
+func (l *Loop) diveAssetAnchors(ctx context.Context, nodeID string) []string {
+	abouts, err := l.Store.Edges(ctx, l.TaskID, rings.EdgeAbout)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range abouts {
+		if e.From != nodeID {
+			continue
+		}
+		out = append(out, fmt.Sprintf("    资产锚点:%s %s", e.To, clipEval(l.diveNodeTitle(ctx, e.To))))
+	}
+	return out
+}
+
+// diveNodeTitle 节点标题回查(失败返空,如实缺省)。
+func (l *Loop) diveNodeTitle(ctx context.Context, id string) string {
+	if n, err := l.Store.Node(ctx, l.TaskID, id); err == nil {
+		return n.Title
+	}
+	return ""
 }
 
 // stepStopDirective 步骤停法的行动指令(§11 重派判定树的研判路由面:
@@ -1578,12 +1914,14 @@ func chainLinksOf(plan []ChainLinkPlan) []ChainLink {
 // 顺序续号。covers 端点由账本校验,幽灵资产整批拒绝(错误上抛)。
 // P2-06:优先级落 step.detail.priority(词汇受限,非法拒派);前置
 // 落 depends_on 边(端点必须是图上 Step,环状依赖拒绝)。
-func (l *Loop) dispatch(ctx context.Context, p IntentPlan) error {
+// P4-48:source=sourceUrgent(深入指令轮)时按"操作者急活"来源落账
+// ——队列准入豁免、取消保护同急活;审批门照走。
+func (l *Loop) dispatch(ctx context.Context, p IntentPlan, source dispatchSource) error {
 	stepID, err := nextStepID(ctx, l.Store, l.TaskID)
 	if err != nil {
 		return err
 	}
-	if err := DispatchStep(ctx, l.Store, l.TaskID, stepID, strings.TrimSpace(p.Intent), DispatchOptions{
+	opt := DispatchOptions{
 		GoalID:              l.currentGoalID(ctx),
 		ExpectedObservation: p.ExpectedObservation,
 		ActionLevel:         p.ActionLevel,
@@ -1591,7 +1929,12 @@ func (l *Loop) dispatch(ctx context.Context, p IntentPlan) error {
 		CoversAssets:        p.Covers,
 		Priority:            p.Priority,
 		DependsOn:           p.DependsOn,
-	}); err != nil {
+	}
+	if source == sourceUrgent {
+		opt.source = sourceUrgent
+		opt.Detail = map[string]any{"urgent": true, "by": "dive"}
+	}
+	if err := DispatchStep(ctx, l.Store, l.TaskID, stepID, strings.TrimSpace(p.Intent), opt); err != nil {
 		return fmt.Errorf("overmind: 派发 %s(%s): %w", stepID, p.Intent, err)
 	}
 	return nil
@@ -1830,14 +2173,11 @@ func (l *Loop) runUnit(ctx context.Context, stepID string) bool {
 	return res != nil && !res.Stale
 }
 
-// modelNow 拆解会话的按请求模型解析(failover 链注入;普通 Provider
-// 返回 nil 退静态 Model)。
-func (l *Loop) modelNow() func() string {
-	type activeModeler interface{ ActiveModel() string }
-	if am, ok := l.Provider.(activeModeler); ok {
-		return am.ActiveModel
-	}
-	return nil
+// modelNow 拆解/生成会话的记账模型解析(任务绑定+会话语境——绑定任务
+// 按绑定腿、会话按实际服务腿,P4-41 ③;普通 Provider 返回 nil 退静态
+// Model)。
+func (l *Loop) modelNow(sid string) func() string {
+	return failover.ModelNow(l.Provider, l.TaskID, sid)
 }
 
 // denialBriefs 审批拒绝简报(P2-06b,第四章 §3 v2:主宰收割可见拒绝

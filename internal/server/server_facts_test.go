@@ -36,7 +36,7 @@ func factsSetup(t *testing.T) (http.Handler, *rings.Store, string, string) {
 	h := srv.Handler()
 
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],
 		"title":"事实页签验证",
 		"assets":[{"class":"host","title":"backup-01"}]}`,
 		http.StatusOK, &created)
@@ -145,7 +145,7 @@ func TestServerFactsList(t *testing.T) {
 
 	// 任务隔离:另一任务的事实清单为空。
 	var created2 map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"隔离验证"}`, http.StatusOK, &created2)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"隔离验证"}`, http.StatusOK, &created2)
 	var body2 struct {
 		Facts []struct {
 			ID string `json:"id"`

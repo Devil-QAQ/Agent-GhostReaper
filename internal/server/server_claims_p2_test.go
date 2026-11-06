@@ -140,7 +140,7 @@ func TestServerClaimDetail(t *testing.T) {
 	_, h := newClaimTestServer(t, store, gate, dir)
 
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"详情验证"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"详情验证"}`, http.StatusOK, &created)
 	task := created["id"]
 	seedFullClaim(t, store, task)
 
@@ -239,6 +239,8 @@ func TestServerClaimDetail(t *testing.T) {
 
 	// 复现步骤:操作方法 + Burp 风格原文(请求行/响应头/响应体可核对);
 	// 来龙去脉(P4-13):定稿冻结的叙述随 repro 视图下发(面板零 LLM)。
+	// P4-36 ②:详情只带小字段与计数(steps 不再随详情下发),步骤经
+	// 分段端点 /claims/{cid}/repro 按页取。
 	repro := d["repro"].(map[string]any)
 	if repro["severity"] != "high" {
 		t.Fatalf("定稿严重级别不符: %+v", repro)
@@ -246,15 +248,31 @@ func TestServerClaimDetail(t *testing.T) {
 	if !strings.Contains(repro["narrative"].(string), "/old-backup/ 的 200 响应正文") {
 		t.Fatalf("来龙去脉叙述应随定稿视图下发: %+v", repro)
 	}
-	steps, _ := repro["steps"].([]any)
-	if len(steps) != 1 {
-		t.Fatalf("应恰 1 步复现: %+v", steps)
+	if repro["steps"] != nil {
+		t.Fatalf("详情不应携带步骤数组(P4-36 分段口径): %+v", repro["steps"])
 	}
-	st := steps[0].(map[string]any)
-	if !strings.Contains(st["op"].(string), "curl -sS") || st["method"] != "GET" || st["status"] != float64(200) {
-		t.Fatalf("复现步骤操作方法/交换摘要不符: %+v", st)
+	var page struct {
+		Rev   int64 `json:"rev"`
+		Steps []struct {
+			Op      string `json:"op"`
+			Method  string `json:"method"`
+			Status  int    `json:"status"`
+			Raw     string `json:"raw"`
+			BlobRef string `json:"blob_ref"`
+		} `json:"steps"`
+		Offset  int  `json:"offset"`
+		Total   int  `json:"total"`
+		HasMore bool `json:"has_more"`
 	}
-	raw := st["raw"].(string)
+	get(t, h, "/api/tasks/"+task+"/claims/tc-f/repro", http.StatusOK, &page)
+	if page.Total != 1 || len(page.Steps) != 1 || page.HasMore {
+		t.Fatalf("应恰 1 步复现(分段首页): %+v", page)
+	}
+	st := page.Steps[0]
+	if st.Op != "" || st.Method != "GET" || st.Status != 200 {
+		t.Fatalf("复现步骤交换摘要不符,操作方法不上面板(证据包收): %+v", st)
+	}
+	raw := st.Raw
 	for _, want := range []string{
 		"GET /old-backup/?nocache=880011 HTTP/1.1",
 		"Host: mock",
@@ -267,7 +285,7 @@ func TestServerClaimDetail(t *testing.T) {
 			t.Fatalf("复现原文缺 %q:\n%s", want, raw)
 		}
 	}
-	if st["blob_ref"] != ref {
+	if st.BlobRef != ref {
 		t.Fatalf("复现步骤应携带 blob 引用: %+v", st)
 	}
 
@@ -292,7 +310,7 @@ func TestServerClaimReopen(t *testing.T) {
 	ctx := context.Background()
 
 	var created map[string]string
-	post(t, h, http.MethodPost, "/api/tasks", `{"goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"重开验证"}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}],"title":"重开验证"}`, http.StatusOK, &created)
 	task := created["id"]
 	seedFullClaim(t, store, task)
 	// 推到 Confirmed(裁决 + 定稿 + 状态迁移)。

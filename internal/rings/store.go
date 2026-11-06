@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -82,6 +83,7 @@ var (
 	ErrInterjectRecMissingField   = errors.New("rings: interject record missing required field")
 	ErrSettingKeyEmpty            = errors.New("rings: setting key is empty")
 	ErrSettingValueEmpty          = errors.New("rings: setting value is empty")
+	ErrTaskPurged                 = errors.New("rings: task purged, appends rejected")
 	ErrInvalidIntentRule          = errors.New("rings: invalid intent rule")
 	ErrInvalidSessionMeta         = errors.New("rings: invalid session meta")
 	ErrUnknownGuardRecType        = errors.New("rings: unknown guard record type")
@@ -101,12 +103,16 @@ var (
 // 写路径:Append/RebuildProjections 经无缓冲 channel 排队,由唯一
 // writer goroutine 逐项以单事务提交(事件插入与投影更新同事务,原子)。
 // 读路径:直接走连接池,WAL 下多读并发、快照不撕裂。
+// P4-38 数据库暂存保养:WAL 回收(写后超阈值被动回收 + 空闲全量回收,
+// journal_size_limit 收缩暂存)全部在单写者循环内执行——checkpoint
+// 进行期间结构上不可能并发写,也不阻塞读。
 type Store struct {
 	db        *sql.DB
 	writes    chan writeRequest
 	closing   chan struct{}
 	done      chan struct{}
 	closeOnce sync.Once
+	walPath   string // 暂存文件路径(P4-38 保养巡检用)
 	// atRest 静态加密封装器(P3-09):敏感键(secrets.SensitiveSetting)
 	// 的值入库前封装、出库后解封,对消费方透明。EnableAtRest 在开始
 	// 并发读写之前调用一次(启动装配期),此后只读——无锁安全。
@@ -116,6 +122,12 @@ type Store struct {
 	// 通知订阅方)。写者协程读、注册方协程写——经 atomic 无锁同步;
 	// SetOnCommit 注册,未注册即无观察者。
 	onCommit atomic.Value
+	// purged 已特权清除的任务(P4-40 ⑥):清除提交后对其一切账本写入
+	// 拒收(ErrTaskPurged)——终态总结等异步写者可能在清除后才落笔,
+	// 不拒收会让已销毁的数据复活。单写者协程私有(置位于 purge 提交、
+	// 判位于 append/token 写路径,均在写者协程内),无需加锁;进程内
+	// 同 ID 复活在 Manager 一侧本就不可能(任务句柄在册即拒建)。
+	purged map[string]bool
 }
 
 // onCommitFn atomic.Value 的具体类型包装(保持存取类型一致)。
@@ -137,6 +149,7 @@ type writeRequest struct {
 	tokens           []TokenUsage
 	rebuild          bool
 	setting          *settingWrite
+	purge            *purgeWrite
 	resp             chan writeResult
 }
 
@@ -153,19 +166,30 @@ type settingWrite struct {
 	updatedAt time.Time
 }
 
+// purgeWrite 特权清除(P4-40 ⑥):单事务删除一个任务在库内的全部行。
+type purgeWrite struct {
+	taskID string
+}
+
 type writeResult struct {
 	revisions []int64
+	rows      int64 // purge 专用:删除总行数
 	err       error
 }
 
 // Open 打开(或创建)年轮库并启动单写者。path 为库文件路径;
 // 驱动 modernc.org/sqlite(纯 Go,单二进制交叉编译无痛,第六章 §3),
-// WAL 模式 + busy_timeout + synchronous(NORMAL)。
+// WAL 模式 + busy_timeout + synchronous(NORMAL) + journal_size_limit
+// (P4-38:checkpoint 重置时收缩暂存文件,防高水位常驻)。
+// P4-36:升级旧库跨过投影首版(v10)时,在写者启动后同步全量重放一次
+// 回填新投影表(一次性启动成本;期间尚无读者,无撕裂窗口)。
+// P4-38:WAL 保养协程随库启动(见 walkeep.go)。
 func Open(path string) (*Store, error) {
 	dsn := "file:" + path +
 		"?_pragma=journal_mode(WAL)" +
 		"&_pragma=busy_timeout(10000)" +
-		"&_pragma=synchronous(NORMAL)"
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=journal_size_limit(" + strconv.FormatInt(walJournalSizeLimit, 10) + ")"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("rings: 打开库 %s: %w", path, err)
@@ -173,6 +197,11 @@ func Open(path string) (*Store, error) {
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("rings: 连接库 %s: %w", path, err)
+	}
+	var fromVersion int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&fromVersion); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("rings: 读取 schema 版本: %w", err)
 	}
 	if err := migrate(db); err != nil {
 		_ = db.Close()
@@ -183,8 +212,17 @@ func Open(path string) (*Store, error) {
 		writes:  make(chan writeRequest),
 		closing: make(chan struct{}),
 		done:    make(chan struct{}),
+		walPath: path + "-wal",
+		purged:  map[string]bool{},
 	}
 	go s.writerLoop()
+	if fromVersion < projectionFloor && len(migrations) >= projectionFloor {
+		runlog.Infof("年轮库升级(v%d → v%d):全量重放回填读侧投影,一次性启动开销", fromVersion, len(migrations))
+		if err := s.RebuildProjections(context.Background()); err != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("rings: 升级回填投影: %w", err)
+		}
+	}
 	return s, nil
 }
 
@@ -310,6 +348,36 @@ func (s *Store) SetSetting(ctx context.Context, key, value, by string) error {
 	return (<-req.resp).err
 }
 
+// SetSettingQuiet 写入(或覆盖)一条全局配置,不留"配置修改"运行日志行
+// (P4-40 任务草稿:草稿保存不是配置修改,防日志刷屏;键值表存储与单写者
+// 排队语义同 SetSetting)。任务草稿(task.draft.* 键)专用,其余配置写
+// 仍走 SetSetting 留痕。
+func (s *Store) SetSettingQuiet(ctx context.Context, key, value, by string) error {
+	if key == "" {
+		return ErrSettingKeyEmpty
+	}
+	if value == "" {
+		return ErrSettingValueEmpty
+	}
+	if s.atRest != nil && secrets.SensitiveSetting(key) {
+		sealed, err := s.atRest.Seal(value)
+		if err != nil {
+			return fmt.Errorf("rings: 封装配置 %s: %w", key, err)
+		}
+		value = sealed
+	}
+	req := writeRequest{setting: &settingWrite{key: key, value: value, by: by,
+		updatedAt: time.Now().UTC()}, resp: make(chan writeResult, 1)}
+	select {
+	case s.writes <- req:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.closing:
+		return ErrClosed
+	}
+	return (<-req.resp).err
+}
+
 // EnableAtRest 启用静态加密并迁移存量(P3-09):此后敏感键的值写入前
 // 封装、读回解封(对消费方透明);库里已有的敏感明文就地改写为密文,
 // by/updated_at 保持原值(内容未变,审计不虚记)。必须在开始并发读写
@@ -394,6 +462,118 @@ func (s *Store) DeleteSetting(ctx context.Context, key string) error {
 	return (<-req.resp).err
 }
 
+// PurgeTask 特权清除:单事务删除该任务在账本库内的全部行(逐表清单见
+// purgeTaskTx,与 schema 带 task_id 的表一一对应)。经单写者排队——与
+// 一切账本写入共用一把写锁,清行不与在途写竞态(调用方须先确保该任务
+// 运行件已收场,见 Manager.WaitSettled)。不落墓碑事件(账本行连同任务
+// 行一并清除,运行日志留痕由调用方负责)。返回删除总行数。任务无任何
+// 行时幂等返回 0。
+func (s *Store) PurgeTask(ctx context.Context, taskID string) (int64, error) {
+	if taskID == "" {
+		return 0, ErrEmptyTaskID
+	}
+	req := writeRequest{purge: &purgeWrite{taskID: taskID}, resp: make(chan writeResult, 1)}
+	select {
+	case s.writes <- req:
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-s.closing:
+		return 0, ErrClosed
+	}
+	res := <-req.resp
+	return res.rows, res.err
+}
+
+// purgeTaskTx 单事务逐表删除该任务行(events 事件流 / nodes+edges 双图
+// 投影 / tasks 生命周期 / roe_state RoE 当前值 / token_usage token 记账 /
+// 其余 P4-36 读侧投影),累计删除行数。逐条显式字面量语句、task_id 一律
+// 参数化;blobs 内容寻址仓不在库内(跨任务共享,一律不动),settings
+// 键值表无 task_id 维度(草稿键另由草稿端点管理)。
+func purgeTaskTx(tx *sql.Tx, taskID string) (int64, error) {
+	var total int64
+	count := func(res sql.Result) {
+		if n, err := res.RowsAffected(); err == nil {
+			total += n
+		}
+	}
+	if res, err := tx.Exec(`DELETE FROM events WHERE task_id = ?`, taskID); err != nil {
+		return 0, fmt.Errorf("rings: 特权清除任务 %s 表 events: %w", taskID, err)
+	} else {
+		count(res)
+	}
+	if res, err := tx.Exec(`DELETE FROM nodes WHERE task_id = ?`, taskID); err != nil {
+		return 0, fmt.Errorf("rings: 特权清除任务 %s 表 nodes: %w", taskID, err)
+	} else {
+		count(res)
+	}
+	if res, err := tx.Exec(`DELETE FROM edges WHERE task_id = ?`, taskID); err != nil {
+		return 0, fmt.Errorf("rings: 特权清除任务 %s 表 edges: %w", taskID, err)
+	} else {
+		count(res)
+	}
+	if res, err := tx.Exec(`DELETE FROM tasks WHERE task_id = ?`, taskID); err != nil {
+		return 0, fmt.Errorf("rings: 特权清除任务 %s 表 tasks: %w", taskID, err)
+	} else {
+		count(res)
+	}
+	if res, err := tx.Exec(`DELETE FROM roe_state WHERE task_id = ?`, taskID); err != nil {
+		return 0, fmt.Errorf("rings: 特权清除任务 %s 表 roe_state: %w", taskID, err)
+	} else {
+		count(res)
+	}
+	if res, err := tx.Exec(`DELETE FROM token_usage WHERE task_id = ?`, taskID); err != nil {
+		return 0, fmt.Errorf("rings: 特权清除任务 %s 表 token_usage: %w", taskID, err)
+	} else {
+		count(res)
+	}
+	if res, err := tx.Exec(`DELETE FROM unit_sessions WHERE task_id = ?`, taskID); err != nil {
+		return 0, fmt.Errorf("rings: 特权清除任务 %s 表 unit_sessions: %w", taskID, err)
+	} else {
+		count(res)
+	}
+	if res, err := tx.Exec(`DELETE FROM session_labels WHERE task_id = ?`, taskID); err != nil {
+		return 0, fmt.Errorf("rings: 特权清除任务 %s 表 session_labels: %w", taskID, err)
+	} else {
+		count(res)
+	}
+	if res, err := tx.Exec(`DELETE FROM approval_records WHERE task_id = ?`, taskID); err != nil {
+		return 0, fmt.Errorf("rings: 特权清除任务 %s 表 approval_records: %w", taskID, err)
+	} else {
+		count(res)
+	}
+	if res, err := tx.Exec(`DELETE FROM claim_cases WHERE task_id = ?`, taskID); err != nil {
+		return 0, fmt.Errorf("rings: 特权清除任务 %s 表 claim_cases: %w", taskID, err)
+	} else {
+		count(res)
+	}
+	if res, err := tx.Exec(`DELETE FROM hyp_states WHERE task_id = ?`, taskID); err != nil {
+		return 0, fmt.Errorf("rings: 特权清除任务 %s 表 hyp_states: %w", taskID, err)
+	} else {
+		count(res)
+	}
+	if res, err := tx.Exec(`DELETE FROM task_extras WHERE task_id = ?`, taskID); err != nil {
+		return 0, fmt.Errorf("rings: 特权清除任务 %s 表 task_extras: %w", taskID, err)
+	} else {
+		count(res)
+	}
+	if res, err := tx.Exec(`DELETE FROM closure_states WHERE task_id = ?`, taskID); err != nil {
+		return 0, fmt.Errorf("rings: 特权清除任务 %s 表 closure_states: %w", taskID, err)
+	} else {
+		count(res)
+	}
+	if res, err := tx.Exec(`DELETE FROM claim_qa WHERE task_id = ?`, taskID); err != nil {
+		return 0, fmt.Errorf("rings: 特权清除任务 %s 表 claim_qa: %w", taskID, err)
+	} else {
+		count(res)
+	}
+	if res, err := tx.Exec(`DELETE FROM mirror_briefs WHERE task_id = ?`, taskID); err != nil {
+		return 0, fmt.Errorf("rings: 特权清除任务 %s 表 mirror_briefs: %w", taskID, err)
+	} else {
+		count(res)
+	}
+	return total, nil
+}
+
 // Setting 读一条全局配置;ok=false 表示未配置(消费方退装配默认)。
 // 读路径走连接池(WAL 并发读),updated_at 解析失败按零值如实返回。
 // P3-09:敏感键密文透明解封;未封装的历史明文原样返回(迁移兜底语义)。
@@ -472,21 +652,59 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// writerLoop 单写者循环:写请求逐项单事务提交;空闲计时器(P4-38)
+// 静默超过空闲窗即转入 WAL 保养(TRUNCATE 全量回收)。保养与写同
+// goroutine——checkpoint 进行期间结构上不可能并发写;写请求优先于
+// 保养(有空闲写请求时先排干再保养)。恢复写入即停计时,不误伤。
 func (s *Store) writerLoop() {
 	defer close(s.done)
+	var idleTimer *time.Timer
+	stopIdle := func() {
+		if idleTimer != nil {
+			idleTimer.Stop()
+			idleTimer = nil
+		}
+	}
+	armIdle := func() {
+		stopIdle()
+		idleTimer = time.NewTimer(walKeeperIdle)
+	}
+	defer stopIdle()
+	armIdle()
+	handle := func(req writeRequest) {
+		res := s.handle(req)
+		req.resp <- res
+		// 提交后通知观察者(P3-08):仅在事件批成功落库时;失败批与
+		// 配置/token 写入不构成推送源。同步调用发生在单写者循环内,
+		// 观察者必须非阻塞。
+		if res.err == nil && len(res.revisions) > 0 {
+			if v, ok := s.onCommit.Load().(onCommitFn); ok && v.fn != nil {
+				v.fn(req.taskID, req.events)
+			}
+		}
+		// P4-38 写后保养:暂存超阈值补一发被动回收(此刻无并发写)。
+		s.walKeepPostWrite()
+		armIdle()
+	}
 	for {
+		// 写请求优先:有空闲写请求时先排干,保养让路。
 		select {
 		case req := <-s.writes:
-			res := s.handle(req)
-			req.resp <- res
-			// 提交后通知观察者(P3-08):仅在事件批成功落库时;失败批与
-			// 配置/token 写入不构成推送源。同步调用发生在单写者循环内,
-			// 观察者必须非阻塞。
-			if res.err == nil && len(res.revisions) > 0 {
-				if v, ok := s.onCommit.Load().(onCommitFn); ok && v.fn != nil {
-					v.fn(req.taskID, req.events)
-				}
-			}
+			handle(req)
+			continue
+		default:
+		}
+		var idleC <-chan time.Time
+		if idleTimer != nil {
+			idleC = idleTimer.C
+		}
+		select {
+		case req := <-s.writes:
+			handle(req)
+		case <-idleC:
+			stopIdle()
+			s.walKeepIdle()
+			armIdle()
 		case <-s.closing:
 			// 无缓冲 channel:尚未完成交接的发送方会经自身的
 			// closing/ctx 分支自行返回,此处直接退出不会留悬挂等待者。
@@ -500,9 +718,29 @@ func (s *Store) handle(req writeRequest) writeResult {
 	case req.rebuild:
 		return writeResult{err: s.withTx(rebuildProjections)}
 	case req.tokens != nil:
-		return writeResult{err: s.withTx(func(tx *sql.Tx) error { return insertTokenRows(tx, req.tokens) })}
+		// 已特权清除任务的迟到用量行丢弃(P4-40 ⑥:数据已销毁,不再
+		// 复活);批内其余任务照常入账。
+		rows := req.tokens[:0:0]
+		for _, r := range req.tokens {
+			if !s.purged[r.TaskID] {
+				rows = append(rows, r)
+			}
+		}
+		return writeResult{err: s.withTx(func(tx *sql.Tx) error { return insertTokenRows(tx, rows) })}
 	case req.setting != nil:
 		return writeResult{err: s.withTx(func(tx *sql.Tx) error { return applySetting(tx, req.setting) })}
+	case req.purge != nil:
+		var rows int64
+		err := s.withTx(func(tx *sql.Tx) error {
+			var perr error
+			rows, perr = purgeTaskTx(tx, req.purge.taskID)
+			return perr
+		})
+		if err == nil {
+			// 拒收闸落位(单写者协程内,见 Store.purged 注释)。
+			s.purged[req.purge.taskID] = true
+		}
+		return writeResult{rows: rows, err: err}
 	default:
 		revs, err := s.appendTx(req.taskID, req.events, req.expectedRevision)
 		return writeResult{revisions: revs, err: err}
@@ -565,7 +803,12 @@ func insertTokenRows(tx *sql.Tx, rows []TokenUsage) error {
 // appendTx 单事务追加一批事件并同步维护投影。
 // revision 分配:任务内取当前最大值;显式指定的必须严格大于当前值
 // (单调递增),重复或回退一律拒绝,UNIQUE(task_id, revision) 为物理兜底。
+// 已特权清除的任务拒收(P4-40 ⑥:清除后迟到的异步写入不得让已销毁的
+// 数据复活)。
 func (s *Store) appendTx(taskID string, events []Event, expected *int64) ([]int64, error) {
+	if s.purged[taskID] {
+		return nil, ErrTaskPurged
+	}
 	var revisions []int64
 	err := s.withTx(func(tx *sql.Tx) error {
 		revisions = nil
@@ -607,7 +850,7 @@ func (s *Store) appendTx(taskID string, events []Event, expected *int64) ([]int6
 			); err != nil {
 				return fmt.Errorf("rings: 任务 %s 追加事件 rev %d: %w", taskID, rev, err)
 			}
-			if err := applyEvent(tx, taskID, rev, ev.Kind, payload); err != nil {
+			if err := applyEvent(tx, taskID, rev, ev.Kind, ev.Actor, payload, occurred); err != nil {
 				return fmt.Errorf("rings: 任务 %s 事件 rev %d 应用投影: %w", taskID, rev, err)
 			}
 			revisions = append(revisions, rev)

@@ -33,9 +33,11 @@ type hypothesisView struct {
 	CreatedRev   int64    `json:"created_rev"`
 }
 
-// hypListView 输出 view 或 nil(列表项可复用)。
+// hypListView 输出 view 或 nil(列表项可复用)。P4-36 起评估/验证结论
+// 读 hyp_states 投影(写侧 applyHypState 同事务维护,latest-wins 语义
+// 与事件扫描一致),不再触碰事件流。
 func (s *Server) hypothesisViewOf(h rings.NodeFull,
-	abouts, produces, verifies []rings.EdgeView, evs []rings.RawEvent) *hypothesisView {
+	abouts, produces, verifies []rings.EdgeView, st rings.HypStateRow) *hypothesisView {
 	v := &hypothesisView{
 		ID: h.ID, Status: h.Status, Statement: h.Title, CreatedRev: h.CreatedRev,
 	}
@@ -55,33 +57,8 @@ func (s *Server) hypothesisViewOf(h rings.NodeFull,
 			}
 		}
 	}
-	var latestEval *rings.HypothesisRecord
-	var latestResult *rings.HypothesisRecord
-	for i := range evs {
-		if evs[i].Kind != rings.EventHypothesisRecord {
-			continue
-		}
-		var r rings.HypothesisRecord
-		if json.Unmarshal(evs[i].Payload, &r) != nil || r.HypothesisID != h.ID {
-			continue
-		}
-		switch r.Type {
-		case rings.HypothesisRecEvaluation:
-			latestEval = &r
-			if r.StepID != "" {
-				v.VerifyStep = r.StepID
-			}
-		case rings.HypothesisRecResult:
-			latestResult = &r
-			v.VerifyStep, v.Verifier = r.StepID, r.UnitID
-		}
-	}
-	if latestEval != nil {
-		v.Decision, v.Reason = latestEval.Decision, latestEval.Reason
-	}
-	if latestResult != nil {
-		v.Verdict = latestResult.Verdict
-	}
+	v.VerifyStep, v.Verifier = st.VerifyStep, st.Verifier
+	v.Decision, v.Reason, v.Verdict = st.Decision, st.Reason, st.Verdict
 	return v
 }
 
@@ -113,14 +90,15 @@ func (s *Server) handleHypothesesList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	evs, err := s.Store.Events(ctx, taskID, 0, 0)
+	// P4-36:摘要读 hyp_states 投影,列表不再扫描事件流。
+	hypStates, err := s.Store.HypStates(ctx, taskID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	out := make([]*hypothesisView, 0, len(hyps))
 	for _, h := range hyps {
-		out = append(out, s.hypothesisViewOf(h, abouts, produces, verifies, evs))
+		out = append(out, s.hypothesisViewOf(h, abouts, produces, verifies, hypStates[h.ID]))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -199,8 +177,12 @@ func (s *Server) handleHypothesisDetail(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-
-	v := hypDetailView{Hypothesis: *s.hypothesisViewOf(*node, abouts, produces, verifies, evs)}
+	hypStates, err := s.Store.HypStates(ctx, taskID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	v := hypDetailView{Hypothesis: *s.hypothesisViewOf(*node, abouts, produces, verifies, hypStates[hypID])}
 	v.Trajectory.Assets = []string{}
 	v.Trajectory.VerifySteps = []verifyStepView{}
 	for _, e := range produces {

@@ -49,7 +49,7 @@ func TestServerTaskSeedFormAndAssetTree(t *testing.T) {
 	// 种子表单:四层链(domain → subdomain → host → service)+ 独立
 	// leak_info,共 5 资产 3 条 sub_of。
 	var created map[string]any
-	post(t, h, http.MethodPost, "/api/tasks", `{
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam",
 		"id":"seed-form","title":"资产同步 v1 验证","goals":["种子目标"],
 		"assets":[
 			{"class":"domain","title":"example.com"},
@@ -181,7 +181,7 @@ func TestServerTaskSeedFormAndAssetTree(t *testing.T) {
 
 	// P4-16:任务名可选——空标题 + 齐全目标资产照建,列表以任务 ID 呈现。
 	post(t, h, http.MethodPost, "/api/tasks",
-		`{"title":"  ","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.2"}]}`,
+		`{"task_type":"redteam","title":"  ","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.2"}]}`,
 		http.StatusOK, &created)
 	if created["id"] == "" {
 		t.Fatalf("空标题应照常建任务: %+v", created)
@@ -220,7 +220,7 @@ func TestServerTaskStopLedger(t *testing.T) {
 	ctx := context.Background()
 
 	var created map[string]any
-	post(t, h, http.MethodPost, "/api/tasks", `{"id":"fuse-ledger","title":"熔断审计","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}]}`, http.StatusOK, &created)
+	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","id":"fuse-ledger","title":"熔断审计","goals":["种子目标"],"assets":[{"class":"host","title":"10.0.0.1"}]}`, http.StatusOK, &created)
 
 	// 不存在的任务 404。
 	var errBody map[string]string
@@ -369,10 +369,10 @@ func TestServerTaskFuseIsolationE2E(t *testing.T) {
 	// 默认并发上限 2,两任务同时拉起。
 	var created map[string]any
 	post(t, h, http.MethodPost, "/api/tasks", fmt.Sprintf(
-		`{"id":"fuse-a","title":"任务 A(将被熔断)","goals":["种子目标"],"assets":[{"class":"service","title":%q}]}`, urlA),
+		`{"task_type":"redteam","id":"fuse-a","title":"任务 A(将被熔断)","goals":["种子目标"],"assets":[{"class":"service","title":%q}]}`, urlA),
 		http.StatusOK, &created)
 	post(t, h, http.MethodPost, "/api/tasks", fmt.Sprintf(
-		`{"id":"fuse-b","title":"任务 B(须不受影响)","goals":["种子目标"],"assets":[{"class":"service","title":%q}]}`, urlB),
+		`{"task_type":"redteam","id":"fuse-b","title":"任务 B(须不受影响)","goals":["种子目标"],"assets":[{"class":"service","title":%q}]}`, urlB),
 		http.StatusOK, &created)
 
 	// 各自补一个带谓词目标(硬终止):该资产上有 confirmed 事实即达成。

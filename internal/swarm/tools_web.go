@@ -21,6 +21,9 @@ import (
 
 	"github.com/Autumn-27/norma/tool"
 
+	"ghostreaper/internal/blackbox"
+	"ghostreaper/internal/rings"
+	"ghostreaper/internal/runlog"
 	"ghostreaper/internal/websearch"
 )
 
@@ -79,6 +82,21 @@ func (env *unitEnv) readTool() tool.CoreTool {
 			}
 			if limit > readMaxLines {
 				limit = readMaxLines
+			}
+			// 存档引用直接回读(P4-39 ①:工具输出超长落盘后,按返回文本中的
+			// sha256: 引用取回全文,offset/limit 分段与文件同款)。
+			if ref := extractBlobRef(p); ref != "" && ref != p {
+				return tool.Errorf("path 含多余内容:存档引用须原样填入(如 sha256:<64 位十六进制>);多余前缀会挡住引用解析"), nil
+			}
+			if strings.HasPrefix(p, BlobRefPrefix) {
+				path, rerr := env.Executor.Blobs.Path(p)
+				if rerr != nil {
+					return tool.Errorf(fmt.Sprintf("存档引用非法: %v", rerr)), nil
+				}
+				if _, serr := os.Stat(path); serr != nil {
+					return tool.Errorf(fmt.Sprintf("存档原文不存在: %s;引用指向的内容寻址文件缺失(可能库目录被移动),可重跑原命令重新取得", p)), nil
+				}
+				p = path
 			}
 			// 相对路径按步骤工作目录解析(与 bash 同一基准)。
 			if !filepath.IsAbs(p) {
@@ -151,8 +169,21 @@ func (env *unitEnv) readTool() tool.CoreTool {
 			}
 			b.WriteString(")")
 			text := b.String()
-			if ref, head := env.Executor.Blobs.spill(text); ref != "" {
-				return tool.Text(fmt.Sprintf("%s\n[输出超长,全文已存档: %s]", head, ref)), nil
+			// P4-39 ①:read 是存档引用的钦定回读通道,阈值取 30,000 定值
+			//——沿用旧 4,096 会套娃 spill(读回的段又被 spill,段后半永远
+			// 读不到)。超 30,000 的整段落 blob,对话内留截头+引用;其余
+			// 工具(bash 等)的 4,096 R18 spill 不变(瘦身优先)。落盘记
+			// 黑匣子 tool_spill(P4-39 新落盘面;bash 家族的 R18 落盘账
+			// 在年轮 SwarmRecord.ResultRef,不动)。
+			if len(text) > convSpillThreshold {
+				if ref, werr := env.Executor.Blobs.Write([]byte(text)); werr == nil {
+					detail := map[string]any{"tool": "read", "ref": ref, "bytes": len(text)}
+					if berr := blackbox.Record(context.Background(), env.Executor.Store, env.TaskID, "swarm:"+env.UnitID,
+						rings.BlackboxRecord{Type: rings.BlackboxToolSpill, StepID: env.StepID, UnitID: env.UnitID, Detail: detail}); berr != nil {
+						runlog.Errorf("黑匣子写入失败: read 落盘 %s/%s: %v", env.TaskID, env.UnitID, berr)
+					}
+					return tool.Text(fmt.Sprintf("%s\n[输出超长,全文已存档: %s]", text[:blobThreshold], ref)), nil
+				}
 			}
 			return tool.Text(text), nil
 		},
@@ -384,7 +415,7 @@ func replaceAllFold(s, old, new string) string {
 // ---- 工具目录条目(描述与 tools.go 的目录单一来源共用) ----
 
 const (
-	toolDescRead      = "只读文件工具:读取本机文本文件内容(带行号),用于分析执行中下载或落盘的产物(配置、源码、响应存档等)。一次最多 1000 行、每行截 2000 字符,大文件用 offset/limit 分段读;本工具无任何写操作,二进制文件不归本工具(用 bash 的 file/strings/xxd 分析)。"
+	toolDescRead      = "只读文件工具:读取本机文本文件内容(带行号),用于分析执行中下载或落盘的产物(配置、源码、响应存档等)。一次最多 1000 行、每行截 2000 字符,大文件用 offset/limit 分段读;工具输出超长被存档时,把返回文本里的存档引用(sha256: 开头)原样作为 path 填入即可读回全文,同样支持 offset/limit 分段。本工具无任何写操作,二进制文件不归本工具(用 bash 的 file/strings/xxd 分析)。"
 	toolDescWebSearch = "外网搜索公开信息(CVE 详情、公开漏洞分析、报错原文查证),返回标题、链接与摘要。默认 DuckDuckGo 免 key;后端(Brave/Tavily 需 key)与独立出口代理在系统设置·搜索配置。结果不足时换关键词重搜,不要重复同一查询。"
 	toolDescWebFetch  = "取回外网 URL 的原文(网页返回正文文本而非 HTML 源码;JSON/XML 等文本原样;二进制只报类型与大小)。流量强制经镜留痕,可在流量页回放查证。正文超长会截断存档;查 CVE 详情、 advisory 原文、公开报告时用本工具。"
 )

@@ -107,6 +107,21 @@ type TaskPack struct {
 	// 评估"值得跟"派发的验证意图(detail.kind=verify)时非 nil。R12:验证
 	// 单位与提出单位必不相同——由领任务包时的绑定与写回入口校验双重保障。
 	Verify *HypothesisBrief
+
+	// TaskType 任务类型(P4-44 ②:created 事件 detail 定格,建后不可改):
+	// 渗透/红队;空 = 存量未标(行为等同红队)。
+	TaskType string
+
+	// ScopeClosure 种子闭包(P4-44 ①③):种子/手动/已放行资产的主机锚点
+	// 集(给域名=域名级授权,给 IP=服务器级授权)。仅渗透任务在领取时
+	// 构建并冻结进任务包——权限管线据此对命令目标做范围外硬拦;红队/
+	// 未标任务为 nil(现状行为,不拦)。冻结语义与授权边界同款:面板
+	// 放行/新增资产对下一批领取的单位生效。
+	ScopeClosure *rings.ScopeClosure
+
+	// PendingScope 待批资产清单(P4-44 ③:渗透任务的范围外发现资产,
+	// 锁定不测)。领取时冻结,RoE 约束块据此渲染"待批资产"行;空 = 无。
+	PendingScope []rings.ExcludedAssetView
 }
 
 // HypothesisBrief 假设验证任务上下文:被验证假设的冻结要素。
@@ -241,6 +256,17 @@ func (p *TaskPack) Render() string {
 
 	fmt.Fprintf(&b, "\n六、授权与预算\n")
 	fmt.Fprintf(&b, "  授权: 仅限 RoE 边界内操作;本系统仅供授权测试。\n")
+	// 造物主注意事项(P4-49):任务包携带注入之一——新单位出生即见;
+	// 与 RoE 约束块、重锚定重申同源于领取时冻结的授权副本。管边界
+	// 不管打法:注意事项之外的做法自由。
+	if p.Authorization.CreatorNotes != "" {
+		b.WriteString("  造物主注意事项(对做法的要求,须遵守;未提及的做法你自主选择):\n")
+		for _, line := range strings.Split(p.Authorization.CreatorNotes, "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				fmt.Fprintf(&b, "    - %s\n", line)
+			}
+		}
+	}
 	if len(p.Credentials) > 0 {
 		b.WriteString("  可用凭据(秘密经环境变量注入,命令里引用变量名,勿回显其值):\n")
 		for _, c := range p.Credentials {

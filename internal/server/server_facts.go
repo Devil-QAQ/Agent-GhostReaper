@@ -6,7 +6,6 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 
@@ -39,6 +38,8 @@ type factRow struct {
 // handleFactsList 已确认事实列表(GET /api/tasks/{id}/facts):只收
 // confirmed(候选经主宰收割转正后才入此清单);入账序返回,面板自上
 // 而下取最新即倒序读(与虫群单位列表同口径)。
+// P4-36:入账/确认时刻读 nodes 投影列(added_at/confirmed_at 由写侧
+// 同事务维护)——不再扫描事件流。
 func (s *Server) handleFactsList(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 	if !s.taskExists(taskID) {
@@ -56,37 +57,6 @@ func (s *Server) handleFactsList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	evs, err := s.Store.Events(ctx, taskID, 0, 0)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-	// 时刻自事件流取:created = node.added,confirmed = 转 confirmed 的
-	// node.state_changed(直接以 confirmed 入账的种子数据退 created)。
-	addedAt := map[string]string{}
-	type confirmedMark struct {
-		at  string
-		rev int64
-	}
-	confirmedOf := map[string]confirmedMark{}
-	for _, ev := range evs {
-		switch ev.Kind {
-		case rings.EventNodeAdded:
-			var p rings.NodeAdded
-			if json.Unmarshal(ev.Payload, &p) == nil && p.NodeType == rings.NodeFact {
-				addedAt[p.NodeID] = ev.OccurredAt.Local().Format("2006-01-02 15:04:05")
-			}
-		case rings.EventNodeStateChanged:
-			var p rings.NodeStateChanged
-			if json.Unmarshal(ev.Payload, &p) == nil && p.Status == "confirmed" {
-				confirmedOf[p.NodeID] = confirmedMark{
-					at:  ev.OccurredAt.Local().Format("2006-01-02 15:04:05"),
-					rev: ev.Revision,
-				}
-			}
-		}
-	}
-
 	assetTitle := map[string]string{}
 	if ag, err := s.Store.AssetGraph(ctx, taskID); err == nil {
 		for _, a := range ag.Assets {
@@ -101,9 +71,9 @@ func (s *Server) handleFactsList(w http.ResponseWriter, r *http.Request) {
 			CreatedRev: f.CreatedRev,
 			Assets:     []factAssetView{},
 		}
-		row.CreatedAt = addedAt[f.ID]
-		if m, ok := confirmedOf[f.ID]; ok {
-			row.ConfirmedAt, row.ConfirmedRev = m.at, m.rev
+		row.CreatedAt = f.AddedAt
+		if f.ConfirmedAt != "" {
+			row.ConfirmedAt, row.ConfirmedRev = f.ConfirmedAt, f.ConfirmedRev
 		} else {
 			row.ConfirmedAt, row.ConfirmedRev = row.CreatedAt, f.CreatedRev
 		}

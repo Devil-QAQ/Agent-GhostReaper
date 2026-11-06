@@ -5,7 +5,7 @@ import { toast } from "sonner";
 
 import { downloadExport } from "@/components/export-dialog";
 import { iconOf } from "@/components/icons";
-import { Field, Fold, INPUT } from "@/components/form-bits";
+import { Field, Fold, INPUT, NUM } from "@/components/form-bits";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -128,39 +128,108 @@ function SettingRow({ title, summary, value, valueMono, onOpen }) {
   );
 }
 
-// SystemParamsRow 系统参数行:卡面只显监听地址,路径细节进只读弹窗。
+// SystemParamsRow 系统参数行:卡面露出任务并发数,路径细节进弹窗;
+// 监听/路径只读,任务并发可改(P4-34)。
 function SystemParamsRow({ sys }) {
   const [open, setOpen] = React.useState(false);
+  // override:保存响应的即时视图(远端轮询尚未带回新值时覆盖展示,
+  // 轮询追上后自然回落)。
+  const [override, setOverride] = React.useState(null);
+  const conc = override ?? sys?.task_concurrency ?? null;
+  React.useEffect(() => {
+    setOverride(null);
+  }, [sys?.task_concurrency?.value, sys?.task_concurrency?.overridden]);
+
   return (
     <>
       <SettingRow
         title="系统参数"
-        summary="启动时指定的参数,面板只读"
-        value={sys?.addr || "—"}
+        summary="监听地址与路径只读,任务并发可改"
+        value={conc ? `并发 ${conc.value}` : "—"}
         valueMono
         onOpen={() => setOpen(true)}
       />
-      <SystemParamsDialog open={open} onOpenChange={setOpen} sys={sys} />
+      <SystemParamsDialog
+        open={open}
+        onOpenChange={setOpen}
+        sys={sys}
+        conc={conc}
+        onSaved={setOverride}
+      />
     </>
   );
 }
 
-function SystemParamsDialog({ open, onOpenChange, sys }) {
+// SystemParamsDialog 系统参数弹窗:监听地址/账本路径/任务目录三行只读,
+// 第四行任务并发可编辑(P4-34)——整数 1~16,越界人话拒改;清空保存回
+// 默认 2;调大保存有空位即拉起排队任务。
+function SystemParamsDialog({ open, onOpenChange, sys, conc, onSaved }) {
+  const [input, setInput] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+
+  // 打开时以远端生效值打底(已配置显数值、未配置留空提示默认);关闭
+  // 即弃本地态。
+  React.useEffect(() => {
+    if (open) setInput(conc?.overridden ? String(conc.value) : "");
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const dirty = (() => {
+    const cur = conc?.overridden ? String(conc.value) : "";
+    return input.trim() !== cur;
+  })();
+
+  const submit = async () => {
+    const v = input.trim();
+    if (v !== "") {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1 || n > 16) {
+        toast.error("任务并发须为 1–16 的整数,清空恢复默认 2");
+        return;
+      }
+    }
+    setBusy(true);
+    const { ok, body } = await postJSON("/api/config/system", {
+      task_concurrency: v,
+    });
+    setBusy(false);
+    if (!ok) {
+      toast.error(`保存失败:${body.error || "原因未说明"}`);
+      return;
+    }
+    onSaved(body?.system?.task_concurrency ?? null);
+    onOpenChange(false);
+    toast.success("已保存,对下一轮调度生效");
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="w-[min(520px,94vw)] max-w-none gap-4 p-6">
         <DialogHeader>
           <DialogTitle>系统参数</DialogTitle>
-          <DialogDescription>启动时指定的参数,面板只读</DialogDescription>
+          <DialogDescription>监听地址与路径为启动参数,只读</DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3">
           <Kv k="监听地址" v={sys?.addr || "—"} mono />
           <Kv k="账本路径" v={sys?.db_path || "—"} mono />
           <Kv k="任务目录" v={sys?.tasks_dir || "—"} mono />
+          <Field label="任务并发">
+            <Input
+              className={NUM}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder={conc?.overridden ? "清空恢复默认 2" : "默认 2"}
+            />
+            <span className="text-xs text-muted-foreground">
+              同时运行的任务数，超出的排队
+            </span>
+          </Field>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             关闭
+          </Button>
+          <Button onClick={submit} disabled={busy || !dirty}>
+            保存
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -338,40 +407,53 @@ function GuardRulesDialog({ open, onOpenChange, rules, error }) {
 }
 
 function GuardRuleRow({ rule, onEdit, onDelete }) {
-  const [busy, setBusy] = React.useState(false);
+  // P4-47 B ① 乐观更新:启停点下即翻、后台提交、失败回弹+人话提示;
+  // 本地态在服务端轮询跟上后自动交还。
+  const [local, setLocal] = React.useState(null); // null = 跟随服务端
+  React.useEffect(() => {
+    setLocal((cur) => (cur !== null && rule.enabled === cur ? null : cur));
+  }, [rule.enabled]);
 
-  const toggle = async (enabled) => {
-    setBusy(true);
-    const { ok, body } = await postJSON("/api/guard/rules", {
-      id: rule.id,
-      group: rule.group,
-      name: rule.name,
-      pattern: rule.pattern,
-      tool_scope: rule.tool_scope || "",
-      action: rule.action || "",
-      enabled,
-      note: rule.note || "",
-    });
-    setBusy(false);
+  const toggle = async (next) => {
+    setLocal(next);
+    let ok = false;
+    let body = null;
+    // 网络/服务端失败统一走回弹(postJSON 在网络不通时抛异常,一并兜住)。
+    try {
+      ({ ok, body } = await postJSON("/api/guard/rules", {
+        id: rule.id,
+        group: rule.group,
+        name: rule.name,
+        pattern: rule.pattern,
+        tool_scope: rule.tool_scope || "",
+        action: rule.action || "",
+        enabled: next,
+        note: rule.note || "",
+      }));
+    } catch {
+      ok = false;
+    }
     if (!ok) {
-      toast.error(`保存失败:${body.error || "原因未说明"}`);
+      // 失败回弹:交还服务端现值(本次点击未被改动)。
+      setLocal(null);
+      toast.error(`未生效:${body?.error || "网络未连通"},已还原勾选`);
       return;
     }
-    toast.success(enabled ? "已启用,对下一次判定生效" : "已禁用,对下一次判定生效");
+    toast.success(next ? "已启用,对下一次判定生效" : "已禁用,对下一次判定生效");
   };
 
+  const enabled = local ?? rule.enabled;
   const builtin = rule.name.startsWith("[内置]");
   return (
     <div
       className={`flex items-center gap-2 rounded-lg border border-border/55 bg-card px-3 py-2 text-[13px] transition-colors duration-150 hover:bg-hover-lift ${
-        rule.enabled ? "" : "opacity-60"
+        enabled ? "" : "opacity-60"
       }`}
     >
       <Checkbox
-        checked={rule.enabled}
-        disabled={busy}
-        onCheckedChange={toggle}
-        title={rule.enabled ? "启用中" : "已禁用"}
+        checked={enabled}
+        onCheckedChange={(v) => toggle(Boolean(v))}
+        title={enabled ? "启用中" : "已禁用"}
       />
       {builtin && <Badge variant="outline">内置</Badge>}
       {rule.action === "gate" && <Badge variant="warning">需批准</Badge>}
@@ -1324,7 +1406,9 @@ function DiagnosticsDialog({ open, onOpenChange, tasks }) {
     const next = new Set(allPicked ? tasks.map((t) => t.id) : picked);
     if (next.has(id)) next.delete(id);
     else next.add(id);
-    setPicked(next.size === tasks.length ? null : next);
+    // P4-47 B ②:逐选勾满仍是逐选(显式清单),不自动跳全选模式;
+    // 全选模式只由上方「全选」行触发。
+    setPicked(next);
   };
   const toggleKind = (id) => {
     const next = new Set(kinds);

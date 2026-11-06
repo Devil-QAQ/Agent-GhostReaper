@@ -192,6 +192,14 @@ function OvermindPane({ task, onInterject }) {
   const { data, error } = usePolling(url || "/api/healthz", 2000, {
     immediate: Boolean(url),
   });
+  // 在途全景实时视图(P4-46 ①):与工作台水位同拍——tasks 实时主题事件
+  // 驱动刷新(推送未连接时按 2 秒轮询降级,与虫群列表同节奏);数据与
+  // 虫群排队条目/水位同源(同一账本投影),不新增采集。
+  const { data: panoBody, error: panoErr } = usePolling(
+    taskID ? `/api/tasks/${taskID}/panorama` : "/api/healthz",
+    2000,
+    { immediate: Boolean(taskID), live: taskID ? ["tasks"] : null }
+  );
   const chatURL = taskID ? `/api/tasks/${taskID}/interject?target=overmind` : null;
   const { data: chat, setData: setChat } = usePolling(chatURL || "/api/healthz", 2000, {
     immediate: Boolean(chatURL),
@@ -223,9 +231,11 @@ function OvermindPane({ task, onInterject }) {
     toast.success(action === "pause" ? "主宰循环已冬眠" : "主宰循环已唤醒");
   };
 
-  // 研判轨迹与直连对话按时间归并成一条流。
+  // 研判轨迹与直连对话按时间归并成一条流。最新轮卡带实时全景(P4-46 ①)。
   const stream = [];
-  rounds.forEach((r, i) => stream.push({ at: r.at, key: `r${i}`, kind: "round", round: r }));
+  rounds.forEach((r, i) =>
+    stream.push({ at: r.at, key: `r${i}`, kind: "round", round: r, latest: i === rounds.length - 1 })
+  );
   messages.forEach((m) => stream.push({ at: m.at, key: m.id, kind: "chat", msg: m }));
   stream.sort((a, b) => (a.at || "").localeCompare(b.at || ""));
 
@@ -265,7 +275,15 @@ function OvermindPane({ task, onInterject }) {
         )}
         {stream.map((item) =>
           item.kind === "round" ? (
-            <RoundCard key={item.key} round={item.round} taskID={taskID} onNode={setNode} />
+            <RoundCard
+              key={item.key}
+              round={item.round}
+              latest={item.latest}
+              live={item.latest ? panoBody?.panorama : undefined}
+              liveError={item.latest ? panoErr : null}
+              taskID={taskID}
+              onNode={setNode}
+            />
           ) : (
             <InterjectBlock key={item.key} msg={item.msg} steerStateOf={steerStateOf} />
           )
@@ -308,13 +326,18 @@ function OvermindPane({ task, onInterject }) {
 // RoundCard 一轮研判:五问结论(逐问一行,无 = 本轮该问无可研判项)+
 // 五问外研判 + 派发决策(本轮窗口内新增步骤,状态取当前)+ 收割
 // (事实转正 / 声明裁决 / 假设裁决)+ 会话原文下钻(态势快照与研判
-// 回复的原文)。
-function RoundCard({ round, taskID, onNode }) {
+// 回复的原文)。在途全景(P4-46 ①):最新轮卡呈实时视图(live,与
+// 虫群列表/水位同源同拍),历史轮次卡保留按轮回放快照并标定格时刻。
+function RoundCard({ round, taskID, onNode, latest, live, liveError }) {
   const [openRaw, setOpenRaw] = React.useState(false);
   // 在途全景自适应折叠(P4-25 ③,问题清单 #41):每卡默认收着,>5 条
   // 只显示前 5 条,点「还有 N 条」展开全量、再点收起;≤5 条直接全显
   //(当前轮与历史轮次同款)。
   const [panoOpen, setPanoOpen] = React.useState(false);
+  // 最新轮 = 实时视图(live 未到达时如实呈读取中/失败,不拿快照冒充
+  // 实时);历史轮 = 该轮时刻的回放快照。
+  const liveLoaded = !latest || live !== undefined || Boolean(liveError);
+  const pano = latest ? live || [] : round.panorama || [];
   const hasHarvest =
     (round.facts_confirmed || []).length > 0 ||
     (round.claims_judged || []).length > 0 ||
@@ -336,6 +359,14 @@ function RoundCard({ round, taskID, onNode }) {
         )}
       </div>
       <div className="mt-2 space-y-1">
+        {/* 触发来源(P4-48 ④):操作者深入指令的触发行,确定性装配;其余
+            触发(单位落地/RoE 变更等)在账本可溯,不逐条上面板 */}
+        {(round.triggers || []).map((t, i) => (
+          <div key={`trig-${i}`} className="flex gap-2">
+            <span className="w-[190px] shrink-0 text-muted-foreground">触发</span>
+            <span className="min-w-0 [overflow-wrap:anywhere]">{t}</span>
+          </div>
+        ))}
         {FIVE_QUESTIONS.map(([key, label]) => (
           <div key={key} className="flex gap-2">
             <span className="w-[190px] shrink-0 text-muted-foreground">{label}</span>
@@ -376,47 +407,68 @@ function RoundCard({ round, taskID, onNode }) {
           执行中 {round.queue.running} / 排队 {round.queue.queued} / 等前置 {round.queue.waiting} / 本轮还可新增 {round.queue.available} · 派发上限 {round.queue.limit}
         </div>
       )}
-      {/* 在途全景(P4-11 ②):该轮研判时刻的在跑+排队步骤,按领取次序排;
-          账本按版本号回放装配,零 LLM——表是机器的,上面五问叙述是模型的 */}
+      {/* 在途全景(P4-11 ②,P4-46 ① 实时化):最新研判卡呈实时视图
+          (与虫群列表、工作台水位同源同拍);历史轮次卡保留按轮回放
+          快照,表头标定格时刻——审计可回放的价值不丢,误读绝迹。
+          账本按版本号回放装配快照,零 LLM——表是机器的,上面五问叙述
+          是模型的 */}
       <div className="mt-2 border-t pt-2">
-        <div className="text-[11px] text-muted-foreground" title="该轮规划时刻的在跑与排队步骤">
+        <div
+          className="text-[11px] text-muted-foreground"
+          title={latest ? "当前在跑与排队步骤,随步骤起落实时更新" : "该轮规划时刻的在跑与排队步骤"}
+        >
           在途全景
+          {latest ? (
+            <span className="ml-1 text-primary">实时</span>
+          ) : (
+            <span className="ml-1">
+              截至 {round.at?.slice(11, 16)}（该轮时刻）
+            </span>
+          )}
         </div>
         <div className="mt-1 space-y-1">
-          {(panoOpen || (round.panorama || []).length <= PANORAMA_FOLD
-            ? round.panorama || []
-            : (round.panorama || []).slice(0, PANORAMA_FOLD)
-          ).map((p) => (
-            <div key={p.id} className="flex items-center gap-2">
-              <Badge variant={p.status === "running" ? "running" : "info"}>{p.status === "running" ? "执行中" : "排队中"}</Badge>
-              {p.waiting && <span className="shrink-0 text-[11px] text-muted-foreground">等前置</span>}
-              <button
-                className="min-w-0 shrink cursor-pointer truncate text-left hover:text-primary"
-                title={`${p.id}${p.title ? " · " + p.title : ""}`}
-                onClick={() => openNode(taskID, p.id, onNode)}
-              >
-                <span className="num text-muted-foreground">{p.id}</span>
-                {p.title && <span className="ml-1">{clip(p.title, 30)}</span>}
-              </button>
-              {(p.assets || []).length > 0 && (
-                <span
-                  className="ml-auto max-w-[40%] shrink-0 truncate text-[11px] text-muted-foreground"
-                  title={(p.assets || []).map((a) => a.title || a.id).join("、")}
-                >
-                  {(p.assets || []).map((a) => a.title || a.id).join("、")}
-                </span>
-              )}
-            </div>
-          ))}
-          {(round.panorama || []).length === 0 && (
-            <div className="text-[11px] text-muted-foreground">该时刻无在跑或排队步骤</div>
+          {!liveLoaded && (
+            <div className="text-[11px] text-muted-foreground">读取中…</div>
           )}
-          {(round.panorama || []).length > PANORAMA_FOLD && (
+          {liveLoaded && liveError && !live && (
+            <div className="text-[11px] text-muted-foreground">读取失败:{liveError}</div>
+          )}
+          {liveLoaded && !liveError &&
+            (panoOpen || pano.length <= PANORAMA_FOLD ? pano : pano.slice(0, PANORAMA_FOLD)).map(
+              (p) => (
+                <div key={p.id} className="flex items-center gap-2">
+                  <Badge variant={p.status === "running" ? "running" : "info"}>{p.status === "running" ? "执行中" : "排队中"}</Badge>
+                  {p.waiting && <span className="shrink-0 text-[11px] text-muted-foreground">等前置</span>}
+                  <button
+                    className="min-w-0 shrink cursor-pointer truncate text-left hover:text-primary"
+                    title={`${p.id}${p.title ? " · " + p.title : ""}`}
+                    onClick={() => openNode(taskID, p.id, onNode)}
+                  >
+                    <span className="num text-muted-foreground">{p.id}</span>
+                    {p.title && <span className="ml-1">{clip(p.title, 30)}</span>}
+                  </button>
+                  {(p.assets || []).length > 0 && (
+                    <span
+                      className="ml-auto max-w-[40%] shrink-0 truncate text-[11px] text-muted-foreground"
+                      title={(p.assets || []).map((a) => a.title || a.id).join("、")}
+                    >
+                      {(p.assets || []).map((a) => a.title || a.id).join("、")}
+                    </span>
+                  )}
+                </div>
+              )
+            )}
+          {liveLoaded && pano.length === 0 && (
+            <div className="text-[11px] text-muted-foreground">
+              {latest ? "当前无在跑或排队步骤" : "该时刻无在跑或排队步骤"}
+            </div>
+          )}
+          {liveLoaded && pano.length > PANORAMA_FOLD && (
             <button
               className="cursor-pointer text-[11px] text-primary underline decoration-dotted underline-offset-2"
               onClick={() => setPanoOpen((o) => !o)}
             >
-              {panoOpen ? "收起" : `还有 ${(round.panorama || []).length - PANORAMA_FOLD} 条`}
+              {panoOpen ? "收起" : `还有 ${pano.length - PANORAMA_FOLD} 条`}
             </button>
           )}
         </div>
@@ -498,13 +550,13 @@ function RawTranscript({ taskID, sessionID }) {
 
 const UNIT_STATUS = {
   running: { label: "执行中", variant: "running" },
-  dispatched: { label: "已派发", variant: "info" },
+  dispatched: { label: STEP_STATUS.dispatched, variant: "info" },
   cancelled: { label: STEP_STATUS.cancelled, variant: "info" },
   paused: { label: "冬眠中", variant: "paused" },
   done: { label: "已完成", variant: "success" },
   exhausted: { label: "预算耗尽", variant: "warning" },
   failed: { label: "失败", variant: "danger" },
-  aborted: { label: "已终止", variant: "info" },
+  aborted: { label: STEP_STATUS.aborted, variant: "info" },
   approval_denied: { label: "审批拒绝终止", variant: "danger" },
   blocked: { label: "受阻", variant: "warning" },
 };
@@ -524,16 +576,17 @@ function unitStatusMeta(u) {
 // 注:exhausted 不再有"转接力"语义——P4-01 起配了上限的单位到线在原
 // 会话内续跑,exhausted 落地仅剩任务总闸场景,故按终因呈"任务总闸到点"。
 // 受阻终态的终因本就是人话语句(模型连续失败简报),不入词表,由状态
-// 词"受阻"收口。
+// 词"受阻"收口。P4-46 ② 对齐状态总表:中止族统一"已中止"(流中断/
+// 工具中断括注细分;任务收场/摘除止损的具因在步骤详情留痕)。
 const FINISH_WORDS = {
   completed: "正常完成",
   timeout: "任务总闸到点",
   max_turns: "轮次到线",
-  checkpointed: "已存档",
+  checkpointed: "断点存档",
   "pause_stale(R14)": "挂起复检",
-  aborted: "已终止",
-  aborted_streaming: "已终止",
-  aborted_tools: "已终止",
+  aborted: "已中止",
+  aborted_streaming: "已中止(流中断)",
+  aborted_tools: "已中止(工具中断)",
   model_error: "失败(模型错误)",
   stream_error: "失败(流式错误)",
   mirror_error: "失败(镜会话失败)",
@@ -946,7 +999,7 @@ function UnitSessionPane({ task, unit, onInterject }) {
       toast.error(body?.error || "终止失败");
       return;
     }
-    toast.success("单位已终止");
+    toast.success("单位已中止");
   };
 
   // 执行轨迹(会话原文)与直连对话按时间归并。
@@ -1542,7 +1595,7 @@ function ShepherdMainPane({ task, data, error, setData, headerExtra }) {
       toast.error(body?.error || "终止失败");
       return;
     }
-    toast.success("任务已终止");
+    toast.success("任务已停止");
   };
 
   return (

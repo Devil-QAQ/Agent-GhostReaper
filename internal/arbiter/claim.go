@@ -641,24 +641,8 @@ func loadClaimOrigin(ctx context.Context, store *rings.Store, taskID, claimID st
 }
 
 // parseAlternatives 从创建事件 detail 解冻结解释清单(ID 缺失的条目
-// 丢弃——受控入口保证写回时 ID 齐全,这里只做防御)。
+// 丢弃——受控入口保证写回时 ID 齐全,这里只做防御)。P4-36 起实现
+// 收归 rings(与判断卷宗投影共用一份,防漂移)。
 func parseAlternatives(raw any) []rings.Alternative {
-	list, ok := raw.([]any)
-	if !ok {
-		return nil
-	}
-	var out []rings.Alternative
-	for _, item := range list {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		id, _ := m["id"].(string)
-		label, _ := m["label"].(string)
-		if id == "" {
-			continue
-		}
-		out = append(out, rings.Alternative{ID: id, Label: label})
-	}
-	return out
+	return rings.ParseAlternatives(raw)
 }

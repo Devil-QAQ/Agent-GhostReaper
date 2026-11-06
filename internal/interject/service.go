@@ -33,8 +33,7 @@ type Service struct {
 	Store    *rings.Store
 	Provider llm.Provider // nil = 未配模型(问会落失败态,改不受影响)
 	RootDir  string       // 任务工作目录根(读目标转录构建快照)
-	Model    string
-	ModelOf  func() string
+	Model    string       // 静态模型名兜底(记账按会话经 failover.ModelNow 逐请求解析,P4-41)
 	// Helm 舵杆(改→对虫群注入;装配层与执行器共持同一实例)。
 	Helm *swarm.Helm
 	// Hiber 任务冬眠门:冬眠中插话入口冻结(面板纯只读;插话事件也
@@ -335,7 +334,7 @@ func (s *Service) answer(ctx context.Context, taskID, key, messageID, question s
 
 	usage := &swarm.UsageTracker{
 		Store: s.Store, TaskID: taskID, Agent: agentName(key),
-		Model: s.Model, ModelOf: s.ModelOf, Transcript: transcriptID(key),
+		Model: s.Model, ModelOf: failover.ModelNow(s.Provider, taskID, transcriptID(key)), Transcript: transcriptID(key),
 	}
 	_ = s.appendRec(context.Background(), taskID, ActorInterject, rings.InterjectRecord{
 		Target: target, SessionID: sessionID, MessageID: messageID,

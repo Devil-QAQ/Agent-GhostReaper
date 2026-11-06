@@ -19,6 +19,7 @@ import (
 	"github.com/Autumn-27/norma/skill"
 	"github.com/Autumn-27/norma/transcript"
 
+	"ghostreaper/internal/failover"
 	"ghostreaper/internal/hiber"
 	"ghostreaper/internal/rings"
 	"ghostreaper/internal/swarm"
@@ -59,13 +60,16 @@ type Service struct {
 	Provider llm.Provider // nil = 未配模型(消息入账后落失败态,面板如实呈现)
 	// RootDir 任务工作目录根(转录 JSONL 落盘);空 = 不落转录。
 	RootDir string
-	// Model 静态模型名兜底;ModelOf 非空时按请求解析(failover 链注入,
-	// 主备切换后 token 按模型分账)。
-	Model   string
-	ModelOf func() string
+	// Model 静态模型名兜底(记账按会话经 failover.ModelNow 逐请求解析,
+	// P4-41)。
+	Model string
 	// WindowOf 当前上下文窗口解析(token;0 = 未配置——不启用自动压缩,
 	// 信息条的消耗比例不呈现)。装配层从模型库解析注入。
 	WindowOf func() int
+	// HelmOf 舵杆实例解析(P4-45 资产范围工具的摘除止损用;装配层
+	// 闭包注入执行器的同一 Helm——模型激活运行时装配后生效)。nil =
+	// 无执行器装配(止损只剩排队步骤取消,无在跑单位可停)。
+	HelmOf func() *swarm.Helm
 	// Wake 任务唤醒(紧急意图/建议/目标/约束入账后通知主宰;装配层
 	// 注入 Manager 的 Task.Wake 路径)。nil = 不唤醒(单测)。
 	Wake func(taskID string)
@@ -138,13 +142,13 @@ func (s *Service) window() int {
 	return 0
 }
 
-func (s *Service) modelOfCall() string {
-	if s.ModelOf != nil {
-		if m := s.ModelOf(); m != "" {
-			return m
-		}
+// helm 舵杆实例(HelmOf 未注入时 nil:无在跑单位可停,止损只剩排队
+// 步骤取消——如实执行,不报错)。
+func (s *Service) helm() *swarm.Helm {
+	if s.HelmOf != nil {
+		return s.HelmOf()
 	}
-	return s.Model
+	return nil
 }
 
 // ErrNoProvider 未配模型时入队的应答失败原因。
@@ -435,6 +439,11 @@ func (s *Service) answer(ctx context.Context, taskID string, msg *convMessage, t
 		fail(ErrNoProvider.Error())
 		return
 	}
+	// 特权清除防御(P4-40 ⑥):任务已不存在(各表行已清)则不再开新
+	// 会话——转录文件不随残行复活;账本侧由写入口拒收兜底。
+	if _, err := s.Store.Task(ctx, taskID); err != nil {
+		return
+	}
 
 	sid := SessionID(taskID)
 	if msg.claimID != "" {
@@ -487,7 +496,7 @@ func (s *Service) answer(ctx context.Context, taskID string, msg *convMessage, t
 
 	usage := &swarm.UsageTracker{
 		Store: s.Store, TaskID: taskID, Agent: ActorShepherd,
-		Model: s.Model, ModelOf: s.ModelOf, Transcript: sid,
+		Model: s.Model, ModelOf: failover.ModelNow(s.Provider, taskID, sid), Transcript: sid,
 	}
 	appendRec := func(p rings.ShepherdRecord) {
 		p.ClaimID, p.Round = msg.claimID, msg.round
@@ -861,54 +870,20 @@ type ClaimQASession struct {
 	LastAt    string `json:"last_at,omitempty"`
 }
 
-// claimQASessions 全部成果追问会话(每 (成果 × 轮) 一条,按轮次升序;
-// 事件流一遍扫描,重启后零内存依赖)。
+// claimQASessions 全部成果追问会话(每 (成果 × 轮) 一条,按轮次升序)。
+// P4-36 起读 claim_qa 投影(写侧 applyClaimQA 同事务维护,发现详情的
+// 追问摘要随详情按条直读)。
 func (s *Service) claimQASessions(ctx context.Context, taskID string) ([]ClaimQASession, error) {
-	evs, err := s.Store.Events(ctx, taskID, 0, 0)
+	rows, err := s.Store.ClaimQAs(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
-	type qaAgg struct {
-		questions int
-		startedAt string
-		lastAt    string
-	}
-	idx := map[[2]string]*ClaimQASession{}
-	agg := map[[2]string]*qaAgg{}
-	order := [][2]string{}
-	get := func(claimID string, round int) (*ClaimQASession, *qaAgg) {
-		k := [2]string{claimID, fmt.Sprintf("%d", round)}
-		if _, ok := idx[k]; !ok {
-			idx[k] = &ClaimQASession{ClaimID: claimID, Round: round}
-			agg[k] = &qaAgg{}
-			order = append(order, k)
-		}
-		return idx[k], agg[k]
-	}
-	for _, ev := range evs {
-		if ev.Kind != rings.EventShepherdRecord {
-			continue
-		}
-		var rec rings.ShepherdRecord
-		if json.Unmarshal(ev.Payload, &rec) != nil || rec.ClaimID == "" || rec.Round <= 0 {
-			continue
-		}
-		if rec.Type != rings.ShepherdRecUserMessage {
-			continue
-		}
-		_, a := get(rec.ClaimID, rec.Round)
-		at := ev.OccurredAt.Local().Format("2006-01-02 15:04:05")
-		a.questions++
-		if a.startedAt == "" {
-			a.startedAt = at
-		}
-		a.lastAt = at
-	}
-	out := make([]ClaimQASession, 0, len(order))
-	for _, k := range order {
-		x, a := idx[k], agg[k]
-		x.Questions, x.StartedAt, x.LastAt = a.questions, a.startedAt, a.lastAt
-		out = append(out, *x)
+	out := make([]ClaimQASession, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, ClaimQASession{
+			ClaimID: r.ClaimID, Round: r.Round,
+			Questions: r.Questions, StartedAt: r.StartedAt, LastAt: r.LastAt,
+		})
 	}
 	return out, nil
 }

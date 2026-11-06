@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/norma/llm"
+	"github.com/Autumn-27/norma/transcript"
 
 	"ghostreaper/internal/rings"
 	"ghostreaper/internal/runlog"
@@ -140,6 +141,13 @@ type Chain struct {
 	ReplayLimit    int
 	Backoff        time.Duration
 
+	// 流式读超时三限(P4-42 ①,零值取默认;见 readtimeout.go):相邻
+	// 数据事件间隔/首事件前等待/单请求整体墙钟。挂建腿时逐腿装饰,
+	// 主宰与虫群全部会话同链生效。
+	ReadStall   time.Duration
+	ReadFirst   time.Duration
+	ReadOverall time.Duration
+
 	Now   func() time.Time
 	Sleep func(ctx context.Context, d time.Duration) bool // false=被取消
 
@@ -151,8 +159,11 @@ type Chain struct {
 	lead        *leg   // 主用腿(库激活或环境变量);无主配置时 nil
 	members     []*leg // 备链成员(优先级升序,同优先级按名称)
 	rr          map[int]int
-	lastOKModel string
 	taskCache   map[string]*taskRoute
+	// served 会话键→最近实际服务的模型(P4-41:记账按会话精确归属——
+	// 请求实际走的腿与记账时刻的路由解析可能不同(轮转游标在请求进行
+	// 中推进),按会话记录实际服务腿,token 台账模型列与真实服务一致)。
+	served map[string]string
 }
 
 // NewChain 构建链:按模型库/环境变量构建腿集 + 装载持久化熔断状态
@@ -272,7 +283,11 @@ func (p capTokensProvider) Stream(ctx context.Context, req llm.CompletionRequest
 }
 
 func (c *Chain) buildProvider(cfg ModelConfig) (llm.Provider, error) {
-	return BuildProvider(cfg, c.ProviderOpts)
+	prov, err := BuildProvider(cfg, c.ProviderOpts)
+	if err != nil {
+		return nil, err
+	}
+	return c.readTimeoutWrap(prov), nil
 }
 
 // reloadLocked 重读模型库并构建腿集。restore=true 装载持久化熔断状态
@@ -283,6 +298,7 @@ func (c *Chain) reloadLocked(ctx context.Context, restore bool) {
 	c.lead, c.members = nil, nil
 	c.rr = map[int]int{}
 	c.taskCache = map[string]*taskRoute{}
+	c.served = nil // 会话服务记录随切换作废(下一请求起记新配置的腿)
 	primaryName := ""
 	if c.Store != nil {
 		if p, ok, _ := ActiveName(ctx, c.Store, RolePrimary); ok {
@@ -483,19 +499,68 @@ func (c *Chain) ResetBreaker(name string) bool {
 	return false
 }
 
-// ActiveModel 最近一次成功请求所走模型的记账名(无成功记录时给当前
-// 将走的路由;供 token 独立表按模型分账)。会话页每轮模型标签同源。
-func (c *Chain) ActiveModel() string {
+// sessionKeyOf 请求 ctx 的会话键(agentcore 会话的转录标记优先,插话等
+// 直连调用方的显式标记次之;空串=一次性调用,无会话归属)。
+func sessionKeyOf(ctx context.Context) string {
+	if sid := transcript.SessionIDFrom(ctx); sid != "" {
+		return sid
+	}
+	return llmSessionFrom(ctx)
+}
+
+// noteServedLocked 记录会话最近实际服务的模型(锁内调用)。
+func (c *Chain) noteServedLocked(ctx context.Context, model string) {
+	key := sessionKeyOf(ctx)
+	if key == "" || model == "" {
+		return
+	}
+	if c.served == nil {
+		c.served = map[string]string{}
+	}
+	c.served[key] = model
+}
+
+// ActiveModelFor 当前服务模型的记账名(P4-41:逐次解析——带会话键时
+// 优先返回该会话最近实际服务的模型(轮转/主备切换下与真实服务腿精确
+// 一致),无服务记录(新会话)或无键退当前路由解析——切主用后立即跟随,
+// 不粘滞旧名;供 token 独立表按模型分账、会话信息条与压缩窗口解析,
+// 会话页每轮模型标签同源)。ctx 带任务标记时按任务绑定解析(显式绑定
+// 任务呈现绑定腿的模型名,③);无路由返回空串(调用方退装配层静态名)。
+func (c *Chain) ActiveModelFor(ctx context.Context) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.lastOKModel != "" {
-		return c.lastOKModel
+	if key := sessionKeyOf(ctx); key != "" {
+		if m := c.served[key]; m != "" {
+			return m
+		}
 	}
-	route := c.routeLocked(context.Background(), llm.CompletionRequest{}, false)
+	route := c.routeLocked(ctx, llm.CompletionRequest{}, false)
 	if route.current == nil {
 		return ""
 	}
 	return route.currentModel
+}
+
+// ActiveModel 全局口径的 ActiveModelFor(无任务/会话标记;展示与兜底用)。
+func (c *Chain) ActiveModel() string {
+	return c.ActiveModelFor(context.Background())
+}
+
+// ModelNow Provider 为链(支持逐请求模型解析)时返回记账解析函数(P4-41
+// 统一入口):taskID 非空按任务绑定解析、sessionID 非空按会话解析(该会话
+// 最近实际服务的模型,轮转/换腿下与真实服务腿一致);普通 Provider 返回
+// nil(调用方退静态名)。
+func ModelNow(p llm.Provider, taskID, sessionID string) func() string {
+	type activeModelerFor interface {
+		ActiveModelFor(context.Context) string
+	}
+	am, ok := p.(activeModelerFor)
+	if !ok {
+		return nil
+	}
+	ctx := WithTask(context.Background(), taskID)
+	ctx = WithLLMSession(ctx, sessionID)
+	return func() string { return am.ActiveModelFor(ctx) }
 }
 
 // taskKey 任务级路由的 ctx 键(执行器把 taskID 附进请求 ctx,链据此
@@ -534,12 +599,12 @@ func (c *Chain) routeOf(ctx context.Context) (lead *leg, members []*leg, strict 
 	}
 	tr := &taskRoute{}
 	if c.Store != nil {
-		if name, ok := taskOverrideName(ctx, c.Store, id, RolePrimary); ok {
+		if name, ok := TaskOverrideName(ctx, c.Store, id, RolePrimary); ok {
 			tr.strict = true
 			if l := c.legByName(name); l != nil {
 				tr.lead = l
 			}
-			if name2, ok := taskOverrideName(ctx, c.Store, id, RoleBackup); ok {
+			if name2, ok := TaskOverrideName(ctx, c.Store, id, RoleBackup); ok {
 				if l := c.legByName(name2); l != nil && l.name != name {
 					tr.members = []*leg{l}
 				}
@@ -706,10 +771,9 @@ func estimateTokens(req llm.CompletionRequest) int {
 }
 
 // onSuccess 一次成功路由的收尾:探测成功即回切(梯度归零);成功即清
-// 连续失败计数;记录记账模型。
+// 连续失败计数。
 func (c *Chain) onSuccess(l *leg) {
 	l.consec = 0
-	c.lastOKModel = l.model
 	if l.brk.State != "closed" {
 		l.brk = breakerState{State: "closed", UpdatedAt: c.Now()}
 		c.persistLocked(context.Background())
@@ -822,7 +886,14 @@ func (c *Chain) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2
 					termErr = err
 					break
 				}
-				delivered = true
+				if !delivered {
+					// 本会话在本腿上交付首事件(P4-41):记实际服务
+					// 模型——零交付重放不产生交付,重放成功记重放腿。
+					delivered = true
+					c.mu.Lock()
+					c.noteServedLocked(ctx, route.current.model)
+					c.mu.Unlock()
+				}
 				if !yield(ev, nil) {
 					return // 调用方停止消费:不当失败处理
 				}
@@ -900,6 +971,7 @@ func (c *Chain) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Me
 		msg, sr, usage, err := route.current.prov.Complete(ctx, req)
 		if err == nil {
 			c.mu.Lock()
+			c.noteServedLocked(ctx, route.current.model)
 			c.onSuccess(route.current)
 			c.mu.Unlock()
 			return msg, sr, usage, nil

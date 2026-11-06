@@ -17,7 +17,6 @@ package overmind
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
 	"ghostreaper/internal/rings"
@@ -99,105 +98,31 @@ func ClosureEffective(ctx context.Context, store *rings.Store, tc ClosureTaskCon
 	return enabled, rounds, minutes
 }
 
-// ClosureOf 从账本确定性推导任务的收口信号态(单遍扫描,零 LLM)。
+// ClosureOf 从账本确定性推导任务的收口信号态(零 LLM)。P4-36 起读
+// closure_states 投影——写侧 applyEvent 同事务维护(rings.applyClosure
+// 系列为 ClosureOf 事件回放的增量形态,重放重建同源),不再扫描事件流。
 // 锚点取"上次新发现或上次「继续」"中较后者,从未有过则取建任务时刻;
 // 锚点后的 overmind.record(assessment) 计为研判轮;新发现 = 事实 /
 // 声明的 node.added 与资产新增中的手动/发现来源(种子资产随建任务
 // 表单入账在首轮研判之前,不算执行中的新发现)。任一新增即清零重计。
 func ClosureOf(ctx context.Context, store *rings.Store, taskID string) (ClosureState, error) {
-	evs, err := store.Events(ctx, taskID, 0, 0)
+	row, err := store.ClosureState(ctx, taskID)
 	if err != nil {
 		return ClosureState{}, err
 	}
-	st := ClosureState{}
-	var prompt *ClosurePending
-	for _, ev := range evs {
-		switch ev.Kind {
-		case rings.EventTaskLifecycle:
-			var p rings.TaskLifecycle
-			if json.Unmarshal(ev.Payload, &p) != nil || p.Action != "created" {
-				continue
-			}
-			if st.AnchorAt.IsZero() {
-				st.AnchorAt, st.AnchorKind = at(ev), rings.ClosureAnchorCreated
-			}
-			// 建任务表单的初始配置(审核迭代 1):只存显式项,有键即视为
-			// 已配置。
-			if raw, ok := p.Detail["closure"].(map[string]any); ok {
-				st.TaskConfig = parseClosureDetail(raw)
-			}
-		case rings.EventNodeAdded:
-			var p rings.NodeAdded
-			if json.Unmarshal(ev.Payload, &p) != nil {
-				continue
-			}
-			switch p.NodeType {
-			case rings.NodeFact, rings.NodeTestClaim:
-				st.AnchorAt, st.Rounds, st.AnchorKind = at(ev), 0, rings.ClosureAnchorFinding
-				prompt = nil // 新发现即清零重计,待决提醒随之解决
-			case rings.NodeAsset:
-				// 手动补入(P4-05)与虫群发现照算;种子来源跳过(建任务
-				// 表单随单入账,锚点保持建任务时刻)。
-				if rings.AssetSourceOf(p.Detail) == rings.AssetSourceSeed {
-					continue
-				}
-				st.AnchorAt, st.Rounds, st.AnchorKind = at(ev), 0, rings.ClosureAnchorFinding
-				prompt = nil
-			}
-		case rings.EventOvermindRecord:
-			var p rings.OvermindRecord
-			if json.Unmarshal(ev.Payload, &p) != nil || p.Type != rings.OvermindRecAssessment {
-				continue
-			}
-			st.Rounds++
-		case rings.EventClosureRecord:
-			var p rings.ClosureRecord
-			if json.Unmarshal(ev.Payload, &p) != nil {
-				continue
-			}
-			switch p.Type {
-			case rings.ClosureRecPrompt:
-				prompt = &ClosurePending{Record: p, PromptedAt: at(ev)}
-			case rings.ClosureRecDismiss:
-				// 弹窗被直接关闭(P4-23):待决保留、标搁置;无待决时
-				// 忽略(历史 dismiss 不造出幻影提醒)。
-				if prompt != nil {
-					prompt.Parked = true
-				}
-			case rings.ClosureRecContinue:
-				st.AnchorAt, st.Rounds, st.AnchorKind = at(ev), 0, rings.ClosureAnchorContinue
-				prompt = nil
-			case rings.ClosureRecEnd:
-				prompt = nil // 结束走收尾时序,任务终态由收尾流程落
-			case rings.ClosureRecConfig:
-				// 任务级配置变更(审核迭代 1):快照式整体覆盖,最新即当前。
-				st.TaskConfig = ClosureTaskConfig{
-					HasConfig: true, Enabled: p.Enabled != nil && *p.Enabled,
-					Rounds: p.Rounds, Minutes: p.Minutes,
-				}
-			}
+	st := ClosureState{
+		AnchorAt: row.AnchorAt, AnchorKind: row.AnchorKind, Rounds: row.Rounds,
+	}
+	if row.Pending != nil {
+		st.Pending = &ClosurePending{Record: *row.Pending, PromptedAt: row.PromptedAt, Parked: row.Parked}
+	}
+	if row.TaskConfig.HasConfig {
+		st.TaskConfig = ClosureTaskConfig{
+			HasConfig: true, Enabled: row.TaskConfig.Enabled,
+			Rounds: row.TaskConfig.Rounds, Minutes: row.TaskConfig.Minutes,
 		}
 	}
-	st.Pending = prompt
 	return st, nil
-}
-
-// at 事件业务时刻(账本读出的 OccurredAt 已解析归一)。
-func at(ev rings.RawEvent) time.Time { return ev.OccurredAt }
-
-// parseClosureDetail created detail.closure 的宽容解析(只认显式项)。
-func parseClosureDetail(raw map[string]any) ClosureTaskConfig {
-	tc := ClosureTaskConfig{HasConfig: true, Enabled: true}
-	if v, ok := raw["enabled"].(bool); ok {
-		tc.Enabled = v
-	}
-	if v, ok := raw["rounds"].(float64); ok && v > 0 {
-		tc.Rounds = int(v)
-	}
-	if v, ok := raw["minutes"].(float64); ok && v > 0 {
-		tc.Minutes = int(v)
-	}
-	return tc
 }
 
 // evalClosure 一轮研判记录落账后的收口评估:双条件同时满足且无待决

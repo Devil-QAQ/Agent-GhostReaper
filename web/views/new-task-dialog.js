@@ -23,7 +23,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { ASSET_CLASSES, postJSON, usePolling } from "@/lib/api";
+import { ASSET_CLASSES, postJSON, taskTypeMeta, TASK_TYPES, usePolling } from "@/lib/api";
 import { toast } from "sonner";
 
 const emptyRow = () => ({ cls: "domain", title: "", parent: "" });
@@ -71,14 +71,26 @@ function FieldLabel({ htmlFor, children, required = false }) {
 // P4-16(问题清单 #29)表单按定稿布局:任务名(可选)→ 任务分类(可选,
 // 搜索或输入新名称回车创建)→ 描述(可选,贴"粘贴描述一键提取"——LLM
 // 从描述回填目标与资产,复用既有提取通道)→ 目标(必填,每行一条)→
+// 注意事项(P4-49,可选多行,对做法的软要求)→
 // 资产(必填,可批量粘贴,贴"一键优化整理格式"——LLM 只规整不增删,
 // 守恒红线由服务端确定性把关)→ 高级选项折叠(最长跑多久 · 拦截规则 ·
-// 纠偏步数)→ 按钮沉底。默认视图仅五框。
+// 纠偏步数)→ 按钮沉底。
+// P4-40(问题清单 #59)按钮区三键:暂存(全部字段存为服务端草稿并关
+// 闭;从草稿行打开继续编辑时暂存=覆盖原草稿不新增)/ 取消(有内容先
+// 确认丢弃)/ 创建(成功后对应草稿删除)。taskDraft = 从任务列表草稿行
+// 打开的草稿({id, draft});draft = 复制任务预填(两者互斥)。
 // draft:{ title, description, rows, goals, category, timeout, anchor }
-export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
+export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft, onDraftSaved }) {
   const [title, setTitle] = React.useState("");
   const [description, setDescription] = React.useState("");
+  // 任务类型(P4-44):必填二选一,默认渗透;建后不可改。草稿携带,
+  // 提取按描述倾向预选(可改)。
+  const [taskType, setTaskType] = React.useState("pentest");
   const [goalsText, setGoalsText] = React.useState("");
+  // 注意事项(P4-49,问题清单 #70):对做法的软要求,多行每行一条,可选;
+  // 与拦截规则分工——方法偏好写这里,绝对红线配拦截规则。随 roe 快照
+  // 落库,建后可在 RoE 页改。
+  const [notes, setNotes] = React.useState("");
   const [rows, setRows] = React.useState([]);
   const [paste, setPaste] = React.useState("");
   const [timeout, setTimeoutSecs] = React.useState("");
@@ -100,45 +112,69 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
   // 资产一键优化整理(P4-16,守恒把关在服务端)。
   const [organizing, setOrganizing] = React.useState(false);
   const [organizeIssues, setOrganizeIssues] = React.useState([]);
+  // 取消丢弃确认(P4-40:表单有内容时确认"未暂存,确定丢弃?")。
+  const [discardAsk, setDiscardAsk] = React.useState(false);
 
   const { data: catBody } = usePolling("/api/task-categories", 8000, { immediate: open });
   const categories = Array.isArray(catBody?.categories) ? catBody.categories : [];
 
-  // 打开时落初值:草稿(复制)或空白。
+  // 打开时落初值:任务草稿(P4-40,服务端暂存)、复制草稿或空白。
   React.useEffect(() => {
     if (!open) return;
-    setTitle(draft?.title ?? "");
-    setDescription(draft?.description ?? "");
-    setGoalsText(Array.isArray(draft?.goals) ? draft.goals.join("\n") : "");
+    const src = taskDraft?.draft;
+    setTitle(src?.title ?? draft?.title ?? "");
+    setDescription(src?.description ?? draft?.description ?? "");
+    setTaskType(src?.task_type === "redteam" ? "redteam" : "pentest");
+    const goalsIn = src ? src.goals : Array.isArray(draft?.goals) ? draft.goals.join("\n") : "";
+    setGoalsText(typeof goalsIn === "string" ? goalsIn : "");
+    setNotes(src?.notes ?? "");
+    const rowsIn = src?.rows ?? draft?.rows;
     setRows(
-      Array.isArray(draft?.rows) && draft.rows.length > 0
-        ? draft.rows.map((r) => ({ cls: r.cls || "domain", title: r.title || "", parent: r.parent || "" }))
+      Array.isArray(rowsIn) && rowsIn.length > 0
+        ? rowsIn.map((r) => ({ cls: r.cls || r.class || "domain", title: r.title || "", parent: r.parent || "" }))
         : []
     );
-    setPaste("");
-    setTimeoutSecs(draft?.timeout ?? "");
-    setAnchor(draft?.anchor ?? "");
-    setClosureOn(true);
-    setClosureRounds("");
-    setClosureMinutes("");
+    setPaste(src?.paste ?? "");
+    setTimeoutSecs(src?.timeout ?? draft?.timeout ?? "");
+    setAnchor(src?.anchor ?? draft?.anchor ?? "");
+    const cl = src?.closure;
+    setClosureOn(cl ? cl.on !== false : true);
+    setClosureRounds(cl?.rounds || "");
+    setClosureMinutes(cl?.minutes || "");
     setAdvOpen(false);
-    setCatID(draft?.category || "");
+    setCatID(src?.category ?? draft?.category ?? "");
     setCatText("");
     setCatOpen(false);
     setExtracting(false);
     setExtractIssues([]);
-    setConstraints([]);
+    setConstraints(
+      Array.isArray(src?.constraints)
+        ? src.constraints.map((c) => ({
+            action: c.action || "",
+            disposition: c.disposition || "forbid",
+            quota: c.quota || "",
+            scope: Array.isArray(c.scope) ? c.scope : [],
+            patterns: Array.isArray(c.patterns) ? c.patterns : [],
+            basis: c.basis || "",
+          }))
+        : []
+    );
     setOrganizing(false);
     setOrganizeIssues([]);
-  }, [open, draft]);
+    setDiscardAsk(false);
+  }, [open, draft, taskDraft]);
 
-  // 分类草稿:清单载入后按 ID 呈现名称。
+  // 分类草稿:清单载入后按 ID 呈现名称;清单已拉到而 ID 不在 = 引用
+  // 失效(P4-40 ②),如实置空不报错(catBody 未回时不动,防误清)。
   React.useEffect(() => {
-    if (catID && !catText) {
-      const hit = categories.find((c) => c.id === catID);
-      if (hit) setCatText(hit.name);
+    if (!catID || catText) return;
+    const hit = categories.find((c) => c.id === catID);
+    if (hit) {
+      setCatText(hit.name);
+      return;
     }
-  }, [categories, catID, catText]);
+    if (catBody) setCatID("");
+  }, [categories, catID, catText, catBody]);
 
   const setRow = (i, patch) =>
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
@@ -201,6 +237,10 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
       setTitle(body.title);
       filledTitle = true;
     }
+    // 任务类型倾向预选(P4-44):模型按描述给的 pentest/redteam,仅预选可改。
+    if (body.task_type === "pentest" || body.task_type === "redteam") {
+      setTaskType(body.task_type);
+    }
     // 目标候选回描述旁的目标框(每行一条,去重);判定口径建议不上面板
     //——正式完成条件在 RoE 目标表单锁定。
     const goals = (body.goals || [])
@@ -219,6 +259,16 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
     if (assets.length > 0) {
       setRows((rs) => [...rs, ...assets.map((a) => ({ cls: a.class, title: a.title, parent: "" }))]);
     }
+    // 注意事项回填(P4-49 ②):语义辨认的候选进注意事项栏,仅预填可改,
+    // 已有条目去重合并(与目标框同款)。
+    const gotNotes = (body.creator_notes || []).map((n) => (typeof n === "string" ? n.trim() : "")).filter(Boolean);
+    if (gotNotes.length > 0) {
+      setNotes((t) => {
+        const lines = t.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        const known = new Set(lines);
+        return [...lines, ...gotNotes.filter((g) => !known.has(g))].join("\n");
+      });
+    }
     setConstraints((cs) => [
       ...cs,
       ...(body.constraints || []).map((c) => ({
@@ -235,6 +285,7 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
     const parts = [
       filledTitle ? "任务名 1" : "",
       goals.length > 0 ? `目标 ${goals.length}` : "",
+      gotNotes.length > 0 ? `注意事项 ${gotNotes.length}` : "",
       assets.length > 0 ? `资产 ${assets.length}` : "",
       (body.constraints || []).length > 0 ? `拦截规则 ${body.constraints.length}` : "",
     ].filter(Boolean);
@@ -276,6 +327,71 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
 
   const setConstraint = (i, patch) =>
     setConstraints((cs) => cs.map((c, j) => (j === i ? { ...c, ...patch } : c)));
+
+  // 表单是否有内容(P4-40):任何字段非默认即算——取消前据此决定是否
+  // 确认丢弃。
+  const formHasContent = () =>
+    Boolean(
+      title.trim() ||
+        description.trim() ||
+        goalsText.trim() ||
+        notes.trim() ||
+        paste.trim() ||
+        timeout.trim() ||
+        anchor.trim() ||
+        catID ||
+        catText.trim() ||
+        taskType !== "pentest" ||
+        constraints.some((c) => c.action.trim() || c.basis) ||
+        rows.some((r) => r.title.trim() || r.parent.trim()) ||
+        !closureOn ||
+        closureRounds.trim() ||
+        closureMinutes.trim()
+    );
+
+  // 关闭请求经此口:用户侧关闭(取消按钮 / ESC / 点遮罩)有内容先确认;
+  // 暂存与创建成功的关闭直接走 onOpenChange(不确认)。
+  const requestClose = (o) => {
+    if (o) return;
+    if (formHasContent()) setDiscardAsk(true);
+    else onOpenChange(false);
+  };
+
+  // 暂存草稿(P4-40 ①):全部字段存为服务端草稿并关闭;从草稿行打开的
+  // (taskDraft.id 在)覆盖原草稿不新增。
+  const saveDraft = async () => {
+    setBusy(true);
+    const payload = {
+      title: title.trim(),
+      category: catID,
+      description,
+      task_type: taskType,
+      goals: goalsText,
+      notes,
+      rows: rows.map((r) => ({ class: r.cls, title: r.title.trim(), parent: r.parent.trim() })),
+      paste,
+      timeout,
+      anchor,
+      closure: { on: closureOn, rounds: closureRounds, minutes: closureMinutes },
+      constraints: constraints.map((c) => ({
+        action: c.action,
+        disposition: c.disposition,
+        quota: c.quota,
+        scope: c.scope,
+        patterns: c.patterns,
+        basis: c.basis,
+      })),
+    };
+    const { ok, body } = await postJSON("/api/task-drafts", { id: taskDraft?.id || "", draft: payload });
+    setBusy(false);
+    if (!ok) {
+      toast.error(`暂存失败:${body.error || "原因未说明"}`);
+      return;
+    }
+    onOpenChange(false);
+    toast.success(payload.title ? `已暂存草稿「${payload.title}」` : "已暂存草稿");
+    if (onDraftSaved) onDraftSaved(body.id);
+  };
 
   const create = async () => {
     const goalTitles = goalsText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
@@ -335,7 +451,7 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
       });
     }
     setBusy(true);
-    const body = { title: title.trim(), assets, goals: goalTitles };
+    const body = { title: title.trim(), task_type: taskType, assets, goals: goalTitles };
     if (description.trim()) body.description = description.trim();
     if (catID) body.category = catID;
     if (Number.isFinite(t) && t > 0) body.timeout_seconds = t;
@@ -344,7 +460,15 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
     if (!closureOn || cr > 0 || cm > 0) {
       body.closure = { enabled: closureOn, rounds: cr, minutes: cm };
     }
-    if (rules.length > 0) body.roe = { intent_rules: rules };
+    // 注意事项随 roe 快照提交(P4-49):有规则或有注意事项才带 roe 对象;
+    // 注意事项为空时不带该键(服务端省略 = 保持语义,建任务即无)。
+    const notesTrim = notes.trim();
+    if (rules.length > 0 || notesTrim !== "") {
+      body.roe = { intent_rules: rules };
+      if (notesTrim !== "") body.roe.creator_notes = notesTrim;
+    }
+    // 来源草稿(P4-40):创建成功后服务端删除对应草稿。
+    if (taskDraft?.id) body.draft_id = taskDraft.id;
     const { ok, body: resp } = await postJSON("/api/tasks", body);
     setBusy(false);
     if (!ok) {
@@ -362,12 +486,14 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={requestClose}>
       <DialogContent className="flex max-h-[92vh] max-w-2xl flex-col gap-4 overflow-hidden">
         <DialogHeader>
           <DialogTitle>{draft ? "复制任务" : "新建任务"}</DialogTitle>
           {draft ? (
             <DialogDescription>已按原任务预填，确认后创建新任务。</DialogDescription>
+          ) : taskDraft ? (
+            <DialogDescription>正在编辑草稿，暂存将覆盖原草稿。</DialogDescription>
           ) : (
             <DialogDescription className="sr-only">填目标与资产创建任务</DialogDescription>
           )}
@@ -490,6 +616,29 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
             </div>
 
             <div className="grid gap-2">
+              <FieldLabel required>任务类型</FieldLabel>
+              {/* P4-44:必填二选一,默认渗透,建后不可改;当前项说明一行 */}
+              <div className="flex gap-2">
+                {Object.entries(TASK_TYPES).map(([v, meta]) => (
+                  <button
+                    key={v}
+                    type="button"
+                    className={
+                      "h-8 flex-1 rounded-md border px-3 text-[13px] transition-colors cursor-pointer " +
+                      (taskType === v
+                        ? "border-primary/60 bg-primary/15 font-medium text-foreground"
+                        : "border-border text-muted-foreground hover:text-foreground")
+                    }
+                    onClick={() => setTaskType(v)}
+                  >
+                    {meta.label}
+                  </button>
+                ))}
+              </div>
+              <div className="text-xs text-muted-foreground">{taskTypeMeta(taskType).hint}</div>
+            </div>
+
+            <div className="grid gap-2">
               <FieldLabel htmlFor="nt-desc">描述</FieldLabel>
               <Textarea
                 id="nt-desc"
@@ -520,6 +669,19 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
                 placeholder="如：拿下管理权限、获取 xx 数据"
                 value={goalsText}
                 onChange={(e) => setGoalsText(e.target.value)}
+              />
+            </div>
+
+            {/* 注意事项(P4-49):目标说"要什么",这里说"怎么做的要求";
+                留空 = 无 */}
+            <div className="grid gap-2">
+              <FieldLabel htmlFor="nt-notes">注意事项</FieldLabel>
+              <Textarea
+                id="nt-notes"
+                rows={2}
+                placeholder="如：用小字典，不要用大字典；不要修改任何数据"
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
               />
             </div>
 
@@ -757,14 +919,41 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft }) {
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
+          <Button variant="outline" onClick={() => requestClose(false)}>
             取消
+          </Button>
+          <Button variant="outline" onClick={saveDraft} disabled={busy}>
+            暂存
           </Button>
           <Button onClick={create} disabled={busy}>
             {draft ? "创建副本" : "创建任务"}
           </Button>
         </DialogFooter>
       </DialogContent>
+
+      {/* 取消丢弃确认(P4-40 ①):表单有内容时取消先确认 */}
+      <Dialog open={discardAsk} onOpenChange={setDiscardAsk}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>丢弃修改？</DialogTitle>
+            <DialogDescription>未暂存，确定丢弃？</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDiscardAsk(false)}>
+              继续编辑
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                setDiscardAsk(false);
+                onOpenChange(false);
+              }}
+            >
+              丢弃
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Dialog>
   );
 }

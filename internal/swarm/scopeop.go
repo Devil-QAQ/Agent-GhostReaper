@@ -2,6 +2,8 @@ package swarm
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -11,6 +13,10 @@ import (
 	"ghostreaper/internal/rings"
 	"ghostreaper/internal/runlog"
 )
+
+// cryptoRandRead crypto/rand.Read 的薄别名(scopeAssetIDSuffix 用,便于
+// 与既有同形态实现对照)。
+func cryptoRandRead(b []byte) (int, error) { return rand.Read(b) }
 
 // ---- 资产范围操作(P4-45,问题清单 #61 ③④) ----
 //
@@ -109,6 +115,70 @@ func idIn(list []string, id string) bool {
 		}
 	}
 	return false
+}
+
+// EnsureScopeAsset 资产标识解析入图(P4-54 牧者操作面/server 范围卡
+// 裁决共用):标识可以是图上资产 ID、标题精确匹配、或同主机锚点的
+// 既有资产(P4-52 锚点等价——URL 形态与 host:端口 写法对上同一资产,
+// 不重复入图);都不命中时按标识写法入图(类按锚点推断,IP→host、
+// 通配/域名→domain;来源与范围归属由调用方声明:范围卡=发现+范围外,
+// 牧者纳入=手动+范围内,通配摘除=发现+范围外——与建任务初始摘除
+// 同形态)。返回(资产 ID, 是否新建)。
+func EnsureScopeAsset(ctx context.Context, store *rings.Store, taskID, ident string, source, actor string) (string, bool, error) {
+	ident = strings.TrimSpace(ident)
+	if ident == "" {
+		return "", false, errors.New("swarm: 资产标识为空")
+	}
+	assets, err := store.NodesByType(ctx, taskID, rings.NodeAsset, "")
+	if err != nil {
+		return "", false, fmt.Errorf("swarm: 查图上资产: %w", err)
+	}
+	for _, a := range assets {
+		if a.ID == ident || a.Title == ident {
+			return a.ID, false, nil
+		}
+	}
+	if anchor, ok := rings.ScopeAnchorOf(ident); ok {
+		for _, a := range assets {
+			if a2, ok2 := rings.ScopeAnchorOf(strings.TrimSpace(a.Title)); ok2 &&
+				a2.Host == anchor.Host && a2.Port == anchor.Port &&
+				a2.Wildcard == anchor.Wildcard {
+				return a.ID, false, nil
+			}
+		}
+	}
+	class := rings.AssetDomain
+	if anchor, ok := rings.ScopeAnchorOf(ident); ok && anchor.IsIP {
+		class = rings.AssetHost
+	}
+	scope := rings.AssetScopeIn
+	if source == rings.AssetSourceDiscovered {
+		// 发现形态入图默认范围外(与范围卡目标入图同口径,归属随裁决
+		// 或放行转范围);手动形态天然范围内。
+		scope = rings.AssetScopeOut
+	}
+	id := "a-" + scopeAssetIDSuffix()
+	detail := map[string]any{"source": source, "scope": scope}
+	if _, err := store.Append(ctx, taskID, rings.Event{
+		Kind: rings.EventNodeAdded, Actor: actor,
+		Payload: rings.NodeAdded{
+			NodeID: id, NodeType: rings.NodeAsset, Title: ident,
+			Status: "active", AssetClass: class, Detail: detail,
+		},
+	}); err != nil {
+		return "", false, fmt.Errorf("swarm: 资产入图: %w", err)
+	}
+	return id, true, nil
+}
+
+// scopeAssetIDSuffix 资产 ID 的随机后缀(同秒多条不撞 ID;与收割入图
+// 的 a-<hex> 形态一致)。
+func scopeAssetIDSuffix() string {
+	var b [4]byte
+	if _, err := cryptoRandRead(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // ScopeChange 一次范围变更(纳入/摘除两向)的结果:面板 toast、牧者
@@ -222,6 +292,15 @@ func ExcludeAssets(ctx context.Context, store *rings.Store, helm *Helm, taskID s
 		var serr error
 		if res.KilledUnits, res.AbortedSteps, serr = StopLossForAssets(ctx, store, helm, taskID, res.Excluded, actor); serr != nil {
 			return res, serr
+		}
+		// 摘除连坐废弃(P4-55 审核迭代,造物主 2026-11-08 定案:动"对象"
+		// 摘资产→声明/假设程序确定性全废弃):摘除覆盖资产上锚定的非终态
+		// 声明与假设批量转已废弃(理由"目标已摘除"),不问主宰、不挂起;
+		// 幂等,零命中零落笔;失败如实跳过可重入(勾回不自动复活)。
+		if dClaims, dHypos, derr := rings.DiscardAnchoredFindings(ctx, store, taskID, rings.DiscardReasonExcluded, actor); derr != nil {
+			runlog.Warnf("摘除连坐废弃失败(如实跳过,可重入): %s %v", taskID, derr)
+		} else if len(dClaims) > 0 || len(dHypos) > 0 {
+			runlog.Infof("摘除连坐废弃: %s 判断 %d 个,假设 %d 个转已废弃(目标已摘除)", taskID, len(dClaims), len(dHypos))
 		}
 	}
 	return res, nil

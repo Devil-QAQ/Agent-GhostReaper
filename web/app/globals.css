@@ -45,12 +45,14 @@
   --destructive: #e5484d;
   --destructive-foreground: #ffffff;
 
-  /* 严重级语义色(8.4):徽标全站统一色映射(红=血红,橙=烬橙,
-     金=暖金,低危=品牌绿,信息=中性灰) */
-  --severity-critical: #e5484d;
-  --severity-high: #ce7a45;
-  --severity-medium: #c9a96e;
-  --severity-low: #8fae94;
+  /* 严重级语义色(P4-56 定稿 2026-11-07;审核迭代 2026-11-08:Critical
+     压深为暗红/枣红,与 High 的亮血红拉开明显明度差):Critical=暗红/
+     High=红/Medium=橙/Low=蓝——黄退场;徽标全站统一色映射,成果徽标、
+     报告、图页节点色与 8.4 token 同源。 */
+  --severity-critical: #a92e2e;
+  --severity-high: #e5484d;
+  --severity-medium: #d97f3e;
+  --severity-low: #7fa3d4;
   --severity-info: #7e7d78;
 
   /* 状态色(8.4):成功/运行=品牌绿,警告=暖金,危险=血红,暂停=灰 */
@@ -128,10 +130,13 @@
   --destructive: #b23c34;
   --destructive-foreground: #ffffff;
 
-  --severity-critical: #b23c34;
-  --severity-high: #a0522d;
-  --severity-medium: #8a6d3b;
-  --severity-low: #3e6b4f;
+  /* 严重级四档(P4-56 定稿;审核迭代 2026-11-08 Critical 压深,亮色取
+     深红,白底对比度充裕):
+     Critical=暗红 / High=红 / Medium=橙 / Low=蓝 */
+  --severity-critical: #8a1d1d;
+  --severity-high: #b23c34;
+  --severity-medium: #a15c1f;
+  --severity-low: #3e5f8f;
   --severity-info: #6b6b73;
 
   --status-success: #3e6b4f;

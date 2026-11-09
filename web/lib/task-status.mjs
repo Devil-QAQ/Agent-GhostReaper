@@ -82,3 +82,29 @@ export function taskStopWay(task) {
   if (task?.settled_by === "closure_prompt") return "收口结束：连续多轮无新发现，选择结束，有序收场";
   return "手动终止：在面板选择终止，任务不可恢复";
 }
+
+// taskBlockedDot 受阻红点取态(P4-57 ⑤ 三层递进之一:任务行/会话标签
+// 只红点+计数,悬停按归因分文案;头部状态徽标不在此列)。非终态且非
+// 冻结(冻结态悬停已注明受阻数,不另标红点)且有 blocked 步骤才亮;
+// 处理即消(步骤恢复/重开)。返回 null=不亮。
+export function taskBlockedDot(task) {
+  const status = task?.status;
+  if (!status || status === "stopped" || status === "completed") return null;
+  if (taskFrozenStatus(status)) return null;
+  const n = task?.blocked_steps ?? 0;
+  if (n <= 0) return null;
+  return { count: n, title: blockedHint(task) };
+}
+
+// blockedHint 受阻红点悬停文案(P4-57 ⑤,按归因分——红点不撒谎,
+// "受阻"词义二义随之消除):模型故障类=等待模型恢复;程序异常类
+//=确定性拒绝,已记录、更新修复后自动恢复;两类并存逐行分列。
+export function blockedHint(task) {
+  const fault = task?.blocked_fault ?? 0;
+  const defect = task?.blocked_defect ?? 0;
+  const parts = [];
+  if (fault > 0) parts.push(`受阻 ${fault} 步，恢复后自动继续`);
+  if (defect > 0) parts.push(`受阻 ${defect} 步，程序异常已记录，更新修复后自动恢复`);
+  if (parts.length === 0) parts.push(`受阻 ${task?.blocked_steps ?? 0} 步，恢复后自动继续`);
+  return parts.join("\n");
+}

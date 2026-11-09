@@ -70,6 +70,14 @@ type Service struct {
 	// 闭包注入执行器的同一 Helm——模型激活运行时装配后生效)。nil =
 	// 无执行器装配(止损只剩排队步骤取消,无在跑单位可停)。
 	HelmOf func() *swarm.Helm
+	// 任务级运行控制(P4-54 操作面:冬眠/唤醒/终止经牧者对话可达,与
+	// 面板按钮同源同账本)。装配层注入 Manager 路由闭包;nil = 未装配
+	// (工具如实答复不可用)。TaskWake 按任务实际状态路由恢复通道
+	// (冬眠走 Wake、暂停/断点走 Resume,与面板唤醒端点同一判定)。
+	TaskHibernate func(taskID string, detail map[string]any) error
+	TaskWake      func(taskID string) error
+	TaskStop      func(taskID string) error
+	TaskStatus    func(taskID string) string
 	// Wake 任务唤醒(紧急意图/建议/目标/约束入账后通知主宰;装配层
 	// 注入 Manager 的 Task.Wake 路径)。nil = 不唤醒(单测)。
 	Wake func(taskID string)

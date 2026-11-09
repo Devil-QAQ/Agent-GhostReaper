@@ -12,7 +12,7 @@ import { ReportPage } from "@/views/report-page";
 import { RoePage } from "@/views/roe-page";
 import { SessionsPage } from "@/views/sessions-page";
 import { WorkbenchPage } from "@/views/workbench-page";
-import { usePolling, useTaskContext } from "@/lib/api";
+import { usePolling, useTaskContext, taskBlockedDot } from "@/lib/api";
 import { enabledTaskTabs } from "@/lib/nav";
 
 // 任务空间(8.3,P2-06g 骨架):进入任务后的顶部标签容器。
@@ -113,6 +113,21 @@ export function TaskSpace({ tasks, taskID, tab, focus, unit }) {
               }}
             >
               {t.title}
+              {/* 受阻红点+计数挂"会话"标签(P4-57 ⑤ 三层递进之二:
+                  点进会话页看到受阻单位与事件;悬停按归因分文案;头部
+                  状态徽标不动——普遍故障单显"受阻",状态不是红点) */}
+              {t.id === "sessions" &&
+                (() => {
+                  const bd = taskBlockedDot(current);
+                  return bd ? (
+                    <span
+                      className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold leading-none text-primary-foreground num"
+                      title={bd.title}
+                    >
+                      {bd.count}
+                    </span>
+                  ) : null;
+                })()}
               {/* 待审批红点+计数(P4-23):只标需要动作的事项,处理即消 */}
               {t.id === "roe" && roePending > 0 && (
                 <span

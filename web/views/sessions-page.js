@@ -79,6 +79,7 @@ const BLACKBOX_LABELS = {
   task_resumed: "任务恢复",
   restart_adoption: "进程重启接管",
   env_observation: "环境观察",
+  llm_chain_streak: "同类连环",
 };
 
 // 收养动作 → 操作者语言(restart_adoption 事件的 detail.action,P4-06 ④
@@ -559,6 +560,7 @@ const UNIT_STATUS = {
   aborted: { label: STEP_STATUS.aborted, variant: "info" },
   approval_denied: { label: "审批拒绝终止", variant: "danger" },
   blocked: { label: "受阻", variant: "warning" },
+  scope_wait: { label: "等待批准", variant: "warning", hint: "命令目标在任务范围外,已拦下等批准;批准后继续,禁止即终止" },
 };
 
 // unitStatusMeta 单位行状态(P4-02:排队中条目 + 拒绝来源区分——
@@ -597,6 +599,8 @@ const FINISH_WORDS = {
   image_error: "失败(不支持的媒体)",
   stop_hook_prevented: "失败(停止被拦)",
   hook_stopped: "失败(被拦停)",
+  scope_wait: "等待批准",
+  scope_reclaim: "范围已批准",
 };
 
 // finishLineOf 收场人话状态行(P4-06 ②:时间账 note 原文不进界面,此为

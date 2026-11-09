@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,6 +40,15 @@ func TestLandingWakesIncrementalRoundE2E(t *testing.T) {
 
 	held := make(chan struct{})     // 慢线:全程挂起,测试末放行
 	heldFast := make(chan struct{}) // 快线:探测后的提交调用挂起,确认无自我规划后放行
+	// 门控放行兜底(P4-54 修复测试潜在缺陷):任意失败路径上 held/heldFast
+	// 也必须放行——否则被挂住的在途请求让 gatedScriptedModel.Close 的
+	// httptest.Close 永久等待,测试由"干净失败"变"挂死到超时"。
+	releaseHeld := sync.OnceFunc(func() { close(held) })
+	releaseHeldFast := sync.OnceFunc(func() { close(heldFast) })
+	t.Cleanup(func() {
+		releaseHeldFast()
+		releaseHeld()
+	})
 	var sawIncrement atomic.Bool
 	// 任务包意图节锚点:前序尝试节含同目标其他步骤(快线的包里也有
 	// 慢线字样),判别单位身份须锚定"本步骤意图"节。
@@ -73,7 +83,7 @@ func TestLandingWakesIncrementalRoundE2E(t *testing.T) {
 		}
 		switch {
 		case strings.Contains(rr.LastUser, intentSection+"慢线"):
-			if !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实") {
+			if !seenToolResult(rr, "submit_candidate_fact", "已提交新进事实") {
 				return scriptedReply{ToolCalls: []scriptedToolCall{{
 					ID: "m1", Name: "submit_candidate_fact",
 					Args: `{"statement":"目录结构已枚举","evidence":"http_probe 逐路径实测","asset_id":"web1"}`,
@@ -81,7 +91,7 @@ func TestLandingWakesIncrementalRoundE2E(t *testing.T) {
 			}
 			return scriptedReply{Text: "慢线完成:目录已枚举。", Finish: "stop"}
 		case strings.Contains(rr.LastUser, intentSection+"基于指纹的增量新方向"):
-			if !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实") {
+			if !seenToolResult(rr, "submit_candidate_fact", "已提交新进事实") {
 				return scriptedReply{ToolCalls: []scriptedToolCall{{
 					ID: "i1", Name: "submit_candidate_fact",
 					Args: `{"statement":"版本接口已确认","evidence":"http_probe 实测版本端点","asset_id":"web1"}`,
@@ -95,7 +105,7 @@ func TestLandingWakesIncrementalRoundE2E(t *testing.T) {
 					Args: fmt.Sprintf(`{"url":%q}`, base+"/"),
 				}}, Finish: "tool_calls"}
 			}
-			if !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实") {
+			if !seenToolResult(rr, "submit_candidate_fact", "已提交新进事实") {
 				return scriptedReply{ToolCalls: []scriptedToolCall{{
 					ID: "f2", Name: "submit_candidate_fact",
 					Args: `{"statement":"首页指纹已确认:服务在线","evidence":"http_probe 实测响应","asset_id":"web1"}`,
@@ -159,21 +169,16 @@ func TestLandingWakesIncrementalRoundE2E(t *testing.T) {
 	if s1 := mustNode(t, store, task, "s1"); s1.Status != "running" {
 		t.Fatalf("快线应挂起在执行中,实际 %s", s1.Status)
 	}
-	close(heldFast) // 放行快线:其落地只能撞出增量轮(派发后无自我规划)
+	releaseHeldFast() // 放行快线:其落地只能撞出增量轮(派发后无自我规划)
 
 	// ---- 增量轮:慢线仍挂起(从未落地)时,基于快线增量的研判已发生 ----
-	waitFor(t, 60*time.Second, "快线落地即触发增量研判轮(不等慢线)", func() bool {
-		return sawIncrement.Load()
+	// s3 的存在性与标题用限期等待判定(P4-54 修复测试潜在竞态):sawIncrement
+	// 在模型应答落地的瞬间置位,而 s3 的图上落账在其后的同轮派发里——
+	// 即时 mustNode 会与派发落账竞态,瞬间读到"节点不存在"误判失败。
+	waitFor(t, 60*time.Second, "增量轮已派发新方向步骤 s3", func() bool {
+		s3, err := store.Node(ctx, task, "s3")
+		return err == nil && strings.Contains(s3.Title, "增量新方向")
 	})
-	if !sawIncrement.Load() {
-		for i, rr := range model.decomposeRequests() {
-			t.Logf("拆解#%d 态势尾段: %s", i, clipTailStr(rr.LastUser, 600))
-		}
-		t.Fatalf("增量研判轮未发生(见上:主宰看到的态势)")
-	}
-	if s3 := mustNode(t, store, task, "s3"); !strings.Contains(s3.Title, "增量新方向") {
-		t.Fatalf("增量轮应已派发新方向步骤: %s", s3.Title)
-	}
 	if s2 := mustNode(t, store, task, "s2"); s2.Status != "running" {
 		t.Fatalf("慢线应仍在执行(增量轮发生在其落地前),实际 %s", s2.Status)
 	}
@@ -191,9 +196,11 @@ func TestLandingWakesIncrementalRoundE2E(t *testing.T) {
 
 	// ---- 放行慢线:在飞工作收尾,任务经机器判定完成 ----
 	waitFor(t, 60*time.Second, "快线与增量方向单位均完成", func() bool {
-		return mustNode(t, store, task, "s1").Status == "done" && mustNode(t, store, task, "s3").Status == "done"
+		s1, err1 := store.Node(ctx, task, "s1")
+		s3, err3 := store.Node(ctx, task, "s3")
+		return err1 == nil && err3 == nil && s1.Status == "done" && s3.Status == "done"
 	})
-	close(held)
+	releaseHeld()
 	waitFor(t, 60*time.Second, "慢线收尾后任务完成", func() bool {
 		return m.Task(task).Status() == "completed"
 	})

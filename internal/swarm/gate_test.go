@@ -512,6 +512,10 @@ func TestGateParkApproveResumeAndClockPause(t *testing.T) {
 	if !strings.Contains(string(raw), "审批结果 · 续跑") {
 		t.Fatalf("转录应含批准续跑指令(挂起与续跑全程可审计)")
 	}
+	// P4-52 ②:批准附意见——意见全文随放行注入原会话(转录可证)。
+	if !strings.Contains(string(raw), "造物主批准附言(请遵照执行):允许本次写入。") {
+		t.Fatalf("转录应含批准附言原文(意见全文注入原会话)")
+	}
 }
 
 func parseSecs(t *testing.T, s string) float64 {
@@ -597,9 +601,10 @@ func TestPanelDenyFusesUnit(t *testing.T) {
 	}
 }
 
-// ---- 完成标准 ④:非常严重项直接拒绝 + 研判后放行逐次执行全记账 ----
+// ---- 完成标准 ④:非常严重项直接拒绝(P4-51 ⑤:"规划后放行"废除,
+// 拒绝即终局——拒绝线不再有放行通道) ----
 
-func TestHarmDenyLineDirectDenyThenForcedRelease(t *testing.T) {
+func TestHarmDenyLineDirectDeny(t *testing.T) {
 	dir := t.TempDir()
 	store := openStore(t, dir)
 	ctx := context.Background()
@@ -610,11 +615,10 @@ func TestHarmDenyLineDirectDenyThenForcedRelease(t *testing.T) {
 	dispatchStepAtLevelHarm(t, store, task, "s1", "销毁目标数据库验证破坏面", "g1",
 		"修改与持久化", rings.HarmDataDestruction, "target")
 
-	const marker = "gr-forced-release-77c1"
 	model := newScriptedModel(func(rr *recordedRequest) scriptedReply {
 		return scriptedReply{ToolCalls: []scriptedToolCall{{
 			ID: "b1", Name: "bash",
-			Args: fmt.Sprintf(`{"command":"echo %s > forced-marker.txt && cat forced-marker.txt"}`, marker),
+			Args: `{"command":"echo gr-harm-deny > forced-marker.txt && cat forced-marker.txt"}`,
 		}}, Finish: "tool_calls"}
 	})
 	defer model.Close()
@@ -638,38 +642,6 @@ func TestHarmDenyLineDirectDenyThenForcedRelease(t *testing.T) {
 	if len(recs) != 1 || recs[0].Type != rings.ApprovalRecDenied ||
 		recs[0].DenyLine != rings.DenyLineHarm || recs[0].HarmClass != rings.HarmDataDestruction {
 		t.Fatalf("应恰 1 条拒绝线留痕(带危害声明): %+v", recs)
-	}
-	denied := recs[0]
-
-	// ---- 研判后放行:按记录在案的参数执行一次,全记账 ----
-	result, err := ex.ExecuteForcedRelease(ctx, task, denied)
-	if err != nil {
-		t.Fatalf("研判后放行执行失败: %v", err)
-	}
-	if !strings.Contains(result, marker) {
-		t.Fatalf("放行执行结果应含 marker: %q", result)
-	}
-	// 放行执行的留痕:swarm.record tool_call,actor=swarm:fr-*。
-	frs := 0
-	evs, _ := store.Events(ctx, task, 0, 0)
-	for _, ev := range evs {
-		if ev.Kind != rings.EventSwarmRecord {
-			continue
-		}
-		var r rings.SwarmRecord
-		_ = json.Unmarshal(ev.Payload, &r)
-		if r.Type == rings.SwarmRecToolCall && strings.HasPrefix(r.UnitID, "fr-") {
-			frs++
-			if !strings.Contains(r.Note, denied.RequestID) || !strings.Contains(r.Note, "规划后放行") {
-				t.Fatalf("放行执行留痕应回指审批请求: %+v", r)
-			}
-			if r.IsError || !strings.Contains(r.ResultHead, marker) {
-				t.Fatalf("放行执行应真实执行: %+v", r)
-			}
-		}
-	}
-	if frs != 1 {
-		t.Fatalf("研判后放行应恰 1 条执行留痕,得到 %d", frs)
 	}
 }
 

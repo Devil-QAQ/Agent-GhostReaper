@@ -14,6 +14,7 @@ import (
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/transcript"
 
+	"ghostreaper/internal/blackbox"
 	"ghostreaper/internal/rings"
 	"ghostreaper/internal/runlog"
 )
@@ -120,6 +121,9 @@ type leg struct {
 	prov     llm.Provider
 	brk      breakerState
 	consec   int // 连续瞬时失败(开闸归零)
+	// 同类连环检测(P4-57 ④):同错误签名连续命中计数(成功或换错误即清)。
+	lastSig   string
+	sigStreak int
 }
 
 // taskRoute 一个任务的腿集:lead 为绑定主用(显式绑定后失败不悄悄换,
@@ -155,15 +159,18 @@ type Chain struct {
 	// 层建连重试加速;生产留空走默认)。对环境变量腿同样生效。
 	ProviderOpts func(*llm.Config)
 
-	mu          sync.Mutex
-	lead        *leg   // 主用腿(库激活或环境变量);无主配置时 nil
-	members     []*leg // 备链成员(优先级升序,同优先级按名称)
-	rr          map[int]int
-	taskCache   map[string]*taskRoute
+	mu        sync.Mutex
+	lead      *leg   // 主用腿(库激活或环境变量);无主配置时 nil
+	members   []*leg // 备链成员(优先级升序,同优先级按名称)
+	rr        map[int]int
+	taskCache map[string]*taskRoute
 	// served 会话键→最近实际服务的模型(P4-41:记账按会话精确归属——
 	// 请求实际走的腿与记账时刻的路由解析可能不同(轮转游标在请求进行
 	// 中推进),按会话记录实际服务腿,token 台账模型列与真实服务一致)。
 	served map[string]string
+	// lastRule 会话键→最近生效的思考回传规则(P4-57 ②:跨腿规则切换
+	// 的日志判定;配置重载清零)。
+	lastRule map[string]string
 }
 
 // NewChain 构建链:按模型库/环境变量构建腿集 + 装载持久化熔断状态
@@ -298,7 +305,8 @@ func (c *Chain) reloadLocked(ctx context.Context, restore bool) {
 	c.lead, c.members = nil, nil
 	c.rr = map[int]int{}
 	c.taskCache = map[string]*taskRoute{}
-	c.served = nil // 会话服务记录随切换作废(下一请求起记新配置的腿)
+	c.served = nil   // 会话服务记录随切换作废(下一请求起记新配置的腿)
+	c.lastRule = nil // 思考回传规则跟踪同随切换作废(P4-57 ②)
 	primaryName := ""
 	if c.Store != nil {
 		if p, ok, _ := ActiveName(ctx, c.Store, RolePrimary); ok {
@@ -771,9 +779,10 @@ func estimateTokens(req llm.CompletionRequest) int {
 }
 
 // onSuccess 一次成功路由的收尾:探测成功即回切(梯度归零);成功即清
-// 连续失败计数。
+// 连续失败计数与同类连环签名(P4-57 ④)。
 func (c *Chain) onSuccess(l *leg) {
 	l.consec = 0
+	l.lastSig, l.sigStreak = "", 0
 	if l.brk.State != "closed" {
 		l.brk = breakerState{State: "closed", UpdatedAt: c.Now()}
 		c.persistLocked(context.Background())
@@ -782,12 +791,33 @@ func (c *Chain) onSuccess(l *leg) {
 
 // onFailure 一次失败的路由收尾(逐成员):额度耗尽立即开闸;瞬时失败
 // 连续达阈值软熔断(重试覆盖④:-1=熔断层关闭,>0=值);确定性拒绝/
-// 超长/取消不计(换模型解决不了认证/参数/超长)。
-func (c *Chain) onFailure(l *leg, cls ErrClass, err error) {
+// 超长/取消不计(换模型解决不了认证/参数/超长)。同类连环检测
+// (P4-57 ④):同端点同错误签名连续 ≥2 次黑匣子记"同类连环"
+// (v1.2.0 实锤形态——同 400 原文连环杀单位,不等肉眼发现)。
+func (c *Chain) onFailure(ctx context.Context, l *leg, cls ErrClass, err error) {
 	if l == nil {
 		return
 	}
-	brief := fmt.Sprintf("%s: %.160s", cls, strings.TrimSpace(err.Error()))
+	sig := failSigOf(cls, err)
+	if sig == l.lastSig {
+		l.sigStreak++
+	} else {
+		l.lastSig, l.sigStreak = sig, 1
+	}
+	if l.sigStreak == 2 && c.Store != nil {
+		taskID := TaskFromContext(ctx)
+		if taskID != "" {
+			rec := rings.BlackboxRecord{Type: rings.BlackboxLLMChainStreak,
+				Detail: map[string]any{
+					"note":   fmt.Sprintf("配置 %s 同一错误连续 %d 次: %s", l.name, l.sigStreak, clipErrForNote(err)),
+					"config": l.name, "streak": l.sigStreak, "class": string(cls),
+				}}
+			if err := blackbox.Record(context.Background(), c.Store, taskID, "failover", rec); err != nil {
+				runlog.Errorf("黑匣子写入失败: 同类连环 %s/%s: %v", taskID, l.name, err)
+			}
+		}
+	}
+	brief := fmt.Sprintf("%s: %.160s", cls, strings.TrimSpace(errText(err)))
 	switch cls {
 	case ClassQuota:
 		c.openLocked(l, "额度耗尽 "+brief)
@@ -800,6 +830,23 @@ func (c *Chain) onFailure(l *leg, cls ErrClass, err error) {
 			c.openLocked(l, fmt.Sprintf("连续瞬时失败 %d 次 %s", l.consec, brief))
 		}
 	}
+}
+
+// errText 错误文案(nil 安全)。
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// clipErrForNote 黑匣子 note 的错误摘录(≤120 字符)。
+func clipErrForNote(err error) string {
+	s := strings.TrimSpace(errText(err))
+	if len(s) > 120 {
+		s = s[:120] + "…"
+	}
+	return s
 }
 
 // LogMsgBreakerTripped 熔断触发的日志行前缀(诊断包"受阻与恢复"类型
@@ -881,7 +928,10 @@ func (c *Chain) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2
 			}
 			delivered := false
 			var termErr error
-			for ev, err := range route.current.prov.Stream(ctx, req) {
+			// P4-57 ②:按当前服务腿的思考回传规则处理整个历史(重放换腿
+			// 各自按新腿规则;确定性,前缀缓存友好)。
+			legReq := c.legThinkingReq(ctx, route.current, req)
+			for ev, err := range route.current.prov.Stream(ctx, legReq) {
 				if err != nil {
 					termErr = err
 					break
@@ -910,7 +960,7 @@ func (c *Chain) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2
 					route.current.name, route.current.model, cls, strings.TrimSpace(termErr.Error()))
 			}
 			c.mu.Lock()
-			c.onFailure(route.current, cls, termErr)
+			c.onFailure(ctx, route.current, cls, termErr)
 			switched := c.routeChanged(ctx, req, route)
 			limit := c.replayLimitOf(route.current)
 			c.mu.Unlock()
@@ -968,7 +1018,10 @@ func (c *Chain) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Me
 		if route.current == nil {
 			return llm.Message{}, "", llm.Usage{}, fmt.Errorf("failover: %s", route.noRoute)
 		}
-		msg, sr, usage, err := route.current.prov.Complete(ctx, req)
+		// P4-57 ②:按当前服务腿的思考回传规则处理整个历史(重放换腿
+		// 各自按新腿规则)。
+		legReq := c.legThinkingReq(ctx, route.current, req)
+		msg, sr, usage, err := route.current.prov.Complete(ctx, legReq)
 		if err == nil {
 			c.mu.Lock()
 			c.noteServedLocked(ctx, route.current.model)
@@ -982,7 +1035,7 @@ func (c *Chain) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Me
 				route.current.name, route.current.model, cls, strings.TrimSpace(err.Error()))
 		}
 		c.mu.Lock()
-		c.onFailure(route.current, cls, err)
+		c.onFailure(ctx, route.current, cls, err)
 		switched := c.routeChanged(ctx, req, route)
 		limit := c.replayLimitOf(route.current)
 		c.mu.Unlock()

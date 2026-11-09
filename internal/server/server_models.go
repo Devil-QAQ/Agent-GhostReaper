@@ -40,6 +40,11 @@ type modelsView struct {
 	Members []memberView `json:"members"`
 	// Presets 平台 × 格式默认端点(P4-03 ④:建模型选平台后预填,可改)。
 	Presets map[string]map[string]string `json:"presets"`
+	// PassbackPresets 平台 × 格式默认思考回传规则(P4-57 ①:建模型选
+	// 平台+格式后联动预填,可改;未列组合走剔除默认)。
+	PassbackPresets map[string]map[string]string `json:"passback_presets"`
+	// PassbackOptions 思考回传规则下拉(P4-57 ①:传回/剔除/不干预)。
+	PassbackOptions []failover.ThinkingPassbackOption `json:"passback_options"`
 	// OpenCodeModes opencode 接入方式双形态端点(P4-10 ①:Go 订阅默认 /
 	// API 按量;presets 内的 opencode 即默认形态 Go 订阅)。
 	OpenCodeModes map[string]map[string]string `json:"opencode_modes"`
@@ -91,7 +96,9 @@ func (s *Server) maskedLibrary(ctx context.Context) ([]failover.MaskedConfig, er
 func (s *Server) handleModelsGet(w http.ResponseWriter, r *http.Request) {
 	v := modelsView{ChainReady: s.Chain != nil && s.Chain.Ready(),
 		Presets: failover.PlatformPresetURLs(), Platforms: failover.PlatformOptions(),
-		OpenCodeModes: failover.OpenCodeModePresetURLs()}
+		OpenCodeModes:   failover.OpenCodeModePresetURLs(),
+		PassbackPresets: failover.ThinkingPassbackPresets(),
+		PassbackOptions: failover.ThinkingPassbackOptions()}
 	lib, err := s.maskedLibrary(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
@@ -146,27 +153,28 @@ func (s *Server) handleModelsGet(w http.ResponseWriter, r *http.Request) {
 // (P3-05c ② 重名拦截:true 且库内已有同名配置即拒"该名称已存在";
 // 编辑自身 Create=false 不受影响)。
 type modelBody struct {
-	Name           string  `json:"name"`
-	Create         bool    `json:"create"`
-	Format         string  `json:"format"`
-	BaseURL        string  `json:"base_url"`
-	APIKey         string  `json:"api_key"`
-	Model          string  `json:"model"`
-	ContextWindow  int     `json:"context_window"`
-	Proxy          string  `json:"proxy"`
-	RatePerSecond  float64 `json:"rate_per_second"`
-	RatePerMinute  float64 `json:"rate_per_minute"`
-	PollPriority   int     `json:"poll_priority"`
-	PollDisabled   bool    `json:"poll_disabled"`
-	MaxTokens      int     `json:"max_tokens"`
-	MaxTokensField string  `json:"max_tokens_field"`
-	StreamDisabled bool    `json:"stream_disabled"`
-	Thinking       string  `json:"thinking"`
-	ThinkingEffort string  `json:"thinking_effort"`
-	RetryConnect   int     `json:"retry_connect"`
-	RetryEmpty     int     `json:"retry_empty"`
-	RetryReplay    int     `json:"retry_replay"`
-	RetryBreaker   int     `json:"retry_breaker"`
+	Name             string  `json:"name"`
+	Create           bool    `json:"create"`
+	Format           string  `json:"format"`
+	BaseURL          string  `json:"base_url"`
+	APIKey           string  `json:"api_key"`
+	Model            string  `json:"model"`
+	ContextWindow    int     `json:"context_window"`
+	Proxy            string  `json:"proxy"`
+	RatePerSecond    float64 `json:"rate_per_second"`
+	RatePerMinute    float64 `json:"rate_per_minute"`
+	PollPriority     int     `json:"poll_priority"`
+	PollDisabled     bool    `json:"poll_disabled"`
+	MaxTokens        int     `json:"max_tokens"`
+	MaxTokensField   string  `json:"max_tokens_field"`
+	StreamDisabled   bool    `json:"stream_disabled"`
+	Thinking         string  `json:"thinking"`
+	ThinkingEffort   string  `json:"thinking_effort"`
+	ThinkingPassback string  `json:"thinking_passback"` // P4-57 ① 思考回传规则(传回/剔除/不干预;空=按端点推断)
+	RetryConnect     int     `json:"retry_connect"`
+	RetryEmpty       int     `json:"retry_empty"`
+	RetryReplay      int     `json:"retry_replay"`
+	RetryBreaker     int     `json:"retry_breaker"`
 }
 
 func (b modelBody) toConfig() failover.ModelConfig {
@@ -180,7 +188,8 @@ func (b modelBody) toConfig() failover.ModelConfig {
 		MaxTokens: b.MaxTokens, MaxTokensField: b.MaxTokensField,
 		StreamDisabled: b.StreamDisabled,
 		Thinking:       b.Thinking, ThinkingEffort: b.ThinkingEffort,
-		RetryConnect: b.RetryConnect, RetryEmpty: b.RetryEmpty,
+		ThinkingPassback: b.ThinkingPassback,
+		RetryConnect:     b.RetryConnect, RetryEmpty: b.RetryEmpty,
 		RetryReplay: b.RetryReplay, RetryBreaker: b.RetryBreaker,
 	}
 }

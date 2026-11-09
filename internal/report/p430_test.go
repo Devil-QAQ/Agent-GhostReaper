@@ -55,8 +55,8 @@ func TestRenderExcludesReviewedClaims(t *testing.T) {
 	if !strings.Contains(md, "不纳入报告:1 条判断经复核为信息性观察") {
 		t.Fatalf("报告须如实交代被排除条数:\n%s", md)
 	}
-	// 未标记的待确认判断照常呈现。
-	if !strings.Contains(md, "tc-2") || !strings.Contains(md, "待确认清单") {
+	// 未标记的证据不足判断照常呈现(P4-56 改词)。
+	if !strings.Contains(md, "tc-2") || !strings.Contains(md, "证据不足清单") {
 		t.Fatalf("未标记判断照常进报告:\n%s", md)
 	}
 }
@@ -83,7 +83,7 @@ func TestRenderExcludesReviewedPending(t *testing.T) {
 	if strings.Contains(md, "tc-2") {
 		t.Fatalf("被标记的待确认判断不得出现在报告正文:\n%s", md)
 	}
-	if !strings.Contains(md, "待确认:0 条") {
+	if !strings.Contains(md, "证据不足:0 条") {
 		t.Fatalf("待确认计数须排除被标记判断:\n%s", md)
 	}
 }

@@ -39,10 +39,11 @@ func (st *convState) oldestQueued() *interjectMessage {
 	return nil
 }
 
-// state 从事件流重建(任务 × 目标)子会话的消息态。
+// state 从事件流重建(任务 × 目标)子会话的消息态。P4-58:按 kind
+// 定向直查 interject.record,不再全量扫事件流。
 func (s *Service) state(ctx context.Context, taskID, key string) (*convState, error) {
 	target, sessionID := splitKey(key)
-	evs, err := s.Store.Events(ctx, taskID, 0, 0)
+	evs, err := s.Store.EventsByKinds(ctx, taskID, rings.EventInterjectRecord)
 	if err != nil {
 		return nil, err
 	}
@@ -133,9 +134,10 @@ type View struct {
 }
 
 // View 子会话视图:插话发言(问/改)+ 改向回执(舵杆状态机汇合)+
-// 建议裁决轨迹 + 冻结态。
+// 建议裁决轨迹 + 冻结态。P4-58:按 kind 定向直查 interject.record +
+// steer.record,不再全量扫事件流。
 func (s *Service) View(ctx context.Context, taskID, target, sessionID string) (*View, error) {
-	evs, err := s.Store.Events(ctx, taskID, 0, 0)
+	evs, err := s.Store.EventsByKinds(ctx, taskID, rings.EventInterjectRecord, rings.EventSteerRecord)
 	if err != nil {
 		return nil, err
 	}

@@ -162,12 +162,17 @@ func TestModelRecoverEndpoint(t *testing.T) {
 
 // TestModelsGetPresets P4-03 ④:/api/models 随行下发平台 × 格式默认端点
 // 与平台清单(建模型预填数据源);P4-10 ①:opencode 默认形态改 Go 订阅
-// 网关,接入方式双形态随行下发。
+// 网关,接入方式双形态随行下发;P4-57 ①:思考回传规则预设与下拉随行。
 func TestModelsGetPresets(t *testing.T) {
 	_, h := newModelsTestServer(t)
 	var res struct {
-		Presets   map[string]map[string]string `json:"presets"`
-		OCModes   map[string]map[string]string `json:"opencode_modes"`
+		Presets          map[string]map[string]string `json:"presets"`
+		OCModes          map[string]map[string]string `json:"opencode_modes"`
+		PassbackPresets  map[string]map[string]string `json:"passback_presets"`
+		PassbackOptions  []struct {
+			Value string `json:"value"`
+			Label string `json:"label"`
+		} `json:"passback_options"`
 		Platforms []struct {
 			Value string `json:"value"`
 			Label string `json:"label"`
@@ -176,7 +181,8 @@ func TestModelsGetPresets(t *testing.T) {
 	get(t, h, "/api/models", http.StatusOK, &res)
 	if res.Presets["glm"]["anthropic"] != "https://open.bigmodel.cn/api/anthropic" ||
 		res.Presets["deepseek"]["openai"] != "https://api.deepseek.com" ||
-		res.Presets["opencode"]["openai"] != "https://opencode.ai/inference/go/openai/v1" {
+		res.Presets["opencode"]["openai"] != "https://opencode.ai/inference/go/openai/v1" ||
+		res.Presets["openai"]["openai"] != "https://api.openai.com/v1" {
 		t.Fatalf("平台预设不符: %+v", res.Presets)
 	}
 	if res.OCModes["go"]["anthropic"] != "https://opencode.ai/inference/go/anthropic" ||
@@ -184,7 +190,20 @@ func TestModelsGetPresets(t *testing.T) {
 		res.OCModes["api"]["anthropic"] != "https://opencode.ai/zen" {
 		t.Fatalf("opencode 接入方式双形态不符: %+v", res.OCModes)
 	}
-	if len(res.Platforms) != 4 || res.Platforms[3].Value != "" {
+	// 思考回传规则预设(P4-57 ①):平台 × 格式映射与三值下拉随行下发。
+	if res.PassbackPresets["glm"]["openai"] != "passback" ||
+		res.PassbackPresets["deepseek"]["openai"] != "strip" ||
+		res.PassbackPresets["deepseek"]["anthropic"] != "passback" ||
+		res.PassbackPresets["openai"]["openai"] != "none" {
+		t.Fatalf("思考回传规则预设不符: %+v", res.PassbackPresets)
+	}
+	if len(res.PassbackOptions) != 3 ||
+		res.PassbackOptions[0].Value != "passback" || res.PassbackOptions[0].Label != "传回" ||
+		res.PassbackOptions[1].Value != "strip" || res.PassbackOptions[1].Label != "剔除" ||
+		res.PassbackOptions[2].Value != "none" || res.PassbackOptions[2].Label != "不干预" {
+		t.Fatalf("思考回传规则下拉不符: %+v", res.PassbackOptions)
+	}
+	if len(res.Platforms) != 5 || res.Platforms[3].Value != "openai" || res.Platforms[4].Value != "" {
 		t.Fatalf("平台清单不符: %+v", res.Platforms)
 	}
 }

@@ -26,7 +26,7 @@ import (
 )
 
 // CaseTimelineEntry 时间线索引行(timeline 数组元素)。K 为条目种类
-// (created|state|falsify|verdict|reopen|repro|retest|replay|review);
+// (created|state|falsify|verdict|reopen|repro|retest|replay|review|suspend);
 // P 为负载——记录类为事件原始 JSON,repro 为 {"severity":…} 摘要,
 // created/state 为 {"status":…} 小摘要。
 type CaseTimelineEntry struct {
@@ -38,15 +38,27 @@ type CaseTimelineEntry struct {
 
 // ReproDigest 最新定稿的投影形态:小字段 + 步骤(不含 Op——面板/报告
 // 正文不显,完整参数在事件流与证据包;不含 Variants/Process 大数组,
-// 计数在案,过程明细由证据包导出按 rev 定向读事件)。
+// 计数在案,过程明细由证据包导出按 rev 定向读事件)。Rounds 为定稿
+// 冻结的反证时间线人话三段(P4-56 ⑤;旧定稿为空,读侧退机器层)。
 type ReproDigest struct {
-	Rev                 int64       `json:"rev"`
-	Severity            string      `json:"severity,omitempty"`
-	Narrative           string      `json:"narrative,omitempty"`
-	NarrativeUnpolished bool        `json:"narrative_unpolished,omitempty"`
-	Steps               []ReproStep `json:"steps,omitempty"`
-	ProcessCount        int         `json:"process_count,omitempty"`
-	VariantsCount       int         `json:"variants_count,omitempty"`
+	Rev                 int64               `json:"rev"`
+	Severity            string              `json:"severity,omitempty"`
+	Narrative           string              `json:"narrative,omitempty"`
+	NarrativeUnpolished bool                `json:"narrative_unpolished,omitempty"`
+	Rounds              []FalsifyRoundHuman `json:"rounds,omitempty"`
+	Steps               []ReproStep         `json:"steps,omitempty"`
+	ProcessCount        int                 `json:"process_count,omitempty"`
+	VariantsCount       int                 `json:"variants_count,omitempty"`
+}
+
+// SummaryDigest 定稿校对后的声明摘要(P4-59 ①,问题清单 #80①③):
+// statement 存在性描述 / impact 影响面 / facts 链上事实描述,报告级
+// 文风锚生成,随 repro 事件同批冻结;空字段 = 未生成,读侧退节点原文。
+type SummaryDigest struct {
+	Rev       int64           `json:"rev,omitempty"`
+	Statement string          `json:"statement,omitempty"`
+	Impact    string          `json:"impact,omitempty"`
+	Facts     []FactStatement `json:"facts,omitempty"`
 }
 
 // CaseEvidenceBind 绑定流量证据条目(首绑次序)。
@@ -99,6 +111,7 @@ type claimCaseRow struct {
 	discoverStep         string
 	discoverSess         string
 	timing               TimingDigest
+	summary              *SummaryDigest
 	// changed* 脏列标记(save 只写触碰过的列组)。
 	changedDigest   bool
 	changedTimeline bool
@@ -107,19 +120,20 @@ type claimCaseRow struct {
 	changedEvidence bool
 	changedOrigin   bool
 	changedTiming   bool
+	changedSummary  bool
 }
 
 // loadClaimCase 读行;不存在时建默认行(幂等)。
 func loadClaimCase(tx *sql.Tx, taskID, claimID string) (*claimCaseRow, error) {
 	row := &claimCaseRow{claimID: claimID, altKilled: map[string]bool{}}
 	var hasEvidence, reportExcluded int
-	var rawTimeline, rawAlts, rawKilled, rawRepro, rawEvidence, rawTiming string
+	var rawTimeline, rawAlts, rawKilled, rawRepro, rawEvidence, rawTiming, rawSummary string
 	err := tx.QueryRow(
 		`SELECT falsify_step, verifier, pending_reason, verdict_rev, severity, repro_steps,
 		   retest_verdict, retest_round, retest_at, replay_verdict, replay_round, replay_at,
 		   has_evidence, report_excluded, report_excluded_reason, evidence_binds, repro_events,
 		   timeline, alternatives, alt_killed, repro, evidence, discoverer, discover_step,
-		   discover_session, timing
+		   discover_session, timing, summary
 		 FROM claim_cases WHERE task_id = ? AND claim_id = ?`, taskID, claimID,
 	).Scan(&row.falsifyStep, &row.verifier, &row.pendingReason, &row.verdictRev, &row.severity,
 		&row.reproSteps, &row.retestVerdict, &row.retestRound, &row.retestAt,
@@ -127,7 +141,7 @@ func loadClaimCase(tx *sql.Tx, taskID, claimID string) (*claimCaseRow, error) {
 		&hasEvidence, &reportExcluded, &row.reportExcludedReason,
 		&row.evidenceBinds, &row.reproEvents,
 		&rawTimeline, &rawAlts, &rawKilled, &rawRepro, &rawEvidence,
-		&row.discoverer, &row.discoverStep, &row.discoverSess, &rawTiming,
+		&row.discoverer, &row.discoverStep, &row.discoverSess, &rawTiming, &rawSummary,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		if _, err := tx.Exec(
@@ -170,6 +184,12 @@ func loadClaimCase(tx *sql.Tx, taskID, claimID string) (*claimCaseRow, error) {
 	}
 	if row.timing.Steps == nil {
 		row.timing.Steps = map[string]TimingStepDigest{}
+	}
+	if rawSummary != "" {
+		row.summary = &SummaryDigest{}
+		if json.Unmarshal([]byte(rawSummary), row.summary) != nil {
+			row.summary = nil
+		}
 	}
 	return row, nil
 }
@@ -276,6 +296,21 @@ func (r *claimCaseRow) save(tx *sql.Tx, taskID string) error {
 			string(b), taskID, r.claimID,
 		); err != nil {
 			return fmt.Errorf("rings: 投影写入耗时态: %w", err)
+		}
+	}
+	if r.changedSummary {
+		summary := []byte("")
+		if r.summary != nil {
+			var err error
+			if summary, err = json.Marshal(r.summary); err != nil {
+				return fmt.Errorf("rings: 序列化判断摘要: %w", err)
+			}
+		}
+		if _, err := tx.Exec(
+			`UPDATE claim_cases SET summary = ? WHERE task_id = ? AND claim_id = ?`,
+			string(summary), taskID, r.claimID,
+		); err != nil {
+			return fmt.Errorf("rings: 投影写入判断摘要: %w", err)
 		}
 	}
 	return nil
@@ -476,10 +511,18 @@ func applyClaimRecord(tx *sql.Tx, taskID string, rev int64, p TestClaimRecord, p
 		}
 		row.repro = &ReproDigest{
 			Rev: rev, Severity: p.Severity, Narrative: p.Narrative,
-			NarrativeUnpolished: p.NarrativeUnpolished, Steps: steps,
+			NarrativeUnpolished: p.NarrativeUnpolished, Rounds: p.Rounds, Steps: steps,
 			ProcessCount: len(p.Process), VariantsCount: len(p.Variants),
 		}
 		row.changedRepro = true
+		// 声明摘要(P4-59 ①):字段全空 = 本次定稿未生成校对摘要,摘要列
+		// 一并清空(取代语义——重开后再确认的新定稿为准,不残留旧摘要)。
+		if p.Statement != "" || p.Impact != "" || len(p.Facts) > 0 {
+			row.summary = &SummaryDigest{Rev: rev, Statement: p.Statement, Impact: p.Impact, Facts: p.Facts}
+		} else {
+			row.summary = nil
+		}
+		row.changedSummary = true
 		summary, _ := json.Marshal(map[string]string{"severity": p.Severity})
 		row.appendTimeline(rev, occurredAt, "repro", summary)
 	case TestClaimRecEvidence:
@@ -512,6 +555,19 @@ func applyClaimRecord(tx *sql.Tx, taskID string, rev int64, p TestClaimRecord, p
 		row.reportExcluded, row.reportExcludedReason = true, p.Reason
 		row.changedDigest = true
 		row.appendTimeline(rev, occurredAt, "review", payload)
+	case TestClaimRecSuspend:
+		// 操作者取消挂起(P4-54):挂起理由 latest-wins 进 pending_reason
+		// (面板/报告读同一口径),时间线留 suspend 条目;状态迁移由
+		// node.state_changed(testing→pending)另行投影。
+		row.pendingReason = p.Reason
+		row.verdictRev = rev
+		row.changedDigest = true
+		row.appendTimeline(rev, occurredAt, "suspend", payload)
+	case TestClaimRecDiscard:
+		// 程序确定性废弃(P4-55 审核迭代):时间线留 discard 条目(理由
+		// 随行可溯);pending_reason 不动——废弃是终态不是搁置,理由在
+		// 本条目与 node.state_changed Note。
+		row.appendTimeline(rev, occurredAt, "discard", payload)
 	}
 	return row.save(tx, taskID)
 }

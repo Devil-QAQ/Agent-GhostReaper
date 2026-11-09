@@ -34,6 +34,7 @@ import (
 	"github.com/Autumn-27/norma/llm"
 
 	"ghostreaper/internal/rings"
+	"ghostreaper/internal/runlog"
 	"ghostreaper/internal/swarm"
 )
 
@@ -249,7 +250,16 @@ func (s *Server) handleRoEAssetScope(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, fmt.Errorf("摘除已落账,在途止损失败: %w", err))
 			return
 		}
+		// 摘除连坐废弃(P4-55 审核迭代):摘除覆盖资产上的非终态声明/
+		// 假设批量转已废弃(理由"目标已摘除");幂等,失败如实跳过可重入。
+		if _, _, derr := rings.DiscardAnchoredFindings(ctx, s.Store, taskID, rings.DiscardReasonExcluded, "creator"); derr != nil {
+			runlog.Warnf("摘除连坐废弃失败(如实跳过,可重入): %s %v", taskID, derr)
+		}
 	}
+	// P4-51 ⑥ 通道联动:RoE 面板纳入(勾回/取消摘除)与卡"加入资产"
+	// 等效——挂等该目标的冻结单位对账唤醒(排除的对账收口由止损与下
+	// 方 resolveScopeWakes 一并覆盖)。
+	s.resolveScopeWakes(taskID)
 	s.wake(taskID)
 	v, err := s.currentRoE(taskID)
 	if err != nil {
@@ -307,7 +317,8 @@ type intentRuleOut struct {
 	Note        string   `json:"note,omitempty"`
 }
 
-// intentRuleViews 组装任务级规则视图(计数来自 guard.record 事件流)。
+// intentRuleViews 组装任务级规则视图(计数来自 guard.record 事件流;
+// P4-58:按 kind 定向直查,不再全量扫事件流)。
 func (s *Server) intentRuleViews(taskID string, rules []rings.IntentRule) []intentRuleOut {
 	out := make([]intentRuleOut, 0, len(rules))
 	if len(rules) == 0 {
@@ -321,7 +332,7 @@ func (s *Server) intentRuleViews(taskID string, rules []rings.IntentRule) []inte
 		}
 	}
 	var quotaEvents []rings.GuardRecord
-	if evs, err := s.Store.Events(ctx, taskID, 0, 0); err == nil {
+	if evs, err := s.Store.EventsByKinds(ctx, taskID, rings.EventGuardRecord); err == nil {
 		for _, ev := range evs {
 			if ev.Kind != rings.EventGuardRecord {
 				continue

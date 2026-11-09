@@ -242,7 +242,7 @@ func taskZipInto(zw *zip.Writer, ctx context.Context, store *rings.Store, blobs 
 			pn++
 			idx, tag = strconv.Itoa(pn), "P"
 		default:
-			continue // 分文件只收 Confirmed/待确认(与报告正文章节同口径)
+			continue // 分文件只收已确认/证据不足(与报告正文章节同口径)
 		}
 		cmd, err := claimMD(ctx, store, taskID, c, cases[c.ID])
 		if err != nil {

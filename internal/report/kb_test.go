@@ -1,6 +1,9 @@
 package report
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // P2-10:修复建议查表(R17 确定性、零 LLM)与事实成果类分类的确定性
 // 验证——面板详情抽屉与报告导出同源共用这两个入口。
@@ -40,8 +43,32 @@ func TestRemediation(t *testing.T) {
 	// 同源前提:返回的切片不被读侧就地修改污染表(返回底层数组可被
 	// 读侧追加改写——查表侧每次返回同一数组,读侧只读;此处固化当前
 	// 语义,防止有人复制表后漂移)。
-	if Remediation("信息暴露")[0] != "从响应、页面与公开文件中移除该敏感内容" {
+	if Remediation("信息暴露")[0] != "从响应、页面与公开文件中删除该敏感内容" {
 		t.Error("信息暴露表项内容被改动,面板与报告将随之改变,须同步更新两侧验收")
+	}
+}
+
+// TestP459RemediationConcrete P4-59 ②(问题清单 #80③):修复建议模板全量
+// 按"具体动作禁空话"标准校准——空话黑名单零命中(无动作的套话、模糊
+// 动词),每条不超过一句(每条一个具体动作,复杂漏洞分条)。
+func TestP459RemediationConcrete(t *testing.T) {
+	vague := []string{
+		"加强", "加固", "收敛", "复核", "收紧", "完善", "规范",
+		"提高", "提升", "增强", "重视", "关注", "定期审查", "综合整改", "安全防护体系",
+	}
+	for _, e := range remediationKB {
+		for _, alias := range e.Aliases {
+			for _, item := range e.Items {
+				for _, w := range vague {
+					if strings.Contains(item, w) {
+						t.Errorf("修复建议含空话词 %q:%s(类型 %s)", w, item, alias)
+					}
+				}
+				if n := len([]rune(item)); n > 40 {
+					t.Errorf("修复建议应是一句具体动作(≤40 字,复杂分条):%s(%d 字)", item, n)
+				}
+			}
+		}
 	}
 }
 

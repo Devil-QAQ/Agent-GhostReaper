@@ -19,8 +19,9 @@ import (
 // 与内置拦截规则同级的确定性拒绝、熔断单位)、领取时闭包冻结。
 
 func TestP444ScopeCallTargets(t *testing.T) {
-	// bash:URL + 裸 IPv4(含带端口);版本号形态(三段)不提取;shell 变量
-	// 拼接的 URL(http://$hp/)非主机形态,跳过(防误拦合法变量循环)。
+	// bash(P4-50 ①收窄面):nmap 目标参数位、curl 目标 URL 提取;版本号
+	// 形态(10.999.999.999)、for 变量列表值(127.0.0.1:8080)与变量拼接
+	// URL(http://$hp/)不提取。
 	ts := scopeCallTargets("bash", json.RawMessage(
 		`{"command":"nmap -p 80,443 10.0.0.9 && curl http://www.example.com:8080/a && echo 2.4.1 rev 10.999.999.999 && for hp in 127.0.0.1:8080; do curl -s http://$hp/; done"}`))
 	var hosts []string
@@ -33,10 +34,15 @@ func TestP444ScopeCallTargets(t *testing.T) {
 			t.Errorf("bash 目标提取缺 %q: %v", want, hosts)
 		}
 	}
-	for _, bad := range []string{"10.999.999.999", "$hp"} {
+	for _, bad := range []string{"10.999.999.999", "$hp", "127.0.0.1"} {
 		if strings.Contains(joined, bad) {
-			t.Errorf("非法形态不应提取(%q): %v", bad, hosts)
+			t.Errorf("非目标形态不应提取(%q): %v", bad, hosts)
 		}
+	}
+	// nmap -p 端口绑定目标(端口写法粒度配套)。
+	ts = scopeCallTargets("bash", json.RawMessage(`{"command":"nmap -p 8080 10.0.0.9"}`))
+	if len(ts) != 1 || ts[0].host != "10.0.0.9" || ts[0].port != "8080" {
+		t.Errorf("nmap -p 端口应绑定目标: %+v", ts)
 	}
 	// http_probe/port_probe 参数直取;web_fetch/read 无目标(不在硬拦面)。
 	if ts := scopeCallTargets("http_probe", json.RawMessage(`{"url":"http://api.other.com:9090/x"}`)); len(ts) != 1 || ts[0].host != "api.other.com" {
@@ -81,6 +87,9 @@ func p444PentestEnv(t *testing.T, approved []string) (*rings.Store, *Executor, *
 	ex := NewExecutor(store, nil, filepath.Join(dir, "tasks"), Budget{})
 	ex.Gate = NewLedgerGate(store)
 	env := &unitEnv{Executor: ex, TaskID: task, StepID: "s1", UnitID: "u1", TranscriptID: "swarm-u1"}
+	// DNS 打桩:解析恒失败(判定按保守方向)——测试不依赖公网 DNS 的
+	// 实际解析结果(P4-50 ②同机扩展下,公网同 IP 会改变判定)。
+	env.scopeResolve = func(string) []string { return nil }
 	return store, ex, env, task
 }
 
@@ -109,22 +118,26 @@ func TestP444DenyScopeApprovalGate(t *testing.T) {
 		t.Fatalf("渗透任务包应冻结类型与闭包: %+v", pack)
 	}
 	gate := env.approvalGate(pack)
-	// 范围外目标(bash 命令里的兄弟域名):拒绝留痕 + 熔断。
+	// 范围外目标(bash 命令里的兄弟域名):P4-51 ①起拦下出待决卡＋单位
+	// 冻结收场让位(不熔断不 denied),提示等待批准。
 	d := gate(context.Background(), "bash", json.RawMessage(
 		`{"command":"curl -s http://api.example.com/"}`), permission.Context{})
-	if d.Behavior != permission.Deny || !strings.Contains(d.Message, "任务范围外") {
-		t.Fatalf("范围外目标应拒绝且人话: %+v", d)
+	if d.Behavior != permission.Deny || !strings.Contains(d.Message, "等待批准") {
+		t.Fatalf("范围外目标应拦下等待批准: %+v", d)
 	}
-	if env.deniedReason == "" || !strings.Contains(env.deniedReason, "任务范围外") {
-		t.Fatalf("范围外拒绝应熔断单位: %q", env.deniedReason)
+	if env.deniedReason != "" {
+		t.Fatalf("等待批准不是拒绝,不得熔断: %q", env.deniedReason)
 	}
-	// 留痕:approval.record denied,DenyLine=roe_scope(与内置拦截规则同级)。
-	recs := p444DenyRecords(t, store, task)
-	if len(recs) != 1 || recs[0].DenyLine != rings.DenyLineRoeScope {
-		t.Fatalf("应留痕一笔 roe_scope 拒绝: %+v", recs)
+	if env.scopeHold == nil || env.scopeHold.host != "api.example.com" {
+		t.Fatalf("应置位冻结目标: %+v", env.scopeHold)
+	}
+	// 留痕:approval.record scope_wait 待决卡(同一目标一张;http 默认
+	// 端口补全 80,写法即授权粒度)。
+	cards := p451ScopeWaitCards(t, store, task)
+	if len(cards) != 1 || cards[0].RequestID != "sc-api.example.com:80" {
+		t.Fatalf("应恰 1 张范围待决卡: %+v", cards)
 	}
 	// 范围内目标(种子域名任意端口)放行。
-	env.deniedReason = ""
 	d = gate(context.Background(), "bash", json.RawMessage(
 		`{"command":"curl -s http://www.example.com:9443/app"}`), permission.Context{})
 	if d.Behavior == permission.Deny && strings.Contains(d.Message, "任务范围外") {
@@ -142,23 +155,26 @@ func TestP444DenyScopeReadOnlyGuard(t *testing.T) {
 	pack := p444PentestPack(t, ex, store, task)
 	g := newToolGuard(env, pack, ex.Helm, 10, time.Time{}, 0)
 	// http_probe 是只读工具(权限管线自动放行、不进审批门)——门卫
-	// 补口拦:目标待批资产的主机即拒,人话原因返回给模型。
+	// 补口拦:范围外目标拦下等待批准(P4-51 ①:出卡＋冻结,不熔断)。
 	reason := g.guardReadOnlyCall("http_probe", json.RawMessage(
 		`{"url":"http://api.example.com/admin"}`))
-	if !strings.Contains(reason, "任务范围外") {
-		t.Fatalf("只读探测范围外目标应被补口拦: %q", reason)
+	if !strings.Contains(reason, "等待批准") {
+		t.Fatalf("只读探测范围外目标应拦下等待批准: %q", reason)
 	}
-	if env.deniedReason == "" {
-		t.Fatal("补口拦截应熔断单位(留痕走 denyGuard)")
+	if env.deniedReason != "" {
+		t.Fatal("等待批准不是拒绝,不得熔断")
 	}
-	env.deniedReason = ""
+	if env.scopeHold == nil {
+		t.Fatal("补口拦截应置位冻结目标")
+	}
+	env.scopeHold = nil
 	// port_probe 裸 IP 目标(种子是域名 → 该 IP 不在闭包)同样拦。
 	reason = g.guardReadOnlyCall("port_probe", json.RawMessage(`{"host":"10.0.0.9","port":8080}`))
-	if !strings.Contains(reason, "任务范围外") {
-		t.Fatalf("port_probe 范围外目标应拦: %q", reason)
+	if !strings.Contains(reason, "等待批准") {
+		t.Fatalf("port_probe 范围外目标应拦下等待批准: %q", reason)
 	}
+	env.scopeHold = nil
 	// 种子域名目标放行。
-	env.deniedReason = ""
 	if reason := g.guardReadOnlyCall("http_probe", json.RawMessage(
 		`{"url":"http://www.example.com:8080/"}`)); reason != "" {
 		t.Fatalf("种子域名目标应放行: %q", reason)
@@ -176,7 +192,7 @@ func TestP444DenyScopeApprovedAndRedteam(t *testing.T) {
 		t.Fatal(err)
 	}
 	pack := p444PentestPack(t, ex, store, task)
-	if !pack.ScopeClosure.CoversHost("api.example.com", nil) {
+	if !pack.ScopeClosure.CoversTarget("api.example.com", "", nil) {
 		t.Fatal("放行资产应入闭包")
 	}
 	d := env.approvalGate(pack)(context.Background(), "bash", json.RawMessage(

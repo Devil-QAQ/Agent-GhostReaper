@@ -24,10 +24,11 @@ type scriptedModel struct {
 }
 
 type oaMessage struct {
-	Role       string `json:"role"`
-	Content    string `json:"content"`
-	ToolCallID string `json:"tool_call_id"`
-	ToolCalls  []struct {
+	Role             string `json:"role"`
+	Content          string `json:"content"`
+	ReasoningContent string `json:"reasoning_content"`
+	ToolCallID       string `json:"tool_call_id"`
+	ToolCalls        []struct {
 		Index    int    `json:"index"`
 		ID       string `json:"id"`
 		Type     string `json:"type"`
@@ -56,6 +57,7 @@ type scriptedToolCall struct {
 
 type scriptedReply struct {
 	Text      string
+	Reasoning string // 思考内容(以 reasoning_content 流回,P4-57 转录保真)
 	ToolCalls []scriptedToolCall
 	Finish    string
 }
@@ -152,6 +154,9 @@ func (m *scriptedModel) writeSSE(w http.ResponseWriter, reply scriptedReply, rr 
 		if fl != nil {
 			fl.Flush()
 		}
+	}
+	if t := reply.Reasoning; t != "" {
+		send(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"reasoning_content": t}}}})
 	}
 	if t := reply.Text; t != "" {
 		send(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"content": t}}}})

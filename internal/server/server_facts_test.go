@@ -86,8 +86,8 @@ func factsSetup(t *testing.T) (http.Handler, *rings.Store, string, string) {
 	return h, store, task, hostID
 }
 
-// TestServerFactsList 事实页签端点:只收已确认、成果类分类、资产锚点、
-// 时刻口径、任务隔离、404。
+// TestServerFactsList 事实页签端点:已确认 + 新进候选(P4-56 标"新")、
+// 成果类分类、资产锚点、时刻口径、任务隔离、404。
 func TestServerFactsList(t *testing.T) {
 	h, _, task, hostID := factsSetup(t)
 
@@ -104,16 +104,22 @@ func TestServerFactsList(t *testing.T) {
 			CreatedAt    string `json:"created_at"`
 			ConfirmedAt  string `json:"confirmed_at"`
 			ConfirmedRev int64  `json:"confirmed_rev"`
+			Kind         string `json:"kind"`
+			IsNew        bool   `json:"is_new"`
 		} `json:"facts"`
 	}
 	get(t, h, "/api/tasks/"+task+"/facts", http.StatusOK, &body)
 
-	if len(body.Facts) != 3 {
-		t.Fatalf("已确认事实应 3 条(候选 f-cand 不入清单),得 %d", len(body.Facts))
+	// P4-56:已确认 3 条 + 新进候选 f-cand(标"新")一并返回。
+	if len(body.Facts) != 4 {
+		t.Fatalf("事实应 4 条(已确认 3 + 新进 1),得 %d", len(body.Facts))
 	}
 	byID := map[string]int{}
 	for i, f := range body.Facts {
 		byID[f.ID] = i
+	}
+	if f := body.Facts[byID["f-cand"]]; !f.IsNew || f.Kind != "fact" {
+		t.Errorf("f-cand 应为新进事实(is_new, kind=fact),得 is_new=%v kind=%q", f.IsNew, f.Kind)
 	}
 	if i, ok := byID["f-cred"]; ok {
 		f := body.Facts[i]

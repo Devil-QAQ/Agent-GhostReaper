@@ -28,6 +28,7 @@ var (
 	ErrNodeIDEmpty                = errors.New("rings: node id is empty")
 	ErrNodeExists                 = errors.New("rings: node already exists")
 	ErrNodeNotFound               = errors.New("rings: node not found")
+	ErrAmendNotAllowed            = errors.New("rings: node amendment not allowed")
 	ErrUnknownEdgeType            = errors.New("rings: unknown edge type")
 	ErrEdgeEndpointsEmpty         = errors.New("rings: edge endpoint is empty")
 	ErrEdgeSelfLoop               = errors.New("rings: edge self loop")

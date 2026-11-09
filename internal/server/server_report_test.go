@@ -125,6 +125,16 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 		if len(rr.ToolsOffered) == 0 && strings.Contains(rr.System, "来龙去脉") {
 			return sreply{Text: `{"narrative":"单位 u1 执行「审计主站敏感路径」时,在 /old-backup/ 的 200 响应正文里发现备份列举;u3 独立反证 1 轮排除竞争解释,仲裁者判定成立。"}`}
 		}
+		// P4-56 ⑤ 反证时间线人话会话(零工具,系统段带"人话三段"):
+		// 回三段 JSON(素材包逐轮给出,坏回复路径由 overmind 单测覆盖)。
+		if len(rr.ToolsOffered) == 0 && strings.Contains(rr.System, "人话三段") {
+			return sreply{Text: `{"rounds":[{"round":1,"doubt":"会不会是 /old-backup/ 的列举来自共享缓存,而不是目标真实文件?","how":"绕开缓存直接请求 /old-backup/,连续 2 次都返回同样的备份文件列举","conclusion":"已排除"}]}`}
+		}
+		// P4-59 ① 判断摘要会话(零工具,系统段带"判断文本"):回报告级
+		// 锚口径的摘要 JSON(坏回复路径由 overmind 单测覆盖)。
+		if len(rr.ToolsOffered) == 0 && strings.Contains(rr.System, "判断文本") {
+			return sreply{Text: `{"statement":"主站备份目录没有登录校验,任何知道地址的人都能下载备份文件","impact":"无需任何账号口令,可下载 1 个数据库备份压缩包","facts":[]}`}
+		}
 		if len(rr.ToolsOffered) == 0 {
 			hasAudit := strings.Contains(rr.LastUser, "审计主站敏感路径")
 			hasActive := strings.Contains(rr.LastUser, "畸形请求")
@@ -213,7 +223,7 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 			return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
 				ID: "d5", Name: "submit_test_claim",
 				Args: fmt.Sprintf(`{"statement":"/api/version 公开暴露服务版本号","impact":"版本号可支撑定向利用","evidence":"curl 实测返回 2.4.1","asset_id":%q,"vulnclass":"信息暴露"}`, assetArg(t, rr.LastUser))}}}
-		case !sSeenToolResult(rr, "submit_candidate_fact", "已提交待确认事实"):
+		case !sSeenToolResult(rr, "submit_candidate_fact", "已提交新进事实"):
 			return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
 				ID: "d6", Name: "submit_candidate_fact",
 				Args: fmt.Sprintf(`{"statement":"主站服务在线,HTTP 指纹已确认","evidence":"port_probe state=open;robots 已实测","asset_id":%q}`, assetArg(t, rr.LastUser))}}}
@@ -354,7 +364,14 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 			confirmedN++
 		case "pending":
 			pendingN++
-			if !strings.Contains(fmt.Sprint(c["pending_reason"]), "证据不足以支撑申报的影响") {
+			// R4 不变式 = 待确认必带搁置理由。理由有两个设计内来源(P4-54
+			// 放宽特指):正常路径是轮末评估的"证据不足以支撑申报的影响";
+			// 完成清点竞态路径是 P4-43 终局清点的"任务完成中断反证,可被
+			// 唤醒"(完成时反证在途、锤炼未完,如实挂起)。两者都满足 R4,
+			// 全量并行负载下两态均合法出现。
+			reason := fmt.Sprint(c["pending_reason"])
+			if !strings.Contains(reason, "证据不足以支撑申报的影响") &&
+				!strings.Contains(reason, "任务完成中断反证") {
 				t.Fatalf("待确认必须带搁置理由(R4): %+v", c)
 			}
 		}
@@ -404,12 +421,14 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 	for _, want := range []string{
 		"# 渗透测试报告 · P1 总验收试跑",
 		"任务状态:已完成(completed)",
-		"已确认发现:**1** 条;待确认:1 条",
-		"### C-1 /old-backup/ 备份目录可公开匿名列举",
+		"已确认发现:**1** 条;证据不足:1 条",
+		// P4-59 ①:标题/存在性判断优先定稿校对稿(报告级锚),节点原文
+		// 不再进标题;待确认发现无定稿,退节点原文。
+		"### C-1 主站备份目录没有登录校验,任何知道地址的人都能下载备份文件",
 		"### P-1 /api/version 公开暴露服务版本号",
-		"搁置理由:",
+		"证据不足:",
 		"资产锚点:`" + assetID,
-		"需批准:请求 1 · 批准 1 · 拒绝 0 · 规划后放行 0",
+		"需批准:请求 1 · 批准 1 · 拒绝 0",
 	} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("导出报告缺 %q:\n%s", want, md)

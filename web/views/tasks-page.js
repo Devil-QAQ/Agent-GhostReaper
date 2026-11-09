@@ -39,7 +39,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { fetchJSON, postJSON, taskStatusBadge, taskTypeMeta, usePolling, useTaskContext } from "@/lib/api";
+import { fetchJSON, postJSON, taskStatusBadge, taskBlockedDot, taskTypeMeta, usePolling, useTaskContext } from "@/lib/api";
 import { defaultTaskTab } from "@/lib/nav";
 import { cn } from "@/lib/utils";
 import { CategoryDialog } from "@/views/category-dialog";
@@ -574,6 +574,50 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
                           >
                             {t.title || t.id}
                           </button>
+                          {/* 受阻红点+计数(P4-57 ⑤ 归位:去掉"受阻"
+                              字样,只红点+计数,与待审批/待批同族形态挂
+                              任务名后;悬停按归因分文案——模型故障/程序
+                              异常;点击进工作台(恢复按钮所在);冬眠/
+                              终态不带(冻结态悬停已注明受阻数) */}
+                          {(() => {
+                            const bd = taskBlockedDot(t);
+                            return bd ? (
+                              <button
+                                className="ml-1 inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold leading-none text-primary-foreground num cursor-pointer transition-transform duration-150 hover:scale-110"
+                                title={bd.title}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  location.hash = `/task/${t.id}/workbench`;
+                                }}
+                              >
+                                {bd.count}
+                              </button>
+                            ) : null;
+                          })()}
+                          {/* 待审批红点+计数(P4-23;P4-51 审核迭代:撤状态列
+                              "待审批 N 笔"按钮,只留名后红点数字):处理即消 */}
+                          {t.pending_approvals > 0 && (
+                            <span
+                              className="ml-1 inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold leading-none text-primary-foreground num"
+                              title={`待审批 ${t.pending_approvals} 笔`}
+                            >
+                              {t.pending_approvals}
+                            </span>
+                          )}
+                          {/* 待批红点+计数(P4-52 ⑤:与待审批同款形态,审批
+                              集中 RoE——点击进 RoE 审批区处理;处理即消) */}
+                          {t.pending_scope > 0 && (
+                            <button
+                              className="ml-1 inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold leading-none text-primary-foreground num cursor-pointer transition-transform duration-150 hover:scale-110"
+                              title={`待批 ${t.pending_scope} 项`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                location.hash = `/task/${t.id}/roe`;
+                              }}
+                            >
+                              {t.pending_scope}
+                            </button>
+                          )}
                           {/* P2-14b①:随机 ID 弱化为悬停可见的复制入口,
                               不再作行内主信息 */}
                           <CopyIDButton id={t.id} className="opacity-0 group-hover:opacity-100" />
@@ -606,51 +650,10 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
                           <Badge variant={st.variant} title={st.title}>
                             {st.label}
                           </Badge>
-                          {/* P4-27 ② 绝对单显:任务状态只此一枚徽标
+                          {/* P2-27 ② 绝对单显:任务状态只此一枚徽标
                               (受阻/冬眠并排形态已废,取态见
-                              taskStatusBadge 全状态矩阵) */}
-                          {/* 受阻红点计数(P4-27 ④,与待审批同款形态):
-                              blocked 步骤待恢复——处理即消,点击进工作台
-                              (恢复按钮所在);冬眠/终态不带(冻结态不可
-                              操作,悬停已注明受阻数) */}
-                          {t.blocked_steps > 0 && !terminal && !["paused", "hibernated", "checkpointed"].includes(t.status) && (
-                            <button
-                              className="text-xs font-medium text-status-danger underline-offset-4 hover:underline cursor-pointer"
-                              title={`受阻 ${t.blocked_steps} 步，等待恢复`}
-                              onClick={() => {
-                                location.hash = `/task/${t.id}/workbench`;
-                              }}
-                            >
-                              {`受阻 ${t.blocked_steps} 步`}
-                            </button>
-                          )}
-                          {/* 待审批笔数(P4-23,与 RoE 标签红点同计数、冬眠
-                              提示同款笔数样式):处理即消,点击进裁决面 */}
-                          {t.pending_approvals > 0 && (
-                            <button
-                              className="text-xs font-medium text-status-danger underline-offset-4 hover:underline cursor-pointer"
-                              title={`待审批 ${t.pending_approvals} 笔`}
-                              onClick={() => {
-                                location.hash = `/task/${t.id}/roe`;
-                              }}
-                            >
-                              {`待审批 ${t.pending_approvals} 笔`}
-                            </button>
-                          )}
-                          {/* 待批资产计数(P4-44 ③,与待审批同款形态):渗透任务
-                              发现的范围外资产待批准——处理即消(放行/忽略),
-                              点击进资产页待批分组 */}
-                          {t.pending_scope > 0 && (
-                            <button
-                              className="text-xs font-medium text-status-danger underline-offset-4 hover:underline cursor-pointer"
-                              title={`待批资产 ${t.pending_scope} 项`}
-                              onClick={() => {
-                                location.hash = `/task/${t.id}/assets`;
-                              }}
-                            >
-                              {`待批 ${t.pending_scope} 项`}
-                            </button>
-                          )}
+                              taskStatusBadge 全状态矩阵;受阻红点已归位
+                              任务名后,P4-57 ⑤) */}
                         </div>
                       </TableCell>
                       <TableCell className="text-right num text-xs">

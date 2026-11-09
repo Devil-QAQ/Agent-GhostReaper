@@ -34,11 +34,15 @@ export function postJSON(url, payload) {
 // live(P3-08 实时推送):主题数组——实时推送已连接时事件驱动刷新
 // (150ms 去抖合并突发)并停轮询;未连接/断线时按 interval 轮询降级,
 // 重连后状态翻转会自动重拉一次(断线窗口的差额由此补齐)。
+// P4-58:响应字节与上拍相同则跳过 setData——轮询/推送触发的重复拉取
+// 在大载荷页(图投影数百 KB/次)每拍驱动全量重渲染与布局重算;后端
+// JSON 序列化字段序确定,字节相同即数据相同,跳过后下游零重算。
 export function usePolling(url, interval = 2000, { immediate = true, live = null } = {}) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const alive = useRef(false);
   const last = useRef(null); // 最近一次响应(函数式 interval 的输入)
+  const lastText = useRef(null); // 最近一次响应原文(字节级去重)
   const { status: liveStatus, subscribe } = useLive();
   const topics = Array.isArray(live) ? live.filter(Boolean) : null;
   const topicKey = topics ? topics.join("\n") : "";
@@ -56,12 +60,20 @@ export function usePolling(url, interval = 2000, { immediate = true, live = null
           location.reload();
           return;
         }
-        const body = await r.json().catch(() => null);
-        if (alive.current && r.ok) {
+        const text = await r.text();
+        if (!alive.current) return;
+        if (r.ok) {
+          setError(null);
+          if (text === lastText.current) return;
+          lastText.current = text;
+          const body = JSON.parse(text);
           last.current = body;
           setData(body);
-          setError(null);
-        } else if (alive.current && !r.ok) {
+        } else {
+          let body = null;
+          try {
+            body = JSON.parse(text);
+          } catch {}
           setError(body?.error || `HTTP ${r.status}`);
         }
       } catch {
@@ -130,38 +142,84 @@ export {
   taskFrozenStatus,
   taskStatusBadge,
   taskStopWay,
+  blockedHint,
+  taskBlockedDot,
 } from "./task-status.mjs";
 
-// 发现(TestClaim)状态 → 徽标变体。P4-28 ⑥ 显示层合并 12→6:过程态
-// candidate/testing/awaiting_round 合并显示"锤炼中"(hint 悬停细分当前
-// 所处阶段),出结果才显示已确认/待确认;fixed 为 P3-06 复测确认已修复
-// (锤炼态之上的修复标记,成果与报告不消失)。live 过程态徽标带呼吸点
-// 动画(gr-live),终态静态。与 rings.ClaimStatusWord 同词同口径。
-export const CLAIM_STATUS = {
-  candidate: {
-    label: "锤炼中", variant: "running", live: true,
-    hint: "锤炼中(待验证)：已提交，等待安排独立单位反证",
+// 发现区四页签词表(P4-56,问题清单 #77):假设→事实→锤炼→成果漏斗,
+// 条目往右迁、左边不留。显示键由服务端按"机器状态+反证/验证步骤现值"
+// 推导(rings.ClaimDisplay 同键),颜色三档全站统一:过程色动画=在动 /
+// 过程色静止(含暂停)=等批准 / 暗黄=挂起可复活(搁置、证据不足) /
+// 灰=终了只可追溯(已废弃、被推翻);红色唯一用途=严重级。
+export const CLAIM_DISPLAY = {
+  wait_falsify: {
+    label: "等待反证", variant: "running",
+    hint: "已提交，等待安排独立单位反证或排队中",
   },
-  testing: {
-    label: "锤炼中", variant: "running", live: true,
-    hint: "锤炼中(反证中)：独立单位正在反证",
+  falsifying: {
+    label: "反证中", variant: "running", live: true,
+    hint: "独立单位正在反证",
   },
-  awaiting_round: {
-    label: "锤炼中", variant: "running", live: true,
-    hint: "锤炼中(待下轮反证)：本轮疑点未排完，等下一轮反证",
+  falsify_paused: {
+    label: "反证暂停", variant: "running", paused: true,
+    hint: "反证单位等待范围批准，批准后继续",
+  },
+  insufficient: {
+    label: "证据不足", variant: "warning",
+    hint: "反证已完成但证据不足，有新证据自动重验",
+  },
+  discarded: {
+    label: "已废弃", variant: "info",
+    hint: "不再锤炼，理由留档可追溯",
   },
   confirmed: {
     label: "已确认", variant: "success",
     hint: "反证未推翻且证据充分，判定成立",
   },
-  pending: {
-    label: "待确认", variant: "warning",
-    hint: "暂不成立挂起，有新证据自动重开，无需人工操作",
-  },
   fixed: {
     label: "已修复", variant: "success",
     hint: "复测确认漏洞已不可触发，发现记录保留",
   },
+};
+
+// 显示键的悬停细分(P4-56 ③ 中断与审批流转:服务端 display_hint 下发
+// 细分键,此处取词;空=无细分)。
+export const CLAIM_HINT = {
+  redispatch: "已重派，换新单位继续本轮反证",
+  redispatch_alt: "已重派换法：原动作方法被拒，换新方法重验",
+  ruling_wait: "等待主宰判定去留",
+  task_done: "任务完成时验证中断",
+};
+
+// 显示键 → 徽标 meta(带步骤现值的精确口径;claim.display 命中即用)。
+export function claimDisplayMeta(claim) {
+  if (claim?.display && CLAIM_DISPLAY[claim.display]) {
+    const meta = CLAIM_DISPLAY[claim.display];
+    const hint = claim.display_hint ? CLAIM_HINT[claim.display_hint] : "";
+    return hint ? { ...meta, hint: `${meta.hint}；${hint}` } : meta;
+  }
+  return null;
+}
+
+// 发现(TestClaim)机器状态 → 徽标变体(无步骤现值的粗口径:图页节点卡、
+// 工具摘要同词;testing 粗显反证中,精确暂停/重派细分在发现页与详情)。
+// fixed 为 P3-06 复测确认已修复(锤炼态之上的修复标记,成果与报告不
+// 消失)。与 rings.ClaimStatusWord 同词同口径。
+export const CLAIM_STATUS = {
+  candidate: CLAIM_DISPLAY.wait_falsify,
+  testing: CLAIM_DISPLAY.falsifying,
+  awaiting_round: {
+    label: "等待反证", variant: "running",
+    hint: "本轮疑点未排完，等下一轮反证",
+  },
+  confirmed: CLAIM_DISPLAY.confirmed,
+  refuted: {
+    label: "已废弃", variant: "info",
+    hint: "被反证推翻，判定已废弃；新证据可重开再证",
+  },
+  discarded: CLAIM_DISPLAY.discarded,
+  pending: CLAIM_DISPLAY.insufficient,
+  fixed: CLAIM_DISPLAY.fixed,
 };
 
 // 复测结论(P3-06):修复状态轴三值,如实呈现(P4-28 ② 悬停人话)。
@@ -179,44 +237,64 @@ export const REPLAY_VERDICT = {
   unreachable: { label: "重放不可达", variant: "danger" },
 };
 
-// 假设(Hypothesis)状态 → 徽标变体(P2-03 直觉回流:候选 → 主宰评估
-// 三去向 → 验证结论;挂账 = 存疑留在图上待唤醒,已废弃 = 有理由的废案)。
-// P4-28 ⑥:过程态 candidate/testing 合并显示"锤炼中"(hint 细分)。
-export const HYP_STATUS = {
-  candidate: {
-    label: "锤炼中", variant: "running", live: true,
-    hint: "锤炼中(待验证)：已提交，等待主宰评估",
+// 假设(Hypothesis)显示键词表(P4-56 四页签:等待验证/验证中/验证
+// 暂停/搁置/已废弃;验证成立迁入事实页带"由假设升级",本页不留)。
+// 已废弃为三种出局合一(未验丢弃/验证被推翻/证据不够),理由在详情。
+export const HYP_DISPLAY = {
+  wait_verify: {
+    label: "等待验证", variant: "running",
+    hint: "已提交，等待安排验证或排队中",
   },
-  testing: {
-    label: "锤炼中", variant: "running", live: true,
-    hint: "锤炼中(验证中)：独立单位正在验证",
+  verifying: {
+    label: "验证中", variant: "running", live: true,
+    hint: "独立单位正在验证",
+  },
+  verify_paused: {
+    label: "验证暂停", variant: "running", paused: true,
+    hint: "验证单位等待范围批准，批准后继续",
   },
   held: {
-    label: "搁置", variant: "paused",
+    label: "搁置", variant: "warning",
     hint: "评估存疑暂留，唤醒后重新评估",
+  },
+  discarded: {
+    label: "已废弃", variant: "info",
+    hint: "不再验证，理由留档可追溯",
   },
   confirmed: {
     label: "成立", variant: "success",
-    hint: "验证取得支持证据，猜测成立",
-  },
-  discarded: {
-    label: "已废弃", variant: "danger",
-    hint: "已判不成立，理由留档不删除",
+    hint: "验证成立，已迁入事实页",
   },
 };
 
-// 假设评估三去向(主宰检查归纳后的判定)。
+// 假设机器状态 → 徽标变体(无步骤现值的粗口径,图页节点卡同词;
+// testing 粗显验证中,暂停细分在假设页签与详情)。与 rings.HypStatusWord
+// 同词同口径。
+export const HYP_STATUS = {
+  candidate: HYP_DISPLAY.wait_verify,
+  testing: HYP_DISPLAY.verifying,
+  held: HYP_DISPLAY.held,
+  confirmed: HYP_DISPLAY.confirmed,
+  discarded: HYP_DISPLAY.discarded,
+};
+
+// 假设显示键 → 徽标 meta(带验证步骤现值的精确口径)。
+export function hypDisplayMeta(h) {
+  return h?.display && HYP_DISPLAY[h.display] ? HYP_DISPLAY[h.display] : null;
+}
+
+// 假设评估三去向(主宰检查归纳后的判定;P4-56:挂账改搁置)。
 export const HYP_DECISION = {
   verify: { label: "转验证", tone: "running" },
   hold: { label: "搁置", tone: "warning" },
-  discard: { label: "废弃", tone: "danger" },
+  discard: { label: "废弃", tone: "info" },
 };
 
-// 假设验证结论(验证单位结构化写回;variant 供 StatusBadge,P4-28 ②
-// 悬停人话)。
+// 假设验证结论(验证单位结构化写回;variant 供 StatusBadge)。P4-56:
+// "不成立"退役——验证推翻显示"被推翻"(灰,终了档;红色只留给严重级)。
 export const HYP_VERDICT = {
   supported: { label: "成立", variant: "success", hint: "验证取得支持证据，猜测成立" },
-  refuted: { label: "不成立", variant: "danger", hint: "验证推翻了这条猜测" },
+  refuted: { label: "被推翻", variant: "info", hint: "验证推翻了这条猜测" },
   inconclusive: { label: "未能定论", variant: "warning", hint: "验证过但证据不足，可再验" },
 };
 
@@ -234,6 +312,7 @@ export function severityMeta(level) {
 export const GOAL_STATUS = {
   active: { label: "进行中", variant: "running" },
   achieved: { label: "已达成", variant: "success" },
+  discarded: { label: "已删除", variant: "info" },
 };
 
 // 意图分级(Q8 四级)→ 徽标变体。
@@ -351,10 +430,12 @@ export function assetSourceMeta(source) {
 
 // 任务类型(P4-44):渗透=范围外发现资产待批锁定;红队=直接可测;
 // 空=存量任务未标(行为等同红队,徽标如实呈现)。落账值不上面板,
-// 统一经此映射为操作者语言。
+// 统一经此映射为操作者语言。说明行文案定稿(P4-53 ②,问题清单
+// #73⑤ 造物主 2026-11-07 定稿,逐字):渗透与红队各一句,"禁止"与
+// 范围卡按钮"禁止测试"同词对应。
 export const TASK_TYPES = {
-  pentest: { label: "渗透任务", hint: "只测填写的域名或 IP;虫群发现的相邻资产待批准才可测" },
-  redteam: { label: "红队任务", hint: "虫群发现的相邻资产(同服务器其他端口、兄弟域名等)直接可测" },
+  pentest: { label: "渗透任务", hint: "范围外的新资产先拦下，批准后才测" },
+  redteam: { label: "红队任务", hint: "范围外的新资产直接测，可随时禁止" },
 };
 
 export function taskTypeMeta(type) {
@@ -391,12 +472,15 @@ export const STEP_STATUS = {
   cancelled: "已取消",
   blocked: "受阻",
   approval_denied: "审批拒绝终止",
+  scope_wait: "等待批准",
 };
 
-// 事实状态(两态:待确认 / 仲裁确认;P4-28 ② 悬停人话)。
+// 事实状态(P4-56 ②:候选改标"新"——新进短暂标记,主宰收割确认后
+// 自动转已确认;被推翻为翻案历史的终了档,灰色只可追溯)。
 export const FACT_STATUS = {
-  candidate: { label: "待确认", variant: "info", hint: "虫群提交的事实，待主宰检查归纳" },
+  candidate: { label: "新", variant: "info", hint: "新进，待主宰检查归纳确认" },
   confirmed: { label: "已确认", variant: "success", hint: "已经主宰检查归纳确认" },
+  refuted: { label: "被推翻", variant: "info", hint: "翻案历史，只可追溯" },
 };
 
 // 目标证书校验结论(https 流量标注;与后端 mirror.TLSLabel 同一映射,

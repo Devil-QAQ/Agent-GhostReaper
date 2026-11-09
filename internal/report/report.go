@@ -20,7 +20,7 @@ import (
 // 诚实省略,不造占位假数据。
 //
 // 章节:任务概要 → 聚合摘要(含级别分布)→ 资产覆盖统计 → Confirmed
-// 列表 → 待确认清单(含搁置理由,R4)→ 年轮审计摘要。每条发现含完整
+// 列表 → 证据不足清单(含理由,R4;P4-56 改词)→ 年轮审计摘要。每条发现含完整
 // 反证时间线与收割定稿的复现步骤(操作方法 + Burp 可验证原文),与
 // 面板发现详情同源同一装配(claim.go,面板所见即报告所印)。
 
@@ -205,11 +205,12 @@ func Render(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore, tas
 
 	// ---- 聚合摘要 ----
 	// fixed(已修复,P3-06)计入 Confirmed 口径——它是已确认发现之上的修复
-	// 标记,不是发现消失;另计已修复条数单列呈现。过程态计数按显示层合并
-	// 口径(P4-28):candidate/testing/awaiting_round 合计"锤炼中"。
+	// 标记,不是发现消失;另计已修复条数单列呈现。过程态计数按 P4-56
+	// 四页签显示词(等待反证/反证中/反证暂停,由步骤现值推导);证据
+	// 不足(原"待确认")与已废弃(refuted+discarded 合并档)单列。
 	// P4-30 ③:复核标记不纳入报告的判断(信息性,无直接危害)整体退出
 	// 报告各计数与清单——账本不涂改,一条汇总行如实交代(判断保留可溯)。
-	var confirmed, fixedN, pending, forging, ungraded, excludedN int
+	var confirmed, fixedN, pending, forging, ungraded, excludedN, discardedN int
 	severityCount := map[string]int{}
 	for _, c := range claims {
 		if cases[c.ID] != nil && cases[c.ID].ReportExcluded {
@@ -230,6 +231,8 @@ func Render(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore, tas
 			}
 		case rings.TestClaimPending:
 			pending++
+		case rings.TestClaimRefuted, rings.TestClaimDiscarded:
+			discardedN++
 		case rings.TestClaimCandidate, rings.TestClaimTesting, rings.TestClaimAwaitingRound:
 			forging++
 		}
@@ -245,19 +248,25 @@ func Render(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore, tas
 		stepByStatus[s.Status]++
 	}
 	b.WriteString("\n## 聚合摘要\n\n")
-	// 待确认为 0 时不输出指向待确认清单的搁置理由引用(悬挂指向)。
+	// 证据不足为 0 时不输出指向证据不足清单的理由引用(悬挂指向)。
 	if pending > 0 {
-		fmt.Fprintf(&b, "- 已确认发现:**%d** 条;待确认:%d 条(搁置理由见待确认清单)\n", confirmed, pending)
+		fmt.Fprintf(&b, "- 已确认发现:**%d** 条;证据不足:%d 条(理由见证据不足清单)\n", confirmed, pending)
 	} else {
-		fmt.Fprintf(&b, "- 已确认发现:**%d** 条;待确认:0 条\n", confirmed)
+		fmt.Fprintf(&b, "- 已确认发现:**%d** 条;证据不足:0 条\n", confirmed)
 	}
 	if fixedN > 0 {
 		fmt.Fprintf(&b, "- 其中已修复(复测确认):%d 条\n", fixedN)
 	}
+	if discardedN > 0 {
+		fmt.Fprintf(&b, "- 已废弃:%d 条(被反证推翻或目标已摘除,理由留档)\n", discardedN)
+	}
 	if excludedN > 0 {
 		fmt.Fprintf(&b, "- 不纳入报告:%d 条判断经复核为信息性观察(无直接危害),不作为漏洞呈现;判断与证据保留在账本\n", excludedN)
 	}
-	fmt.Fprintf(&b, "- 判断在途:锤炼中 %d\n", forging)
+	if forging > 0 {
+		fmt.Fprintf(&b, "- 判断在途:%s(共 %d 条)\n",
+			inFlightWords(claims, steps, store.SteerKilledSteps(ctx, taskID), cases), forging)
+	}
 	var sevParts []string
 	for _, sev := range severityOrder {
 		if n := severityCount[sev]; n > 0 {
@@ -322,8 +331,10 @@ func Render(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore, tas
 		b.WriteString("本轮无经独立反证与机器判定确认的发现。\n")
 	}
 
-	// ---- 待确认清单 ----
-	b.WriteString("\n## 待确认清单\n\n")
+	// ---- 证据不足清单 ----
+	// P4-56 ②:原"待确认清单"改词——证据不足(锤炼完仍证不实,挂起
+	// 可复活),理由直陈(R4)。
+	b.WriteString("\n## 证据不足清单\n\n")
 	n = 0
 	for _, c := range claims {
 		if c.Status != rings.TestClaimPending || !inScope(c.ID) {
@@ -336,7 +347,7 @@ func Render(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore, tas
 		writeClaim(&b, n, "P", c, assetTitle, abouts, cases[c.ID])
 	}
 	if n == 0 {
-		b.WriteString("无待确认发现。\n")
+		b.WriteString("无证据不足发现。\n")
 	}
 
 	// ---- 年轮审计摘要 ----
@@ -355,9 +366,15 @@ func Render(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore, tas
 		fmt.Fprintf(&b, "%s ×%d", k, kindCount[rings.EventKind(k)])
 	}
 	b.WriteString("\n")
-	fmt.Fprintf(&b, "- 需批准:请求 %d · 批准 %d · 拒绝 %d · 规划后放行 %d\n",
+	fmt.Fprintf(&b, "- 需批准:请求 %d · 批准 %d · 拒绝 %d",
 		approval[rings.ApprovalRecRequested], approval[rings.ApprovalRecApproved],
-		approval[rings.ApprovalRecDenied], approval[rings.ApprovalRecForced])
+		approval[rings.ApprovalRecDenied])
+	// P4-51 ⑤:"规划后放行"废除——新任务零 forced;历史任务(存量账本)
+	// 有则如实列出,无则不占行。
+	if n := approval[rings.ApprovalRecForced]; n > 0 {
+		fmt.Fprintf(&b, " · 规划后放行 %d", n)
+	}
+	b.WriteString("\n")
 	if line := fuseLine(lifecycle); line != "" {
 		fmt.Fprintf(&b, "- 终止记录:%s\n", line)
 	} else {
@@ -449,17 +466,31 @@ func settledByOf(evs []rings.RawEvent) string {
 	return by
 }
 
-// writeClaim 写一条发现小节:prefix C-(Confirmed)或 P-(待确认)。
-// 待确认的搁置理由直陈(R4);发现者/验证者并排(R12 可审计)。
+// writeClaim 写一条发现小节:prefix C-(已确认)或 P-(证据不足)。
+// 证据不足的理由直陈(R4);发现者/验证者并排(R12 可审计)。
 // P2-13:小节含完整反证时间线与收割定稿复现步骤(卷宗装配与面板
 // 发现详情同源,claim.go)。
 func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 	assetTitle map[string]string, abouts []rings.EdgeView, cs *ClaimCase) {
 	vulnclass, _ := c.Detail["vulnclass"].(string)
-	impact, _ := c.Detail["impact"].(string)
 	discoverer, _ := c.Detail["unit_id"].(string)
+	// 声明文本优先定稿校对稿(P4-59 ①:报告级文风——描述=一句话本质+
+	// 影响对象,危害=直接说结果+数字精确);未生成/未过闸退节点原文
+	//(机器判定与审计仍读节点,包装不是证据)。
+	statement, impact := c.Title, ""
+	if impactRaw, ok := c.Detail["impact"].(string); ok {
+		impact = impactRaw
+	}
+	if cs != nil && cs.Summary != nil {
+		if cs.Summary.Statement != "" {
+			statement = cs.Summary.Statement
+		}
+		if cs.Summary.Impact != "" {
+			impact = cs.Summary.Impact
+		}
+	}
 	// 标题是一句话人话(判断原文),tc-ID 进条目内详情行,不作标题。
-	head := fmt.Sprintf("### %s-%d %s", prefix, n, c.Title)
+	head := fmt.Sprintf("### %s-%d %s", prefix, n, statement)
 	if vulnclass != "" {
 		head += " · " + vulnclass
 	}
@@ -468,7 +499,7 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 	}
 	fmt.Fprintf(b, "%s\n\n", head)
 	fmt.Fprintf(b, "- 判断标识:`%s`\n", c.ID)
-	fmt.Fprintf(b, "- 存在性判断:%s\n", c.Title)
+	fmt.Fprintf(b, "- 存在性判断:%s\n", statement)
 	if impact != "" {
 		fmt.Fprintf(b, "- 影响面判断:%s\n", impact)
 	}
@@ -503,7 +534,7 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 	}
 	if prefix == "P" {
 		if reason := cs.PendingReason(); reason != "" {
-			fmt.Fprintf(b, "- 搁置理由:%s\n", reason)
+			fmt.Fprintf(b, "- 证据不足:%s\n", reason)
 		}
 	}
 	if prefix == "C" {
@@ -522,10 +553,35 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 			b.WriteString("- 来龙去脉:定稿时未生成叙述\n")
 		}
 	}
-	// 反证记录:完整时间线(面板发现详情同源同一装配)。
+	// 反证记录:完整时间线(面板发现详情同源同一装配)。P4-56 ⑤:
+	// 定稿冻结的人话三段(疑点→怎么验的→结论)先于人话对应轮次的
+	// 机器行——报告与面板同口径(人话层默认可见,机器原文随后)。
 	if cs != nil && len(cs.Timeline) > 0 {
 		b.WriteString("- 反证记录:\n")
+		humanOf := map[int]rings.FalsifyRoundHuman{}
+		if cs.Repro != nil {
+			for _, rh := range cs.Repro.Rounds {
+				humanOf[rh.Round] = rh
+			}
+		}
 		for _, e := range cs.Timeline {
+			if e.Kind == "falsify" && e.Round > 0 {
+				if rh, ok := humanOf[e.Round]; ok && (rh.Doubt != "" || rh.How != "" || rh.Conclusion != "") {
+					fmt.Fprintf(b, "  - 第 %d 轮人话\n", e.Round)
+					if rh.Doubt != "" {
+						fmt.Fprintf(b, "    疑点:%s\n", rh.Doubt)
+					}
+					if rh.How != "" {
+						fmt.Fprintf(b, "    怎么验的:%s\n", rh.How)
+					}
+					if rh.Conclusion != "" {
+						fmt.Fprintf(b, "    结论:%s\n", rh.Conclusion)
+					}
+					if rh.Unpolished {
+						b.WriteString("    (文字未过文风校验,按原文保留)\n")
+					}
+				}
+			}
 			if line := caseEntryLine(e); line != "" {
 				fmt.Fprintf(b, "  - %s\n", line)
 			}
@@ -699,9 +755,9 @@ func caseEntryLine(e CaseEntry) string {
 			if level == "" {
 				level = "未定级"
 			}
-			line += " · 影响面成立(" + level + ")"
+			line += " · 影响面:证据充分(" + level + ")"
 		} else {
-			line += " · 影响面不成立"
+			line += " · 影响面:证据不足"
 		}
 		for _, a := range e.AltResults {
 			word := "未排除"
@@ -721,7 +777,7 @@ func caseEntryLine(e CaseEntry) string {
 		case rings.VerdictAdvanceRound:
 			return fmt.Sprintf("轮末评估:待下一轮反证(%s)", e.PendingReason)
 		default:
-			return fmt.Sprintf("机器判定:待确认(%s)", e.PendingReason)
+			return fmt.Sprintf("机器判定:证据不足(%s)", e.PendingReason)
 		}
 	case "reopen":
 		return fmt.Sprintf("重开(触发:%s · 理由:%s)", reopenWord(e.Trigger), e.Reason)
@@ -750,6 +806,45 @@ func reopenWord(trigger string) string {
 		return "结论过期"
 	}
 	return trigger
+}
+
+// inFlightWords 判断在途计数行(P4-56 四页签显示词,与面板同拍):按
+// 机器状态+反证步骤现值推导(等待反证/反证中/反证暂停),零计数段不
+// 输出;无在途判断返回空串(调用方不输出本行)。
+func inFlightWords(claims, steps []rings.NodeFull, steerKills map[string]bool, cases map[string]*ClaimCase) string {
+	falsifyOf := map[string][]rings.NodeFull{}
+	for _, s := range steps {
+		if kind, _ := s.Detail["kind"].(string); kind != "falsify" {
+			continue
+		}
+		if cid, _ := s.Detail["testclaim_id"].(string); cid != "" {
+			falsifyOf[cid] = append(falsifyOf[cid], s)
+		}
+	}
+	counts := map[string]int{}
+	for _, c := range claims {
+		switch c.Status {
+		case rings.TestClaimCandidate, rings.TestClaimTesting, rings.TestClaimAwaitingRound:
+		default:
+			continue
+		}
+		var reason string
+		if cs := cases[c.ID]; cs != nil {
+			reason = cs.PendingReason()
+		}
+		key, _ := rings.ClaimDisplay(c.Status, rings.ClaimFlightOfSteps(falsifyOf[c.ID], steerKills), reason)
+		counts[key]++
+	}
+	var parts []string
+	for _, key := range []string{
+		rings.ClaimDisplayFalsifying, rings.ClaimDisplayWaitFalsify,
+		rings.ClaimDisplayFalsifyPaused,
+	} {
+		if n := counts[key]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", rings.ClaimDisplayWord(key), n))
+		}
+	}
+	return strings.Join(parts, " · ")
 }
 
 func orDash(s string) string {

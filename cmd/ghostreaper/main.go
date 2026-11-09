@@ -169,6 +169,34 @@ func main() {
 			}
 			return exec.Helm
 		},
+		// P4-54 牧者操作面的任务级控制(与面板按钮同源同账本):闭包
+		// 引用的 mgr 在任务拉起前必已赋值(与 Wake 同款次序)。唤醒按
+		// 任务实际状态路由(冬眠走 Wake、暂停/断点走 Resume——与面板
+		// 唤醒端点同一判定)。
+		TaskHibernate: func(taskID string, detail map[string]any) error {
+			return mgr.Hibernate(taskID, detail)
+		},
+		TaskWake: func(taskID string) error {
+			switch t := mgr.Task(taskID); {
+			case t == nil:
+				return fmt.Errorf("任务 %s 不在册", taskID)
+			case t.Status() == manager.StatusHibernated:
+				return mgr.Wake(taskID, nil)
+			case t.Status() == manager.StatusPaused || t.Status() == manager.StatusCheckpointed:
+				return mgr.Resume(taskID)
+			default:
+				return fmt.Errorf("任务 %s 状态 %s 不可唤醒", taskID, t.Status())
+			}
+		},
+		TaskStop: func(taskID string) error {
+			return mgr.Stop(taskID)
+		},
+		TaskStatus: func(taskID string) string {
+			if t := mgr.Task(taskID); t != nil {
+				return t.Status()
+			}
+			return ""
+		},
 	}
 	// 文风 skill 包(P3-11,第四章 §10 按需层):内嵌 SKILL.md 物化到
 	// 任务根 skills/ 后经 Norma 原生加载挂进牧者会话,deferred 按需注入。
@@ -294,6 +322,9 @@ func main() {
 	if exec == nil {
 		runlog.Warnf("未配置可用模型(模型库未激活主用,GR_* 环境变量未注入)——任务可管理 RoE/目标/审批,但主宰循环不运行;面板 LLM配置 页激活主用后即自动装配(免重启)")
 	}
+	// P4-57 ④ 存量受阻步骤随升级一次性自动重开(程序缺陷类死锁解法:
+	// 重开不再只挂"模型配置恢复";幂等标记键,仅本升级跑一次)。
+	srv.ReopenBlockedStockOnce()
 
 	// 设置页只读装配信息(P1-09b):LLM 注入状态 + 并发/预算默认值。
 	// P2-08c:系统级参数(监听/账本/任务目录)随设置收窄一并呈现。

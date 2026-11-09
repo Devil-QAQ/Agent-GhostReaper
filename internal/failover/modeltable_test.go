@@ -111,8 +111,10 @@ func TestPlatformPresets(t *testing.T) {
 		{"deepseek", "openai", "https://api.deepseek.com"},
 		{"opencode", "anthropic", "https://opencode.ai/inference/go/anthropic"}, // P4-10:默认形态 Go 订阅(不带 /v1)
 		{"opencode", "openai", "https://opencode.ai/inference/go/openai/v1"},
-		{"glm", "openai-responses", ""}, // 非预设组合:纯手动
-		{"", "openai", ""},              // 自定义平台
+		{"openai", "openai", "https://api.openai.com/v1"}, // P4-57 ① OpenAI 官方(仅 openai 格式)
+		{"openai", "anthropic", ""},                       // 无 anthropic 端点:纯手动
+		{"glm", "openai-responses", ""},                   // 非预设组合:纯手动
+		{"", "openai", ""},                                // 自定义平台
 		{"unknown", "openai", ""},
 		{"GLM", "Anthropic", "https://open.bigmodel.cn/api/anthropic"}, // 归一
 	}
@@ -121,12 +123,12 @@ func TestPlatformPresets(t *testing.T) {
 			t.Errorf("PlatformDefaultURL(%q,%q) = %q, want %q", c.platform, c.format, got, c.want)
 		}
 	}
-	if !IsKnownPlatform("glm") || IsKnownPlatform("") || IsKnownPlatform("x") {
+	if !IsKnownPlatform("glm") || IsKnownPlatform("") || IsKnownPlatform("x") || !IsKnownPlatform("openai") {
 		t.Fatal("IsKnownPlatform 词表判定异常")
 	}
-	// 平台清单含自定义项且顺序稳定。
+	// 平台清单含自定义项且顺序稳定(P4-57 ① 起含 OpenAI 官方)。
 	opts := PlatformOptions()
-	if len(opts) != 4 || opts[3].Value != "" || opts[3].Label != "自定义" {
+	if len(opts) != 5 || opts[3].Value != PlatformOpenAI || opts[4].Value != "" || opts[4].Label != "自定义" {
 		t.Fatalf("PlatformOptions: %+v", opts)
 	}
 	// 预设快照与主表一致(面板下发不漏格式)。

@@ -44,13 +44,14 @@ type extractConstraintIn struct {
 }
 
 type extractReply struct {
-	Title        string                `json:"title,omitempty"`
-	TaskType     string                `json:"task_type,omitempty"` // 任务类型预选(P4-44:按描述倾向,可改)
-	Assets       []extractAssetIn      `json:"assets"`
-	Goals        []extractGoalIn       `json:"goals"`
-	CreatorNotes []string              `json:"creator_notes"` // 注意事项候选(P4-49;仅预填,确认才落库)
-	Constraints  []extractConstraintIn `json:"constraints"`
-	Issues       []string              `json:"issues"` // 带问题被丢弃/修正的条目(如实呈现,不静默丢)
+	Title          string                `json:"title,omitempty"`
+	TaskType       string                `json:"task_type,omitempty"` // 任务类型预选(P4-44:按描述倾向,可改)
+	Assets         []extractAssetIn      `json:"assets"`
+	ExcludedAssets []extractAssetIn      `json:"excluded_assets"` // 初始摘除候选(P4-53 ③;仅预填,确认才落库)
+	Goals          []extractGoalIn       `json:"goals"`
+	CreatorNotes   []string              `json:"creator_notes"` // 注意事项候选(P4-49;仅预填,确认才落库)
+	Constraints    []extractConstraintIn `json:"constraints"`
+	Issues         []string              `json:"issues"` // 带问题被丢弃/修正的条目(如实呈现,不静默丢)
 }
 
 // handleTaskExtract 建任务前的描述提取(单发短调用;跑完即弃)。
@@ -95,15 +96,28 @@ func (s *Server) handleTaskExtract(w http.ResponseWriter, r *http.Request) {
 }
 
 // taskExtractSystem 提取提示词:结构化目标(带判定口径建议)/注意事项/
-// 操作约束/种子资产/任务类型倾向(P4-44);反向规则(不编造)逐条钉死。
-// 注意事项(P4-49 ②)凭语义辨认不靠标志词,正反例定口径。
+// 操作约束/种子资产/初始摘除(P4-53 ③范围语句分流)/任务类型倾向
+// (P4-44);反向规则(不编造)逐条钉死。注意事项(P4-49 ②)与范围分流
+// (P4-53 ③)均凭语义辨认不靠标志词,正反例定口径。
 func taskExtractSystem() string {
 	return `你是渗透测试任务建单的提取器。操作者粘贴一段授权描述,你从中提取建任务表单的候选内容,输出且只输出一个 JSON 对象(不要围栏、不要解释):
-{"title":"推断的任务标题(15字内)","task_type":"pentest|redteam","assets":[{"class":"资产类","title":"资产标识"}],"goals":[{"title":"目标","pred":"判定口径"}],"creator_notes":["注意事项"],"constraints":[{"action":"动作描述","disposition":"forbid|allow","quota":N,"assets":["资产标识"],"patterns":["RE2正则"],"basis":"描述里的原句"}]}
+{"title":"推断的任务标题(15字内)","task_type":"pentest|redteam","assets":[{"class":"资产类","title":"资产标识"}],"excluded_assets":[{"class":"资产类","title":"资产标识"}],"goals":[{"title":"目标","pred":"判定口径"}],"creator_notes":["注意事项"],"constraints":[{"action":"动作描述","disposition":"forbid|allow","quota":N,"assets":["资产标识"],"patterns":["RE2正则"],"basis":"描述里的原句"}]}
 提取纪律(违反即失职):
 - 只提取描述明确表达的内容,一律不编造、不推测、不补全:描述没写的约束、目标、次数上限一律不出现。
 - task_type 按描述倾向二选一:只针对单个站点/网址/域名("对这个网站""测这个系统")→ pentest(渗透任务:范围外发现的相邻资产待批准才可测);全面评估/整站/内网横向/多目标/给 IP 段或一批 IP("全面""整站""这些 IP""内网")→ redteam(红队任务:发现的相邻资产直接可测)。倾向不明默认 pentest。
 - 资产类 12 词:domain 域名 / subdomain 子域名 / host 主机 / service 服务 / api 接口 / organization 组织 / miniprogram 小程序 / app 应用 / wechat_account 公众号 / person 人员 / leak_info 泄露信息 / other 其他。URL、IP:端口 → service;纯 IP → host;点分域名 → subdomain 或 domain。
+- 范围语句分流(assets 与 excluded_assets 的取舍,凭语义辨认):
+  肯定范围("只测 X""就测 X""目标只有 X")→ X 进 assets;
+  否定范围("X 不要测""X 不许动""除 X 外都测"语义里被排除的 X)→ X 进 excluded_assets;
+  泛指排除转写为通配写法:"其他子域不要测"(配 aaa.x.com 类目标)→ "*.x.com" 进 excluded_assets;
+  同一目标既被肯定又被否定时以肯定为准(进 assets),不进 excluded_assets;
+  边界只认主机目标(域名/IP/网址),"不要改数据"这类打法要求不进 excluded_assets(归 creator_notes 或 constraints);
+  范围语句不再重复提取为 constraints——范围归范围(assets/excluded_assets),动作约束归 constraints("只测 X""X 不要测"不是动作描述)。
+  正例:"只测 aaa.x.com,其他子域不要测" → assets=[aaa.x.com]、excluded_assets=["*.x.com"],constraints 不收这两句;
+  正例:"bbb.x.com 和 10.0.0.8 不要测" → excluded_assets=[bbb.x.com, 10.0.0.8];
+  正例:"不允许上传,爆破最多 20 次" → constraints(动作约束,与范围无关);
+  反例:"不要修改任何数据" → 不进 excluded_assets(进 creator_notes);
+  描述没有否定范围就给空数组,不硬凑。
 - goals = 可核验的最终目标(描述里的任务目的),不是步骤。每条目标尽量写成可判定的完成条件:给出明确的完成判据(拿到什么产出、达到什么数量或状态算完成,如"提取 users 表全部账号与口令哈希"),不用"评估/了解/摸清"这类说不清何时算完成的表述。
 - pred 用一句话写清该目标怎样算完成(判定口径,面向证据:产出物、数量、可观察状态);判据只能来自描述里的任务目的,描述没给就留空,不编造。
 - creator_notes = 注意事项(对做法的软要求:怎么测的要求与偏好),凭语义辨认,不靠"不要/禁止"这类标志词——只要句子在对做法提要求或表达偏好就提取,每条一句话、贴描述原意转写、不添义:
@@ -125,19 +139,20 @@ func taskExtractSystem() string {
 // 裸串按无判定口径建议收)。
 func parseTaskExtract(reply string) (*extractReply, []string) {
 	var issues []string
-	out := &extractReply{Assets: []extractAssetIn{}, Goals: []extractGoalIn{}, CreatorNotes: []string{}, Constraints: []extractConstraintIn{}}
+	out := &extractReply{Assets: []extractAssetIn{}, ExcludedAssets: []extractAssetIn{}, Goals: []extractGoalIn{}, CreatorNotes: []string{}, Constraints: []extractConstraintIn{}}
 	raw := strings.TrimSpace(reply)
 	start, end := strings.Index(raw, "{"), strings.LastIndex(raw, "}")
 	if start < 0 || end <= start {
 		return out, []string{"回复里没有 JSON 对象,提取为空(可重试或手填)"}
 	}
 	var parsed struct {
-		Title        string                `json:"title"`
-		TaskType     string                `json:"task_type"`
-		Assets       []extractAssetIn      `json:"assets"`
-		Goals        []json.RawMessage     `json:"goals"`
-		CreatorNotes json.RawMessage       `json:"creator_notes"`
-		Constraints  []extractConstraintIn `json:"constraints"`
+		Title          string                `json:"title"`
+		TaskType       string                `json:"task_type"`
+		Assets         []extractAssetIn      `json:"assets"`
+		ExcludedAssets []extractAssetIn      `json:"excluded_assets"`
+		Goals          []json.RawMessage     `json:"goals"`
+		CreatorNotes   json.RawMessage       `json:"creator_notes"`
+		Constraints    []extractConstraintIn `json:"constraints"`
 	}
 	if err := json.Unmarshal([]byte(raw[start:end+1]), &parsed); err != nil {
 		return out, []string{"JSON 解析失败,提取为空(可重试或手填): " + err.Error()}
@@ -166,6 +181,37 @@ func parseTaskExtract(reply string) (*extractReply, []string) {
 		}
 		seen[title] = true
 		out.Assets = append(out.Assets, extractAssetIn{Class: class, Title: title})
+	}
+	// 初始摘除候选(P4-53 ③):与资产同款校验;锚点与已收资产相同的
+	//(同一目标既肯定又否定)以肯定为准,丢弃入 issues;条目间锚点级
+	// 去重(x.com 与 X.COM 同一对象)。
+	assetAnchors := map[string]bool{}
+	for _, a := range out.Assets {
+		if an, ok := rings.ScopeAnchorOf(a.Title); ok {
+			assetAnchors[scopeAnchorKey(an)] = true
+		}
+	}
+	seenExAnchor := map[string]bool{}
+	for _, a := range parsed.ExcludedAssets {
+		title := strings.TrimSpace(a.Title)
+		class := ringsAssetClass(strings.TrimSpace(a.Class))
+		if title == "" || class == "" {
+			issues = append(issues, fmt.Sprintf("不要测的资产 %q(类 %q)标识为空或类不在 12 类词表,已丢弃", a.Title, a.Class))
+			continue
+		}
+		anchor, hasAnchor := rings.ScopeAnchorOf(title)
+		if hasAnchor {
+			key := scopeAnchorKey(anchor)
+			if assetAnchors[key] {
+				issues = append(issues, fmt.Sprintf("不要测的资产 %q 与要测的资产为同一目标,以资产栏为准,未预填摘除", title))
+				continue
+			}
+			if seenExAnchor[key] {
+				continue
+			}
+			seenExAnchor[key] = true
+		}
+		out.ExcludedAssets = append(out.ExcludedAssets, extractAssetIn{Class: class, Title: title})
 	}
 	for _, g := range parsed.Goals {
 		title, pred := "", ""

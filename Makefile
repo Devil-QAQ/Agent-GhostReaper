@@ -49,6 +49,7 @@ web:
 	node $(WEB_DIR)/scripts/check-hardcoded-colors.mjs
 	node $(WEB_DIR)/scripts/check-status-words.mjs
 	node $(WEB_DIR)/scripts/check-fusion-rules.mjs
+	node $(WEB_DIR)/scripts/check-unbounded-events.mjs
 	node $(WEB_DIR)/scripts/test-task-status-matrix.mjs
 	cd $(WEB_DIR) && { [ -f package-lock.json ] && npm ci || npm install; } && NEXT_TELEMETRY_DISABLED=1 npm run build
 	rm -rf $(WEB_DIST) && cp -R $(WEB_DIR)/out $(WEB_DIST)
@@ -58,6 +59,7 @@ test:
 	node $(WEB_DIR)/scripts/check-hardcoded-colors.mjs
 	node $(WEB_DIR)/scripts/check-status-words.mjs
 	node $(WEB_DIR)/scripts/check-fusion-rules.mjs
+	node $(WEB_DIR)/scripts/check-unbounded-events.mjs
 	node $(WEB_DIR)/scripts/test-fusion-rules.mjs
 	node $(WEB_DIR)/scripts/test-task-status-matrix.mjs
 	go test ./...

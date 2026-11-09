@@ -71,6 +71,7 @@ const (
 	PlatformGLM      = "glm"
 	PlatformDeepSeek = "deepseek"
 	PlatformOpenCode = "opencode"
+	PlatformOpenAI   = "openai"
 )
 
 // PlatformOption 平台下拉项。
@@ -85,13 +86,15 @@ func PlatformOptions() []PlatformOption {
 		{PlatformGLM, "智谱GLM"},
 		{PlatformDeepSeek, "DeepSeek"},
 		{PlatformOpenCode, "OpenCode"},
+		{PlatformOpenAI, "OpenAI官方"},
 		{"", "自定义"},
 	}
 }
 
 // platformPresets 平台 × 格式 → 默认端点。glm / deepseek 双格式经真实
 // 端点验证(2026-10);opencode 为接入方式的默认形态(Go 订阅,实测全链
-// 2026-10,问题清单 #22),另一形态见 opencodeModePresets。注意 anthropic
+// 2026-10,问题清单 #22),另一形态见 opencodeModePresets;openai 官方
+// 仅 openai 格式(无 anthropic 端点,留空走纯手动)。注意 anthropic
 // 格式的 BaseURL 不带 /v1(Norma 请求时追加 /v1/messages;go 网关实测
 // .../anthropic/v1/messages 200,双 /v1 404)。
 var platformPresets = map[string]map[string]string{
@@ -107,6 +110,116 @@ var platformPresets = map[string]map[string]string{
 		"anthropic": "https://opencode.ai/inference/go/anthropic",
 		"openai":    "https://opencode.ai/inference/go/openai/v1",
 	},
+	PlatformOpenAI: {
+		"openai": "https://api.openai.com/v1",
+	},
+}
+
+// ---- 思考回传规则预设(P4-57 ①,问题清单 #76) ----
+//
+// 各家端点对历史思考内容(reasoning_content / thinking 块)的要求相反:
+// 出站组装按当前服务腿的规则确定性处理,一处收口(见 thinking.go)。
+// 规则三值:传回(历史思考原样带上)/ 剔除(剥掉)/ 不干预(系统不动,
+// 引擎行为原样)。预设映射经真实端点实测(2026-11-08,glm-5.3-flash /
+// deepseek-flash):glm 两格式传回可行;deepseek openai 按造物主定案取
+// 剔除;deepseek anthropic 实测传回与剔除均被接受,按 anthropic 协议
+// 原生语义取传回;openai 官方不干预;自定义/未知端点默认剔除(剔除
+// 恒安全:最坏多耗一轮思考,传错规则则确定性 400)。
+
+// 思考回传规则词表(配置值与面板下拉共用)。
+const (
+	ThinkingPassback = "passback" // 传回
+	ThinkingStrip    = "strip"    // 剔除
+	ThinkingNone     = "none"     // 不干预
+)
+
+// ThinkingPassbackOption 规则下拉项(label 为界面词)。
+type ThinkingPassbackOption struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
+	Hint  string `json:"hint"`
+}
+
+// ThinkingPassbackOptions 规则清单(建模型弹窗下拉;顺序即呈现序)。
+func ThinkingPassbackOptions() []ThinkingPassbackOption {
+	return []ThinkingPassbackOption{
+		{ThinkingPassback, "传回", "历史思考内容原样随请求带上"},
+		{ThinkingStrip, "剔除", "历史思考内容不随请求发送(默认)"},
+		{ThinkingNone, "不干预", "系统不做处理,按引擎默认发送"},
+	}
+}
+
+// platformThinkingPassback 平台 × 格式 → 默认思考回传规则(建模型时
+// 预填;未列组合无预设,走剔除默认)。
+var platformThinkingPassback = map[string]map[string]string{
+	PlatformGLM: {
+		"openai":    ThinkingPassback,
+		"anthropic": ThinkingPassback,
+	},
+	PlatformDeepSeek: {
+		"openai":    ThinkingStrip,
+		"anthropic": ThinkingPassback,
+	},
+	PlatformOpenAI: {
+		"openai": ThinkingNone,
+	},
+}
+
+// ThinkingPassbackPreset 平台 × 格式的预设规则;无预设组合返回空串
+// (调用方落剔除默认)。
+func ThinkingPassbackPreset(platform, format string) string {
+	m, ok := platformThinkingPassback[strings.TrimSpace(strings.ToLower(platform))]
+	if !ok {
+		return ""
+	}
+	return m[NormalizeFormat(format)]
+}
+
+// ThinkingPassbackPresets 全部预设快照(随 /api/models 下发,建模型
+// 弹窗按平台+格式联动预填)。
+func ThinkingPassbackPresets() map[string]map[string]string {
+	out := make(map[string]map[string]string, len(platformThinkingPassback))
+	for p, m := range platformThinkingPassback {
+		cm := make(map[string]string, len(m))
+		for f, v := range m {
+			cm[f] = v
+		}
+		out[p] = cm
+	}
+	return out
+}
+
+// hostPlatforms 端点主机 → 平台(存量配置/环境变量腿未带规则字段时按
+// 端点归一匹配的运行时兜底;与 platformPresets 同源主机)。
+var hostPlatforms = []struct {
+	hostSuffix string
+	platform   string
+}{
+	{"bigmodel.cn", PlatformGLM},
+	{"deepseek.com", PlatformDeepSeek},
+	{"api.openai.com", PlatformOpenAI},
+}
+
+// PassbackByBaseURL 按端点地址与格式推断规则(URL 主机后缀匹配 → 平台
+// 预设表);匹配不上返回剔除(自定义/未知端点默认,可经配置字段显式改)。
+func PassbackByBaseURL(baseURL, format string) string {
+	u := strings.TrimSpace(baseURL)
+	if i := strings.Index(u, "://"); i >= 0 {
+		u = u[i+3:]
+	}
+	if i := strings.IndexAny(u, "/?#"); i >= 0 {
+		u = u[:i]
+	}
+	u = strings.ToLower(u)
+	for _, e := range hostPlatforms {
+		if strings.HasSuffix(u, e.hostSuffix) {
+			if r := ThinkingPassbackPreset(e.platform, format); r != "" {
+				return r
+			}
+			break
+		}
+	}
+	return ThinkingStrip
 }
 
 // ---- opencode 接入方式双形态(P4-10 ①,问题清单 #22) ----

@@ -171,7 +171,7 @@ func TestLoopCompletesTaskAfterClaimsSettle(t *testing.T) {
 				ID: "d5", Name: "submit_test_claim",
 				Args: fmt.Sprintf(`{"statement":"/api/version 公开暴露服务版本号","impact":"版本号可支撑定向利用","evidence":"curl 实测返回 2.4.1","asset_id":"web1","vulnclass":"信息暴露"}`),
 			}}, Finish: "tool_calls"}
-		case !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实"):
+		case !seenToolResult(rr, "submit_candidate_fact", "已提交新进事实"):
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
 				ID: "d6", Name: "submit_candidate_fact",
 				Args: `{"statement":"主站服务在线,HTTP 指纹已确认","evidence":"port_probe state=open;curl 首页含 gr-mock-main","asset_id":"web1"}`,

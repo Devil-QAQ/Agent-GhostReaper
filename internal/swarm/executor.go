@@ -247,6 +247,12 @@ type RunResult struct {
 	// Checkpointed 断点存档收场(P3-07):当前工具调用完成后单位落地,
 	// 步骤回可领取、会话保留可续(session_finished 带 Checkpointed 标记)。
 	Checkpointed bool
+	// ScopeWait 范围等待批准收场(P4-51 ①):命令命中任务范围外,拦下
+	// 出待决卡后单位冻结收场让位名额——步骤落 scope_wait 态(不可领
+	// 取,等"加入资产/禁止测试"裁决)、会话冻结保留(session_finished
+	// 带 ScopeWait 标记)、并发名额释放、计时停走;批准后步骤回可领取
+	//(插队队首),重领的单位原会话 Resume 续跑。
+	ScopeWait bool
 
 	// 时间账(P2-06b 审批等待 / P2-06e 模型故障 / P2-08 挂起等待,计时
 	// 暂停对账):billable 只含各有效执行段时长,gateWait 为弹门等待合计,
@@ -375,6 +381,8 @@ func (e *Executor) beginUnit(ctx context.Context, pack *TaskPack) (*unitEnv, Bud
 			resumeNote = "受阻重开:原会话续(" + tid + ")"
 		case resumeCheckpoint:
 			resumeNote = "断点续接:原会话续(" + tid + ")"
+		case resumeScope:
+			resumeNote = "范围批准续跑:原会话续(" + tid + ")"
 		default:
 			resumeNote = "重启接管:原会话续(" + tid + ")"
 		}
@@ -413,6 +421,7 @@ const (
 	resumeAdoption   = "adoption"   // 崩溃残留:session_started 后无 session_finished
 	resumeBlocked    = "blocked"    // 模型故障受阻保留(session_finished 带 Resumable)
 	resumeCheckpoint = "checkpoint" // 断点存档收场(session_finished 带 Checkpointed)
+	resumeScope      = "scope"      // 范围等待批准收场(P4-51:session_finished 带 ScopeWait;批准后重领续跑)
 )
 
 // pendingSession 查该步骤的可续会话转录 ID 与来源(P2-06f 重启收养判定
@@ -446,6 +455,10 @@ func (e *Executor) pendingSession(ctx context.Context, taskID, stepID string) (t
 			case rec.Checkpointed:
 				// 断点存档收场:续跑资格保留,恢复领取时原会话 Resume。
 				kind = resumeCheckpoint
+			case rec.ScopeWait:
+				// 范围等待批准收场(P4-51):步骤被"加入资产"裁决唤醒回
+				// 可领取时,重领的单位原会话 Resume 续跑(重发被拦命令)。
+				kind = resumeScope
 			case rec.Resumable:
 				// 受阻保留会话:续跑资格保留,恢复重开时原会话 Resume。
 				kind = resumeBlocked
@@ -525,6 +538,12 @@ func (e *Executor) finishUnit(ctx context.Context, env *unitEnv, pack *TaskPack,
 	if status == StepBlocked {
 		stateNote = res.BlockedClass
 	}
+	// P4-51 ①:scope_wait 态携带越界目标(机器标记"scope_wait <host>
+	// <port>",投影层合并进 detail——对账唤醒按 host:port 重判范围的
+	// 判定面)。
+	if status == rings.StepScopeWait && env.scopeHold != nil {
+		stateNote = "scope_wait " + env.scopeHold.host + " " + env.scopeHold.port
+	}
 	e.claimMu.Lock()
 	_, serr := e.Store.Append(ledgerCtx, pack.TaskID,
 		rings.Event{
@@ -538,6 +557,7 @@ func (e *Executor) finishUnit(ctx context.Context, env *unitEnv, pack *TaskPack,
 				Type: rings.SwarmRecSessionEnd, GraphVersion: pack.GraphVersion,
 				Resumable:    status == StepBlocked,
 				Checkpointed: res.Checkpointed,
+				ScopeWait:    res.ScopeWait,
 				Note: fmt.Sprintf("reason=%s turns=%d status=%s billable=%.1fs gate_wait=%.1fs block_wait=%.1fs pause_wait=%.1fs",
 					res.Reason, res.Turns, status, res.billable.Seconds(), res.gateWait.Seconds(), res.blockWait.Seconds(), res.pauseWait.Seconds()),
 			},
@@ -709,6 +729,8 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 			input = modelRecoveredResumePrompt(pack)
 		case resumeCheckpoint:
 			input = checkpointResumePrompt(pack)
+		case resumeScope:
+			input = scopeApprovedResumePrompt(pack)
 		default:
 			input = adoptionResumePrompt(pack)
 		}
@@ -1093,6 +1115,24 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 		// 模型恢复:连续失败计数与起算时刻清零(深阈值只量"全不通"
 		// 的连续段;恢复过就重新起算)。
 		modelFails, failStreak = 0, time.Time{}
+		// ---- P4-51 ①:范围等待批准——单位冻结收场让位名额 ----
+		// 命中范围外的命令拦下出待决卡后,单位收段冻结:goroutine 退出
+		//(并发名额让位给其他方向)、会话冻结保留(scope_wait 标记,批
+		// 准后重领原会话 Resume 续跑)、计时停走(等待不进任何时间账)。
+		// 裁决与唤醒走面板两键/RoE 面板的对账通道,单位侧不驻留等待
+		//(与弹门挂起占名额等待是两套纪律:弹门等待是既有纪律不动)。
+		if env.scopeHold != nil {
+			e.clockSet(pack.TaskID, env.TranscriptID, billable, false)
+			res.Reason, res.StepStatus, res.ScopeWait = "scope_wait", rings.StepScopeWait, true
+			break
+		}
+		// P4-51 ②:目标已获准但本单位闭包是领取时快照——步骤回可领取,
+		// 重领的新任务包含该目标,原会话 Resume 续跑重发命令(与断点收
+		// 场同款落地)。
+		if env.scopeReclaim {
+			res.Reason, res.StepStatus, res.Checkpointed = "scope_reclaim", "dispatched", true
+			break
+		}
 		// ---- P2-08 工具边界/段间挂起:先于流错误结案 ----
 		// guard 收段后引擎可能以 aborted 终态或段 ctx 流错误收段,两者都
 		// 是挂起信号而非失败(段是被挂起收拢的);单位在被暂缓调用后自然
@@ -1252,13 +1292,16 @@ func reasonSuffix(reason string) string {
 }
 
 // approvalResumePrompt 批准后的续跑指令(进会话上下文,transcript 可查:
-// 续跑单位看到的是明确的审批结果,不是凭空继续)。
+// 续跑单位看到的是明确的审批结果,不是凭空继续)。P4-52 ②:批准附意
+// 见(面板意见框)非空时以造物主指令语义注入——意见全文随放行进入原
+// 会话(舵杆注入通道同族:引擎注入 user 消息,transcript 与审批记录双
+// 处可对账),单位须遵照执行。
 func approvalResumePrompt(req ApprovalRequest, d GateDecision) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "【审批结果 · 续跑】面板已批准请求 %s(意图:%s;工具 %s;参数 %s)。",
 		req.ID, req.Intent, req.ToolName, clipLine(req.ToolArgs, 400))
 	if r := strings.TrimSpace(d.Reason); r != "" {
-		fmt.Fprintf(&b, "批准备注:%s。", r)
+		fmt.Fprintf(&b, "造物主批准附言(请遵照执行):%s。", r)
 	}
 	b.WriteString("该次调用已被单次授权,可直接重新发起;等待期间该单位的运行预算未消耗,请继续完成本步骤意图。")
 	if req.GateGroup == HardGroupProxyBypass {
@@ -1300,6 +1343,18 @@ func checkpointResumePrompt(pack *TaskPack) string {
 	b.WriteString("【断点 · 续跑】执行进程重启,任务从账本续跑,本会话已从转录完整恢复(历史消息与已耗用量俱在)。")
 	fmt.Fprintf(&b, "继续完成本步骤意图:%s。", pack.StepIntent)
 	b.WriteString("断点存档前被暂缓的调用可重新发起;已执行过的动作与已写回的结论勿重复;若意图已近完成,直接收尾写回最终结论。本单位的运行预算已按新领取重置。")
+	return b.String()
+}
+
+// scopeApprovedResumePrompt 范围批准的续跑指令(P4-51 ②,进会话上下文,
+// transcript 可查):此前等待批准的目标已加入任务范围,新任务包闭包已
+// 含该目标——被拦下的命令可直接重新发起(会自然通过范围判定),从暂
+// 停点继续,不是从头再来。
+func scopeApprovedResumePrompt(pack *TaskPack) string {
+	var b strings.Builder
+	b.WriteString("【范围批准 · 续跑】此前等待批准的范围外目标已加入任务范围,本会话已从转录完整恢复(历史消息与已耗用量俱在)。")
+	fmt.Fprintf(&b, "继续完成本步骤意图:%s。", pack.StepIntent)
+	b.WriteString("此前被拦下等待批准的命令现在可以重新发起;已执行过的动作与已写回的结论勿重复;若意图已近完成,直接收尾写回最终结论。本单位的运行预算已按新领取重置。")
 	return b.String()
 }
 
@@ -1480,9 +1535,11 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 			}
 			return denyUnit(rings.DenyLineHardRule, hardRuleDenyReason(r, m))
 		}
-		// ②b 范围外硬拦(P4-44 ③):渗透任务的命令目标不在种子闭包内
-		// 即拒(留痕+熔断,与硬规则同纪律;只读探测工具在门卫补口同判,
-		// bash 经由本回调)。denyScope 内部完成留痕与熔断。
+		// ②b 范围外拦截(P4-51 ①,问题清单 #73②):渗透任务的命令目标
+		// 不在种子闭包内——拦下出待决卡(同一目标一张卡)＋单位冻结收
+		// 场让位名额(denyScope 内部完成出卡/分流/置位,drive 收段后落
+		// scope_wait 态);已排除目标(禁止测试/摘除)直接拒留痕熔断。
+		// 只读探测工具在门卫补口同判,bash 经由本回调。
 		if reason := env.denyScope(pack, toolName, input); reason != "" {
 			return permission.Denied(reason)
 		}
@@ -1502,14 +1559,15 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 			return denyUnit(rings.DenyLineHarm,
 				fmt.Sprintf("危害声明非法(%q),拒绝线 fail-safe 拒绝", string(pack.HarmClass)))
 		}
-		// ⑤ 非常严重项:数据销毁/拒绝服务类直接拒绝(面板可研判后放行)。
+		// ⑤ 非常严重项:数据销毁/拒绝服务类直接拒绝(P4-51 ⑤:"规划后
+		// 放行"整体废除,拒绝即终局)。
 		if pack.HarmClass == rings.HarmDataDestruction || pack.HarmClass == rings.HarmDenialOfService {
 			harmWord := "数据销毁"
 			if pack.HarmClass == rings.HarmDenialOfService {
 				harmWord = "拒绝服务类"
 			}
 			return denyUnit(rings.DenyLineHarm,
-				"拒绝线(非常严重):"+harmWord+"动作直接拒绝;造物主可在面板规划后放行")
+				"拒绝线(非常严重):"+harmWord+"动作直接拒绝,不提供放行通道")
 		}
 		// ⑥ 批准续跑的单次放行配额:同请求(同工具同参数)恰好一次。
 		// 参数比对按 JSON 语义等价(键序与转义形态无关)——续跑重发的
@@ -1669,7 +1727,11 @@ func (env *unitEnv) denyIntentRecord(pack *TaskPack, toolName string, input json
 // recordApproval 审批审计流入口(拒绝等不进弹门的判定也要留痕)。
 // 账本入账用独立 ctx:判定留痕不可因任务熔断而断账。
 func (env *unitEnv) recordApproval(rec rings.ApprovalRecord) {
-	rec.RequestID = gateRequestID()
+	// P4-51:范围待决卡自带稳定请求号(sc-<目标>,同一目标一张卡的
+	// 去重键)——已设 RequestID 不覆盖;其余记录现生成 ap- 短号。
+	if rec.RequestID == "" {
+		rec.RequestID = gateRequestID()
+	}
 	_, _ = env.Executor.Store.Append(ledgerCtx, env.TaskID, rings.Event{
 		Kind: rings.EventApprovalRecord, Actor: "swarm:" + env.UnitID, Payload: rec,
 	})

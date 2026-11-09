@@ -103,6 +103,22 @@ func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 		if sess.EndStatus != "" {
 			row.Status, row.Running, row.FinishedAt = sess.EndStatus, false, sess.FinishedAt
 			row.Finish = &finishView{Turns: sess.Turns, Reason: sess.Reason}
+			// P4-51 ①:范围等待批准的会话,显示态随步骤现值走——步骤还
+			// 在 scope_wait = 等待批准;已被裁决唤醒回 dispatched = 排队
+			// 中(重领后 session_started 清 end_status 回执行中);被禁
+			// 止测试收口 = 中止。
+			if sess.EndStatus == rings.StepScopeWait {
+				if st, ok := steps[sess.StepID]; ok {
+					switch st.Status {
+					case rings.StepScopeWait:
+						row.Status = rings.StepScopeWait
+					case "dispatched":
+						row.Status, row.Finish = "dispatched", nil // 已批准,排队中
+					default:
+						row.Status = st.Status // aborted(禁止测试/任务收场)等终态
+					}
+				}
+			}
 		} else if st, ok := steps[sess.StepID]; ok && st.Status != "running" {
 			row.Status, row.Running = st.Status, false
 		}

@@ -105,6 +105,44 @@ func TestParseAssetsOrganizeBadReply(t *testing.T) {
 	}
 }
 
+// TestParseAssetsOrganizeNewScopeForms P4-50 ③新写法:`*.域` 与
+// `域名:端口` 整体成实体(拆开即授权粒度漂移),启发式归类同口径。
+func TestParseAssetsOrganizeNewScopeForms(t *testing.T) {
+	lines := []string{"*.example.com、api.example.com:8443、example.org"}
+	reply := `{"assets":[
+		{"class":"subdomain","title":"*.example.com"},
+		{"class":"service","title":"api.example.com:8443"},
+		{"class":"domain","title":"example.org"}
+	]}`
+	res := parseAssetsOrganize(reply, lines)
+	if len(res.Assets) != 3 || len(res.Issues) != 0 {
+		t.Fatalf("三种写法各一条、零补回: %+v %+v", res.Assets, res.Issues)
+	}
+	// 模型拆写 *.域(丢通配)→ 拆写形是原文子串,派生通过被保留;原文
+	// 整体未被承接按原文补回(守恒优先,零删除——两条并存,通配粒度
+	// 由原文那条保住)。
+	res2 := parseAssetsOrganize(
+		`{"assets":[{"class":"subdomain","title":"example.com"}]}`,
+		[]string{"*.example.com"})
+	titles := map[string]string{}
+	for _, a := range res2.Assets {
+		titles[a.Title] = a.Class
+	}
+	if titles["*.example.com"] != "subdomain" {
+		t.Fatalf("原文 *.example.com 应按原文整体补回: %+v", res2.Assets)
+	}
+	if len(res2.Assets) != 2 {
+		t.Fatalf("拆写形与原文整体并存(零删除): %+v", res2.Assets)
+	}
+	// 启发式归类:域名:端口 → service;*.域 → subdomain。
+	if got := organizeHeuristicClass("api.example.com:8443"); got != "service" {
+		t.Errorf("域名:端口 应归 service,得 %q", got)
+	}
+	if got := organizeHeuristicClass("*.example.com"); got != "subdomain" {
+		t.Errorf("*.域 应归 subdomain,得 %q", got)
+	}
+}
+
 // TestAssetsOrganizeAPI 端点:未配模型 503 指引;脚本模型全链——回复经
 // 守恒把关回填;空输入 400。
 func TestAssetsOrganizeAPI(t *testing.T) {

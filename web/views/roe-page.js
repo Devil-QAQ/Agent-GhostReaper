@@ -28,6 +28,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import {
   APPROVAL_THRESHOLD_OPTIONS,
@@ -42,10 +49,10 @@ import {
   usePolling,
 } from "@/lib/api";
 
-// RoE 授权面板(8.3 驾驶域):审批弹门(待决裁决+拒绝线记录的研判后
-// 放行)+ 操作约束(快照+变更弹窗,审批门槛)+ 任务级拦截 + 目标管理。
-// 增删改全部记账(资产范围摘除即时止损,P4-45;约束变更下一轮生效);
-// 对话内容不能代替裁决(R9)。P2-13b
+// RoE 授权面板(8.3 驾驶域):审批区(弹门待决 + 范围待决卡两键,P4-51)
+// + 操作约束(快照+变更弹窗,审批门槛)+ 任务级拦截 + 资产范围(摘除
+// 即时止损)+ 目标管理。增删改全部记账(资产范围摘除即时止损,P4-45;
+// 约束变更下一轮生效);对话内容不能代替裁决(R9)。P2-13b
 // 各区改 Card 组件、弹窗对齐 LLM配置/Agent 基准形态(Field 左标签 +
 // 高级折叠 + 无改动禁用保存)。
 
@@ -54,10 +61,28 @@ const APPROVAL_TYPE_LABELS = {
   requested: "请求",
   approved: "批准",
   denied: "拒绝",
-  forced: "规划后放行",
+  forced: "规划后放行", // 历史记录(P4-51 起废除,存量账本如实呈现)
   group_pass: "同组放行",
   step_pass: "同步骤放行",
+  scope_wait: "等待批准",
 };
+
+// 处理者 → 操作者语言(机器元数据零裸露;空=未处理的请求/等待记录)。
+function decidedByLabel(v, type) {
+  if (v === "creator") return "造物主";
+  if (v === "") return type === "requested" || type === "scope_wait" ? "未处理" : "—";
+  if (v.startsWith("swarm:")) return `虫群单位 ${v.slice(6)}`;
+  return v;
+}
+
+// 记录主语(行内一眼可辨:拦截卡/待批资产卡按目标与说明,命令类按工具)。
+function recordSubject(r) {
+  if (r.request_id?.startsWith("sc-")) return { mono: true, text: r.request_id.slice(3) };
+  if (r.request_id?.startsWith("ac-") || (!r.tool_name && r.note)) {
+    return { mono: false, text: r.note || "范围" };
+  }
+  return { mono: true, text: r.tool_name };
+}
 
 // 审批门槛的简短说明(操作约束区展示)。
 const APPROVAL_THRESHOLD_HINT = {
@@ -293,6 +318,9 @@ function ConfirmRemoveDialog({ pending, onCancel, onConfirm }) {
 
 // ---- 审批弹门 ----
 
+// ApprovalSection 审批区(P4-52 呈现层收口):待决卡三类同骨架混排
+//(弹门待决 / 范围拦截 / 红队可否决 + 待批资产卡),范围卡可勾选批量
+// 两键;审批记录全量滚动加载、点击看详情。实时推送驱动刷新(P3-08)。
 function ApprovalSection({ taskID }) {
   // P3-08:审批待决走实时推送驱动刷新(裁决后服务端再推一轮,待决卡
   // 即时消失);推送未连接时按 2s 轮询降级。
@@ -300,14 +328,55 @@ function ApprovalSection({ taskID }) {
     live: [`approval:${taskID}`],
   });
   const approvals = Array.isArray(body?.pending) ? body.pending : [];
-  const records = Array.isArray(body?.records) ? body.records.slice(0, 20) : [];
+  const scopeAssets = Array.isArray(body?.scope_assets) ? body.scope_assets : [];
+  const records = Array.isArray(body?.records) ? body.records : [];
+  // 待决卡统一混排(先到先决):弹门票 + 范围卡 + 待批资产卡。
+  const cards = [...approvals, ...scopeAssets].sort((a, b) =>
+    (a.created_at || "").localeCompare(b.created_at || "")
+  );
+  const [checked, setChecked] = React.useState(() => new Set());
+  const [batchBusy, setBatchBusy] = React.useState(false);
+  // 有效勾选 = 与现存活卡求交(卡被其他通道处理后勾选自然失效)。
+  const scopeIDs = new Set(cards.filter((c) => c.kind === "scope").map((c) => c.id));
+  const checkedIDs = [...checked].filter((id) => scopeIDs.has(id));
+  const toggleCheck = (id, on) => {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  const runBatch = async (approved) => {
+    if (batchBusy || checkedIDs.length === 0) return;
+    setBatchBusy(true);
+    const { ok, body: resp } = await postJSON(
+      `/api/tasks/${taskID}/approvals/batch`,
+      { ids: checkedIDs, approved }
+    );
+    setBatchBusy(false);
+    if (!ok) {
+      toast.error(`批量处理失败:${resp.error || "原因未说明"}`);
+      return;
+    }
+    const verb = approved ? "加入资产" : "禁止测试";
+    const parts = [`${verb} ${resp.handled} 张`];
+    if (resp.woken_units > 0) parts.push(`唤醒 ${resp.woken_units} 个单位`);
+    if (resp.stopped_units > 0) parts.push(`终止 ${resp.stopped_units} 个单位`);
+    if (Array.isArray(resp.failed) && resp.failed.length > 0) {
+      parts.push(`${resp.failed.length} 张失败(可能已被其他通道处理)`);
+    }
+    toast.success(parts.join(","));
+    setChecked(new Set());
+  };
 
   return (
     <Card>
       <CardContent className="flex flex-col gap-4 p-5">
         <SectionHeader title="审批">
-          <Badge variant={approvals.length > 0 ? "danger" : "info"}>
-            待决 {approvals.length}
+          <Badge variant={approvals.length + scopeAssets.length > 0 ? "danger" : "info"}>
+            待决 {approvals.length + scopeAssets.length}
           </Badge>
           <span className="ml-auto text-xs text-muted-foreground">
             对话内容不能代替这里的审批
@@ -318,213 +387,362 @@ function ApprovalSection({ taskID }) {
           拒绝就终止这个单位,它不换方法重试;主宰会另想办法。
         </p>
         {error && <div className="text-xs text-status-danger">读取失败:{error}</div>}
-        {approvals.length === 0 ? (
+        {cards.length === 0 ? (
           <div className="rounded-lg border border-dashed py-6 text-center text-sm text-muted-foreground">
             无待审批请求
           </div>
         ) : (
-          approvals.map((a) => (
-            <ApprovalCard key={a.id} taskID={taskID} approval={a} />
+          cards.map((a) => (
+            <ApprovalCard
+              key={a.id}
+              taskID={taskID}
+              approval={a}
+              checkable={a.kind === "scope"}
+              checked={checked.has(a.id)}
+              onCheck={toggleCheck}
+            />
           ))
         )}
-        <ApprovalRecords records={records} taskID={taskID} />
+        {/* 勾选批量两键(P4-52 ⑤):发现多时逐张点不过来;批量与单卡同
+            通道,逐笔留痕 */}
+        {checkedIDs.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border/55 bg-muted/40 px-3 py-2">
+            <span className="text-xs text-muted-foreground">已选 {checkedIDs.length} 张范围卡</span>
+            <Button size="sm" variant="outline" disabled={batchBusy} onClick={() => runBatch(true)}>
+              加入资产
+            </Button>
+            <Button size="sm" variant="destructive" disabled={batchBusy} onClick={() => runBatch(false)}>
+              禁止测试
+            </Button>
+            <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={() => setChecked(new Set())}>
+              取消勾选
+            </Button>
+          </div>
+        )}
+        <ApprovalRecords key={taskID} records={records} />
       </CardContent>
     </Card>
   );
 }
 
-// 审批记录(拒绝线记录可研判后放行,逐次执行、全记账)。
-function ApprovalRecords({ records, taskID }) {
-  const releasable = records.filter((r) => r.releasable);
-  const history = records.filter((r) => !r.releasable);
+// ApprovalRecords 审批记录(P4-52 ③④:全量可达——滚动到底自动加载
+// 更多,初始 20 条与现状相当、展示框高度恒定;每条点击看详情,六样
+// 说清:什么时候·什么动作·为什么·什么性质·归属·等待多久谁裁决)。
+function ApprovalRecords({ records }) {
+  const PAGE = 20;
+  const [visible, setVisible] = React.useState(PAGE);
+  const [detail, setDetail] = React.useState(null);
+  const listRef = React.useRef(null);
+  const onScroll = () => {
+    const el = listRef.current;
+    if (!el || visible >= records.length) return;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 24) {
+      setVisible((v) => Math.min(v + PAGE, records.length));
+    }
+  };
+
   return (
     <div className="flex flex-col gap-2 border-t pt-4">
       <div className="flex items-center gap-2">
         <span className="text-xs font-medium text-muted-foreground">审批记录</span>
-        {releasable.length > 0 && (
-          <Badge variant="danger">可放行 {releasable.length}</Badge>
-        )}
+        <span className="num text-xs text-muted-foreground">{records.length}</span>
       </div>
-      {releasable.length === 0 && history.length === 0 ? (
+      {records.length === 0 ? (
         <div className="text-xs text-muted-foreground">暂无记录</div>
       ) : (
-        <>
-          {releasable.map((r) => (
-            <DeniedCard key={r.request_id} taskID={taskID} rec={r} />
-          ))}
-          {history.length > 0 && (
-            <div className="flex flex-col gap-1">
-              {history.slice(0, 8).map((r, i) => (
-                <div
-                  key={`${r.request_id}-${r.type}-${i}`}
-                  className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
-                >
-                  <span className="num">{r.occurred_at}</span>
-                  <span>{APPROVAL_TYPE_LABELS[r.type] || r.type}</span>
-                  <span className="num">{r.tool_name}</span>
-                  {r.deny_line && <span>({DENY_LINE_LABELS[r.deny_line] || r.deny_line})</span>}
-                  {r.wait_millis > 0 && <span>等待 {(r.wait_millis / 1000).toFixed(1)} 秒</span>}
-                  {r.reason && (
-                    <LongText
-                      text={r.reason}
-                      max={40}
-                      variant="dialog"
-                      label={r.type === "denied" ? "拒绝原因" : "备注"}
-                      className="max-w-80 text-xs text-muted-foreground"
-                    />
-                  )}
-                </div>
-              ))}
-            </div>
+        <div
+          ref={listRef}
+          onScroll={onScroll}
+          className="flex max-h-72 flex-col gap-0.5 overflow-y-auto pr-1"
+        >
+          {records.slice(0, visible).map((r, i) => {
+            const subject = recordSubject(r);
+            return (
+              <button
+                key={`${r.request_id}-${r.type}-${i}`}
+                type="button"
+                className="flex flex-wrap items-center gap-2 rounded-md px-2 py-1 text-left text-xs text-muted-foreground transition-colors duration-150 hover:bg-hover-lift cursor-pointer"
+                onClick={() => setDetail(r)}
+              >
+                <span className="num shrink-0">{r.occurred_at}</span>
+                <span className="shrink-0">{APPROVAL_TYPE_LABELS[r.type] || r.type}</span>
+                <span className={`min-w-0 max-w-64 truncate ${subject.mono ? "num" : ""}`} title={subject.text}>
+                  {subject.text}
+                </span>
+                {r.deny_line && <span className="shrink-0">({DENY_LINE_LABELS[r.deny_line] || r.deny_line})</span>}
+                {r.wait_millis > 0 && <span className="num shrink-0">等待 {(r.wait_millis / 1000).toFixed(1)} 秒</span>}
+                {r.reason && (
+                  <span className="min-w-0 max-w-80 truncate" title={r.reason}>
+                    {r.reason}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+          {visible < records.length && (
+            <span className="px-2 py-1 text-xs text-muted-foreground">
+              还有 {records.length - visible} 条,滚动到底加载
+            </span>
           )}
-        </>
-      )}
-    </div>
-  );
-}
-
-// 拒绝线记录卡:直接拒绝的非常严重动作,造物主研判后可逐次放行。
-function DeniedCard({ taskID, rec }) {
-  const [busy, setBusy] = React.useState(false);
-  const [confirmOpen, setConfirmOpen] = React.useState(false);
-  const [reason, setReason] = React.useState("");
-
-  const release = async () => {
-    setBusy(true);
-    const { ok, body } = await postJSON(
-      `/api/tasks/${taskID}/approvals/${rec.request_id}/release`,
-      { reason: reason.trim() }
-    );
-    setBusy(false);
-    if (!ok) {
-      toast.error(`放行失败:${body.error || "原因未说明"}`);
-      return;
-    }
-    setConfirmOpen(false);
-    toast.success("已放行并执行一次(全记账)");
-  };
-
-  return (
-    <div className="flex flex-col gap-2 rounded-lg border border-status-danger/40 p-3">
-      <div className="flex flex-wrap items-center gap-2 text-sm">
-        <Badge variant="danger">{DENY_LINE_LABELS[rec.deny_line] || "拒绝线"}</Badge>
-        {rec.harm_class && (
-          <Badge variant="outline">{HARM_CLASS_LABELS[rec.harm_class] || rec.harm_class}</Badge>
-        )}
-        <span className="num">{rec.tool_name}</span>
-        <span className="text-xs text-muted-foreground">
-          步骤 {rec.step_id} · {rec.occurred_at}
-        </span>
-      </div>
-      {rec.intent && (
-        <div className="text-xs text-muted-foreground">
-          意图:<LongText text={rec.intent} max={120} label="意图原文" className="align-baseline" />
         </div>
       )}
-      <div className="text-xs text-muted-foreground">
-        拒绝原因:<LongText text={rec.reason} max={120} label="拒绝原因" className="align-baseline" />
-      </div>
-      <div className="text-xs">
-        <LongText text={rec.tool_args} max={200} mono label="参数原文" className="align-baseline" />
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" variant="destructive" disabled={busy} onClick={() => setConfirmOpen(true)}>
-          规划后放行
-        </Button>
-        <span className="text-xs text-muted-foreground">放行按上方参数执行一次,逐次放行不累计授权</span>
-      </div>
-      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>规划后放行</DialogTitle>
-            <DialogDescription>
-              将按记录在案的参数执行一次 {rec.tool_name} 调用,执行结果与本次放行全部记账;
-              被终止的单位不恢复。
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-2">
-            <span className="text-sm text-muted-foreground">放行理由(记账)</span>
-            <Input
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="为何放行这次动作"
-            />
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmOpen(false)}>
-              取消
-            </Button>
-            <Button variant="destructive" onClick={release} disabled={busy}>
-              确认放行
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ApprovalRecordSheet record={detail} onClose={() => setDetail(null)} />
     </div>
   );
 }
 
-function ApprovalCard({ taskID, approval }) {
-  const [reason, setReason] = React.useState("");
+// RecordField 详情块:小标签 + 内容(六样各一块,陈述事实)。
+function RecordField({ label, children }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <div className="flex flex-col gap-1.5 text-sm">{children}</div>
+    </div>
+  );
+}
+
+// ApprovalRecordSheet 审批记录详情(P4-52 ④,#74):说清六样——什么时候·
+// 什么动作(命令原文等宽完整)·为什么(意图+拒绝原因或放行理由)·
+// 什么性质(类型按词表翻译)·归属(步骤、单位)·等待多久谁裁决;
+// 机器元数据零裸露(请求号不上面板,审计走账本)。
+function ApprovalRecordSheet({ record, onClose }) {
+  const open = !!record;
+  const deniedLike = record && (record.type === "denied" || record.deny_line);
+  return (
+    <Sheet open={open} onOpenChange={(v) => !v && onClose()}>
+      <SheetContent className="w-[min(560px,94vw)] gap-4 overflow-y-auto p-6 sm:max-w-none">
+        <SheetHeader>
+          <SheetTitle>审批记录详情</SheetTitle>
+          <SheetDescription>
+            这笔审批的完整来龙去脉,全部字段来自账本留痕
+          </SheetDescription>
+        </SheetHeader>
+        {record && (
+          <div className="flex flex-col gap-5">
+            <RecordField label="时间">
+              <span className="num">{record.occurred_at}</span>
+            </RecordField>
+            <RecordField label="动作">
+              <div className="flex flex-wrap items-center gap-2">
+                {record.tool_name && <span className="num">{record.tool_name}</span>}
+                {record.tool_name ? (
+                  <span className="text-xs text-muted-foreground">命令/参数原文完整如下</span>
+                ) : (
+                  <span className="text-xs text-muted-foreground">{record.note || "无命令上下文(资产类审批)"}</span>
+                )}
+              </div>
+              {record.tool_args && (
+                <div className="max-h-64 overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md border border-border/55 bg-input-surface px-3 py-2 num text-xs">
+                  {record.tool_args}
+                </div>
+              )}
+            </RecordField>
+            <RecordField label="性质">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="outline">{APPROVAL_TYPE_LABELS[record.type] || record.type}</Badge>
+                {record.action_level && (
+                  <Badge variant={levelVariant(record.action_level)}>{record.action_level}</Badge>
+                )}
+                {record.harm_class && (
+                  <Badge variant="danger">{HARM_CLASS_LABELS[record.harm_class] || record.harm_class}</Badge>
+                )}
+                {record.deny_line && (
+                  <Badge variant="danger">{DENY_LINE_LABELS[record.deny_line] || record.deny_line}</Badge>
+                )}
+              </div>
+            </RecordField>
+            <RecordField label="原因">
+              {record.intent && (
+                <div className="flex flex-col gap-1">
+                  <span className="text-xs text-muted-foreground">意图</span>
+                  <span className="whitespace-pre-line [overflow-wrap:anywhere]">{record.intent}</span>
+                </div>
+              )}
+              {record.reason && (
+                <div className="flex flex-col gap-1">
+                  <span className="text-xs text-muted-foreground">
+                    {deniedLike ? "拒绝原因" : "放行理由"}
+                  </span>
+                  <span className="whitespace-pre-line [overflow-wrap:anywhere]">{record.reason}</span>
+                </div>
+              )}
+              {record.tool_name && record.note && (
+                <div className="flex flex-col gap-1">
+                  <span className="text-xs text-muted-foreground">拦截说明</span>
+                  <span className="whitespace-pre-line [overflow-wrap:anywhere]">{record.note}</span>
+                </div>
+              )}
+              {!record.intent && !record.reason && !(record.tool_name && record.note) && (
+                <span className="text-xs text-muted-foreground">无</span>
+              )}
+            </RecordField>
+            <RecordField label="归属">
+              <div className="flex flex-wrap items-center gap-3">
+                {record.step_id && <span>步骤 <span className="num">{record.step_id}</span></span>}
+                {record.unit_id && <span>单位 <span className="num">{record.unit_id}</span></span>}
+                {!record.step_id && !record.unit_id && (
+                  <span className="text-xs text-muted-foreground">无步骤与单位(资产类审批)</span>
+                )}
+              </div>
+            </RecordField>
+            <RecordField label="处理">
+              <div className="flex flex-wrap items-center gap-3">
+                {record.wait_millis > 0 && (
+                  <span>等待 <span className="num">{(record.wait_millis / 1000).toFixed(1)} 秒</span></span>
+                )}
+                <span>处理者:{decidedByLabel(record.decided_by, record.type)}</span>
+              </div>
+            </RecordField>
+          </div>
+        )}
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+// ApprovalCard 统一骨架(P4-52 ①):三类待决卡同一结构——类型徽标＋
+// 工具名/目标＋步骤/单位＋时间 → 危害说明三段式(P4-27 ⑼)→ 意图 →
+// 命令/参数原文(等宽、折叠展开)→ 按钮区 → 一行辅助说明;仅徽标与
+// 按钮组随类型不同(弹门=批准＋意见框/拒绝;范围卡=加入资产/禁止测试)。
+function ApprovalCard({ taskID, approval, checkable, checked, onCheck }) {
+  const scopeCard = approval.kind === "scope";
+  const [opinion, setOpinion] = React.useState("");
   const [busy, setBusy] = React.useState(false);
 
+  // P4-51:范围卡两键"加入资产/禁止测试"——瞬间返回,命令由单位自己
+  // 异步跑(按钮不做任何同步执行);P4-52 ②:弹门批准可附意见,留空
+  // 直接继续原会话,非空随放行注入原会话(转录可证)。
   const decide = async (approved) => {
     setBusy(true);
     const { ok, body } = await postJSON(
       `/api/tasks/${taskID}/approvals/${approval.id}`,
-      { approved, reason: reason.trim() }
+      { approved, reason: opinion.trim() }
     );
     setBusy(false);
     if (!ok) {
       toast.error(`审批失败:${body.error || "原因未说明"}`);
       return;
     }
-    toast.success(approved ? "已批准(已记账)" : "已拒绝(已记账)");
+    if (scopeCard) {
+      toast.success(approved ? `已加入资产:${body.target || approval.target}` : `已禁止测试:${body.target || approval.target}`);
+      return;
+    }
+    toast.success(
+      approved
+        ? opinion.trim()
+          ? "已批准,附言已发给单位"
+          : "已批准(已记账)"
+        : "已拒绝(已记账)"
+    );
   };
 
+  const meta = [
+    approval.step_id ? `步骤 ${approval.step_id}` : "",
+    approval.unit_id ? `单位 ${approval.unit_id}` : "",
+    approval.created_at || "",
+  ].filter(Boolean).join(" · ");
+
   return (
-    <div className="flex flex-col gap-2 rounded-lg border p-3 transition-colors duration-150 hover:bg-hover-lift">
+    <div
+      className={`flex flex-col gap-2 rounded-lg border p-3 transition-colors duration-150 hover:bg-hover-lift ${
+        scopeCard ? "border-status-warning/40" : ""
+      }`}
+    >
+      {/* 头部:勾选(范围卡批量)＋类型徽标＋目标/工具名＋步骤/单位＋时间 */}
       <div className="flex flex-wrap items-center gap-2 text-sm">
-        <Badge variant={levelVariant(approval.action_level)}>
-          {approval.action_level}
-        </Badge>
-        <span className="num">{approval.tool_name}</span>
-        <span className="text-xs text-muted-foreground">
-          步骤 {approval.step_id} · 单位 {approval.unit_id} · {approval.created_at}
-        </span>
+        {checkable && (
+          <Checkbox
+            checked={checked}
+            onCheckedChange={(v) => onCheck(approval.id, Boolean(v))}
+            title="勾选后可批量处理"
+          />
+        )}
+        {scopeCard ? (
+          approval.mode === "pentest" ? (
+            <Badge variant="warning" title="目标在任务范围外,已拦下等批准或锁定未测">范围外</Badge>
+          ) : (
+            <Badge variant="warning" title="范围外新资产已直接开始测试,可随时禁止">红队</Badge>
+          )
+        ) : (
+          <Badge variant={levelVariant(approval.action_level)}>{approval.action_level}</Badge>
+        )}
+        {scopeCard && approval.target && <span className="num font-medium">{approval.target}</span>}
+        {approval.tool_name && <span className="num">{approval.tool_name}</span>}
+        {meta && <span className="text-xs text-muted-foreground">{meta}</span>}
       </div>
-      <div className="text-xs text-muted-foreground">
-        意图:<LongText text={approval.intent} max={120} label="意图原文" className="align-baseline" />
-      </div>
-      {/* 危害说明三段式(P4-27 ⑨):要做什么/目标会怎样/最坏后果,
-          确定性模板拼装——批准后果先说清,不用猜 */}
+      {/* 危害说明三段式(P4-27 ⑼):批准后果先说清,不用猜 */}
       {approval.harm_note && (
         <div className="text-sm leading-relaxed">{approval.harm_note}</div>
       )}
-      {approval.note && (
+      {/* 弹门上下文(拦截说明):为什么这条会弹门 */}
+      {!scopeCard && approval.note && (
         <div className="text-xs text-status-warning">
           <LongText text={approval.note} max={160} label="拦截说明" className="align-baseline" />
         </div>
       )}
-      <div className="text-xs">
-        <LongText text={approval.tool_args} max={200} mono label="参数原文" className="align-baseline" />
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <Input
-          className="w-64"
-          placeholder="审批理由(随审批记录)"
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
-        />
-        <Button size="sm" variant="outline" disabled={busy} onClick={() => decide(true)}>
-          批准
-        </Button>
-        <Button size="sm" variant="destructive" disabled={busy} onClick={() => decide(false)}>
-          拒绝
-        </Button>
-      </div>
+      {approval.intent && (
+        <div className="text-xs text-muted-foreground">
+          意图:<LongText text={approval.intent} max={120} label="意图原文" className="align-baseline" />
+        </div>
+      )}
+      {approval.tool_args && (
+        <div className="text-xs">
+          <span className="text-muted-foreground">命令/参数 </span>
+          <LongText
+            text={approval.tool_args}
+            max={160}
+            mono
+            variant="inline"
+            label="命令/参数原文"
+            className="align-baseline"
+          />
+        </div>
+      )}
+      {/* 按钮区:仅按钮组随类型不同 */}
+      {scopeCard ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => decide(true)}>
+            加入资产
+          </Button>
+          <Button size="sm" variant="destructive" disabled={busy} onClick={() => decide(false)}>
+            禁止测试
+          </Button>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <Input
+            className="w-64"
+            placeholder="附言,批准时发给单位,拒绝时作为原因"
+            title='如批准注册账号时附"用完删掉"'
+            value={opinion}
+            onChange={(e) => setOpinion(e.target.value)}
+          />
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => decide(true)}>
+            批准
+          </Button>
+          <Button size="sm" variant="destructive" disabled={busy} onClick={() => decide(false)}>
+            拒绝
+          </Button>
+        </div>
+      )}
+      {/* 一行辅助说明 */}
+      <div className="text-xs text-muted-foreground">{approvalHint(approval)}</div>
     </div>
   );
+}
+
+// approvalHint 卡尾一行辅助说明(按类型,平实陈述)。
+function approvalHint(approval) {
+  if (approval.kind !== "scope") {
+    return "附言留空直接放行;填写后随批准发给单位执行";
+  }
+  if (approval.mode !== "pentest") {
+    return "已直接开始测试;可随时禁止(禁止测试=立即止损)";
+  }
+  if (approval.tool_name) {
+    return "加入资产:目标转范围内,挂等单位继续;禁止测试:目标排除,挂等单位终止";
+  }
+  return "未放行不测;加入资产后可测,禁止测试后不再测";
 }
 
 // ---- 操作约束 ----
@@ -555,7 +773,7 @@ function ConstraintSection({ taskID }) {
               </span>
             </div>
             <div className="text-xs text-muted-foreground">
-              数据销毁与拒绝服务类动作不进审批等待,直接拒绝并留在审批记录,可规划后放行。
+              数据销毁与拒绝服务类动作不进审批等待,直接拒绝并留在审批记录。
             </div>
             <ConstraintRow label="禁止工具" values={roe.denied_tools} empty="无" />
             <ConstraintRow label="仅允许工具" values={roe.allowed_tools} empty="不设白名单" />
@@ -1110,6 +1328,8 @@ function ConfirmRuleDeleteDialog({ taskID, rule, onClose }) {
 function GoalSection({ taskID }) {
   const { data, error } = usePolling(`/api/tasks/${taskID}/goals`, 2000);
   const [dialogOpen, setDialogOpen] = React.useState(false);
+  const [editing, setEditing] = React.useState(null); // 修改中的目标(null=新增)
+  const [deleting, setDeleting] = React.useState(null); // 删除确认中的目标
   const goals = Array.isArray(data) ? data : [];
 
   return (
@@ -1118,13 +1338,13 @@ function GoalSection({ taskID }) {
         <SectionHeader
           title="目标管理"
           tail={
-            <Button size="sm" variant="outline" onClick={() => setDialogOpen(true)}>
+            <Button size="sm" variant="outline" onClick={() => { setEditing(null); setDialogOpen(true); }}>
               新增目标
             </Button>
           }
         >
           <span className="text-xs text-muted-foreground">
-            完成条件创建时锁定,达成与否由仲裁者自动判定
+            完成条件锁定,达成由仲裁者自动判定;可修改,改后重新锁定
           </span>
         </SectionHeader>
         {error && <div className="text-xs text-status-danger">读取失败:{error}</div>}
@@ -1139,34 +1359,153 @@ function GoalSection({ taskID }) {
                 <Badge variant={GOAL_STATUS[g.status]?.variant || "info"}>
                   {GOAL_STATUS[g.status]?.label || g.status}
                 </Badge>
+                {g.focused && <Badge variant="medium">聚焦中</Badge>}
                 <span className="num text-xs text-muted-foreground">{g.id}</span>
-                <span>{g.title}</span>
+                <span className={g.status === "discarded" ? "text-muted-foreground" : ""}>{g.title}</span>
                 {g.predicate && (
                   <span className="text-xs text-muted-foreground">条件已锁定</span>
+                )}
+                {g.status !== "discarded" && (
+                  <span className="ml-auto flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-8 px-2 text-xs"
+                      onClick={() => { setEditing(g); setDialogOpen(true); }}
+                    >
+                      修改…
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-8 px-2 text-xs text-status-danger hover:text-status-danger"
+                      onClick={() => setDeleting(g)}
+                    >
+                      删除…
+                    </Button>
+                  </span>
                 )}
               </div>
             ))}
           </div>
         )}
-        <GoalDialog taskID={taskID} open={dialogOpen} onOpenChange={setDialogOpen} />
+        <GoalDialog
+          taskID={taskID}
+          goal={editing}
+          open={dialogOpen}
+          onOpenChange={setDialogOpen}
+        />
+        <GoalDeleteDialog taskID={taskID} goal={deleting} onClose={() => setDeleting(null)} />
       </CardContent>
     </Card>
   );
 }
 
-function GoalDialog({ taskID, open, onOpenChange }) {
+// GoalDeleteDialog 删除确认(P4-54):打开即取影响预览,先告知"将终止
+// N 个在途、取消 M 条排队",确认才执行;理由随账本留痕。
+function GoalDeleteDialog({ taskID, goal, onClose }) {
+  const [impact, setImpact] = React.useState(null);
+  const [reason, setReason] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const open = !!goal;
+
+  React.useEffect(() => {
+    if (!goal) {
+      setImpact(null);
+      setReason("");
+      return;
+    }
+    let stop = false;
+    fetchJSON(`/api/tasks/${taskID}/goals/${goal.id}/impact`)
+      .then((d) => !stop && setImpact(d))
+      .catch(() => !stop && setImpact(null));
+    return () => { stop = true; };
+  }, [goal, taskID]);
+
+  const submit = async () => {
+    setBusy(true);
+    const { ok, body } = await postJSON(`/api/tasks/${taskID}/goals/${goal.id}/delete`, {
+      reason: reason.trim(),
+    });
+    setBusy(false);
+    if (!ok) {
+      toast.error(`被拒:${body.error || "原因未说明"}`);
+      return;
+    }
+    toast.success(
+      `目标已删除:终止在途单位 ${body.killed_units} 个,取消排队步骤 ${body.aborted_steps} 条`
+    );
+    onClose();
+  };
+
+  if (!goal) return null;
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="w-[min(480px,94vw)] max-w-none gap-4 p-6">
+        <DialogHeader>
+          <DialogTitle>删除目标</DialogTitle>
+          <DialogDescription>
+            该方向不要了:排队步骤取消、在途单位终止、后续不再派发该方向。
+            受影响的判断由主宰处理去留（继续锤炼或挂起）。
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-col gap-3 text-sm">
+          <div className="flex items-center gap-2">
+            <Badge variant={GOAL_STATUS[goal.status]?.variant || "info"}>
+              {GOAL_STATUS[goal.status]?.label || goal.status}
+            </Badge>
+            <span className="num text-xs text-muted-foreground">{goal.id}</span>
+            <span>{goal.title}</span>
+          </div>
+          <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
+            {impact === null
+              ? "正在核对在途影响…"
+              : `将终止在途单位 ${impact.units} 个,取消排队步骤 ${impact.queued} 条`}
+          </div>
+          <Field label="删除理由">
+            <Input
+              className={INPUT}
+              placeholder="可选,随账本留痕"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+            />
+          </Field>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            取消
+          </Button>
+          <Button variant="destructive" onClick={submit} disabled={busy}>
+            删除
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// GoalDialog 新增/修改目标(P4-54 起支持修改:goal 非空 = 修改模式,
+// 预填当前标题与完成条件;完成条件改后重新锁定,达成判定按新条件)。
+function GoalDialog({ taskID, goal, open, onOpenChange }) {
   const [title, setTitle] = React.useState("");
   const [predicate, setPredicate] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [advanced, setAdvanced] = React.useState(false);
+  const isEdit = !!goal;
 
   React.useEffect(() => {
     if (!open) {
       setTitle("");
       setPredicate("");
       setAdvanced(false);
+      return;
     }
-  }, [open]);
+    if (goal) {
+      setTitle(goal.title || "");
+      setPredicate(goal.predicate ? JSON.stringify(goal.predicate, null, 2) : "");
+      setAdvanced(!!goal.predicate);
+    }
+  }, [open, goal]);
 
   const submit = async () => {
     if (!title.trim()) {
@@ -1183,26 +1522,33 @@ function GoalDialog({ taskID, open, onOpenChange }) {
       }
     }
     setBusy(true);
-    const { ok, body } = await postJSON(`/api/tasks/${taskID}/goals`, {
-      title: title.trim(),
-      predicate: payload,
-    });
+    const { ok, body } = isEdit
+      ? await postJSON(`/api/tasks/${taskID}/goals/${goal.id}`, {
+          title: title.trim(),
+          predicate: payload,
+        })
+      : await postJSON(`/api/tasks/${taskID}/goals`, {
+          title: title.trim(),
+          predicate: payload,
+        });
     setBusy(false);
     if (!ok) {
       toast.error(`被拒:${body.error || "原因未说明"}`);
       return;
     }
     onOpenChange(false);
-    toast.success("目标已入图并唤醒主宰");
+    toast.success(isEdit ? "目标已修改并唤醒主宰" : "目标已入图并唤醒主宰");
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[88vh] w-[min(620px,94vw)] max-w-none gap-4 overflow-y-auto p-6">
         <DialogHeader>
-          <DialogTitle>新增目标</DialogTitle>
+          <DialogTitle>{isEdit ? "修改目标" : "新增目标"}</DialogTitle>
           <DialogDescription>
-            目标是最终可核验对象;完成条件(可选)创建时锁定。
+            {isEdit
+              ? "修改即记账:完成条件改后重新锁定,达成判定按新条件。"
+              : "目标是最终可核验对象;完成条件(可选)创建时锁定。"}
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-4">
@@ -1224,7 +1570,9 @@ function GoalDialog({ taskID, open, onOpenChange }) {
               <Field label="完成条件" className="items-start" labelClassName="mt-2">
                 <div className="flex min-w-0 flex-1 flex-col gap-2">
                   <span className="text-xs text-muted-foreground">
-                    JSON 格式,创建时锁定,格式非法直接拒绝
+                    {isEdit
+                      ? "JSON 格式,改后重新锁定,格式非法直接拒绝"
+                      : "JSON 格式,创建时锁定,格式非法直接拒绝"}
                   </span>
                   <Textarea
                     rows={4}
@@ -1243,7 +1591,7 @@ function GoalDialog({ taskID, open, onOpenChange }) {
             取消
           </Button>
           <Button onClick={submit} disabled={busy || !title.trim()}>
-            新增目标
+            {isEdit ? "保存修改" : "新增目标"}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -115,7 +115,7 @@ func TestChainAllCooling(t *testing.T) {
 	}
 	// 连续瞬时失败开闸 → 全冷却。
 	for i := 0; i < 3; i++ {
-		c.onFailure(lead, ClassTransient, errTransient(0))
+		c.onFailure(context.Background(), lead, ClassTransient, errTransient(0))
 	}
 	if !c.AllCooling() {
 		t.Fatal("唯一腿开闸后应判全冷却")

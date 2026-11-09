@@ -167,7 +167,12 @@ func Evaluate(ctx context.Context, store *rings.Store, taskID, goalID string) (*
 	return v, nil
 }
 
-// predicateOfGoal 从事件流取目标创建事件里冻结的谓词(契约②)。
+// predicateOfGoal 从事件流取目标当前生效的完成谓词(契约②)。P4-54 起
+// 目标可经 node.amended 变更(面板/牧者改完成条件):创建事件先立、
+// 后续携带 predicate 键的变更事件整体覆盖(未携带的变更不动谓词),
+// "创建时冻结"落成"最后一次显式冻结生效"——变更本身就是新事件,
+// 每次冻结的时刻与内容都在账本可审计。事件按 revision 升序遍历,
+// 最后写入者胜。
 func predicateOfGoal(ctx context.Context, store *rings.Store, taskID, goalID string) (*Predicate, error) {
 	if goalID == "" {
 		return nil, fmt.Errorf("arbiter: goal id 为空")
@@ -176,24 +181,43 @@ func predicateOfGoal(ctx context.Context, store *rings.Store, taskID, goalID str
 	if err != nil {
 		return nil, fmt.Errorf("arbiter: 读事件流: %w", err)
 	}
+	found := false
+	created := false
+	var raw map[string]any
 	for _, ev := range evs {
-		if ev.Kind != rings.EventNodeAdded {
-			continue
+		switch ev.Kind {
+		case rings.EventNodeAdded:
+			var p rings.NodeAdded
+			if err := json.Unmarshal(ev.Payload, &p); err != nil {
+				return nil, fmt.Errorf("arbiter: 解码 node.added: %w", err)
+			}
+			if p.NodeID != goalID || p.NodeType != rings.NodeGoal {
+				continue
+			}
+			created = true
+			if v, ok := p.Detail["predicate"].(map[string]any); ok {
+				raw, found = v, true
+			}
+		case rings.EventNodeAmended:
+			var p rings.NodeAmended
+			if err := json.Unmarshal(ev.Payload, &p); err != nil {
+				return nil, fmt.Errorf("arbiter: 解码 node.amended: %w", err)
+			}
+			if p.NodeID != goalID {
+				continue
+			}
+			if v, ok := p.Detail["predicate"].(map[string]any); ok {
+				raw, found = v, true
+			}
 		}
-		var p rings.NodeAdded
-		if err := json.Unmarshal(ev.Payload, &p); err != nil {
-			return nil, fmt.Errorf("arbiter: 解码 node.added: %w", err)
-		}
-		if p.NodeID != goalID || p.NodeType != rings.NodeGoal {
-			continue
-		}
-		raw, _ := p.Detail["predicate"].(map[string]any)
-		if raw == nil {
-			return nil, fmt.Errorf("%w: goal %s", ErrNoPredicate, goalID)
-		}
-		return ParsePredicate(raw)
 	}
-	return nil, fmt.Errorf("%w: task %s goal %s", ErrGoalNotFound, taskID, goalID)
+	if !created {
+		return nil, fmt.Errorf("%w: task %s goal %s", ErrGoalNotFound, taskID, goalID)
+	}
+	if !found {
+		return nil, fmt.Errorf("%w: goal %s", ErrNoPredicate, goalID)
+	}
+	return ParsePredicate(raw)
 }
 
 // countConfirmedFacts 数资产上挂的已确认事实(契约③:只读结构——

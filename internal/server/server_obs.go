@@ -216,10 +216,10 @@ type obsToolRow struct {
 	atTime     time.Time
 }
 
-// handleObsTools 工具执行流水(P2-12):扫账本审计流的 tool_call 记录
-// (swarm.record + shepherd.record,零新增采集),按任务 / 工具 / 状态
-// 过滤,新到旧。tools 为过滤前全量工具计数(筛选选项与对账的依据);
-// counts 为过滤后(限流前)的计数。
+// handleObsTools 工具执行流水(P2-12):按 kind 定向读账本审计流的
+// tool_call 记录(swarm.record + shepherd.record,零新增采集,P4-58 起
+// 不再全量扫事件流),按任务 / 工具 / 状态过滤,新到旧。tools 为过滤前
+// 全量工具计数(筛选选项与对账的依据);counts 为过滤后(限流前)的计数。
 func (s *Server) handleObsTools(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	fTask := q.Get("task")
@@ -240,7 +240,7 @@ func (s *Server) handleObsTools(w http.ResponseWriter, r *http.Request) {
 		if fTask != "" && t.ID != fTask {
 			continue
 		}
-		evs, err := s.Store.Events(r.Context(), t.ID, 0, 0)
+		evs, err := s.Store.EventsByKinds(r.Context(), t.ID, rings.EventSwarmRecord, rings.EventShepherdRecord)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
@@ -356,7 +356,8 @@ type obsQueuePoint struct {
 // handleObsThroughput 两个吞吐指标(P2-12,从事件流确定性推导,零新增
 // 采集):① 意图等待领取时长——每次 dispatched→running 的时间差(虫群
 // 单位等主宰派发节奏的实证);② 意图队列深度——各时刻已派发未领取的
-// 步骤数(阶跃时间线)。?task= 限定单任务,缺省跨任务合并。
+// 步骤数(阶跃时间线)。?task= 限定单任务,缺省跨任务合并。P4-58:推导
+// 只消费 node.added / node.state_changed 两类,按 kind 定向直查。
 //
 // 推导口径:逐任务按 revision 序(账本权威序)重放步骤状态机,得到
 // 每个步骤的「派发区间」[入队时刻, 出队时刻](仍在队的开口区间);
@@ -390,7 +391,7 @@ func (s *Server) handleObsThroughput(w http.ResponseWriter, r *http.Request) {
 		if fTask != "" && t.ID != fTask {
 			continue
 		}
-		evs, err := s.Store.Events(r.Context(), t.ID, 0, 0)
+		evs, err := s.Store.EventsByKinds(r.Context(), t.ID, rings.EventNodeAdded, rings.EventNodeStateChanged)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
@@ -893,7 +894,9 @@ type obsInterceptRule struct {
 
 // handleObsIntercepts 拦截命中统计(P4-07):每条拦截规则的命中次数与
 // 近期命中记录、被拒单位的后续走向与轨迹下钻;规则按命中合计降序
-// (高频突出)。?task= 限定单任务,缺省跨任务合并。
+// (高频突出)。?task= 限定单任务,缺省跨任务合并。P4-58:走向推导与
+// 命中行只消费五类事件(approval.record + node.added/node.state_changed
+// + task.lifecycle + swarm.record),按 kind 定向直查。
 func (s *Server) handleObsIntercepts(w http.ResponseWriter, r *http.Request) {
 	fTask := r.URL.Query().Get("task")
 	tasks, err := s.Store.Tasks(r.Context())
@@ -936,7 +939,9 @@ func (s *Server) handleObsIntercepts(w http.ResponseWriter, r *http.Request) {
 		if fTask != "" && t.ID != fTask {
 			continue
 		}
-		evs, err := s.Store.Events(r.Context(), t.ID, 0, 0)
+		evs, err := s.Store.EventsByKinds(r.Context(), t.ID,
+			rings.EventApprovalRecord, rings.EventNodeAdded, rings.EventNodeStateChanged,
+			rings.EventTaskLifecycle, rings.EventSwarmRecord)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return

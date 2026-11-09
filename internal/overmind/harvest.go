@@ -122,15 +122,49 @@ func stepEvents(ctx context.Context, store *rings.Store, taskID, stepID, intent 
 	// 授权范围摘除守卫(P4-05):摘除的资产不再被派发——covers 命中
 	// 即整批拒收,拒因回流进简报,主宰换方向不重试。双保险:快照资产
 	// 行已标"范围外",RoE 约束块带清单。
+	// P4-54:摘除粒度升级为写法粒度——`*.域` 通配摘除覆盖其后新发现的
+	// 子域资产(新发现子域是独立节点、ID 精确命中不覆盖的派发面缺口,
+	// 此前只有提示词软约束;现按通配排除模式确定性判定,命中不派)。
 	if len(opt.CoversAssets) > 0 {
 		if roe, err := store.CurrentRoE(ctx, taskID); err == nil {
-			if ex := roe.ExcludedAssetSet(); ex != nil {
+			if ex := roe.ExcludedAssetSet(); len(ex) > 0 {
+				assets, aerr := store.NodesByType(ctx, taskID, rings.NodeAsset, "")
+				if aerr != nil {
+					return nil, fmt.Errorf("overmind: 派发 %s: 摘除通配判定查资产: %w", stepID, aerr)
+				}
+				// 覆盖面单源判定(rings.ExcludedCoveredAssetIDs):精确命中 +
+				// 通配/端口写法覆盖 + 无锚点资产的排除标识子串回退——派发
+				// 守卫与摘除连坐废弃(P4-55 审核迭代)同一覆盖面,防两处漂移。
+				covered := rings.ExcludedCoveredAssetIDs(assets, ex)
 				for _, a := range opt.CoversAssets {
 					if ex[a] {
 						return nil, fmt.Errorf("overmind: 派发 %s: 资产 %s 已从授权范围摘除(RoE),不派发覆盖它的意图", stepID, a)
 					}
+					if !covered[a] {
+						continue
+					}
+					node, err := store.Node(ctx, taskID, a)
+					if err != nil {
+						continue
+					}
+					return nil, fmt.Errorf("overmind: 派发 %s: 资产 %s(%s) 命中摘除覆盖写法,不派发覆盖它的意图", stepID, a, node.Title)
 				}
 			}
+		}
+	}
+	// 方向聚焦守卫(P4-54 停聚焦):聚焦期间只派发聚焦方向的意图——
+	// 非聚焦方向的探索与反证拒收(收割侧据此跳过不报错);操作者急活
+	// 豁免(造物主指令高于聚焦纪律)。
+	if opt.source != sourceUrgent {
+		if fg := FocusGoalID(ctx, store, taskID); fg != "" && opt.GoalID != fg {
+			return nil, fmt.Errorf("overmind: 派发 %s「%s」: %w", stepID, intent, ErrFocusOutside)
+		}
+	}
+	// 已删除目标守卫(P4-54 目标删除):该方向后续零新派——绑定已删除
+	// 目标的意图与反证(反证继承发现步骤的目标归属)一律拒收。
+	if opt.GoalID != "" {
+		if g, gerr := store.Node(ctx, taskID, opt.GoalID); gerr == nil && g.Type == rings.NodeGoal && g.Status == GoalStatusDiscarded {
+			return nil, fmt.Errorf("overmind: 派发 %s「%s」: %w", stepID, intent, ErrGoalDiscarded)
 		}
 	}
 	// 待批守卫(P4-44 ③):渗透任务的范围外资产锁定不测——covers 命中
@@ -186,6 +220,9 @@ func stepEvents(ctx context.Context, store *rings.Store, taskID, stepID, intent 
 	}
 	return events, nil
 }
+
+// 无锚点资产的摘除子串回退判定已收编 rings.ExcludedCoveredAssetIDs
+// (派发守卫与摘除连坐废弃共用单源覆盖判定,P4-55 审核迭代)。
 
 // validateDependencies depends_on 前置校验:非空、不得依赖自身、不得
 // 重复,且每个前置必须是图上既有 Step。环在此入口不可构造:stepEvents
@@ -255,19 +292,34 @@ func Harvest(ctx context.Context, store *rings.Store, taskID string) (*HarvestRe
 			hasEvidence = true
 		}
 		if !hasEvidence {
-			res.Skipped = append(res.Skipped, Skipped{FactID: c.ID, Reason: "待确认事实无证据引用,不确认"})
+			res.Skipped = append(res.Skipped, Skipped{FactID: c.ID, Reason: "新进事实无证据引用,不确认"})
 			continue
 		}
 		events := []rings.Event{{
 			Kind: rings.EventNodeStateChanged, Actor: ActorOvermind,
 			Payload: rings.NodeStateChanged{NodeID: c.ID, Status: "confirmed"},
 		}}
+		newAsset := false
 		if decl := factNewAsset(c.Detail); decl != nil {
 			assetEvents, err := discoveredAssetEvents(ctx, store, taskID, c, decl)
 			if err != nil {
 				return res, fmt.Errorf("overmind: 检查归纳事实 %s 入图新对象: %w", c.ID, err)
 			}
+			// 新对象入图(非既有资产补边)= 出可否决卡的时机(P4-51 ④)。
+			if len(assetEvents) > 0 && assetEvents[0].Kind == rings.EventNodeAdded {
+				newAsset = true
+			}
 			events = append(events, assetEvents...)
+		}
+		// P4-51 ④(红队先测＋可否决卡):红队/未标任务的范围外新资产
+		// 直接可测(现状),同时出待办卡(加入资产=确认消卡;禁止测试
+		// =立即止损)——同一目标一张卡(按锚点去重,已裁过/已排除的
+		// 不再出)。渗透任务不出发现卡:锁定不测,待单位真发起测试时
+		// 由拦截通道出卡(①)。
+		if newAsset {
+			if ev := redteamScopeCardEvent(ctx, store, taskID, c, events); ev != nil {
+				events = append(events, *ev)
+			}
 		}
 		if _, err := store.Append(ctx, taskID, events...); err != nil {
 			return res, fmt.Errorf("overmind: 检查归纳事实 %s: %w", c.ID, err)
@@ -275,6 +327,56 @@ func Harvest(ctx context.Context, store *rings.Store, taskID string) (*HarvestRe
 		res.Confirmed = append(res.Confirmed, c.ID)
 	}
 	return res, nil
+}
+
+// redteamScopeCardEvent 红队任务新入图资产的可否决卡事件(P4-51 ④):
+// 任务类型非渗透、资产范围判定为范围外(out_open)且该目标从未出过卡
+// (含已裁过——防骚扰,翻案走 RoE)时,追加 approval.record scope_wait。
+// 返回 nil = 不出卡(渗透任务/范围内/已出过/无锚点)。
+func redteamScopeCardEvent(ctx context.Context, store *rings.Store, taskID string, fact rings.NodeFull, events []rings.Event) *rings.Event {
+	detail, err := store.CreatedDetail(ctx, taskID)
+	if err != nil || rings.TaskTypeOf(detail) == rings.TaskTypePentest {
+		return nil
+	}
+	// 找本批新增的资产节点(入图事件在前):范围外才出卡。
+	var added *rings.NodeAdded
+	for i := range events {
+		if events[i].Kind != rings.EventNodeAdded {
+			continue
+		}
+		var na rings.NodeAdded
+		if b, ok := events[i].Payload.([]byte); ok && json.Unmarshal(b, &na) == nil {
+			if na.NodeType == rings.NodeAsset {
+				added = &na
+			}
+		} else if na, ok := events[i].Payload.(rings.NodeAdded); ok && na.NodeType == rings.NodeAsset {
+			a := na
+			added = &a
+		}
+	}
+	if added == nil || rings.AssetScopeOf(added.Detail) != rings.AssetScopeOut {
+		return nil
+	}
+	anchor, ok := rings.ScopeAnchorOf(added.Title)
+	if !ok {
+		return nil // 无主机锚点的资产不构成范围问题,不出卡
+	}
+	rid := rings.ScopeCardID(anchor.Host, anchor.Port)
+	// 同一目标只出一张卡(含已裁过——防骚扰:已排除目标被再次发现
+	// 不再出卡,裁决在案)。
+	if rows, err := store.ApprovalByRequest(ctx, taskID, rid); err != nil || len(rows) > 0 {
+		return nil
+	}
+	stepID, _ := added.Detail["step_id"].(string)
+	unitID, _ := added.Detail["unit_id"].(string)
+	return &rings.Event{
+		Kind: rings.EventApprovalRecord, Actor: ActorOvermind,
+		Payload: rings.ApprovalRecord{
+			RequestID: rid, StepID: stepID, UnitID: unitID,
+			Type: rings.ApprovalRecScopeWait,
+			Note: "红队任务:发现范围外资产 " + added.Title + ",已直接开始测试;可随时禁止(禁止测试=立即止损)",
+		},
+	}
 }
 
 // factNewAsset 候选事实 detail 里的 new_asset 声明(P4-12);无声明或
@@ -376,13 +478,17 @@ func discoveredAssetEvents(ctx context.Context, store *rings.Store, taskID strin
 // 任务类型都判(红队任务的"发现的其他资产"分组同靠此标记)。
 func judgeDiscoveredScope(ctx context.Context, store *rings.Store, taskID, title string, assets []rings.NodeFull) string {
 	approved := map[string]bool{}
+	excluded := map[string]bool{}
 	if roe, err := store.CurrentRoE(ctx, taskID); err == nil {
 		approved = roe.ScopeApprovedSet()
+		excluded = roe.ExcludedAssetSet()
 	}
 	if approved == nil {
 		approved = map[string]bool{}
 	}
-	closure := rings.BuildScopeClosure(rings.ScopeSeedsOf(assets), approved)
+	// 摘除即去权(P4-54):排除资产不贡献归属判定闭包(摘除 *.域 后
+	// 新发现的子域判为范围外,而非"命中被摘除的授权")。
+	closure := rings.BuildScopeClosure(rings.ScopeSeedsOf(assets), approved, excluded)
 	return rings.JudgeAssetScope(closure, title, rings.DefaultScopeResolver)
 }
 
@@ -419,16 +525,23 @@ func coversPendingScope(ctx context.Context, store *rings.Store, taskID string, 
 
 // HarvestClaimsResult 一次声明收割(反证派发)的结果。
 type HarvestClaimsResult struct {
-	Dispatched []string // 派出反证 Step 的声明 ID
-	Skipped    []Skipped
+	Dispatched   []string // 派出反证 Step 的声明 ID
+	Redispatched []string // 中断自动重派反证 Step 的声明 ID(P4-55 ①)
+	Skipped      []Skipped
 }
 
 // HarvestClaims 声明收割(P1-08 + P2-02,第三章 §5:反证测试 = 普通意图
-// Step,主宰派发、虫群单位执行、结果写回)。两类收割对象:
+// Step,主宰派发、虫群单位执行、结果写回)。三类收割对象:
 //   - candidate:完整性核验(冻结标准/发现单位/发现血缘齐全)后派发
 //     第 1 轮反证 Step(冻结竞争解释全量清单进 step.detail)→ testing;
 //   - awaiting_round(P2-02):轮末机器评估判"再反证"的声明,派发下一轮
-//     (轮次续号,存活解释清单从账本算出)→ testing。
+//     (轮次续号,存活解释清单从账本算出)→ testing;
+//   - testing 且当前轮被中断(P4-55 ①):确定性检测(经 arbiter.
+//     InterruptedClaim,不挑中断原因)自动重派同轮次反证 Step——新
+//     单位、优先级 high 既有、与 blocked 步骤自动重开同模式(程序保证
+//     不靠主宰自觉);重派轮次与原因入 step.detail;同声明(当前战役)
+//     重派满 arbiter.MaxFalsifyRedispatch 次不再派,交仲裁者判待确认。
+//     操作者显式取消的反证由停向侧挂起(不在此列)。
 //
 // R12 落地形态:一 Step 一单位,反证 Step 由领取的新单位执行,天然 ≠
 // 发现单位;写回入口另有同单位拒收兜底,仲裁者求值再核验一道
@@ -444,8 +557,12 @@ func HarvestClaims(ctx context.Context, store *rings.Store, taskID string) (*Har
 	if err != nil {
 		return nil, fmt.Errorf("overmind: 检查归纳扫描待下轮判断: %w", err)
 	}
+	testing, err := store.NodesByType(ctx, taskID, rings.NodeTestClaim, rings.TestClaimTesting)
+	if err != nil {
+		return nil, fmt.Errorf("overmind: 检查归纳扫描反证中判断: %w", err)
+	}
 	res := &HarvestClaimsResult{}
-	if len(candidates) == 0 && len(awaiting) == 0 {
+	if len(candidates) == 0 && len(awaiting) == 0 && len(testing) == 0 {
 		return res, nil
 	}
 	derived, err := store.Edges(ctx, taskID, rings.EdgeDerivedFrom)
@@ -521,6 +638,9 @@ func HarvestClaims(ctx context.Context, store *rings.Store, taskID string) (*Har
 		}
 		if err := dispatchFalsifyRound(ctx, store, taskID, c, 1, claimAlternatives(c), discoverStep, assets,
 			"反证(第 1 轮): "+c.Title); err != nil {
+			if skipFalsifyDispatch(res, c, err) {
+				continue
+			}
 			return res, fmt.Errorf("overmind: 派发判断 %s 反证: %w", c.ID, err)
 		}
 		res.Dispatched = append(res.Dispatched, c.ID)
@@ -578,11 +698,135 @@ func HarvestClaims(ctx context.Context, store *rings.Store, taskID string) (*Har
 		}
 		if err := dispatchFalsifyRound(ctx, store, taskID, c, next, altToRaw(alive), discoverStep, assets,
 			fmt.Sprintf("反证(第 %d 轮): %s", next, c.Title)); err != nil {
+			if skipFalsifyDispatch(res, c, err) {
+				continue
+			}
 			return res, fmt.Errorf("overmind: 派发判断 %s 第 %d 轮反证: %w", c.ID, next, err)
 		}
 		res.Dispatched = append(res.Dispatched, c.ID)
 	}
+
+	if err := redispatchInterruptedClaims(ctx, store, taskID, res, testing, derived, abouts); err != nil {
+		return res, err
+	}
 	return res, nil
+}
+
+// redispatchInterruptedClaims 中断自动重派(P4-55 ①,问题清单 #75):
+// 扫描 testing 声明,当前反证轮被中断(终态无结构化结论或 blocked 终结,
+// 经 arbiter.InterruptedClaim 确定性检测,不挑中断原因)且重派预算未尽
+// 时,派发同轮次的新反证 Step(新单位、优先级 high)——中断不是结论,
+// 是暂停,声明留在锤炼不落待确认装死。重派轮次与原因冻结进
+// step.detail(redispatch_of/redispatch_reason/redispatch);被中断步骤
+// 若为 blocked(等模型恢复无期)一并收场,防配置恢复后同轮双跑。
+// 派发守卫(聚焦/摘除/已删目标/待批)拒收时按跳过处理不报错——声明
+// 停在原状态,守卫放开后收割自然续派(与 P4-54 候选跳过同语义)。
+func redispatchInterruptedClaims(ctx context.Context, store *rings.Store, taskID string,
+	res *HarvestClaimsResult, testing []rings.NodeFull, derived, abouts []rings.EdgeView) error {
+	for _, c := range testing {
+		info, err := arbiter.InterruptedClaim(ctx, store, taskID, c.ID)
+		if err != nil {
+			return fmt.Errorf("overmind: 判断 %s 中断检测: %w", c.ID, err)
+		}
+		if info == nil {
+			continue // 未中断
+		}
+		if info.OperatorKilled {
+			// 操作者终止(杀单位/取消步骤,P4-55 审核迭代:程序禁止连坐):
+			// 不重派、不改状态——声明留锤炼中,事件经态势快照「待裁决判断」
+			// 区交主宰下轮裁决(continue=恢复反证/suspend=挂起)。
+			res.Skipped = append(res.Skipped, Skipped{FactID: c.ID,
+				Reason: "反证被操作者终止(" + info.Reason + "),交主宰判定,程序不重派"})
+			continue
+		}
+		if info.RedispatchesUsed >= arbiter.MaxFalsifyRedispatch {
+			continue // 重派用尽(同轮 judgeClaims 在先,已判待确认)
+		}
+		discoverStep, assets, ok := claimDispatchContext(ctx, store, taskID, c, derived, abouts)
+		if !ok {
+			res.Skipped = append(res.Skipped, Skipped{FactID: c.ID,
+				Reason: "判断无发现步骤血缘,无法继承意图分级,不重派中断反证"})
+			continue
+		}
+		// 被中断轮的待检解释清单原样继承(同轮重试,目标不变)。
+		rawAlts := []any(nil)
+		if interrupted, nerr := store.Node(ctx, taskID, info.StepID); nerr == nil {
+			rawAlts, _ = interrupted.Detail["alternatives"].([]any)
+		}
+		events, err := falsifyRoundEvents(ctx, store, taskID, c, info.Round, rawAlts, discoverStep, assets,
+			fmt.Sprintf("反证(第 %d 轮·重派): %s", roundNumberOf(info.Round), c.Title),
+			map[string]any{
+				"redispatch":        info.RedispatchesUsed + 1,
+				"redispatch_of":     info.StepID,
+				"redispatch_reason": info.Reason,
+			})
+		if err != nil {
+			if skipFalsifyDispatch(res, c, err) {
+				continue
+			}
+			return fmt.Errorf("overmind: 重派判断 %s 反证: %w", c.ID, err)
+		}
+		// blocked 终结的中断步骤收场(已重派新单位,不再等模型恢复)。
+		if interrupted, nerr := store.Node(ctx, taskID, info.StepID); nerr == nil && interrupted.Status == "blocked" {
+			events = append([]rings.Event{{
+				Kind: rings.EventNodeStateChanged, Actor: ActorOvermind,
+				Payload: rings.NodeStateChanged{NodeID: info.StepID, Status: "cancelled",
+					Note: "反证已重派新单位,原步骤收场"},
+			}}, events...)
+		}
+		// 声明已在 testing(锤炼未完成),无状态迁移——只有步骤派发。
+		if _, err := store.Append(ctx, taskID, events...); err != nil {
+			return fmt.Errorf("overmind: 重派判断 %s 反证落账: %w", c.ID, err)
+		}
+		res.Redispatched = append(res.Redispatched, c.ID)
+	}
+	return nil
+}
+
+// claimDispatchContext 解析声明的派发上下文:发现步骤(意图分级/危害
+// 声明/目标归属的继承源)与资产锚点清单。组合声明无发现步骤(血缘挂
+// 环节 Fact),返回 nil 发现步骤;普通声明无血缘返回 ok=false。
+func claimDispatchContext(ctx context.Context, store *rings.Store, taskID string, c rings.NodeFull,
+	derived, abouts []rings.EdgeView) (*rings.NodeFull, []string, bool) {
+	var assets []string
+	for _, e := range abouts {
+		if e.From == c.ID {
+			assets = append(assets, e.To)
+		}
+	}
+	if combined, _ := c.Detail["combined"].(bool); combined {
+		return nil, assets, true
+	}
+	for _, e := range derived {
+		if e.From != c.ID {
+			continue
+		}
+		if n, err := store.Node(ctx, taskID, e.To); err == nil && n.Type == rings.NodeStep {
+			return n, assets, true
+		}
+	}
+	return nil, assets, false
+}
+
+// roundNumberOf 轮次号的展示口径(旧数据 0 显示为 1;与 arbiter 内
+// roundNumber 同规则,收割侧重派标题用)。
+func roundNumberOf(r int) int {
+	if r <= 0 {
+		return 1
+	}
+	return r
+}
+
+// skipFalsifyDispatch 反证派发被方向守卫(聚焦中/目标已删)拒收时跳过
+// 该声明不报错(P4-54):声明停在原状态,派发守卫放开(重新聚焦/方向
+// 恢复)后收割自然续派;拒收原因进 Skipped 供审计。返回 true=已按跳过
+// 处理。
+func skipFalsifyDispatch(res *HarvestClaimsResult, c rings.NodeFull, err error) bool {
+	if errors.Is(err, ErrFocusOutside) || errors.Is(err, ErrGoalDiscarded) {
+		res.Skipped = append(res.Skipped, Skipped{FactID: c.ID, Reason: err.Error() + ",本轮不派反证"})
+		return true
+	}
+	return false
 }
 
 // dispatchFalsifyRound 派发一轮反证:反证 Step(绑定声明 + 轮次 + 本轮
@@ -595,6 +839,25 @@ func HarvestClaims(ctx context.Context, store *rings.Store, taskID string) (*Har
 // 探索稍让位是预期取舍,名额保障与解释限量不碰)。
 func dispatchFalsifyRound(ctx context.Context, store *rings.Store, taskID string, c rings.NodeFull,
 	round int, rawAlts []any, discoverStep *rings.NodeFull, assets []string, intent string) error {
+	events, err := falsifyRoundEvents(ctx, store, taskID, c, round, rawAlts, discoverStep, assets, intent, nil)
+	if err != nil {
+		return err
+	}
+	events = append(events, rings.Event{
+		Kind: rings.EventNodeStateChanged, Actor: ActorOvermind,
+		Payload: rings.NodeStateChanged{NodeID: c.ID, Status: rings.TestClaimTesting},
+	})
+	_, err = store.Append(ctx, taskID, events...)
+	return err
+}
+
+// falsifyRoundEvents 构造一轮反证派发的事件批(反证 Step + covers 边),
+// 首派(caller 补状态迁移)与中断重派(P4-55:声明已在 testing,免迁移)
+// 共用;extraDetail 携带重派情报(轮次与原因入账)。优先级 high 与
+// 意图分级/危害声明继承的口径两路同一处收口。
+func falsifyRoundEvents(ctx context.Context, store *rings.Store, taskID string, c rings.NodeFull,
+	round int, rawAlts []any, discoverStep *rings.NodeFull, assets []string, intent string,
+	extraDetail map[string]any) ([]rings.Event, error) {
 	level := rings.ActionReadOnly
 	harm := ""
 	goalID := ""
@@ -609,13 +872,16 @@ func dispatchFalsifyRound(ctx context.Context, store *rings.Store, taskID string
 	}
 	stepID, err := nextStepID(ctx, store, taskID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	detail := map[string]any{"kind": "falsify", "testclaim_id": c.ID, "round": round}
+	for k, v := range extraDetail {
+		detail[k] = v
+	}
 	if rawAlts != nil {
 		detail["alternatives"] = rawAlts
 	}
-	events, err := stepEvents(ctx, store, taskID, stepID, intent, DispatchOptions{
+	return stepEvents(ctx, store, taskID, stepID, intent, DispatchOptions{
 		source:              sourceFalsify,
 		GoalID:              goalID,
 		ExpectedObservation: "经 submit_falsify_result 写回结构化反证结论(逐条竞争解释按 ID 给 refuted)",
@@ -625,15 +891,6 @@ func dispatchFalsifyRound(ctx context.Context, store *rings.Store, taskID string
 		CoversAssets:        assets,
 		Detail:              detail,
 	})
-	if err != nil {
-		return err
-	}
-	events = append(events, rings.Event{
-		Kind: rings.EventNodeStateChanged, Actor: ActorOvermind,
-		Payload: rings.NodeStateChanged{NodeID: c.ID, Status: rings.TestClaimTesting},
-	})
-	_, err = store.Append(ctx, taskID, events...)
-	return err
 }
 
 // claimAlternatives 声明 detail 里冻结的解释清单原样转 step.detail 用的
@@ -1045,7 +1302,8 @@ func clipLine(s string, n int) string {
 }
 
 // ReopenClaim 重开(P2-02,第三章 §5"确认后出现新反证可撤销重开"/
-// "待确认可被新事件唤醒重新进入反证"):Confirmed/待确认声明经 reopen
+// "待确认可被新事件唤醒重新进入反证";P4-55 ②:不成立同列——证伪
+// 结论同样可被新证据反驳):Confirmed/不成立/待确认声明经 reopen
 // 记录(触发词 + 理由,历史不删,R1)回到反证中——竞争解释全部复活
 // (旧战役证据整体失效,战役边界见仲裁者),轮次全局续号,重开轮的
 // 反证 Step 与状态迁移同批事务落账。面板(造物主反驳/过期)与未来
@@ -1058,8 +1316,8 @@ func ReopenClaim(ctx context.Context, store *rings.Store, taskID, claimID, trigg
 	if claim.Type != rings.NodeTestClaim {
 		return fmt.Errorf("overmind: 节点 %s 是 %s 不是 testclaim", claimID, claim.Type)
 	}
-	if claim.Status != rings.TestClaimConfirmed && claim.Status != rings.TestClaimPending {
-		return fmt.Errorf("overmind: 判断 %s 当前状态 %s,只有已确认/待确认可重开", claimID, claim.Status)
+	if claim.Status != rings.TestClaimConfirmed && claim.Status != rings.TestClaimRefuted && claim.Status != rings.TestClaimPending {
+		return fmt.Errorf("overmind: 判断 %s 当前状态 %s,只有已确认/不成立/待确认可重开", claimID, claim.Status)
 	}
 	if strings.TrimSpace(reason) == "" {
 		return fmt.Errorf("overmind: 重开必须说明理由(可反驳的结论必有可审计的反驳依据)")

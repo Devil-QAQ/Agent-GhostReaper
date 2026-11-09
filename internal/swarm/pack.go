@@ -69,10 +69,14 @@ func (e *Executor) Claim(ctx context.Context, taskID, stepID string) (*TaskPack,
 			if approved == nil {
 				approved = map[string]bool{}
 			}
+			// 摘除即去权(P4-54 修复):排除清单内的资产(含手动/种子)
+			// 不贡献闭包——摘除后新领的任务包不再含其主机,命令级范围
+			// 检查不会被"闭包内"短路。
+			excluded := roe.ExcludedAssetSet()
 			if assets, err := e.Store.NodesByType(ctx, taskID, rings.NodeAsset, ""); err != nil {
 				return nil, fmt.Errorf("swarm: 领取: 查资产(范围闭包): %w", err)
 			} else {
-				pack.ScopeClosure = rings.BuildScopeClosure(rings.ScopeSeedsOf(assets), approved)
+				pack.ScopeClosure = rings.BuildScopeClosure(rings.ScopeSeedsOf(assets), approved, excluded)
 			}
 		}
 		if pending, err := e.Store.PendingScopeAssets(ctx, taskID); err == nil {

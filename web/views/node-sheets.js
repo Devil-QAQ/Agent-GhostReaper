@@ -44,6 +44,8 @@ import {
   STEP_STATUS,
   assetClassMeta,
   assetSourceMeta,
+  claimDisplayMeta,
+  hypDisplayMeta,
   jumpToNodeView,
   nodeTypeMeta,
   postJSON,
@@ -456,17 +458,20 @@ export function AssetDetailSheet({ tid, nodeID, onClose, onSelectNode }) {
 
 const DECISION_META = {
   confirm: { label: "终审确认", tone: "success" },
-  pending: { label: "终审待确认", tone: "warning" },
+  refuted: { label: "终审已废弃", tone: "info" },
+  pending: { label: "终审证据不足", tone: "warning" },
   advance_round: { label: "再反证", tone: "running" },
 };
-// 时间线"状态 →"行的显示词(P4-28 ⑥ 合并口径,与 CLAIM_STATUS 同词;
+// 时间线"状态 →"行的显示词(P4-56 四页签口径,与 CLAIM_STATUS 同词;
 // 时间线单独成表是刻度叙事行,不套徽标)。
 const STATE_LABELS = {
-  candidate: "锤炼中",
-  testing: "锤炼中",
-  awaiting_round: "锤炼中",
+  candidate: "等待反证",
+  testing: "反证中",
+  awaiting_round: "等待反证",
   confirmed: "已确认",
-  pending: "待确认",
+  refuted: "已废弃",
+  discarded: "已废弃",
+  pending: "证据不足",
   fixed: "已修复",
 };
 
@@ -566,20 +571,24 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
     );
   }
   const claim = data.claim || {};
-  const st = CLAIM_STATUS[claim.status] || { label: claim.status, variant: "info" };
+  const st = claimDisplayMeta(claim) || CLAIM_STATUS[claim.status] || { label: claim.status, variant: "info" };
   const sev = severityMeta(claim.severity || data.repro?.severity);
   const repro = data.repro || null;
   const timeline = data.timeline || [];
-  // 当前结论一句话(P4-28 ③):终态直陈结果,不让人读搁置理由原文猜;
-  // 过程态(锤炼中)尚未出结论,不呈现本行。
+  // 当前结论一句话(P4-28 ③):终态直陈结果,不让人读理由原文猜结果;
+  // 过程态(等待反证/反证中)尚未出结论,不呈现本行。
   const conclusion =
     claim.status === "confirmed"
       ? "当前结论：成立，已确认"
       : claim.status === "fixed"
         ? "当前结论：成立，已确认（复测已修复）"
-        : claim.status === "pending"
-          ? "当前结论：暂不成立（可被新证据推翻重审）"
-          : "";
+        : claim.status === "refuted"
+          ? "当前结论：已废弃（被反证推翻，新证据可重开）"
+          : claim.status === "discarded"
+            ? "当前结论：已废弃（理由留档）"
+            : claim.status === "pending"
+              ? "当前结论：证据不足（可被新证据推翻重审）"
+              : "";
 
   return (
     <>
@@ -613,7 +622,7 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
             )}
             {claim.status === "pending" && claim.pending_reason && (
               <div className="rounded-md bg-status-warning-soft px-3 py-2 text-xs text-status-warning">
-                搁置理由:{claim.pending_reason}
+                证据不足:{claim.pending_reason}
               </div>
             )}
             {claim.report_excluded && (
@@ -693,7 +702,8 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
             </section>
 
             {/* 反证时间线(P4-28 ④:过程信息折叠其下,默认收起;数据与
-                报告导出同源同一装配)。 */}
+                报告导出同源同一装配)。P4-56 ⑤:定稿冻结的每轮人话三段
+                (疑点→怎么验的→结论)为人话层,机器原文与证据折叠其下。 */}
             {timeline.length > 0 && (
               <section className="flex flex-col gap-1">
                 <div className="text-xs font-medium tracking-wide text-muted-foreground">反证时间线</div>
@@ -715,7 +725,13 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
                   {tlOpen && (
                     <ol className="relative mt-2 flex flex-col gap-3 border-l pl-4">
                       {timeline.map((e, i) => (
-                        <TimelineEntry key={`${e.rev}-${e.kind}-${i}`} entry={e} />
+                        <TimelineEntry
+                          key={`${e.rev}-${e.kind}-${i}`}
+                          entry={e}
+                          humanOf={(no) =>
+                            (repro?.rounds || []).find((r) => r.round === no) || null
+                          }
+                        />
                       ))}
                     </ol>
                   )}
@@ -1283,7 +1299,7 @@ function fmtDur(s) {
   return `${m} 分 ${Math.round(s - m * 60)} 秒`;
 }
 
-function TimelineEntry({ entry }) {
+function TimelineEntry({ entry, humanOf }) {
   switch (entry.kind) {    case "created":
       return (
         <TimelineItem
@@ -1299,56 +1315,7 @@ function TimelineEntry({ entry }) {
       );
     case "falsify":
       return (
-        <TimelineItem
-          rev={entry.rev}
-          title={`第 ${entry.round || 1} 轮反证(独立单位)`}
-          tone="running"
-          detail={
-            <>
-              验证单位 <span className="num text-xs">{entry.unit_id || "—"}</span>
-              {entry.step_id && (
-                <>
-                  {" "}· 反证步骤{" "}
-                  <span className="num text-xs">{entry.step_id}</span>
-                </>
-              )}
-              <div className="mt-1 flex flex-col gap-0.5">
-                <span>
-                  存在性:{entry.existence_refuted ? "被推翻" : "未推翻"} · 影响面:
-                  {entry.impact_supported
-                    ? `证据充分${entry.impact_level ? `(定级 ${severityMeta(entry.impact_level)?.label || entry.impact_level})` : ""}`
-                    : "证据不足"}
-                </span>
-                {(entry.alt_results || []).length > 0 && (
-                  <span className="flex flex-wrap gap-2">
-                    解释结论:
-                    {entry.alt_results.map((a) => (
-                      <span
-                        key={a.id}
-                        className={
-                          "rounded px-2 py-0.5 text-[10px] " +
-                          (a.refuted
-                            ? "bg-status-success-soft text-status-success"
-                            : "bg-status-warning-soft text-status-warning")
-                        }
-                      >
-                        {a.label || a.id} {a.refuted ? "已排除" : "未排除"}
-                      </span>
-                    ))}
-                  </span>
-                )}
-                {entry.evidence_head && (
-                  <span className="text-muted-foreground">证据:{entry.evidence_head}</span>
-                )}
-                {entry.note && (
-                  <span className="text-muted-foreground">
-                    备注(不参与机器判定):{entry.note}
-                  </span>
-                )}
-              </div>
-            </>
-          }
-        />
+        <FalsifyTimelineEntry entry={entry} humanOf={humanOf} />
       );
     case "verdict": {
       const meta = DECISION_META[entry.decision] || {
@@ -1401,6 +1368,20 @@ function TimelineEntry({ entry }) {
           }
         />
       );
+    case "suspend":
+      return (
+        <TimelineItem
+          rev={entry.rev}
+          title="方向收窄,反证挂起"
+          tone="warning"
+          detail={
+            <>
+              {entry.reason && <div>理由:{entry.reason}</div>}
+              <div>重新聚焦该方向时自动恢复反证</div>
+            </>
+          }
+        />
+      );
     case "repro":
       return (
         <TimelineItem
@@ -1424,7 +1405,9 @@ function TimelineEntry({ entry }) {
               ? "success"
               : entry.status === "pending"
                 ? "warning"
-                : "running"
+                : entry.status === "refuted" || entry.status === "discarded"
+                  ? "info"
+                  : "running"
           }
           detail=""
         />
@@ -1432,6 +1415,127 @@ function TimelineEntry({ entry }) {
     default:
       return null;
   }
+}
+
+// FalsifyTimelineEntry 一轮反证(P4-56 ⑤ 人话化):定稿冻结的三段人话
+// (疑点→怎么验的→结论)为默认呈现层;机器原文(存在性/影响面/解释
+// 结论/证据/备注)折叠在"机器原文"里,点开可查(等宽与原始数据走详情
+// 其余区)。无人话(旧定稿/重开后未再定稿)如实只呈现机器层。
+function FalsifyTimelineEntry({ entry, humanOf }) {
+  const [rawOpen, setRawOpen] = React.useState(false);
+  const rh = humanOf ? humanOf(entry.round || 1) : null;
+  const hasHuman = rh && (rh.doubt || rh.how || rh.conclusion);
+  return (
+    <TimelineItem
+      rev={entry.rev}
+      title={`第 ${entry.round || 1} 轮反证(独立单位)`}
+      tone="running"
+      detail={
+        <>
+          验证单位 <span className="num text-xs">{entry.unit_id || "—"}</span>
+          {entry.step_id && (
+            <>
+              {" "}· 反证步骤{" "}
+              <span className="num text-xs">{entry.step_id}</span>
+            </>
+          )}
+          {hasHuman ? (
+            <div className="mt-1 flex flex-col gap-1">
+              {rh.doubt && (
+                <div>
+                  <span className="text-muted-foreground">疑点:</span>
+                  {rh.doubt}
+                </div>
+              )}
+              {rh.how && (
+                <div>
+                  <span className="text-muted-foreground">怎么验的:</span>
+                  {rh.how}
+                </div>
+              )}
+              {rh.conclusion && (
+                <div>
+                  <span className="text-muted-foreground">结论:</span>
+                  {rh.conclusion}
+                </div>
+              )}
+              {rh.unpolished && (
+                <div className="text-muted-foreground">(文字未过文风校验,按原文保留)</div>
+              )}
+            </div>
+          ) : (
+            <div className="mt-1 flex flex-col gap-0.5">
+              <FalsifyMachineDetail entry={entry} />
+            </div>
+          )}
+          {hasHuman && (
+            <div className="mt-1">
+              <button
+                className={
+                  "flex w-fit items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] transition-colors cursor-pointer " +
+                  (rawOpen
+                    ? "border-primary/50 text-foreground"
+                    : "text-muted-foreground hover:text-foreground")
+                }
+                onClick={() => setRawOpen(!rawOpen)}
+              >
+                {React.createElement(iconOf(rawOpen ? "chevronDown" : "chevronRight"), {
+                  className: "size-3",
+                })}
+                机器原文与证据
+              </button>
+              {rawOpen && (
+                <div className="mt-1 flex flex-col gap-0.5">
+                  <FalsifyMachineDetail entry={entry} />
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      }
+    />
+  );
+}
+
+// FalsifyMachineDetail 一轮反证的机器层(结构化结论、逐条解释排除、
+// 证据截头与备注——仲裁求值依据,审计可查)。
+function FalsifyMachineDetail({ entry }) {
+  return (
+    <>
+      <span>
+        存在性:{entry.existence_refuted ? "被推翻" : "未推翻"} · 影响面:
+        {entry.impact_supported
+          ? `证据充分${entry.impact_level ? `(定级 ${severityMeta(entry.impact_level)?.label || entry.impact_level})` : ""}`
+          : "证据不足"}
+      </span>
+      {(entry.alt_results || []).length > 0 && (
+        <span className="flex flex-wrap gap-2">
+          解释结论:
+          {entry.alt_results.map((a) => (
+            <span
+              key={a.id}
+              className={
+                "rounded px-2 py-0.5 text-[10px] " +
+                (a.refuted
+                  ? "bg-status-success-soft text-status-success"
+                  : "bg-status-warning-soft text-status-warning")
+              }
+            >
+              {a.label || a.id} {a.refuted ? "已排除" : "未排除"}
+            </span>
+          ))}
+        </span>
+      )}
+      {entry.evidence_head && (
+        <span className="text-muted-foreground">证据:{entry.evidence_head}</span>
+      )}
+      {entry.note && (
+        <span className="text-muted-foreground">
+          备注(不参与机器判定):{entry.note}
+        </span>
+      )}
+    </>
+  );
 }
 
 function TimelineItem({ rev, title, detail, tone }) {
@@ -1446,7 +1550,9 @@ function TimelineItem({ rev, title, detail, tone }) {
               ? "bg-status-warning"
               : tone === "danger"
                 ? "bg-status-danger"
-                : "bg-status-running")
+                : tone === "info"
+                  ? "bg-status-paused"
+                  : "bg-status-running")
         }
       />
       <div className="flex flex-wrap items-baseline gap-2">
@@ -1544,15 +1650,16 @@ export function HypothesisDetailSheet({ tid, hypID, onClose, onSelectNode }) {
     );
   }
   const h = data.hypothesis || {};
-  const st = HYP_STATUS[h.status] || { label: h.status, variant: "info" };
+  const st = hypDisplayMeta(h) || HYP_STATUS[h.status] || { label: h.status, variant: "info" };
   const timeline = data.timeline || [];
   const traj = data.trajectory || {};
   // 当前结论一句话(P4-28 ③ 同款):终态直陈结果;搁置与过程态不呈现。
+  // P4-56:已废弃为三种出局合一(理由留档);成立迁入事实页。
   const hypConclusion =
     h.status === "confirmed"
-      ? "当前结论：成立"
+      ? "当前结论：成立，已迁入事实页"
       : h.status === "discarded"
-        ? "当前结论：不成立，废案留档"
+        ? "当前结论：已废弃，理由留档"
         : "";
 
   return (
@@ -1738,7 +1845,7 @@ function HypTimelineEntry({ entry }) {
             entry.status === "confirmed"
               ? "success"
               : entry.status === "discarded"
-                ? "danger"
+                ? "info"
                 : entry.status === "held"
                   ? "warning"
                   : "running"

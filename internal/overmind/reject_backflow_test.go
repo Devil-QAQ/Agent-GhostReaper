@@ -110,7 +110,7 @@ func TestGuardRejectBackflowE2E(t *testing.T) {
 			return scriptedReply{Text: `{"new_intents":[{"intent":"探测幽灵资产","expected_observation":"证据","action_level":"只读探测","covers":["ghost1"]}]}`, Finish: "stop"}
 		}
 		// 虫群单位:提交候选事实后收口。
-		if !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实") {
+		if !seenToolResult(rr, "submit_candidate_fact", "已提交新进事实") {
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
 				ID: "f1", Name: "submit_candidate_fact",
 				Args: `{"statement":"靶标暴露面已确认","evidence":"实测","asset_id":"a1"}`,

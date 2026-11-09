@@ -324,7 +324,7 @@ func TestServerTaskFuseIsolationE2E(t *testing.T) {
 			return sreply{ToolCalls: []struct {
 				ID, Name, Args string
 			}{{ID: "p1", Name: "port_probe", Args: fmt.Sprintf(`{"host":%q,"port":%s}`, host, port)}}}
-		case !sSeenToolResult(rr, "submit_candidate_fact", "已提交待确认事实"):
+		case !sSeenToolResult(rr, "submit_candidate_fact", "已提交新进事实"):
 			return sreply{ToolCalls: []struct {
 				ID, Name, Args string
 			}{{ID: "c1", Name: "submit_candidate_fact", Args: fmt.Sprintf(

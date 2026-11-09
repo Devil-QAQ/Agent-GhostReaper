@@ -12,6 +12,11 @@ import (
 
 const SettingKeyQueueLimit = "overmind.queue.limit"
 
+// actorShepherd 牧者在账本事件里的 actor 字符串(shepherd.ActorShepherd
+// 的镜像——shepherd 包 import overmind(紧急意图派发),反向引用会成
+// 环;事件 actor 是账本层的字符串契约,此处按字面量对齐)。
+const actorShepherd = "shepherd"
+
 // DefaultQueueLimit 派发准入上限默认值(P4-29):在跑+排队+等前置 ≥ 上限
 // 时拒收新增普通探索。原 6(=执行 3+排队 3,起始验证值);2026-10-26 随
 // 并发默认 3→5 同步上调为 8(=执行 5+排队 3),维持"排队缓冲 3"配比,
@@ -280,7 +285,17 @@ func (l *Loop) planningTriggers(ctx context.Context) ([]int64, bool, error) {
 			trigger = json.Unmarshal(ev.Payload, &p) == nil && (p.Type == rings.ShepherdRecUserMessage || p.Type == rings.ShepherdRecAdvice)
 		case rings.EventNodeStateChanged:
 			var p rings.NodeStateChanged
-			trigger = ev.Actor == "creator" && json.Unmarshal(ev.Payload, &p) == nil
+			trigger = (ev.Actor == "creator" || ev.Actor == actorShepherd) && json.Unmarshal(ev.Payload, &p) == nil
+		case rings.EventNodeAmended:
+			// 目标变更(P4-54):改标题/完成条件/聚焦标记构成新规划依据
+			// (修改通知主宰并可复活任务,宪法既有);纯优先级调整不触发
+			// (队列排序即时生效,不消耗规划轮)。
+			var p rings.NodeAmended
+			if json.Unmarshal(ev.Payload, &p) == nil {
+				_, focus := p.Detail["focus"]
+				_, pred := p.Detail["predicate"]
+				trigger = p.Title != nil || focus || pred
+			}
 		case rings.EventOperatorDive:
 			// 操作者深入指令(P4-48):硬承诺——立即唤醒规划。
 			trigger = true

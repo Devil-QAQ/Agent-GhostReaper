@@ -121,7 +121,7 @@ func TestOvermindLoopE2E(t *testing.T) {
 				ID: "p" + strconv.Itoa(rr.Index), Name: "port_probe",
 				Args: fmt.Sprintf(`{"host":%q,"port":%s}`, host, portStr),
 			}}, Finish: "tool_calls"}
-		case !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实"):
+		case !seenToolResult(rr, "submit_candidate_fact", "已提交新进事实"):
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
 				ID: "s" + strconv.Itoa(rr.Index), Name: "submit_candidate_fact",
 				Args: fmt.Sprintf(`{"statement":"%s 端口开放,服务 banner 已确认","evidence":"port_probe 实测 state=open","asset_id":"%s"}`, hostPort, assetID),
@@ -711,7 +711,7 @@ func TestLoopNoDispatchSpin(t *testing.T) {
 
 // TestSnapshotShowsApprovalDenials 快照是主宰研判的输入:被审批拒绝终止
 // 熔断的单位,其拒绝原因(拒绝线自动拒绝/面板拒绝)必须在快照可见,
-// 主宰据此重新研判;研判后放行的记录同样可见。
+// 主宰据此重新研判。
 func TestSnapshotShowsApprovalDenials(t *testing.T) {
 	store := openStore(t)
 	ctx := context.Background()
@@ -722,7 +722,8 @@ func TestSnapshotShowsApprovalDenials(t *testing.T) {
 			Payload: rings.TaskLifecycle{Action: "created", Title: "快照拒绝可见"}},
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
 			NodeID: "g1", NodeType: rings.NodeGoal, Title: "验证拒绝可见", Status: "active"}},
-		// s1:危害类(数据销毁)被拒绝线熔断,后经造物主研判后放行。
+		// s1:危害类(数据销毁)被拒绝线熔断(P4-51 ⑤:放行通道废除,
+		// 拒绝即终局)。
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
 			NodeID: "s1", NodeType: rings.NodeStep, Title: "销毁演练", Status: "approval_denied",
 			Detail: map[string]any{"goal_id": "g1", "action_level": "修改与持久化",
@@ -732,11 +733,6 @@ func TestSnapshotShowsApprovalDenials(t *testing.T) {
 			ActionLevel: rings.ActionModifyPersist, HarmClass: rings.HarmDataDestruction,
 			Intent: "销毁演练", ToolName: "bash", ToolArgs: []byte(`{"command":"rm x"}`),
 			DenyLine: rings.DenyLineHarm, Reason: "拒绝线(非常严重):数据销毁动作直接拒绝"}},
-		rings.Event{Kind: rings.EventApprovalRecord, Actor: "creator", Payload: rings.ApprovalRecord{
-			RequestID: "ap-1", StepID: "s1", UnitID: "u1", Type: rings.ApprovalRecForced,
-			ActionLevel: rings.ActionModifyPersist, HarmClass: rings.HarmDataDestruction,
-			Intent: "销毁演练", ToolName: "bash", ToolArgs: []byte(`{"command":"rm x"}`),
-			DecidedBy: "creator", Reason: "复核后放行"}},
 		// s2:弹门级被面板拒绝熔断。
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
 			NodeID: "s2", NodeType: rings.NodeStep, Title: "修改配置", Status: "approval_denied",
@@ -764,12 +760,11 @@ func TestSnapshotShowsApprovalDenials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("快照失败: %v", err)
 	}
-	// 拒绝线原因 + 研判后放行可见。
+	// 拒绝线原因可见。
 	for _, want := range []string{
 		"审批拒绝",
 		"s1 销毁演练 | 工具 bash",
 		"数据销毁动作直接拒绝",
-		"造物主已规划后放行",
 		"s2 修改配置",
 		"目标环境不允许修改",
 	} {

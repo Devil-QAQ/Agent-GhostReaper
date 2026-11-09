@@ -313,6 +313,24 @@ var migrations = [][]string{
 		// 不变)。
 		`ALTER TABLE roe_state ADD COLUMN creator_notes TEXT NOT NULL DEFAULT ''`,
 	},
+	{
+		// v13:P4-56 发现区四页签(问题清单 #77):events 增加 (task_id,
+		// kind, revision) 索引——发现页锤炼显示态需要读舵杆终止记录
+		// (kill_work 送达集合,与 arbiter.operatorKilled 同口径),按
+		// kind 定向直查取代全量事件扫描(P4-36 列表禁全量纪律);舵杆
+		// 记录每任务屈指可数,索引扫描代价可忽略。IF NOT EXISTS:降级
+		// 模拟重放升级路径(如 p436 回填测试把 user_version 回拨)时
+		// 索引已在,幂等跳过。
+		`CREATE INDEX IF NOT EXISTS idx_events_task_kind ON events (task_id, kind, revision)`,
+	},
+	{
+		// v14:P4-59 报告级文风锚(问题清单 #80①③):claim_cases 增加定稿
+		// 校对后的声明摘要列(summary,小 JSON:statement/impact/facts)。
+		// 独立小列而非并入 repro JSON——发现列表摘要读(ClaimDigests)与
+		// 事实页反查只取它,不解析含步骤数组的 repro 大列(P4-36 列表
+		// 禁重读纪律);旧库默认空 = 无校对摘要,读侧退节点原文。
+		`ALTER TABLE claim_cases ADD COLUMN summary TEXT NOT NULL DEFAULT ''`,
+	},
 }
 
 // projectionFloor 投影初次落库的 schema 版本(v10,P4-36):升级跨过本版本

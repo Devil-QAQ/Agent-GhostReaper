@@ -116,19 +116,22 @@ func stepOrdinal(n int) string {
 // P4-36 起 Variants/Process 大数组不进投影(巨记录瘦身):常规装配为
 // 空,证据包导出经 EnrichReproForEvent 按 rev 定向读事件补齐。Narrative
 // 为定稿冻结的来龙去脉叙述(P4-13:模型生成人话,读定稿零 LLM;旧定稿
-// 无叙述为空,读侧如实标注不编造)。NarrativeUnpolished / Steps[].Unpolished
+// 无叙述为空,读侧如实标注不编造)。Rounds 为定稿冻结的反证时间线人话
+// 三段(P4-56 ⑤:疑点→怎么验的→结论,旧定稿为空,读侧退机器层)。
+// NarrativeUnpolished / Steps[].Unpolished / Rounds[].Unpolished
 // 为文风校验未过的如实标注(P4-24 ②:校对+重写一次后仍含机器语特征,
 // 原文保留,读侧渲染一行说明)。
 type ReproFinal struct {
-	Rev                 int64                   `json:"rev"`
-	Severity            string                  `json:"severity"`
-	Narrative           string                  `json:"narrative,omitempty"`
-	NarrativeUnpolished bool                    `json:"narrative_unpolished,omitempty"`
-	Steps               []ReproStepView         `json:"steps"`
-	Variants            []rings.ReproStep       `json:"variants,omitempty"` // 旧口径过程流量(存量;证据包导出补全,常规装配为空)
-	Process             []rings.ReproProcessRef `json:"process,omitempty"`  // 过程流量引用清单(P4-35;证据包导出补全,常规装配为空)
-	ProcessCount        int                     `json:"process_count"`      // 过程流量条数(计数行口径;新记录 = Process 长度)
-	VariantsCount       int                     `json:"variants_count"`     // 旧口径变体条数(存量)
+	Rev                 int64                     `json:"rev"`
+	Severity            string                    `json:"severity"`
+	Narrative           string                    `json:"narrative,omitempty"`
+	NarrativeUnpolished bool                      `json:"narrative_unpolished,omitempty"`
+	Rounds              []rings.FalsifyRoundHuman `json:"rounds,omitempty"`
+	Steps               []ReproStepView           `json:"steps"`
+	Variants            []rings.ReproStep         `json:"variants,omitempty"` // 旧口径过程流量(存量;证据包导出补全,常规装配为空)
+	Process             []rings.ReproProcessRef   `json:"process,omitempty"`  // 过程流量引用清单(P4-35;证据包导出补全,常规装配为空)
+	ProcessCount        int                       `json:"process_count"`      // 过程流量条数(计数行口径;新记录 = Process 长度)
+	VariantsCount       int                       `json:"variants_count"`     // 旧口径变体条数(存量)
 }
 
 // ProcessUnlisted 未进最小集的过程交换条数(面板与报告同口径计数行:
@@ -160,6 +163,10 @@ type ClaimCase struct {
 	Alternatives []AltView    `json:"alternatives"`
 	Repro        *ReproFinal  `json:"repro,omitempty"`
 	Retest       *RetestFinal `json:"retest,omitempty"`
+	// Summary 定稿校对后的声明摘要(P4-59 ①,问题清单 #80①③):存在性
+	// 描述/影响面/链上事实描述的报告级文风改写,随 repro 同批冻结;
+	// 空字段读侧退节点原文。只改文风,包装不是证据(R2)。
+	Summary *rings.SummaryDigest `json:"summary,omitempty"`
 	// 复核标记不纳入报告(P4-30 ③):最新 report_review 记录为准(取代
 	// 语义);账本不涂改,判断保留可追溯——报告只收已确认且非信息性。
 	ReportExcluded       bool   `json:"report_excluded,omitempty"`
@@ -213,7 +220,7 @@ func applyProjection(cs *ClaimCase, proj *rings.ClaimCaseProjection, discovererI
 			if json.Unmarshal(ent.P, &p) == nil {
 				cs.Timeline = append(cs.Timeline, CaseEntry{Rev: ent.Rev, Kind: "state", Status: p.Status})
 			}
-		case "falsify", "verdict", "reopen":
+		case "falsify", "verdict", "reopen", "suspend":
 			var rec rings.TestClaimRecord
 			if json.Unmarshal(ent.P, &rec) == nil {
 				cs.Timeline = append(cs.Timeline, caseEntryOf(ent.Rev, rec))
@@ -244,10 +251,12 @@ func applyProjection(cs *ClaimCase, proj *rings.ClaimCaseProjection, discovererI
 		}
 	}
 	cs.ReportExcluded, cs.ReportExcludedReason = proj.ReportExcluded, strings.TrimSpace(proj.ReportExcludedReason)
+	cs.Summary = proj.Summary
 	if proj.Repro != nil {
 		out := &ReproFinal{
 			Rev: proj.Repro.Rev, Severity: proj.Repro.Severity,
 			Narrative: proj.Repro.Narrative, NarrativeUnpolished: proj.Repro.NarrativeUnpolished,
+			Rounds:       proj.Repro.Rounds,
 			ProcessCount: proj.Repro.ProcessCount, VariantsCount: proj.Repro.VariantsCount,
 		}
 		steps := make([]ReproStepView, 0, len(proj.Repro.Steps))
@@ -317,6 +326,10 @@ func caseEntryOf(rev int64, p rings.TestClaimRecord) CaseEntry {
 	case rings.TestClaimRecReopen:
 		e.Kind = "reopen"
 		e.Trigger, e.Reason = p.Trigger, p.Reason
+	case rings.TestClaimRecSuspend:
+		// 操作者取消挂起(P4-54):与 reopen 同形(理由时间线可读)。
+		e.Kind = "suspend"
+		e.Reason = p.Reason
 	case rings.TestClaimRecRepro:
 		e.Kind = "repro"
 		e.Severity = p.Severity

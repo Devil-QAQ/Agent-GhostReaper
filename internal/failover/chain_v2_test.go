@@ -70,7 +70,7 @@ func TestChainGradientCooldown(t *testing.T) {
 	for i, want := range []time.Duration{time.Second, 5 * time.Second, 30 * time.Second, 30 * time.Second} {
 		c.mu.Lock()
 		c.lead.brk = breakerState{State: "closed", Opens: i} // 从 closed 起步,累计开闸预置为 i
-		c.onFailure(c.lead, ClassQuota, errors.New("x"))
+		c.onFailure(context.Background(), c.lead, ClassQuota, errors.New("x"))
 		c.mu.Unlock()
 		got, opens := snap()
 		if got <= want-200*time.Millisecond || got > want {
@@ -84,7 +84,7 @@ func TestChainGradientCooldown(t *testing.T) {
 	c.mu.Lock()
 	c.lead.brk.State = "open"
 	c.onSuccess(c.lead)
-	c.onFailure(c.lead, ClassQuota, errors.New("x"))
+	c.onFailure(context.Background(), c.lead, ClassQuota, errors.New("x"))
 	c.mu.Unlock()
 	got, opens := snap()
 	if opens != 1 {

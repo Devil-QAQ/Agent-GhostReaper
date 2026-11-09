@@ -153,9 +153,10 @@ func parseTimeParam(v string) (time.Time, error) {
 
 // mirrorExchange 定位任务内一条镜留痕:账本摘要 + blob 原文文档
 // (http/https;tunnel 无原文)。交换 ID 任务内定位(会话前缀随机,
-// 跨任务理论可撞,任务内唯一)。
+// 跨任务理论可撞,任务内唯一)。P4-58:按 kind 定向直查 mirror.record,
+// 不再全量扫事件流。
 func (s *Server) mirrorExchange(ctx context.Context, taskID, exID string) (*rings.MirrorRecord, *mirror.Exchange, time.Time, error) {
-	evs, err := s.Store.Events(ctx, taskID, 0, 0)
+	evs, err := s.Store.EventsByKinds(ctx, taskID, rings.EventMirrorRecord)
 	if err != nil {
 		return nil, nil, time.Time{}, err
 	}

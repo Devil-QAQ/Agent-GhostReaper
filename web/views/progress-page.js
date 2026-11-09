@@ -452,6 +452,7 @@ export function GraphCanvas({ data, focus, heightClass, sheet, onSheetChange }) 
           nodesDraggable={false}
           nodesConnectable={false}
           elementsSelectable={false}
+          onlyRenderVisibleElements
           fitView
           fitViewOptions={{ padding: 0.22, maxZoom: 1 }}
           minZoom={0.15}

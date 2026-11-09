@@ -162,6 +162,10 @@ var (
 	organizeIPRe     = regexp.MustCompile(`\d{1,3}(\.\d{1,3}){3}`)
 	organizeDomainRe = regexp.MustCompile(`[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9-]+)+`)
 	organizeSchemeRe = regexp.MustCompile(`^https?://`)
+	// P4-50 ③新写法(无锚,行内子串提取——同 DomainRe 口径):*.域 通
+	// 配与 域名:端口,整体成实体(拆开即授权粒度漂移)。
+	organizeWildRe   = regexp.MustCompile(`\*\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9-]+)+`)
+	organizeHostPort = regexp.MustCompile(`[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9-]+)+:\d+`)
 )
 
 // organizeNorm 标识规范化:小写、去协议、去前导 www.、去末尾斜杠——
@@ -178,10 +182,12 @@ type organizeToken struct {
 	norm string
 }
 
-// organizeTokens 从输入行抽实体:按 URL → IP:端口 → 纯 IP → 点分域名的
-// 优先级提取标识形子串,已消费的跨度用占位符遮蔽(URL 内的域名、IP:端口
-// 内的裸 IP 不重复计实体);一行内一个标识形都没有时,整行(去空白后
-// 仍有内容)计一个实体(组织名/人名等非标识形资产)。
+// organizeTokens 从输入行抽实体:按 URL → IP:端口 → 域名:端口 →
+// 纯 IP → *.域 → 点分域名的优先级提取标识形子串,已消费的跨度用占位
+// 符遮蔽(URL 内的域名、IP:端口内的裸 IP、*.域 内的裸域名不重复计
+// 实体;*.域 与 域名:端口 整体成实体——拆开即粒度漂移,P4-50 ③);
+// 一行内一个标识形都没有时,整行(去空白后仍有内容)计一个实体(组织
+// 名/人名等非标识形资产)。
 func organizeTokens(lines []string) []organizeToken {
 	var toks []organizeToken
 	seen := map[string]bool{}
@@ -200,7 +206,7 @@ func organizeTokens(lines []string) []organizeToken {
 	for _, line := range lines {
 		masked := line
 		found := false
-		for _, re := range []*regexp.Regexp{organizeURLRe, organizeIPPortRe, organizeIPRe, organizeDomainRe} {
+		for _, re := range []*regexp.Regexp{organizeURLRe, organizeIPPortRe, organizeHostPort, organizeIPRe, organizeWildRe, organizeDomainRe} {
 			for _, m := range re.FindAllString(masked, -1) {
 				add(m)
 				found = true
@@ -239,15 +245,16 @@ func organizeDerived(title string, lines []string, toks []organizeToken) bool {
 }
 
 // organizeHeuristicClass 标识形启发式归类(与面板 recognizeLines 同口径:
-// URL/带端口 IP → service;纯 IP → host;点分域名 → subdomain;其余 →
-// other),用于覆盖检查补回行与模型漏给类时的兜底。
+// URL/带端口 IP/域名:端口 → service;纯 IP → host;*.域/点分域名 →
+// subdomain;其余 → other),用于覆盖检查补回行与模型漏给类时的兜底。
 func organizeHeuristicClass(title string) string {
 	switch {
-	case organizeSchemeRe.MatchString(title) || organizeIPPortRe.MatchString(title):
+	case organizeSchemeRe.MatchString(title) || organizeIPPortRe.MatchString(title) ||
+		organizeHostPort.MatchString(title):
 		return "service"
 	case organizeIPRe.MatchString(title):
 		return "host"
-	case organizeDomainRe.MatchString(title):
+	case organizeWildRe.MatchString(title) || organizeDomainRe.MatchString(title):
 		return "subdomain"
 	default:
 		return "other"

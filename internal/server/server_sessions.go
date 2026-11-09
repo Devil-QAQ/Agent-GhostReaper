@@ -293,44 +293,21 @@ func (rep *panoramaReplay) snapshot() []PanoramaRow {
 // 排队(含等前置)步骤——与虫群会话列表排队条目、工作台水位同源(同一
 // 账本投影,排序同一 StepLaunchLess),行装配与研判卡历史快照共用
 // panoramaRows。最新研判卡的实时数据面(历史轮次快照仍归 overmindRounds);
-// 读面只走投影(步骤含 detail 供排序,边与资产标题取统一图投影),
-// 供面板 tasks 主题事件驱动高频刷新,不扫事件流。
+// 读面只走投影直查(P4-58:在跑/排队步骤 + covers 资产标题 + 前置状态,
+// Store.PanoramaFlight,不再全图重建),供面板 tasks 主题事件驱动高频
+// 刷新,不扫事件流。
 func (s *Server) handlePanoramaLive(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 	if !s.taskExists(taskID) {
 		writeErr(w, http.StatusNotFound, fmt.Errorf("任务 %s 不存在", taskID))
 		return
 	}
-	steps := map[string]rings.NodeFull{}
-	list, err := s.Store.NodesByType(r.Context(), taskID, rings.NodeStep, "")
+	pl, err := s.Store.PanoramaFlight(r.Context(), taskID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	for _, st := range list {
-		steps[st.ID] = st
-	}
-	g, err := s.Store.Graph(r.Context(), taskID)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-	assetTitle := map[string]string{}
-	covers, deps := map[string][]string{}, map[string][]string{}
-	for _, n := range g.Nodes {
-		if n.Type == rings.NodeAsset {
-			assetTitle[n.ID] = n.Title
-		}
-	}
-	for _, e := range g.Edges {
-		switch e.Type {
-		case rings.EdgeCovers:
-			covers[e.From] = append(covers[e.From], e.To)
-		case rings.EdgeDependsOn:
-			deps[e.From] = append(deps[e.From], e.To)
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"panorama": panoramaRows(steps, covers, deps, assetTitle)})
+	writeJSON(w, http.StatusOK, map[string]any{"panorama": panoramaRows(pl.Steps, pl.Covers, pl.Deps, pl.AssetTitle)})
 }
 
 // OvermindRound 一轮研判:五问结论 + 派发决策 + 本轮收割 + 在途全景。
@@ -385,9 +362,14 @@ func diveTriggerLines(evs []rings.RawEvent, revs []int64) []string {
 }
 
 // overmindRounds 主宰研判轨迹:按账本顺序取全部 overmind.record
-// (assessment),逐轮派生窗口内的派发与收割。
+// (assessment),逐轮派生窗口内的派发与收割。P4-58:研判轨迹回放只
+// 消费五类事件(overmind.record / operator.dive / node.added /
+// node.state_changed / edge.added),按 kind 定向直查合并(revision
+// 升序 = 账本权威序,回放语义不变),不再全量扫事件流。
 func (s *Server) overmindRounds(r *http.Request, taskID string) ([]OvermindRound, error) {
-	evs, err := s.Store.Events(r.Context(), taskID, 0, 0)
+	evs, err := s.Store.EventsByKinds(r.Context(), taskID,
+		rings.EventOvermindRecord, rings.EventOperatorDive, rings.EventNodeAdded,
+		rings.EventNodeStateChanged, rings.EventEdgeAdded)
 	if err != nil {
 		return nil, err
 	}

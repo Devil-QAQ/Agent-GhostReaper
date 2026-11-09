@@ -458,7 +458,7 @@ func TestJudgeClaimVerdicts(t *testing.T) {
 		t.Fatalf("搁置理由须言明证据不足: %q", jb.Verdict.PendingReason)
 	}
 
-	// 声明 C:存在性被推翻 → 待确认,理由言明被推翻。
+	// 声明 C:存在性被推翻 → 不成立(P4-55 ②:推翻即终态,理由"被反证推翻")。
 	claimFixture(t, s, task, "tc-c", legacy)
 	falsifyRound(t, s, task, "tc-c", "s4", "u4", &rings.TestClaimRecord{
 		ClaimID: "tc-c", UnitID: "u4", Type: rings.TestClaimRecFalsify,
@@ -468,8 +468,8 @@ func TestJudgeClaimVerdicts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("求值失败: %v", err)
 	}
-	if jc.Status != rings.TestClaimPending || !strings.Contains(jc.Verdict.PendingReason, "推翻") {
-		t.Fatalf("存在性被推翻应待确认且理由言明: %+v", jc.Verdict)
+	if jc.Status != rings.TestClaimRefuted || jc.Verdict.Decision != rings.VerdictRefuted || jc.Verdict.PendingReason != "被反证推翻" {
+		t.Fatalf("存在性被推翻应判不成立(理由逐字'被反证推翻'): %+v", jc.Verdict)
 	}
 
 	// 声明 D:反证单位 = 发现单位(R12 违例)→ 结果不被采信,待确认。
@@ -486,15 +486,12 @@ func TestJudgeClaimVerdicts(t *testing.T) {
 		t.Fatalf("发现者自证不得确认: %+v", jd.Verdict)
 	}
 
-	// 声明 E:反证轮完成但未写回结构化结论 → 待确认,理由言明缺结论。
+	// 声明 E:反证轮完成但未写回结构化结论 → 中断(P4-55 ①:预算未尽
+	// 交收割自动重派,不落待确认装死)。
 	claimFixture(t, s, task, "tc-e", legacy)
 	falsifyRound(t, s, task, "tc-e", "s6", "u5", nil)
-	je, err := JudgeClaim(ctx, s, task, "tc-e")
-	if err != nil {
-		t.Fatalf("求值失败: %v", err)
-	}
-	if je.Status != rings.TestClaimPending || !strings.Contains(je.Verdict.PendingReason, "未写回结构化结论") {
-		t.Fatalf("无结构化结论应待确认且理由言明: %+v", je.Verdict)
+	if _, err := JudgeClaim(ctx, s, task, "tc-e"); !errors.Is(err, ErrClaimInterrupted) {
+		t.Fatalf("无结构化结论且预算未尽应 ErrClaimInterrupted, 得到 %v", err)
 	}
 }
 

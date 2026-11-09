@@ -43,6 +43,12 @@ func (s *Store) Events(ctx context.Context, taskID string, sinceRevision int64, 
 	if err != nil {
 		return nil, fmt.Errorf("rings: 查询任务 %s 事件: %w", taskID, err)
 	}
+	return scanEventRows(rows)
+}
+
+// scanEventRows 事件行扫描公共段(Events / EventsByKinds 同一解码,
+// revision 升序由各自查询的 ORDER BY 保证)。
+func scanEventRows(rows *sql.Rows) ([]RawEvent, error) {
 	defer rows.Close()
 	var out []RawEvent
 	for rows.Next() {
@@ -50,9 +56,10 @@ func (s *Store) Events(ctx context.Context, taskID string, sinceRevision int64, 
 		var kind string
 		var occurred, recorded string
 		if err := rows.Scan(&e.Seq, &e.TaskID, &e.Revision, &kind, &e.Actor, &e.Payload, &occurred, &recorded); err != nil {
-			return nil, fmt.Errorf("rings: 扫描任务 %s 事件: %w", taskID, err)
+			return nil, fmt.Errorf("rings: 扫描事件: %w", err)
 		}
 		e.Kind = EventKind(kind)
+		var err error
 		if e.OccurredAt, err = time.Parse(time.RFC3339Nano, occurred); err != nil {
 			return nil, fmt.Errorf("rings: 解析 occurred_at: %w", err)
 		}
@@ -62,6 +69,35 @@ func (s *Store) Events(ctx context.Context, taskID string, sinceRevision int64, 
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// EventsByKinds 按事件种类定向直查(P4-58):经 v13 (task_id, kind,
+// revision) 索引只扫所需种类,不触碰其余事件——面板读侧按需取数的
+// 底层原语(P4-36 列表禁全量扫描纪律)。返回按 revision 升序(与
+// Events 同序,回放语义不变;种类集合内合并排序,任务内 revision
+// 唯一保证次序确定)。
+func (s *Store) EventsByKinds(ctx context.Context, taskID string, kinds ...EventKind) ([]RawEvent, error) {
+	if taskID == "" {
+		return nil, ErrEmptyTaskID
+	}
+	if len(kinds) == 0 {
+		return nil, fmt.Errorf("rings: EventsByKinds 须至少一种事件种类")
+	}
+	ph := make([]string, len(kinds))
+	args := make([]any, 0, len(kinds)+1)
+	args = append(args, taskID)
+	for i, k := range kinds {
+		ph[i] = "?"
+		args = append(args, string(k))
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT seq, task_id, revision, kind, actor, payload, occurred_at, recorded_at
+		 FROM events WHERE task_id = ? AND kind IN (`+strings.Join(ph, ",")+`)
+		 ORDER BY revision`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("rings: 查询任务 %s 事件(按种类): %w", taskID, err)
+	}
+	return scanEventRows(rows)
 }
 
 // CurrentRevision 返回任务当前最大 revision(无事件为 0)。
@@ -327,10 +363,15 @@ func (r RoeState) ScopeApprovedSet() map[string]bool {
 }
 
 // ExcludedAssetView 摘除资产的呈现形态(ID + 标题,供约束块渲染与面板
-// 读面共用;标题查不到时原样给 ID,历史资产被清场也能读)。
+// 读面共用;标题查不到时原样给 ID,历史资产被清场也能读)。P4-52 ⑤:
+// 待批资产合成审批卡时补带 AddedAt(入图时间)与出生步骤/单位(detail
+// 血缘,可能有缺),摘除清单路径不填。
 type ExcludedAssetView struct {
-	ID    string
-	Title string
+	ID      string
+	Title   string
+	AddedAt string
+	StepID  string
+	UnitID  string
 }
 
 // ExcludedAssets 当前摘除清单的资产明细(题名解析)。清单里的 ID 已不在
@@ -610,24 +651,31 @@ func (s *Store) Graph(ctx context.Context, taskID string) (*GraphView, error) {
 	}
 
 	// 资产派生计数(AssetGraph 同源语义):covers 边入=已覆盖;about 边
-	// 按来源节点类型分计事实/假设。
+	// 按来源节点类型分计事实/假设。一遍边扫建索引再回填节点(O(N+E),
+	// P4-58:原资产×边双重循环在大图上平方级,结果不变)。
+	coverIn := make(map[string]bool, 64)
+	factIn := make(map[string]int, 64)
+	hypIn := make(map[string]int, 64)
+	for _, e := range view.Edges {
+		switch e.Type {
+		case EdgeCovers:
+			coverIn[e.To] = true
+		case EdgeAbout:
+			switch nodeType[e.From] {
+			case NodeFact:
+				factIn[e.To]++
+			case NodeHypothesis:
+				hypIn[e.To]++
+			}
+		}
+	}
 	for i := range view.Nodes {
 		if view.Nodes[i].Type != NodeAsset {
 			continue
 		}
-		for _, e := range view.Edges {
-			if e.To != view.Nodes[i].ID {
-				continue
-			}
-			switch {
-			case e.Type == EdgeCovers:
-				view.Nodes[i].Covered = true
-			case e.Type == EdgeAbout && nodeType[e.From] == NodeFact:
-				view.Nodes[i].FactCount++
-			case e.Type == EdgeAbout && nodeType[e.From] == NodeHypothesis:
-				view.Nodes[i].HypothesisCount++
-			}
-		}
+		view.Nodes[i].Covered = coverIn[view.Nodes[i].ID]
+		view.Nodes[i].FactCount = factIn[view.Nodes[i].ID]
+		view.Nodes[i].HypothesisCount = hypIn[view.Nodes[i].ID]
 	}
 
 	// 资产来源三态(P4-05):读 asset.detail 的 source(归一,缺省种子)。
@@ -858,12 +906,169 @@ func (s *Store) NodesByType(ctx context.Context, taskID string, nt NodeType, sta
 	return out, rows.Err()
 }
 
+// PanoramaLive 在途全景实时取数(P4-58):只取在跑/排队步骤(nodes
+// 投影直查,含 detail 供领取次序排序)与其 covers 资产标题、depends_on
+// 前置状态——四结构与 panoramaRows 装配入参同形(历史快照回放器的
+// 实时对照面),读侧零全图重建、零事件流扫描。前置步骤以状态桩入
+// Steps(panoramaRows 只读其 Status,语义与全量步骤表一致:节点不在
+// 即等待)。
+type PanoramaLive struct {
+	Steps      map[string]NodeFull
+	Covers     map[string][]string // stepID → covers 资产
+	Deps       map[string][]string // stepID → 前置步骤
+	AssetTitle map[string]string
+}
+
+// PanoramaFlight 在途全景实时取数(见 PanoramaLive)。无在跑/排队步骤
+// 时返回空结构(装配侧得到空行列表,与旧全量路径一致)。
+func (s *Store) PanoramaFlight(ctx context.Context, taskID string) (*PanoramaLive, error) {
+	out := &PanoramaLive{
+		Steps: map[string]NodeFull{}, Covers: map[string][]string{},
+		Deps: map[string][]string{}, AssetTitle: map[string]string{},
+	}
+	if taskID == "" {
+		return nil, ErrEmptyTaskID
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT node_id, title, status, asset_class, detail, created_rev, updated_rev,
+		  added_at, confirmed_at, confirmed_rev
+		FROM nodes
+		WHERE task_id = ? AND node_type = 'step' AND status IN ('running', 'dispatched')
+		ORDER BY created_rev, node_id`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("rings: 查询任务 %s 在途步骤: %w", taskID, err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var n NodeFull
+		var class, detail, addedAt, confirmedAt string
+		if err := rows.Scan(&n.ID, &n.Title, &n.Status, &class, &detail, &n.CreatedRev, &n.UpdatedRev,
+			&addedAt, &confirmedAt, &n.ConfirmedRev); err != nil {
+			return nil, fmt.Errorf("rings: 扫描任务 %s 在途步骤: %w", taskID, err)
+		}
+		n.Type = NodeStep
+		n.AssetClass = AssetClass(class)
+		if err := json.Unmarshal([]byte(detail), &n.Detail); err != nil {
+			return nil, fmt.Errorf("rings: 解码节点 %s detail: %w", n.ID, err)
+		}
+		n.AddedAt, n.ConfirmedAt = FmtLocal(addedAt), FmtLocal(confirmedAt)
+		out.Steps[n.ID] = n
+		ids = append(ids, n.ID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return out, nil
+	}
+
+	// 在途步骤的 covers/depends_on 边(边序与 Graph 的 queryEdges 同口径:
+	// created_rev, from_node——covers 资产列表次序不变)。
+	ph := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, taskID)
+	for i, id := range ids {
+		ph[i] = "?"
+		args = append(args, id)
+	}
+	inList := strings.Join(ph, ",")
+	erows, err := s.db.QueryContext(ctx, `
+		SELECT edge_type, from_node, to_node FROM edges
+		WHERE task_id = ? AND from_node IN (`+inList+`)
+		  AND edge_type IN ('covers', 'depends_on')
+		ORDER BY created_rev, from_node`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("rings: 查询任务 %s 在途步骤边: %w", taskID, err)
+	}
+	defer erows.Close()
+	var depIDs, assetIDs []string
+	for erows.Next() {
+		var et, from, to string
+		if err := erows.Scan(&et, &from, &to); err != nil {
+			return nil, fmt.Errorf("rings: 扫描任务 %s 在途步骤边: %w", taskID, err)
+		}
+		switch EdgeType(et) {
+		case EdgeCovers:
+			out.Covers[from] = append(out.Covers[from], to)
+			assetIDs = append(assetIDs, to)
+		case EdgeDependsOn:
+			out.Deps[from] = append(out.Deps[from], to)
+			depIDs = append(depIDs, to)
+		}
+	}
+	if err := erows.Err(); err != nil {
+		return nil, err
+	}
+
+	// 前置步骤状态桩(等前置判定的查表面;节点缺失 = 不在表内 = 等待,
+	// 与全量步骤表语义一致)。
+	if len(depIDs) > 0 {
+		ph2 := make([]string, len(depIDs))
+		args2 := []any{taskID}
+		for i, id := range depIDs {
+			ph2[i] = "?"
+			args2 = append(args2, id)
+		}
+		drows, err := s.db.QueryContext(ctx, `
+			SELECT node_id, status FROM nodes
+			WHERE task_id = ? AND node_id IN (`+strings.Join(ph2, ",")+`)`, args2...)
+		if err != nil {
+			return nil, fmt.Errorf("rings: 查询任务 %s 前置步骤状态: %w", taskID, err)
+		}
+		for drows.Next() {
+			var id, status string
+			if err := drows.Scan(&id, &status); err != nil {
+				drows.Close()
+				return nil, fmt.Errorf("rings: 扫描任务 %s 前置步骤状态: %w", taskID, err)
+			}
+			if _, inflight := out.Steps[id]; !inflight {
+				out.Steps[id] = NodeFull{NodeView: NodeView{ID: id, Type: NodeStep, Status: status}}
+			}
+		}
+		drows.Close()
+		if err := drows.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	// covers 资产标题。
+	if len(assetIDs) > 0 {
+		ph3 := make([]string, len(assetIDs))
+		args3 := []any{taskID}
+		for i, id := range assetIDs {
+			ph3[i] = "?"
+			args3 = append(args3, id)
+		}
+		arows, err := s.db.QueryContext(ctx, `
+			SELECT node_id, title FROM nodes
+			WHERE task_id = ? AND node_id IN (`+strings.Join(ph3, ",")+`)`, args3...)
+		if err != nil {
+			return nil, fmt.Errorf("rings: 查询任务 %s 覆盖资产标题: %w", taskID, err)
+		}
+		for arows.Next() {
+			var id, title string
+			if err := arows.Scan(&id, &title); err != nil {
+				arows.Close()
+				return nil, fmt.Errorf("rings: 扫描任务 %s 覆盖资产标题: %w", taskID, err)
+			}
+			out.AssetTitle[id] = title
+		}
+		arows.Close()
+		if err := arows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 // UnreadConfirms 已读线之后的"新确认"计数(P4-47 A 未读红点):成果
 // (testclaim 状态 confirmed/fixed,与发现页签成果视图同口径)与事实
-// (fact 状态 confirmed,与事实页签同口径)分开计数;判定时刻取
-// nodes 投影的确认时刻列(confirmed_at,转 confirmed 的写侧同事务
-// 维护;历史空值回退入账时刻 added_at,与事实列表呈现同口径),在
-// Go 侧解析比较——RFC3339Nano 变长小数位的字符串序不保时序,不进
+// (fact 状态 confirmed,与事实页签同口径;P4-56 起假设成立显示层迁入
+// 事实页,已成立假设同计入事实未读——与页签展示口径一致)分开计数;
+// 判定时刻取 nodes 投影的确认时刻列(confirmed_at,转 confirmed 的写侧
+// 同事务维护;历史空值回退入账时刻 added_at,与事实列表呈现同口径),
+// 在 Go 侧解析比较——RFC3339Nano 变长小数位的字符串序不保时序,不进
 // SQL 比较。since 零值(从未看过)= 全部已确认计为未读。
 func (s *Store) UnreadConfirms(ctx context.Context, taskID string, claimsSince, factsSince time.Time) (claims, facts int, err error) {
 	if taskID == "" {
@@ -873,8 +1078,10 @@ func (s *Store) UnreadConfirms(ctx context.Context, taskID string, claimsSince, 
 		SELECT node_type, confirmed_at, added_at FROM nodes
 		WHERE task_id = ?
 		  AND ((node_type = ? AND status IN (?, ?))
+		    OR (node_type = ? AND status = ?)
 		    OR (node_type = ? AND status = ?))`,
-		taskID, string(NodeTestClaim), TestClaimConfirmed, TestClaimFixed, string(NodeFact), "confirmed")
+		taskID, string(NodeTestClaim), TestClaimConfirmed, TestClaimFixed,
+		string(NodeFact), "confirmed", string(NodeHypothesis), HypothesisConfirmed)
 	if err != nil {
 		return 0, 0, fmt.Errorf("rings: 查询任务 %s 已确认节点: %w", taskID, err)
 	}
@@ -900,6 +1107,38 @@ func (s *Store) UnreadConfirms(ctx context.Context, taskID string, claimsSince, 
 		}
 	}
 	return claims, facts, rows.Err()
+}
+
+// SteerKilledSteps 任务内收到舵杆 kill_work 送达回执的步骤集合(P4-56
+// 发现区四页签:锤炼页"等待主宰判定去留"悬停的判定面,与
+// arbiter.operatorKilled 同口径——cancelled 状态由调用方按步骤现值另判)。
+// 经 v13 (task_id, kind) 索引按 kind 定向直查,不触碰其余事件(P4-36
+// 列表禁全量扫描纪律);读失败如实返回空集合(显示退粗词,不误标)。
+func (s *Store) SteerKilledSteps(ctx context.Context, taskID string) map[string]bool {
+	if taskID == "" {
+		return nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT payload FROM events WHERE task_id = ? AND kind = ?`, taskID, string(EventSteerRecord))
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return out
+		}
+		var r SteerRecord
+		if json.Unmarshal([]byte(payload), &r) != nil {
+			continue
+		}
+		if r.Command == SteerCommandKill && r.State == SteerStateDelivered {
+			out[r.StepID] = true
+		}
+	}
+	return out
 }
 
 // ClaimSearchRow 跨任务声明搜索结果行(P3-10 命令面板):声明定位四元组,
@@ -988,11 +1227,12 @@ func (s *Store) Edges(ctx context.Context, taskID string, types ...EdgeType) ([]
 // 计时器停走——任务总闸墙钟/收尾预算不因冬眠被吃):扫描生命周期事件,
 // hibernated(入眠)→ 下一条生命周期事件(唤醒恢复)配对求时长和。
 // 当前仍在冬眠的开口区间不计(唤醒事件的记账先于开门,醒后查询即闭合)。
+// P4-58:生命周期事件按 kind 定向直查,不再全量扫事件流。
 func (s *Store) HibernateCredit(ctx context.Context, taskID string) (time.Duration, error) {
 	if taskID == "" {
 		return 0, ErrEmptyTaskID
 	}
-	evs, err := s.Events(ctx, taskID, 0, 0)
+	evs, err := s.EventsByKinds(ctx, taskID, EventTaskLifecycle)
 	if err != nil {
 		return 0, fmt.Errorf("rings: 冬眠抵扣查事件 %s: %w", taskID, err)
 	}
@@ -1025,7 +1265,7 @@ func (s *Store) LastHibernateRev(ctx context.Context, taskID string) (int64, err
 	if taskID == "" {
 		return 0, ErrEmptyTaskID
 	}
-	evs, err := s.Events(ctx, taskID, 0, 0)
+	evs, err := s.EventsByKinds(ctx, taskID, EventTaskLifecycle)
 	if err != nil {
 		return 0, fmt.Errorf("rings: 冬眠锚点查事件 %s: %w", taskID, err)
 	}
@@ -1046,12 +1286,13 @@ func (s *Store) LastHibernateRev(ctx context.Context, taskID string) (int64, err
 // 口径):已闭合区间求和 + 当前开口区间截至 now。与 HibernateCredit 的
 // 分工——那边是收尾线抵扣(醒后查询才闭合,不含开口),这边是面板
 // 呈现(冬眠中就要冻结,开口区间必须计入)。查询失败返回 0(呈现
-// 降级为自然时长,不阻塞会话视图)。
+// 降级为自然时长,不阻塞会话视图)。P4-58:按 kind 定向直查生命周期
+// 事件,不再全量扫事件流。
 func (s *Store) HibernateDeduct(ctx context.Context, taskID string, now time.Time) time.Duration {
 	if taskID == "" {
 		return 0
 	}
-	evs, err := s.Events(ctx, taskID, 0, 0)
+	evs, err := s.EventsByKinds(ctx, taskID, EventTaskLifecycle)
 	if err != nil {
 		return 0
 	}

@@ -51,7 +51,7 @@ var (
 	// ErrRetestInFlight 该声明已有活复测会话(同声明同时至多一轮)。
 	ErrRetestInFlight = errors.New("该判断复测进行中,等本轮结束再发起")
 	// ErrRetestNotRetestable 声明不在可复测状态(锤炼中态不可复测)。
-	ErrRetestNotRetestable = errors.New("判断不在可复测状态(须为 已确认/待确认/已修复)")
+	ErrRetestNotRetestable = errors.New("判断不在可复测状态(须为 已确认/证据不足/已修复)")
 	// ErrRetestUnavailable 复测依赖未装配(模型/镜)。
 	ErrRetestUnavailable = errors.New("swarm: 复测依赖未装配(模型或镜缺失,面板激活主用模型后自动装配)")
 )

@@ -29,11 +29,27 @@ func TestP444ScopeAnchorHost(t *testing.T) {
 		{"http://ex.com/a b", "ex.com", false, true},
 	}
 	for _, c := range cases {
-		host, isIP, ok := ScopeAnchorHost(c.title)
-		if ok != c.ok || (ok && (host != c.host || isIP != c.isIP)) {
-			t.Errorf("ScopeAnchorHost(%q) = %q,%v,%v; want %q,%v,%v",
-				c.title, host, isIP, ok, c.host, c.isIP, c.ok)
+		a, ok := ScopeAnchorOf(c.title)
+		if ok != c.ok || (ok && (a.Host != c.host || a.IsIP != c.isIP)) {
+			t.Errorf("ScopeAnchorOf(%q) = %+v,%v; want host %q,isIP %v,%v",
+				c.title, a, ok, c.host, c.isIP, c.ok)
 		}
+	}
+	// P4-50 ③写法粒度锚点:端口限定与 *.域 通配;通配不与端口组合。
+	if a, ok := ScopeAnchorOf("api.example.com:8443"); !ok || a.Host != "api.example.com" || a.Port != "8443" {
+		t.Errorf("host:port 锚点应带端口: %+v,%v", a, ok)
+	}
+	if a, ok := ScopeAnchorOf("*.Example.COM"); !ok || a.Host != "example.com" || !a.Wildcard {
+		t.Errorf("*.域 锚点应为通配基域: %+v,%v", a, ok)
+	}
+	if a, ok := ScopeAnchorOf("10.0.0.5:8080"); !ok || a.Port != "8080" {
+		t.Errorf("IP:端口 锚点应带端口: %+v,%v", a, ok)
+	}
+	if _, ok := ScopeAnchorOf("*.example.com:8080"); ok {
+		t.Error("通配+端口不支持,应无锚点")
+	}
+	if _, ok := ScopeAnchorOf("a*b.example.com"); ok {
+		t.Error("段中 * 非通配写法,应无锚点")
 	}
 }
 
@@ -43,30 +59,30 @@ func TestP444ScopeClosureCovers(t *testing.T) {
 	domainSeed := BuildScopeClosure([]ScopeSeed{
 		{ID: "a-1", Title: "www.example.com", Source: AssetSourceSeed},
 		{ID: "a-2", Title: "https://app.example.com:443", Source: AssetSourceManual},
-	}, nil)
-	if !domainSeed.CoversHost("www.example.com", nil) {
+	}, nil, nil)
+	if !domainSeed.CoversTarget("www.example.com", "", nil) {
 		t.Fatal("种子域名自身应在闭包内")
 	}
-	if !domainSeed.CoversHost("WWW.EXAMPLE.COM:8080", nil) {
-		t.Fatal("同域名各端口应在闭包内(端口不参与判定)")
+	if !domainSeed.CoversTarget("WWW.EXAMPLE.COM:8080", "", nil) {
+		t.Fatal("同域名各端口应在闭包内(裸域名=全端口)")
 	}
-	if domainSeed.CoversHost("api.example.com", nil) {
+	if domainSeed.CoversTarget("api.example.com", "", nil) {
 		t.Fatal("兄弟子域名不在闭包内(给域名=该域名自身)")
 	}
-	if domainSeed.CoversHost("10.0.0.5", nil) {
+	if domainSeed.CoversTarget("10.0.0.5", "", nil) {
 		t.Fatal("其他 IP 不在闭包内")
 	}
 	// discovered 资产默认不入闭包;放行后进入(闭包=种子∪手动∪已放行)。
 	mixed := BuildScopeClosure([]ScopeSeed{
 		{ID: "a-1", Title: "www.example.com", Source: AssetSourceSeed},
 		{ID: "a-9", Title: "ok.example.net", Source: AssetSourceDiscovered},
-	}, map[string]bool{"a-9": true})
-	if !mixed.CoversHost("ok.example.net", nil) {
+	}, map[string]bool{"a-9": true}, nil)
+	if !mixed.CoversTarget("ok.example.net", "", nil) {
 		t.Fatal("已放行的发现资产应入闭包")
 	}
 	notApproved := BuildScopeClosure([]ScopeSeed{
 		{ID: "a-9", Title: "ok.example.net", Source: AssetSourceDiscovered},
-	}, nil)
+	}, nil, nil)
 	if !notApproved.Empty() {
 		t.Fatal("未放行的发现资产不入闭包(闭包为空)")
 	}
@@ -75,14 +91,14 @@ func TestP444ScopeClosureCovers(t *testing.T) {
 	ipSeed := BuildScopeClosure([]ScopeSeed{
 		{ID: "a-1", Title: "10.0.0.5", Source: AssetSourceSeed},
 		{ID: "a-2", Title: "http://10.0.0.5:8080", Source: AssetSourceSeed},
-	}, nil)
-	if !ipSeed.CoversHost("10.0.0.5", nil) {
+	}, nil, nil)
+	if !ipSeed.CoversTarget("10.0.0.5", "", nil) {
 		t.Fatal("种子 IP 任意端口应在闭包内")
 	}
-	if !ipSeed.CoversHost("10.0.0.5:9999", nil) {
+	if !ipSeed.CoversTarget("10.0.0.5:9999", "", nil) {
 		t.Fatal("同 IP 其他端口应在闭包内")
 	}
-	if ipSeed.CoversHost("10.0.0.6", nil) {
+	if ipSeed.CoversTarget("10.0.0.6", "", nil) {
 		t.Fatal("其他 IP 不在闭包内")
 	}
 	resolve := func(host string) []string {
@@ -91,27 +107,27 @@ func TestP444ScopeClosureCovers(t *testing.T) {
 		}
 		return nil
 	}
-	if !ipSeed.CoversHost("vhost.example.com", resolve) {
+	if !ipSeed.CoversTarget("vhost.example.com", "", resolve) {
 		t.Fatal("解析命中种子 IP 的域名应视为同机在闭包内")
 	}
-	if ipSeed.CoversHost("unknown.example.com", resolve) {
+	if ipSeed.CoversTarget("unknown.example.com", "", resolve) {
 		t.Fatal("解析不到种子 IP 的域名不在闭包内")
 	}
-	if ipSeed.CoversHost("unknown.example.com", nil) {
+	if ipSeed.CoversTarget("unknown.example.com", "", nil) {
 		t.Fatal("无解析器时域名按保守(不在闭包)")
 	}
 	// 混合给取并集:域名种子 + IP 种子同时成立。
 	union := BuildScopeClosure([]ScopeSeed{
 		{ID: "a-1", Title: "www.example.com", Source: AssetSourceSeed},
 		{ID: "a-2", Title: "10.0.0.5", Source: AssetSourceSeed},
-	}, nil)
-	if !union.CoversHost("www.example.com", nil) || !union.CoversHost("10.0.0.5:7070", nil) {
+	}, nil, nil)
+	if !union.CoversTarget("www.example.com", "", nil) || !union.CoversTarget("10.0.0.5:7070", "", nil) {
 		t.Fatal("混合种子应取并集")
 	}
 }
 
 func TestP444JudgeAssetScope(t *testing.T) {
-	c := BuildScopeClosure([]ScopeSeed{{ID: "a-1", Title: "www.example.com", Source: AssetSourceSeed}}, nil)
+	c := BuildScopeClosure([]ScopeSeed{{ID: "a-1", Title: "www.example.com", Source: AssetSourceSeed}}, nil, nil)
 	if got := JudgeAssetScope(c, "www.example.com:8080", nil); got != AssetScopeIn {
 		t.Errorf("种子域名同域任意端口应 in,得 %q", got)
 	}

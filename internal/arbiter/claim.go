@@ -42,6 +42,29 @@ var (
 	ErrNoClaimStandard = errors.New("arbiter: testclaim has no frozen standard")
 	// ErrClaimNotReady 当前反证轮尚未结束(反证 Step 未到终态),还不可裁决。
 	ErrClaimNotReady = errors.New("arbiter: falsify round not finished")
+	// ErrClaimInterrupted 当前反证轮被中断(步骤终态但无结构化结论,
+	// 或步骤 blocked 终结)且重派预算未尽(P4-55 ①):中断不是结论,
+	// 是暂停——声明留在 testing 待收割侧自动重派,非终审,不产生裁决
+	// 记录。预算用尽时不再返回本哨兵,而是判待确认(理由"反证多轮未
+	// 取得结论")。操作者终止(杀单位/取消步骤)同样返回本哨兵且不占
+	// 额度——去留交主宰裁决(P4-55 审核迭代:程序禁止连坐)。
+	ErrClaimInterrupted = errors.New("arbiter: falsify round interrupted, awaiting redispatch")
+)
+
+// MaxFalsifyRedispatch 同一轮反证的自动重派上限(P4-55 ③+审核迭代,
+// 造物主 2026-11-08 定案:每轮锤炼 3 次;弹门拒绝后的换法重派计入同一
+// 额度):同轮重派 3 次仍无结构化结论,才落待确认(理由逐字"反证多轮
+// 未取得结论")。额度按轮计——轮末评估进下一轮即新额度;reopen 重开
+// 战役清空一切重算。操作者终止不占额度、不走程序重派。
+const MaxFalsifyRedispatch = 3
+
+// 搁置理由定稿(P4-55,逐字入账;重派用尽与被推翻两条理由的措辞是
+// 验收锚,改动须过子计划条目):
+const (
+	// refutedReason 存在性被反证推翻的不成立理由。
+	refutedReason = "被反证推翻"
+	// redispatchExhaustedReason 反证重派用尽仍无结构化结论的搁置理由。
+	redispatchExhaustedReason = "反证多轮未取得结论"
 )
 
 // 判定标准 kind 值域(single_round_falsify 为 P1-08 兼容保留)。
@@ -138,21 +161,22 @@ const (
 )
 
 // Step 终态清单(与 swarm 执行器终因迁移一致:done|exhausted|failed|
-// aborted|approval_denied)。反证 Step 到终态后当前轮才可裁决;预算耗尽/
-// 失败/中止/审批拒绝终止同样诚实进入裁决(结论必然是待确认,理由如实
-// 记录)。approval_denied(P2-06b):反证被审批拒绝熔断——被拒单位不得
-// 换法重试,该轮无结构化结论。
+// aborted|approval_denied)。反证 Step 到终态后当前轮才可裁决。P4-55 ①:
+// 终态而无结构化结论 = 中断(单位熔断/审批拒绝终止/完成未交结论等),
+// 交收割侧自动重派,不再诚实落待确认;blocked 终结(等待模型恢复无期)
+// 与终态同列中断形态(见 falsifyRoundInfo.interrupted)。approval_denied
+// (P2-06b):被拒单位已终态,重派的新单位自会换法重试。
 var stepTerminal = map[string]bool{"done": true, "exhausted": true, "failed": true, "aborted": true, "approval_denied": true}
 
 // ClaimJudgement 一次声明裁决的产物:Verdict 是待落账的裁决记录
-// (type=verdict),Status 是声明应迁入的状态(confirmed|pending|
+// (type=verdict),Status 是声明应迁入的状态(confirmed|refuted|pending|
 // awaiting_round)。记账与状态迁移由调用方(主宰循环)以 actor=arbiter
 // 落账,本函数零写。确认时附带收割定稿素材:Severity(末轮影响面定级,
 // 级别跟影响面证据走)与 AliveAlt(advance 时的存活解释清单,供收割
 // 派发下一轮)。
 type ClaimJudgement struct {
 	Verdict  rings.TestClaimRecord
-	Status   string              // rings.TestClaimConfirmed | TestClaimPending | TestClaimAwaitingRound
+	Status   string              // rings.TestClaimConfirmed | TestClaimRefuted | TestClaimPending | TestClaimAwaitingRound
 	Severity string              // confirm 时非空可能:末轮 impact_level(发现者无级别通道)
 	Round    int                 // 本轮轮次(verdict.Round)
 	AliveAlt []rings.Alternative // advance 时:待下一轮反证的存活解释
@@ -167,6 +191,7 @@ type claimOrigin struct {
 	alternatives []rings.Alternative // 创建时冻结的竞争解释清单
 	campaignRev  int64               // 当前战役起点(最近 reopen 的 revision;0=从未重开)
 	rounds       []falsifyRoundInfo  // 战役内反证轮(事件顺序)
+	steerKills   map[string]bool     // 收到过舵杆 kill_work 送达回执的步骤(P4-55 审核迭代:操作者终止的判定依据)
 }
 
 // falsifyRoundInfo 战役内一轮反证:绑定的反证 Step 与其结构化结论。
@@ -177,18 +202,113 @@ type falsifyRoundInfo struct {
 	result *rings.TestClaimRecord
 }
 
+// currentRound 当前反证轮 = 战役内轮次号最大(并列取最晚创建)的
+// 反证 Step(P4-55 起收割侧重派与本求值共用同一取轮口径,防两处漂移;
+// 调用方保证 len(rounds) > 0)。
+func (o *claimOrigin) currentRound() *falsifyRoundInfo {
+	cur := &o.rounds[len(o.rounds)-1]
+	for i := range o.rounds {
+		if o.rounds[i].round >= cur.round {
+			cur = &o.rounds[i]
+		}
+	}
+	return cur
+}
+
+// redispatchesUsed 当前轮已重派的反证次数(P4-55 ③+审核迭代,造物主
+// 2026-11-08 定案:每轮锤炼 3 次):同轮反证步骤数减一——每轮首个步骤
+// 是原派,同轮多余步骤即重派(含弹门拒绝后的换法重派)。按轮计,轮末
+// 评估进下一轮即新额度;reopen 重开战役清空一切重算。
+func (o *claimOrigin) redispatchesUsed(cur *falsifyRoundInfo) int {
+	n := 0
+	for _, r := range o.rounds {
+		if r.round == cur.round {
+			n++
+		}
+	}
+	if n > 0 {
+		return n - 1
+	}
+	return 0
+}
+
+// interrupted 当前轮是否被中断(P4-55 ①):步骤已到终态但无结构化
+// 结论、blocked 终结(等待模型恢复无期,交新单位续锤炼)、或被操作者
+// 取消(cancelled——排队步骤的取消,程序禁止连坐,交主宰裁决)。
+// scope_wait(等待范围批准)是暂停不是中断,不算。
+func (r *falsifyRoundInfo) interrupted() bool {
+	if r.result != nil {
+		return false
+	}
+	return stepTerminal[r.status] || r.status == "blocked" || r.status == "cancelled"
+}
+
+// operatorKilled 当前轮的终结是否出自操作者之手(P4-55 审核迭代,程序
+// 禁止连坐):舵杆 kill_work 送达后被真中断的步骤(aborted),或被
+// 直接取消的排队步骤(cancelled)。此类中断不走程序重派、不占重派
+// 额度——声明留锤炼中,去留交主宰下轮裁决。
+func (o *claimOrigin) operatorKilled(cur *falsifyRoundInfo) bool {
+	return cur.status == "cancelled" || o.steerKills[cur.stepID]
+}
+
+// ClaimInterruption 当前反证轮的中断情报(P4-55 ①,收割侧自动重派的
+// 判定依据;arbiter 与 overmind 收割共用,防口径漂移)。
+type ClaimInterruption struct {
+	StepID           string // 被中断的反证步骤
+	Round            int    // 被中断的轮次(重派沿用同轮次号)
+	Reason           string // 中断原因(按步骤终态如实拼装,入账 step.detail)
+	RedispatchesUsed int    // 当前轮已重派次数(与 MaxFalsifyRedispatch 对表)
+	OperatorKilled   bool   // 操作者终止(kill_work/取消):不重派不占额度,交主宰裁决
+}
+
+// InterruptedClaim 判断当前反证轮是否被中断(收割侧重派检测的arbiter
+// 出口):testing 状态且当前轮步骤终态无结构化结论(或 blocked 终结/
+// 被取消)时返回中断情报;未中断(反证在跑/等待批准/有结论)返回
+// nil。纯读。
+func InterruptedClaim(ctx context.Context, store *rings.Store, taskID, claimID string) (*ClaimInterruption, error) {
+	o, err := loadClaimOrigin(ctx, store, taskID, claimID)
+	if err != nil {
+		return nil, err
+	}
+	node, err := store.Node(ctx, taskID, claimID)
+	if err != nil {
+		return nil, fmt.Errorf("arbiter: 查判断 %s: %w", claimID, err)
+	}
+	if node.Type != rings.NodeTestClaim {
+		return nil, fmt.Errorf("%w: task %s node %s 是 %s", ErrClaimNotFound, taskID, claimID, node.Type)
+	}
+	if node.Status != rings.TestClaimTesting || len(o.rounds) == 0 {
+		return nil, nil
+	}
+	cur := o.currentRound()
+	if !cur.interrupted() {
+		return nil, nil
+	}
+	return &ClaimInterruption{
+		StepID: cur.stepID, Round: cur.round,
+		Reason:           falsifyIncompleteReason(cur.status),
+		RedispatchesUsed: o.redispatchesUsed(cur),
+		OperatorKilled:   o.operatorKilled(cur),
+	}, nil
+}
+
 // JudgeClaim TestClaim 确认判定(纯函数,零 LLM、零外部输入、零写)。
 // 只对 testing 状态的声明求值:按创建时冻结的判定标准与竞争解释清单,
 // 读当前战役(最近重开之后)账本内结构化证据得出裁决——
 //
-//	full_falsify:当前轮已写回结论且存在性立住且解释全灭(跨轮累积)
-//	  且(标准要求时)末轮影响面证据充分且各轮验证者独立 → Confirmed;
-//	  解释未全灭且战役轮次未到上限 → 待下轮反证(awaiting_round);
-//	  其余(含轮次耗尽、影响面不足、R12 违例、存在性被推翻、轮未写回)
+//	full_falsify:存在性被任一轮推翻 → 不成立(refuted,P4-55 ②,
+//	  理由"被反证推翻");当前轮已写回结论且存在性立住且解释全灭
+//	  (跨轮累积)且(标准要求时)末轮影响面证据充分且各轮验证者独立
+//	  → Confirmed;解释未全灭且战役轮次未到上限 → 待下轮反证
+//	  (awaiting_round);当前轮被中断(终态无结构化结论或 blocked
+//	  终结)且重派预算未尽 → ErrClaimInterrupted(收割侧自动重派,
+//	  P4-55 ①);其余(含重派用尽、轮次耗尽、影响面不足、R12 违例)
 //	  → 待确认(R4 机器搁置理由)。
-//	single_round_falsify(P1-08 兼容):单轮四条件,语义不变。
+//	single_round_falsify(P1-08 兼容):被推翻判不成立、中断走重派、
+//	  四条件语义不变。
 //
-// 当前轮反证 Step 未到终态时返回 ErrClaimNotReady(调用方留待下轮)。
+// 当前轮反证 Step 未到终态(含 scope_wait 等待批准)时返回
+// ErrClaimNotReady(调用方留待下轮)。
 func JudgeClaim(ctx context.Context, store *rings.Store, taskID, claimID string) (*ClaimJudgement, error) {
 	origin, err := loadClaimOrigin(ctx, store, taskID, claimID)
 	if err != nil {
@@ -208,14 +328,9 @@ func JudgeClaim(ctx context.Context, store *rings.Store, taskID, claimID string)
 	if len(origin.rounds) == 0 {
 		return nil, fmt.Errorf("%w: 判断 %s 战役内无反证步骤", ErrClaimNotReady, claimID)
 	}
-	cur := &origin.rounds[len(origin.rounds)-1]
-	for i := range origin.rounds {
-		if origin.rounds[i].round >= cur.round {
-			cur = &origin.rounds[i]
-		}
-	}
-	if !stepTerminal[cur.status] {
-		return nil, fmt.Errorf("%w: 反证 Step %s 状态 %s", ErrClaimNotReady, cur.stepID, cur.status)
+	cur := origin.currentRound()
+	if !stepTerminal[cur.status] && cur.status != "blocked" && cur.status != "cancelled" {
+		return nil, fmt.Errorf("%w: 反证 Step %s 状态 %s", ErrClaimNotReady, claimID, cur.status)
 	}
 
 	rev, err := store.CurrentRevision(ctx, taskID)
@@ -230,8 +345,10 @@ func JudgeClaim(ctx context.Context, store *rings.Store, taskID, claimID string)
 }
 
 // judgeSingleRound P1-08 单轮标准(旧账本兼容):四条件,语义与 P1-08
-// 完全一致——反证完成 + 存在性未推翻 + 影响面证据充分(标准要求时)+
-// 验证者独立,全满足判 Confirmed,否则待确认。
+// 一致——反证完成 + 存在性未推翻 + 影响面证据充分(标准要求时)+
+// 验证者独立,全满足判 Confirmed。P4-55 两处补齐:存在性被推翻 →
+// 不成立(refuted,与完整反证同判);反证轮被中断 → 重派兜底
+// (ErrClaimInterrupted)或预算用尽落待确认。
 func judgeSingleRound(o *claimOrigin, cur *falsifyRoundInfo, claimID string, rev int64) (*ClaimJudgement, error) {
 	res := cur.result
 	j := &ClaimJudgement{Round: cur.round}
@@ -240,6 +357,30 @@ func judgeSingleRound(o *claimOrigin, cur *falsifyRoundInfo, claimID string, rev
 	v.StepID = cur.stepID
 
 	hasResult := res != nil
+	if hasResult && res.ExistenceRefuted {
+		// 推翻即不成立(P4-55 ②):反证独立单位写回存在性推翻,与完整
+		// 反证同判——不再落待确认"待复核"。
+		v.UnitID = res.UnitID
+		v.Conditions = append(v.Conditions, rings.ArbiterConditionResult{
+			Kind: CondExistenceNotRefuted, Required: 1, Actual: 0, Satisfied: false})
+		j.Status = rings.TestClaimRefuted
+		v.Decision = rings.VerdictRefuted
+		v.PendingReason = refutedReason
+		return j, nil
+	}
+	if !hasResult {
+		// 中断(P4-55 ①+审核迭代):操作者终止交主宰裁决(不占额度);
+		// 系统中断预算未尽交收割重派,用尽才落待确认。
+		if o.operatorKilled(cur) || o.redispatchesUsed(cur) < MaxFalsifyRedispatch {
+			return nil, ErrClaimInterrupted
+		}
+		v.Conditions = append(v.Conditions, rings.ArbiterConditionResult{
+			Kind: CondFalsifyCompleted, Required: 1, Actual: 0, Satisfied: false})
+		j.Status = rings.TestClaimPending
+		v.Decision = rings.VerdictPending
+		v.PendingReason = redispatchExhaustedReason
+		return j, nil
+	}
 	sat := func(b bool) rings.ArbiterConditionResult {
 		actual := 0
 		if b {
@@ -249,7 +390,7 @@ func judgeSingleRound(o *claimOrigin, cur *falsifyRoundInfo, claimID string, rev
 	}
 	completed := hasResult
 	independent := hasResult && res.UnitID != "" && res.UnitID != o.discoverer
-	notRefuted := hasResult && !res.ExistenceRefuted
+	notRefuted := true // 推翻已在前面单独成判,走到这里的结论必未推翻
 	if hasResult {
 		v.UnitID = res.UnitID
 	}
@@ -353,19 +494,30 @@ func judgeFullFalsify(o *claimOrigin, cur *falsifyRoundInfo, claimID string, rev
 		v.UnitID = res.UnitID
 	}
 
-	// 决策次序:无结论/被推翻/R12 违例 → 待确认;解释全灭且影响面立住
-	// → 确认;解释未全灭且轮次未尽 → 待下轮;其余(轮次耗尽/影响面
-	// 不足且解释已全灭)→ 待确认。
+	// 决策次序(P4-55:终态只从完整的锤炼产生;中断不是结论,是暂停;
+	// 审核迭代:操作者终止交主宰裁决,程序禁止连坐):
+	// 被推翻(任一轮,先于中断判定——推翻即战役终局)→ 不成立;当前轮
+	// 被操作者终止(kill_work/取消)→ ErrClaimInterrupted(声明留锤炼,
+	// 待主宰裁决,不占额度);当前轮系统中断且重派预算未尽 →
+	// ErrClaimInterrupted(收割侧自动重派,非终审);重派用尽仍无结论 →
+	// 待确认(理由逐字"反证多轮未取得结论");R12 违例 → 待确认;解释
+	// 全灭且影响面立住 → 确认;解释未全灭且轮次未尽 → 待下轮;其余
+	// (轮次耗尽/影响面不足且解释已全灭)→ 待确认。
 	roundsUsed := len(o.rounds)
 	switch {
-	case !completed:
-		j.Status = rings.TestClaimPending
-		v.Decision = rings.VerdictPending
-		v.PendingReason = singleIncompleteReason(o, cur)
 	case existenceRefuted:
+		j.Status = rings.TestClaimRefuted
+		v.Decision = rings.VerdictRefuted
+		v.PendingReason = refutedReason
+	case !completed && o.operatorKilled(cur):
+		return nil, ErrClaimInterrupted
+	case !completed:
+		if o.redispatchesUsed(cur) < MaxFalsifyRedispatch {
+			return nil, ErrClaimInterrupted
+		}
 		j.Status = rings.TestClaimPending
 		v.Decision = rings.VerdictPending
-		v.PendingReason = "存在性被反证推翻,判断不成立,待复核(重开可再证)"
+		v.PendingReason = redispatchExhaustedReason
 	case !independent:
 		j.Status = rings.TestClaimPending
 		v.Decision = rings.VerdictPending
@@ -435,8 +587,9 @@ func (o *claimOrigin) latestResult() *rings.TestClaimRecord {
 }
 
 // pendingReason 单轮标准的机器搁置理由(R4):从逐条件求值结果确定性
-// 生成,非自然语言自由发挥;反证轮没写回结论时理由聚焦"为什么没有结论",
-// 其余情况逐条列明未被满足的前提。
+// 生成,非自然语言自由发挥。P4-55 起无结论(中断)与被推翻都在进入
+// 本函数前单独成判(重派兜底/不成立),这里只剩"办完没办成"类前提
+// 未满足的列明。
 func pendingReason(o *claimOrigin, conds []rings.ArbiterConditionResult) string {
 	byKind := map[string]bool{}
 	for _, c := range conds {
@@ -444,15 +597,9 @@ func pendingReason(o *claimOrigin, conds []rings.ArbiterConditionResult) string 
 			byKind[c.Kind] = true
 		}
 	}
-	if byKind[CondFalsifyCompleted] {
-		return "反证轮未写回结构化结论(" + falsifyIncompleteReason(o.currentStatus()) + "),待重派反证后复核"
-	}
 	var parts []string
 	if byKind[CondVerifierIndependent] {
 		parts = append(parts, "反证单位与发现单位相同(R12 违例),反证结果不被采信")
-	}
-	if byKind[CondExistenceNotRefuted] {
-		parts = append(parts, "存在性被反证推翻,判断不成立,待复核")
 	}
 	if byKind[CondImpactSupported] {
 		parts = append(parts, "反证未推翻存在性,但证据不足以支撑申报的影响")
@@ -463,20 +610,6 @@ func pendingReason(o *claimOrigin, conds []rings.ArbiterConditionResult) string 
 	return strings.Join(parts, ";")
 }
 
-// singleIncompleteReason 完整反证下当前轮无结构化结论的搁置理由。
-func singleIncompleteReason(o *claimOrigin, cur *falsifyRoundInfo) string {
-	return fmt.Sprintf("第 %d 轮反证未写回结构化结论(%s),待重派反证后复核",
-		roundNumber(cur.round), falsifyIncompleteReason(cur.status))
-}
-
-// currentStatus 战役内最末一轮反证 Step 的状态(单轮标准理由拼装用)。
-func (o *claimOrigin) currentStatus() string {
-	if len(o.rounds) == 0 {
-		return ""
-	}
-	return o.rounds[len(o.rounds)-1].status
-}
-
 // roundNumber 轮次的展示口径(旧数据 0 显示为 1)。
 func roundNumber(r int) int {
 	if r <= 0 {
@@ -485,7 +618,9 @@ func roundNumber(r int) int {
 	return r
 }
 
-// falsifyIncompleteReason 反证轮无结构化结论时,按反证 Step 终态如实说明。
+// falsifyIncompleteReason 反证轮无结构化结论时,按反证 Step 终态如实说明
+// (P4-55 起兼作中断重派的原因入账文案,blocked 为受阻终结形态,
+// cancelled 为操作者取消形态)。
 func falsifyIncompleteReason(stepStatus string) string {
 	switch stepStatus {
 	case "done":
@@ -498,6 +633,10 @@ func falsifyIncompleteReason(stepStatus string) string {
 		return "反证轮被中止"
 	case "approval_denied":
 		return "反证轮被审批拒绝终止(该单位已终止)"
+	case "blocked":
+		return "反证轮受阻终结(模型持续不可用)"
+	case "cancelled":
+		return "反证步骤被操作者取消"
 	default:
 		return "反证步骤状态 " + stepStatus
 	}
@@ -592,6 +731,21 @@ func loadClaimOrigin(ctx context.Context, store *rings.Store, taskID, claimID st
 			}
 			o.standard = st
 			o.alternatives = parseAlternatives(p.Detail["alternatives"])
+		case rings.EventSteerRecord:
+			// 舵杆 kill_work 送达回执(P4-55 审核迭代):操作者真中断的
+			// 步骤集合——aborted 步骤若在此集合内即操作者终止,不走程序
+			// 重派(交主宰裁决);系统熔断等内部 kill 不落舵杆记录,不受
+			// 影响(系统故障自动重派)。
+			var r rings.SteerRecord
+			if err := json.Unmarshal(ev.Payload, &r); err != nil {
+				return nil, fmt.Errorf("arbiter: 解码 steer.record: %w", err)
+			}
+			if r.Command == rings.SteerCommandKill && r.State == rings.SteerStateDelivered {
+				if o.steerKills == nil {
+					o.steerKills = map[string]bool{}
+				}
+				o.steerKills[r.StepID] = true
+			}
 		case rings.EventTestClaimRecord:
 			var r rings.TestClaimRecord
 			if err := json.Unmarshal(ev.Payload, &r); err != nil {

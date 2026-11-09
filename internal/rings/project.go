@@ -34,6 +34,12 @@ func applyEvent(tx *sql.Tx, taskID string, rev int64, kind EventKind, actor stri
 			return err
 		}
 		return applyCaseStateChanged(tx, taskID, rev, p, occurredAt)
+	case EventNodeAmended:
+		var p NodeAmended
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return fmt.Errorf("rings: 解码 node.amended 负载: %w", err)
+		}
+		return applyNodeAmended(tx, taskID, rev, p, occurredAt)
 	case EventEdgeAdded:
 		var p EdgeAdded
 		if err := json.Unmarshal(payload, &p); err != nil {
@@ -563,7 +569,7 @@ func validateTestClaimRecord(tx *sql.Tx, taskID string, p TestClaimRecord) error
 		if len(p.Conditions) == 0 {
 			return ErrTestClaimRecMissingField
 		}
-		if p.Decision != "" && p.Decision != VerdictConfirm && p.Decision != VerdictPending && p.Decision != VerdictAdvanceRound {
+		if p.Decision != "" && p.Decision != VerdictConfirm && p.Decision != VerdictRefuted && p.Decision != VerdictPending && p.Decision != VerdictAdvanceRound {
 			return fmt.Errorf("%w: %s", ErrUnknownClaimDecision, p.Decision)
 		}
 		// 有效 decision:显式值优先;P1-08 旧数据无 Decision,按 Satisfied 推导。
@@ -609,7 +615,7 @@ func validateTestClaimRecord(tx *sql.Tx, taskID string, p TestClaimRecord) error
 		return validateReplayRecord(tx, taskID, p)
 	case TestClaimRecReportReview:
 		// 存量复核标记(P4-30 ③):复核理由必填;锚点必须是本任务图上
-		// 的 TestClaim(标记的是判断,锚错即拒)。只追加标记记录,判断
+		// TestClaim(标记的是判断,锚错即拒)。只追加标记记录,判断
 		// 节点与历史不动——账本不涂改,读取侧按最新标记过滤报告。
 		if strings.TrimSpace(p.Reason) == "" {
 			return fmt.Errorf("%w: 复核理由为空", ErrReportReviewInvalid)
@@ -620,6 +626,38 @@ func validateTestClaimRecord(tx *sql.Tx, taskID string, p TestClaimRecord) error
 		}
 		if nt != NodeTestClaim {
 			return fmt.Errorf("%w: 节点 %s 是 %s 不是 testclaim", ErrReportReviewInvalid, p.ClaimID, nt)
+		}
+		return nil
+	case TestClaimRecSuspend:
+		// 操作者取消挂起(P4-54):挂起理由必填;锚点必须是本任务图上的
+		// TestClaim。状态迁移(testing→pending)由写入口另行落
+		// node.state_changed,本记录承载理由(投影 pending_reason)。
+		if strings.TrimSpace(p.Reason) == "" {
+			return fmt.Errorf("%w: 挂起理由为空", ErrTestClaimPendingNoReason)
+		}
+		nt, err := nodeTypeOf(tx, taskID, p.ClaimID)
+		if err != nil {
+			return fmt.Errorf("%w: 判断 %s: %w", ErrReopenNoReason, p.ClaimID, err)
+		}
+		if nt != NodeTestClaim {
+			return fmt.Errorf("%w: 节点 %s 是 %s 不是 testclaim", ErrReopenNoReason, p.ClaimID, nt)
+		}
+		return nil
+	case TestClaimRecDiscard:
+		// 程序确定性废弃(P4-55 审核迭代,造物主 2026-11-08 定案:摘除
+		// 资产→锚定声明/假设全废弃,理由"目标已摘除";主宰裁决放弃同用):
+		// 废弃理由必填;锚点必须是本任务图上的 TestClaim。状态迁移
+		// (锤炼中→discarded)由写入口同批落 node.state_changed,终态只
+		// 追加、历史不涂改;勾回资产不自动复活(再验走操作者深入)。
+		if strings.TrimSpace(p.Reason) == "" {
+			return fmt.Errorf("%w: 废弃理由为空", ErrTestClaimPendingNoReason)
+		}
+		nt, err := nodeTypeOf(tx, taskID, p.ClaimID)
+		if err != nil {
+			return fmt.Errorf("%w: 判断 %s: %w", ErrReopenNoReason, p.ClaimID, err)
+		}
+		if nt != NodeTestClaim {
+			return fmt.Errorf("%w: 节点 %s 是 %s 不是 testclaim", ErrReopenNoReason, p.ClaimID, nt)
 		}
 		return nil
 	default: // repro
@@ -749,17 +787,28 @@ func validateApprovalRecord(p ApprovalRecord) error {
 	if !approvalRecordTypes[p.Type] {
 		return fmt.Errorf("%w: %s", ErrUnknownApprovalRecType, p.Type)
 	}
-	if p.RequestID == "" || p.StepID == "" || p.UnitID == "" || p.ToolName == "" {
-		return ErrApprovalRecMissingField
-	}
-	if p.Type != ApprovalRecDenied && p.Type != ApprovalRecForced && !actionLevels[p.ActionLevel] {
-		return fmt.Errorf("%w: %s", ErrInvalidActionLevel, string(p.ActionLevel))
+	// P4-51:范围待决卡锚定的是目标(资产),不是一次命令——红队发现卡
+	// 无步骤/单位/工具上下文,渗透拦截卡有但分级不适用,四字段与分级
+	// 均豁免(仅要求 RequestID;同号裁决记录一并豁免)。denied/forced
+	// 沿既有豁免分级校验:拒绝留痕,被拒对象可能正是"分级缺失/非法"
+	// 的调用,记录必须能如实落账,不受词汇表约束。
+	if IsScopeCardRecord(p) {
+		if p.RequestID == "" {
+			return ErrApprovalRecMissingField
+		}
+	} else {
+		if p.RequestID == "" || p.StepID == "" || p.UnitID == "" || p.ToolName == "" {
+			return ErrApprovalRecMissingField
+		}
+		if p.Type != ApprovalRecDenied && p.Type != ApprovalRecForced && !actionLevels[p.ActionLevel] {
+			return fmt.Errorf("%w: %s", ErrInvalidActionLevel, string(p.ActionLevel))
+		}
 	}
 	if p.DenyLine != "" && !IsValidDenyLine(p.DenyLine) {
 		return fmt.Errorf("%w: %s", ErrUnknownDenyLine, p.DenyLine)
 	}
 	if p.HarmClass != "" && !IsValidHarmClass(p.HarmClass) {
-		return fmt.Errorf("%w: %s", ErrUnknownHarmClass, string(p.HarmClass))
+		return fmt.Errorf("%w: %s", ErrUnknownHarmClass, p.HarmClass)
 	}
 	return nil
 }
@@ -1022,6 +1071,10 @@ func applyRoeUpdated(tx *sql.Tx, taskID string, rev int64, p RoeUpdated) error {
 	return nil
 }
 
+// CreatorNotesMaxRunes 注意事项长度上限(多行合计;写入口共用——面板
+// 表单与牧者 set_notes 同一上限)。
+const CreatorNotesMaxRunes = 2000
+
 // NormalizeCreatorNotes 注意事项的归一形态:首尾空白去除、CRLF 统一
 // 为 LF、行内尾空白去除、空行折叠(多行要求的呈现与注入共用一份,
 // 防服务端写入口与投影各写一套漂移)。
@@ -1087,12 +1140,80 @@ func applyNodeAdded(tx *sql.Tx, taskID string, rev int64, p NodeAdded, occurredA
 	return nil
 }
 
+// amendableKeys node.amended 按节点类型的 detail 键白名单(P4-54 受控
+// 入口:变更只开放操作面声明的字段,结构外一律拒——goal 的 predicate
+// 由写入口按仲裁受限结构校验后入账,focus 为布尔;step 的 priority 限
+// high|normal|low)。
+var amendableKeys = map[NodeType]map[string]bool{
+	NodeGoal: {"predicate": true, "focus": true},
+	NodeStep: {"priority": true},
+}
+
+// applyNodeAmended node.amended 投影(P4-54):节点标题(指针覆盖)与
+// detail(键白名单内合并)就地更新,updated_rev 推进;历史事件不动,
+// 重放确定性(逐事件按同序合并)。
+func applyNodeAmended(tx *sql.Tx, taskID string, rev int64, p NodeAmended, occurredAt time.Time) error {
+	if p.NodeID == "" {
+		return ErrNodeIDEmpty
+	}
+	var nt, title, detail string
+	if err := tx.QueryRow(
+		`SELECT node_type, title, detail FROM nodes WHERE task_id = ? AND node_id = ?`, taskID, p.NodeID,
+	).Scan(&nt, &title, &detail); err != nil {
+		return fmt.Errorf("%w: task %s node %s", ErrNodeNotFound, taskID, p.NodeID)
+	}
+	allowed := amendableKeys[NodeType(nt)]
+	if allowed == nil {
+		return fmt.Errorf("%w: %s 节点不支持变更", ErrAmendNotAllowed, nt)
+	}
+	for k, v := range p.Detail {
+		if !allowed[k] {
+			return fmt.Errorf("%w: %s 节点的 %q 键不可变更", ErrAmendNotAllowed, nt, k)
+		}
+		if k == "focus" {
+			if _, ok := v.(bool); !ok {
+				return fmt.Errorf("%w: focus 必须是布尔值", ErrAmendNotAllowed)
+			}
+		}
+	}
+	m := map[string]any{}
+	if json.Unmarshal([]byte(detail), &m) != nil {
+		m = map[string]any{}
+	}
+	for k, v := range p.Detail {
+		if v == nil {
+			delete(m, k) // 显式 null = 移除该键(如清除优先级回缺省)
+			continue
+		}
+		m[k] = v
+	}
+	nextTitle := title
+	if p.Title != nil {
+		nextTitle = *p.Title
+	}
+	merged, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("rings: 变更序列化 detail: %w", err)
+	}
+	if _, err := tx.Exec(
+		`UPDATE nodes SET title = ?, detail = ?, updated_rev = ? WHERE task_id = ? AND node_id = ?`,
+		nextTitle, string(merged), rev, taskID, p.NodeID,
+	); err != nil {
+		return fmt.Errorf("rings: 投影变更节点 %s: %w", p.NodeID, err)
+	}
+	return nil
+}
+
 func applyNodeStateChanged(tx *sql.Tx, taskID string, rev int64, p NodeStateChanged, occurredAt time.Time) error {
 	// P4-27 ⑥⑦:blocked 归因的机器标记(Note 恰为 model_fault/
 	// determinant)随状态迁移合并进节点 detail(blocked_class 键),
 	// 供受阻派生按归因过滤(确定性拒绝不计故障)。其余 Note(人工
 	// 标记的迁移依据)照旧只留事件流,不进投影(P3-14b ④ 惯例)。
-	if p.Note == "model_fault" || p.Note == "determinant" || p.Status == "cancelled" {
+	// P4-51:scope_wait 目标(Note "scope_wait <host> <port>",对账唤醒
+	// 的判定面)与范围批准回队标记(Note "scope_head",领取排序的队首
+	// 权)同为机器标记,随迁移合并进 detail。
+	if p.Note == "model_fault" || p.Note == "determinant" || p.Status == "cancelled" ||
+		(p.Status == StepScopeWait && strings.HasPrefix(p.Note, "scope_wait ")) || p.Note == "scope_head" {
 		var detail string
 		if err := tx.QueryRow(
 			`SELECT detail FROM nodes WHERE task_id = ? AND node_id = ?`, taskID, p.NodeID,
@@ -1103,9 +1224,20 @@ func applyNodeStateChanged(tx *sql.Tx, taskID string, rev int64, p NodeStateChan
 		if json.Unmarshal([]byte(detail), &m) != nil {
 			m = map[string]any{} // detail 损坏时重建(状态迁移不因旧值失败)
 		}
-		if p.Status == "cancelled" {
+		switch {
+		case p.Status == "cancelled":
 			m["cancellation_reason"] = p.Note
-		} else {
+		case p.Status == StepScopeWait:
+			// "scope_wait <host> <port>":冻结时携带的越界目标(对账唤醒
+			// 按 host:port 重判范围;port 可缺省=全端口意图)。
+			fields := strings.Fields(p.Note)
+			m["scope_wait_host"] = fields[1]
+			if len(fields) > 2 {
+				m["scope_wait_port"] = fields[2]
+			}
+		case p.Note == "scope_head":
+			m["scope_head"] = true
+		default:
 			m["blocked_class"] = p.Note
 		}
 		raw, err := marshalDetail(m)

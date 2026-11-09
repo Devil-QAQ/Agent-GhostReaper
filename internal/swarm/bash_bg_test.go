@@ -222,35 +222,6 @@ func TestBashReapUnitBG(t *testing.T) {
 	}
 }
 
-// TestBashOneShotNoBackground 单发路径(研判后放行):run_in_background
-// 不生效,超时即杀不转后台。
-func TestBashOneShotNoBackground(t *testing.T) {
-	env := bgEnv(t)
-	env.oneShot = true
-	// 显式后台被忽略 → 前台执行完成。
-	res, err := env.bashTool().Call(context.Background(), json.RawMessage(
-		`{"command":"echo oneshot-fg","run_in_background":true}`), nil)
-	if err != nil {
-		t.Fatalf("调用异常: %v", err)
-	}
-	if res.IsError || !strings.Contains(resultText(res), "oneshot-fg") {
-		t.Fatalf("单发路径 run_in_background 应被忽略、照常前台执行: %+v", res)
-	}
-	// 超时不转后台。
-	res2, err := env.bashTool().Call(context.Background(), json.RawMessage(
-		`{"command":"sleep 3","timeout_ms":300}`), nil)
-	if err != nil {
-		t.Fatalf("调用异常: %v", err)
-	}
-	if !res2.IsError || !strings.Contains(resultText(res2), "已终止") {
-		t.Fatalf("单发路径超时应即杀: %+v", res2)
-	}
-	dir := env.Executor.stepDir(env.TaskID, env.StepID)
-	if ents, err := os.ReadDir(dir); err == nil && len(ents) != 0 {
-		t.Fatalf("单发路径不应留下后台文件: %v", ents)
-	}
-}
-
 // TestBashBackgroundThroughMirror 后台子进程与前台同一构造:镜代理
 // 环境注入照旧——后台 curl 流量经镜留痕可回放。
 func TestBashBackgroundThroughMirror(t *testing.T) {

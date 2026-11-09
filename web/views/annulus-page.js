@@ -55,9 +55,9 @@ const T_DARK = {
   foreground: "#e7e5e4",
   mutedFg: "#9b9a94",
   primary: "#8fae94",
-  critical: "#e5484d",
-  high: "#ce7a45",
-  medium: "#c9a96e",
+  critical: "#a92e2e",
+  high: "#e5484d",
+  medium: "#d97f3e",
   info: "#7e7d78",
   success: "#8fae94",
   warning: "#c9a96e",
@@ -282,8 +282,61 @@ const RF_NODE_TYPES = { annulusCard: AnnulusCard };
 
 // ---- Cytoscape 透镜(发散全景 / 资产网)----
 
-function cyStyle() {
+// 大图降采样阈值(P4-58):HTML 卡片标签逐节点成 DOM,缩放/平移每帧
+// 全量重排——数千节点时交互冻结(实测 3340 节点约 4fps)。超过阈值改
+// 画布原生节点(类型色点 + 标题文字,纹理快照下交互零重排),点击
+// 详情/过滤/聚焦语义不变;阈值内与原 HTML 卡片完全一致。
+const CY_RICH_LABEL_MAX = 800;
+
+function cyStyle(mass) {
   const T = graphPalette();
+  if (mass) {
+    return [
+      {
+        selector: "node",
+        style: {
+          width: 20,
+          height: 20,
+          shape: "round-rectangle",
+          "background-color": "data(dotColor)",
+          "border-width": 1,
+          "border-color": T.background,
+          label: "data(title)",
+          color: T.foreground,
+          "font-size": 9,
+          "text-background-color": T.background,
+          "text-background-opacity": 0.85,
+          "text-background-padding": 2,
+          "text-valign": "bottom",
+          "text-margin-y": 7,
+          "text-wrap": "wrap",
+          "text-max-width": 88,
+          "min-zoomed-font-size": 10,
+          cursor: "pointer",
+        },
+      },
+      {
+        selector: "edge",
+        style: {
+          "curve-style": "bezier",
+          "line-color": "data(color)",
+          "target-arrow-shape": "triangle",
+          "target-arrow-color": "data(color)",
+          width: 1.4,
+          label: "data(label)",
+          "font-size": 10,
+          color: T.foreground,
+          "text-background-color": T.background,
+          "text-background-opacity": 0.85,
+          "text-background-padding": 4,
+          "text-valign": "top",
+          "text-margin-y": -10,
+          "min-zoomed-font-size": 8,
+        },
+      },
+      { selector: "edge.dashed", style: { "line-style": "dashed" } },
+    ];
+  }
   return [
     {
       selector: "node",
@@ -318,18 +371,44 @@ function cyStyle() {
   ];
 }
 
-// eliminateOverlaps 布局后消重叠(P2-14b④):按卡片外包(宽 CARD_W+24,
-// 高 120)做成对推开松弛,直到零重叠或 80 轮上限——确定性、不动连线。
-function eliminateOverlaps(cy) {
-  const W = CARD_W + 24;
-  const H = 120;
+// eliminateOverlaps 布局后消重叠(P2-14b④):按节点外包尺寸做成对推开
+// 松弛,直到零重叠或 80 轮上限——确定性、不动连线。W/H 为外包尺寸
+// (富卡片 CARD_W+24 × 120;降采样色点 44 × 44)。
+// P4-58:大图改空间网格配对(同外包尺寸格子,只与邻格比对)——原全对
+// 两两比对在数千节点上是 O(80×N²) 单段长任务(实测 3340 节点冻结主
+// 线程 150 秒),网格化后每轮近线性,推开语义不变(同尺寸外包、同侧
+// 推开、同轮上限)。
+function eliminateOverlaps(cy, W, H) {
   const list = cy.nodes().map((n) => ({ n, p: { ...n.position() } }));
+  // 邻格偏移固定序(含自身格),保证确定性。
+  const CELLS = [
+    [-1, -1], [0, -1], [1, -1],
+    [-1, 0], [0, 0], [1, 0],
+    [-1, 1], [0, 1], [1, 1],
+  ];
+  const cellKey = (x, y) => x + "," + y;
   for (let iter = 0; iter < 80; iter++) {
     let moved = false;
-    for (let i = 0; i < list.length; i++) {
-      for (let j = i + 1; j < list.length; j++) {
-        const a = list[i].p;
-        const b = list[j].p;
+    // 位置入格:格宽高 = 外包尺寸,重叠只可能发生在同格与八邻格。
+    const grid = new Map();
+    for (const it of list) {
+      const k = cellKey(Math.floor(it.p.x / W), Math.floor(it.p.y / H));
+      if (!grid.has(k)) grid.set(k, []);
+      grid.get(k).push(it);
+    }
+    // 同格内按稳定序(i<j)成对推开,邻格单向(右/下向)处理避免重复对。
+    for (const it of list) {
+      const cx = Math.floor(it.p.x / W);
+      const cyy = Math.floor(it.p.y / H);
+      const partners = [];
+      for (const [dx, dy] of CELLS) {
+        const bucket = grid.get(cellKey(cx + dx, cyy + dy));
+        if (bucket) partners.push(...bucket);
+      }
+      for (const other of partners) {
+        if (other === it || other.n.id() <= it.n.id()) continue;
+        const a = it.p;
+        const b = other.p;
         const dx = b.x - a.x;
         const dy = b.y - a.y;
         const ox = W - Math.abs(dx);
@@ -339,7 +418,7 @@ function eliminateOverlaps(cy) {
           let px = 0;
           let py = 0;
           if (dx === 0 && dy === 0) {
-            px = (i % 2 ? 1 : -1) * (W / 2);
+            px = (other.n.id() < it.n.id() ? 1 : -1) * (W / 2);
           } else if (ox < oy) {
             px = (dx >= 0 ? 1 : -1) * (ox / 2 + 1);
           } else {
@@ -360,7 +439,10 @@ function eliminateOverlaps(cy) {
 // CyLens:props.elements = { nodes: [cardSpec], edges: [{id,type,from,to}] }。
 // 数据同步走 diff(增删 + 就地改 data;拓扑变化才重跑布局,轮询属性
 // 更新不扰动布局);小地图 cytoscape-navigator,缩放按钮为自有控件。
-function CyLens({ elements, focus, onNodeClick, heightClass }) {
+// mass(P4-58 降采样):超过 CY_RICH_LABEL_MAX 节点时由父组件以 key 换
+// 挂本组件——HTML 卡片标签不绑定,节点走画布原生色点 + 标题,交互期
+// 纹理快照零重排;点击/聚焦/过滤语义不变。
+function CyLens({ elements, focus, onNodeClick, heightClass, mass = false }) {
   const wrapRef = React.useRef(null);
   const cyRef = React.useRef(null);
   const clickRef = React.useRef(onNodeClick);
@@ -383,24 +465,38 @@ function CyLens({ elements, focus, onNodeClick, heightClass }) {
   React.useEffect(() => {
     const cy = cytoscape({
       container: wrapRef.current,
-      style: cyStyle(),
+      style: cyStyle(mass),
       elements: [],
       wheelSensitivity: 0.22,
       minZoom: 0.1,
       maxZoom: 2.5,
+      // P4-58:交互期(缩放/平移)画静态纹理快照并藏边——数千节点时
+      // 逐元素重绘冻结视图;松手恢复全量绘制,静止画面不变。降采样
+      // 模式再降渲染像素比(retina 全比填充成本 ×4),大图流畅优先。
+      textureOnViewport: true,
+      hideEdgesOnViewport: true,
+      pixelRatio: mass ? 1 : undefined,
     });
     // 第二参数必须给(哪怕空对象):省略时扩展不设 pointer-events:none,
-    // 标签浮层会盖住画布吞掉节点点击与缩放控件。
-    cy.nodeHtmlLabel([{ query: "node", halign: "center", valign: "center", tpl: (d) => cardHTML(d) }], {});
+    // 标签浮层会盖住画布吞掉节点点击与缩放控件。降采样模式不绑 HTML
+    // 标签(画布原生色点 + 标题)。
+    if (!mass) {
+      cy.nodeHtmlLabel([{ query: "node", halign: "center", valign: "center", tpl: (d) => cardHTML(d) }], {});
+    }
     cy.on("tap", "node", (ev) => {
       clickRef.current?.({ type: ev.target.data("type"), id: ev.target.data("id") });
     });
     cy.on("resize", () => fitWithReassert());
     let nav = null;
-    try {
-      nav = cy.navigator({ container: "." + navClass });
-    } catch {
-      // 小地图初始化失败不阻断主图
+    // 小地图是第二张全量画布,每次视口变化整图重渲——数千节点时与主图
+    // 同量级(P4-58 实测每次手势 ~200ms 主线程占用),降采样模式不挂,
+    // 主图流畅优先;阈值内行为不变。
+    if (!mass) {
+      try {
+        nav = cy.navigator({ container: "." + navClass });
+      } catch {
+        // 小地图初始化失败不阻断主图
+      }
     }
     cyRef.current = cy;
     return () => {
@@ -414,7 +510,7 @@ function CyLens({ elements, focus, onNodeClick, heightClass }) {
       cyRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [navClass]);
+  }, [navClass, mass]);
 
   React.useEffect(() => {
     const cy = cyRef.current;
@@ -423,6 +519,7 @@ function CyLens({ elements, focus, onNodeClick, heightClass }) {
     const wantN = new Map(nodes.map((n) => [n.id, n]));
     const wantE = new Map(edges.map((e) => [e.id, e]));
     let topo = false;
+    const dotColorOf = (spec) => toneHex(spec.tone);
     cy.batch(() => {
       const rmN = cy.nodes().filter((n) => !wantN.has(n.id()));
       const rmE = cy.edges().filter((e) => !wantE.has(e.id()));
@@ -433,9 +530,9 @@ function CyLens({ elements, focus, onNodeClick, heightClass }) {
       for (const n of nodes) {
         const el = cy.getElementById(n.id);
         if (el.nonempty()) {
-          if (el.data("__v") !== n.__v) el.data({ ...n });
+          if (el.data("__v") !== n.__v) el.data(mass ? { ...n, dotColor: dotColorOf(n) } : { ...n });
         } else {
-          addN.push({ group: "nodes", data: { ...n } });
+          addN.push({ group: "nodes", data: mass ? { ...n, dotColor: dotColorOf(n) } : { ...n } });
           topo = true;
         }
       }
@@ -455,22 +552,33 @@ function CyLens({ elements, focus, onNodeClick, heightClass }) {
       // P2-14b④:发散布局参数调优——低重力防"纺锤形"纵向聚拢(横向
       // 展开),更大理想边长/斥力/分量间距拉开净距;cose 原生重叠规避
       // 对卡片型节点不收敛,布局后追加确定性消重叠通道。
-      cy
-        .layout({
-          name: "cose",
-          animate: false,
-          randomize: true,
-          padding: 80,
-          numIter: 1200,
-          idealEdgeLength: (e) => (e.isEdge() ? 170 : 100),
-          nodeRepulsion: () => 20000,
-          nodeOverlap: 36,
-          componentSpacing: 200,
-          edgeElasticity: 0.4,
-          gravity: 0.08,
-        })
-        .run();
-      eliminateOverlaps(cy);
+      // P4-58:降采样模式(大图)改网格布局——cose 逐对斥力 O(N²)/迭代,
+      // 数千节点即便降档迭代仍是数秒级同步长任务(实测 3340 节点满额
+      // 1200 冻结主线程 150 秒、降 30 次仍 7.7 秒);网格 O(N) 即时完成,
+      // 排布形态变化(力导本就每次随机),节点/边/标签/点击语义不变,
+      // 净距仍由消重叠通道兜底。富卡片模式维持 cose,迭代按节点数降档。
+      if (mass) {
+        cy.layout({ name: "grid", avoidOverlap: true, condense: false, spacing: 56, sort: undefined }).run();
+      } else {
+        const nCount = cy.nodes().length;
+        const numIter = nCount <= 600 ? 1200 : 600;
+        cy
+          .layout({
+            name: "cose",
+            animate: false,
+            randomize: true,
+            padding: 80,
+            numIter,
+            idealEdgeLength: (e) => (e.isEdge() ? 170 : 100),
+            nodeRepulsion: () => 20000,
+            nodeOverlap: 36,
+            componentSpacing: 200,
+            edgeElasticity: 0.4,
+            gravity: 0.08,
+          })
+          .run();
+      }
+      eliminateOverlaps(cy, mass ? 44 : CARD_W + 24, mass ? 44 : 120);
       fitWithReassert();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -521,7 +629,7 @@ function CyLens({ elements, focus, onNodeClick, heightClass }) {
           </button>
         ))}
       </div>
-      <div className={cn("gr-cy-nav", navClass)} />
+      {!mass && <div className={cn("gr-cy-nav", navClass)} />}
     </div>
   );
 }
@@ -589,6 +697,7 @@ function RfLens({ rfNodes, rfEdges, focus, onNodeClick, heightClass }) {
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
+        onlyRenderVisibleElements
         fitView
         fitViewOptions={{ padding: 0.22, maxZoom: 1 }}
         minZoom={0.12}
@@ -1043,7 +1152,15 @@ export function AnnulusPage({ currentTask, focus }) {
       {!graph ? (
         <div className="skeleton h-[calc(100vh-318px)] min-h-[420px]" />
       ) : lens === "panorama" ? (
-        <CyLens elements={buildElements(specs, visEdges, true)} focus={focus} onNodeClick={setSheet} />
+        (() => {
+          const el = buildElements(specs, visEdges, true);
+          // P4-58 降采样:超过阈值换挂画布原生节点模式(key 换挂重初始化,
+          // 阈值内与原 HTML 卡片完全一致)。
+          const mass = el.nodes.length > CY_RICH_LABEL_MAX;
+          return (
+            <CyLens key={mass ? "mass" : "rich"} elements={el} focus={focus} onNodeClick={setSheet} mass={mass} />
+          );
+        })()
       ) : lens === "assetsnet" ? (
         assetsEl.nodes.length === 0 ? (
           <div className="flex h-[calc(100vh-318px)] min-h-[420px] items-center justify-center rounded-xl border border-border/55 bg-card">

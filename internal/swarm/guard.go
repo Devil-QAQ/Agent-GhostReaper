@@ -242,8 +242,9 @@ func (g *toolGuard) guardReadOnlyCall(toolName string, in json.RawMessage) strin
 		g.env.denyGuard(g.pack, toolName, in, rings.DenyLineHardRule, reason)
 		return reason
 	}
-	// P4-44 ③ 范围外硬拦(渗透任务):只读探测的目标不在种子闭包内即
-	// 拒——denyScope 内部留痕+熔断(与审批门 ②b 同一挂点纪律)。
+	// P4-51 ① 范围外拦截(渗透任务):只读探测的目标不在种子闭包内
+	// ——denyScope 内部分流(出待决卡＋单位冻结收场让位/已排除直接拒;
+	// 与审批门 ②b 同一挂点纪律)。
 	if reason := g.env.denyScope(g.pack, toolName, in); reason != "" {
 		return reason
 	}

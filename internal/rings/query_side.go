@@ -283,6 +283,26 @@ func (s *Store) StepDenyLatest(ctx context.Context, taskID string) (map[string]A
 	return out, rows.Err()
 }
 
+// ScopePendingCount 范围待决卡数(P4-51:任务行/RoE 红点与 gate 待决
+// 合并计数)——type=scope_wait 且同 request_id 无 approved/denied 收口
+// 记录的目标数(同一目标一张卡,去重即数卡)。
+func (s *Store) ScopePendingCount(ctx context.Context, taskID string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM (
+		   SELECT request_id FROM approval_records
+		    WHERE task_id = ? AND type = ?
+		   EXCEPT
+		   SELECT request_id FROM approval_records
+		    WHERE task_id = ? AND type IN (?, ?)
+		 )`, taskID, ApprovalRecScopeWait, taskID, ApprovalRecApproved, ApprovalRecDenied,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("rings: 统计范围待决卡: %w", err)
+	}
+	return n, nil
+}
+
 // ---- 假设结论(hyp_states) ----
 
 // HypStateRow 假设最新评估/验证结论。
@@ -412,7 +432,8 @@ func (s *Store) MirrorBriefs(ctx context.Context, taskID string, ids []string) (
 
 // ---- 判断卷宗(claim_cases) ----
 
-// ClaimDigest 判断的列表摘要(claim_cases 小字段)。
+// ClaimDigest 判断的列表摘要(claim_cases 小字段)。Statement/Impact/
+// Facts 为定稿校对后的声明摘要(P4-59 ①:空 = 未生成,读侧退节点原文)。
 type ClaimDigest struct {
 	ClaimID              string
 	FalsifyStep          string
@@ -432,6 +453,9 @@ type ClaimDigest struct {
 	ReportExcludedReason string
 	EvidenceBinds        int
 	ReproEvents          int
+	Statement            string          // 校对后存在性描述(空 = 未生成)
+	Impact               string          // 校对后影响面(空 = 未生成)
+	Facts                []FactStatement // 校对后事实描述(空 = 未生成)
 }
 
 // ClaimCaseProjection 判断卷宗投影(全列;详情与报告装配的数据面)。
@@ -443,6 +467,7 @@ type ClaimCaseProjection struct {
 	Alternatives []Alternative
 	AltKilled    map[string]bool
 	Repro        *ReproDigest
+	Summary      *SummaryDigest
 	Evidence     []CaseEvidenceBind
 	Discoverer   string
 	DiscoverStep string
@@ -468,21 +493,30 @@ const claimDigestCols = `claim_id, falsify_step, verifier, pending_reason, verdi
 func scanDigest(scan func(...any) error) (ClaimDigest, error) {
 	var d ClaimDigest
 	var hasEvidence, reportExcluded int
+	var rawSummary string
 	if err := scan(&d.ClaimID, &d.FalsifyStep, &d.Verifier, &d.PendingReason, &d.VerdictRev,
 		&d.Severity, &d.ReproSteps, &d.RetestVerdict, &d.RetestRound, &d.RetestAt,
 		&d.ReplayVerdict, &d.ReplayRound, &d.ReplayAt,
 		&hasEvidence, &reportExcluded, &d.ReportExcludedReason,
-		&d.EvidenceBinds, &d.ReproEvents); err != nil {
+		&d.EvidenceBinds, &d.ReproEvents, &rawSummary); err != nil {
 		return d, err
 	}
 	d.HasEvidence, d.ReportExcluded = hasEvidence != 0, reportExcluded != 0
+	if rawSummary != "" {
+		var s SummaryDigest
+		if json.Unmarshal([]byte(rawSummary), &s) == nil {
+			d.Statement, d.Impact, d.Facts = s.Statement, s.Impact, s.Facts
+		}
+	}
 	return d, nil
 }
 
-// ClaimDigests 列任务全部判断摘要(claim_id → 摘要)。
+// ClaimDigests 列任务全部判断摘要(claim_id → 摘要)。附读定稿校对的
+// 声明摘要小列(P4-59 ①:发现列表与事实页的文本优先来源,小 JSON 不触
+// repro 大列)。
 func (s *Store) ClaimDigests(ctx context.Context, taskID string) (map[string]ClaimDigest, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+claimDigestCols+` FROM claim_cases WHERE task_id = ?`, taskID,
+		`SELECT `+claimDigestCols+`, summary FROM claim_cases WHERE task_id = ?`, taskID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("rings: 查询判断摘要: %w", err)
@@ -503,7 +537,7 @@ func (s *Store) ClaimDigests(ctx context.Context, taskID string) (map[string]Cla
 func (s *Store) ClaimCaseOf(ctx context.Context, taskID, claimID string) (*ClaimCaseProjection, bool, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+claimDigestCols+`, timeline, alternatives, alt_killed, repro,
-		   evidence, discoverer, discover_step, discover_session, timing
+		   evidence, discoverer, discover_step, discover_session, timing, summary
 		 FROM claim_cases WHERE task_id = ? AND claim_id = ?`, taskID, claimID,
 	)
 	if err != nil {
@@ -524,7 +558,7 @@ func (s *Store) ClaimCaseOf(ctx context.Context, taskID, claimID string) (*Claim
 func (s *Store) ClaimCases(ctx context.Context, taskID string) ([]*ClaimCaseProjection, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+claimDigestCols+`, timeline, alternatives, alt_killed, repro,
-		   evidence, discoverer, discover_step, discover_session, timing
+		   evidence, discoverer, discover_step, discover_session, timing, summary
 		 FROM claim_cases WHERE task_id = ? ORDER BY claim_id`, taskID,
 	)
 	if err != nil {
@@ -545,7 +579,7 @@ func (s *Store) ClaimCases(ctx context.Context, taskID string) ([]*ClaimCaseProj
 // scanClaimCase 全列单行扫描:摘要小字段 + JSON 列解码 + 耗时态换算。
 func scanClaimCase(scan func(...any) error) (*ClaimCaseProjection, error) {
 	var p ClaimCaseProjection
-	var rawTimeline, rawAlts, rawKilled, rawRepro, rawEvidence, rawTiming string
+	var rawTimeline, rawAlts, rawKilled, rawRepro, rawEvidence, rawTiming, rawSummary string
 	var hasEvidence, reportExcluded int
 	err := scan(&p.ClaimID, &p.FalsifyStep, &p.Verifier, &p.PendingReason, &p.VerdictRev,
 		&p.Severity, &p.ReproSteps, &p.RetestVerdict, &p.RetestRound, &p.RetestAt,
@@ -553,7 +587,7 @@ func scanClaimCase(scan func(...any) error) (*ClaimCaseProjection, error) {
 		&hasEvidence, &reportExcluded, &p.ReportExcludedReason,
 		&p.EvidenceBinds, &p.ReproEvents,
 		&rawTimeline, &rawAlts, &rawKilled, &rawRepro, &rawEvidence,
-		&p.Discoverer, &p.DiscoverStep, &p.DiscoverSess, &rawTiming)
+		&p.Discoverer, &p.DiscoverStep, &p.DiscoverSess, &rawTiming, &rawSummary)
 	if err != nil {
 		return nil, err
 	}
@@ -577,6 +611,12 @@ func scanClaimCase(scan func(...any) error) (*ClaimCaseProjection, error) {
 		p.Repro = &ReproDigest{}
 		if json.Unmarshal([]byte(rawRepro), p.Repro) != nil {
 			p.Repro = nil
+		}
+	}
+	if rawSummary != "" {
+		p.Summary = &SummaryDigest{}
+		if json.Unmarshal([]byte(rawSummary), p.Summary) != nil {
+			p.Summary = nil
 		}
 	}
 	if rawEvidence != "" {

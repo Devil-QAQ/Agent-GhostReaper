@@ -24,11 +24,14 @@ import {
 } from "@/components/ui/select";
 import {
   CLAIM_STATUS,
+  FACT_STATUS,
   HYP_STATUS,
   HYP_VERDICT,
   REPLAY_VERDICT,
   RETEST_VERDICT,
   SEVERITY,
+  claimDisplayMeta,
+  hypDisplayMeta,
   postJSON,
   severityMeta,
   usePolling,
@@ -58,14 +61,24 @@ const FACT_TIME_FILTERS = [
   ["d7", "近 7 天"],
 ];
 
-// 发现页(8.3 发现域三页签,P2-10 改版):发现页签默认只显示
-// Confirmed 成果(打开即战果、主动切才盯过程),状态切换「锤炼中」看
-// 候选 / 反证中 / 待确认(含搁置理由);事实页签 = 已确认事实一等列表
-//(成果类凭据/数据/权限/立足点战果清单,与图上事实节点跳转协议互跳);
-// 假设页签同前。详情抽屉与引用下钻走全站跳转协议(node-sheets)。
+// 发现区四页签(P4-56,问题清单 #77):假设→事实→锤炼→成果漏斗,页签
+// 按流程阶段分、条目往右迁移、左边不留——假设验证成立迁入事实页(带
+// "由假设升级"来路),锤炼反证确认迁入成果页;跨对象"锤炼中"合并词与
+// 内藏视图切换退役。页签计数徽标替代原"锤炼积压行"。
+const FINDING_TABS = [
+  ["hypos", "假设"],
+  ["facts", "事实"],
+  ["forging", "锤炼"],
+  ["results", "成果"],
+];
+
+// 成果页收录的显示键(confirmed/fixed:已确认含已修复标记)。
+const RESULT_DISPLAYS = new Set(["confirmed", "fixed"]);
+// 锤炼页收录其余全部显示键(等待反证/反证中/反证暂停/证据不足/已废弃)。
+
 export function FindingsPage({ currentTask, focus }) {
   const tid = currentTask?.id;
-  const [tab, setTab] = React.useState(focus ? "facts" : "claims");
+  const [tab, setTab] = React.useState(focus ? "facts" : "results");
 
   // 图上事实节点跳回页签定位(?focus=<事实ID>):落在事实页签并高亮。
   const lastFocus = React.useRef(null);
@@ -92,16 +105,18 @@ export function FindingsPage({ currentTask, focus }) {
   const [seenOverride, setSeenOverride] = React.useState(null);
   React.useEffect(() => {
     setSeenOverride(null);
-    if (!tid || (tab !== "claims" && tab !== "facts")) return;
+    if (!tid || (tab !== "results" && tab !== "facts")) return;
     let alive = true;
-    postJSON(`/api/tasks/${tid}/seen`, { kind: tab }).then(({ ok, body }) => {
-      if (ok && alive) {
-        setSeenOverride({
-          claims: body?.claims ?? 0,
-          facts: body?.facts ?? 0,
-        });
-      }
-    });
+    postJSON(`/api/tasks/${tid}/seen`, { kind: tab === "results" ? "claims" : "facts" }).then(
+      ({ ok, body }) => {
+        if (ok && alive) {
+          setSeenOverride({
+            claims: body?.claims ?? 0,
+            facts: body?.facts ?? 0,
+          });
+        }
+      },
+    );
     return () => {
       alive = false;
     };
@@ -130,7 +145,7 @@ export function FindingsPage({ currentTask, focus }) {
   // 未读时,亮起约 3 秒(给注意的时间)后自动盖戳消点——列表本身实时
   // 刷新,正看着即已看。任一条件变化(跳走子页签/转后台/计数再变)
   // 作废计时重新计:3 秒内跳走则不盖,红点保留,回来点一下才消。
-  const dwellKind = tab === "claims" || tab === "facts" ? tab : null;
+  const dwellKind = tab === "results" ? "claims" : tab === "facts" ? "facts" : null;
   const dwellUnread = dwellKind ? unread[dwellKind] : 0;
   React.useEffect(() => {
     if (!tid || !dwellKind || !visible || dwellUnread <= 0) return;
@@ -149,13 +164,36 @@ export function FindingsPage({ currentTask, focus }) {
     };
   }, [tid, dwellKind, visible, dwellUnread]);
 
+  // 页签计数徽标(P4-56 ④:计数替代原"锤炼积压行";数字与各页签条目
+  // 同口径,零计数不占位)。假设页不含成立条目(已迁入事实页)。
+  const { data: claimsData } = usePolling(tid ? `/api/tasks/${tid}/claims` : "/api/healthz", 4000, {
+    immediate: Boolean(tid),
+    live: tid ? [`claims:${tid}`] : null,
+  });
+  const { data: hyposData } = usePolling(
+    tid ? `/api/tasks/${tid}/hypotheses` : "/api/healthz",
+    4000,
+    { immediate: Boolean(tid) },
+  );
+  const { data: factsData } = usePolling(tid ? `/api/tasks/${tid}/facts` : "/api/healthz", 6000, {
+    immediate: Boolean(tid),
+  });
+  const counts = React.useMemo(() => {
+    const claims = Array.isArray(claimsData) ? claimsData : [];
+    const hypos = Array.isArray(hyposData) ? hyposData : [];
+    const facts = Array.isArray(factsData?.facts) ? factsData.facts : [];
+    return {
+      hypos: hypos.filter((h) => h.status !== "confirmed").length,
+      facts: facts.length,
+      forging: claims.filter((c) => !RESULT_DISPLAYS.has(c.display || "")).length,
+      results: claims.filter((c) => RESULT_DISPLAYS.has(c.display || "")).length,
+    };
+  }, [claimsData, hyposData, factsData]);
+
   if (!tid) {
     return (
       <div className="flex flex-col gap-6">
-        <PageHeader
-          title="发现"
-          subtitle="成果与过程分列 · 已确认事实一等列出 · 猜测回传"
-        />
+        <PageHeader title="发现" subtitle="假设 → 事实 → 锤炼 → 成果" />
         <EmptyState
           icon="shieldAlert"
           title="未选择任务"
@@ -171,20 +209,17 @@ export function FindingsPage({ currentTask, focus }) {
       <PageHeader
         title="发现"
         subtitle={
-          tab === "claims"
-            ? "打开即成果(已确认按级别排) · 切「锤炼中」盯过程"
+          tab === "hypos"
+            ? "虫群直觉 · 等待验证与验证中 · 成立迁入事实"
             : tab === "facts"
               ? "已确认事实一等列出 · 凭据 / 数据 / 权限 / 立足点战果清单"
-              : "虫群直觉 · 主宰评估三去向 · 独立单位验证 · 回传轨迹"
+              : tab === "forging"
+                ? "漏洞怀疑在锤炼 · 等待反证 → 反证中 → 结论 · 确认迁入成果"
+                : "打开即成果(已确认按级别排) · 已修复带标记"
         }
       />
-      <ForgingSummary tid={tid} />
       <div className="flex w-fit rounded-lg border border-border/55 bg-card p-1">
-        {[
-          ["claims", "发现"],
-          ["facts", "事实"],
-          ["hypos", "假设"],
-        ].map(([v, label]) => (
+        {FINDING_TABS.map(([v, label]) => (
           <button
             key={v}
             className={
@@ -196,96 +231,66 @@ export function FindingsPage({ currentTask, focus }) {
             onClick={() => setTab(v)}
           >
             {label}
+            {/* 页签计数徽标(P4-56 ④):条目数,零不占位 */}
+            {counts[v] > 0 && (
+              <span
+                className={
+                  "ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-semibold leading-none num " +
+                  (tab === v ? "bg-primary-foreground/20 text-primary-foreground" : "bg-muted text-muted-foreground")
+                }
+              >
+                {counts[v]}
+              </span>
+            )}
             {/* 未读红点+计数(P4-47 A):看过即消,成果与事实各自独立;
-                假设页签不在未读语义内 */}
-            {(v === "claims" && unread.claims > 0) ||
-            (v === "facts" && unread.facts > 0) ? (
+                假设/锤炼过程态不标未读 */}
+            {(v === "results" && unread.claims > 0) || (v === "facts" && unread.facts > 0) ? (
               <span
                 className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold leading-none text-primary-foreground num"
                 title={
-                  v === "claims"
+                  v === "results"
                     ? `新增已确认成果 ${unread.claims} 条`
                     : `新确认事实 ${unread.facts} 条`
                 }
               >
-                {v === "claims" ? unread.claims : unread.facts}
+                {v === "results" ? unread.claims : unread.facts}
               </span>
             ) : null}
           </button>
         ))}
       </div>
-      {tab === "claims" ? (
-        <ClaimsSection tid={tid} />
+      {tab === "hypos" ? (
+        <HypothesesSection tid={tid} />
       ) : tab === "facts" ? (
         <FactsSection tid={tid} focus={focus} />
+      ) : tab === "forging" ? (
+        <ForgingSection tid={tid} />
       ) : (
-        <HypothesesSection tid={tid} />
+        <ResultsSection tid={tid} />
       )}
     </div>
   );
 }
 
-// 锤炼中视图的过程态集合(候选 → 反证 → 待确认;Confirmed 归成果视图)。
-const FORGING_STATUSES = new Set(["candidate", "testing", "awaiting_round", "pending"]);
-
-// ForgingSummary 锤炼积压行(P4-28 ⑤,问题清单 #48):发现页顶部一行
-// 汇总,数字与图对账一致(按显示层合并口径:三类过程态判断合计为
-// "反证中",假设 candidate 为"待验证猜测");悬停说明各段口径。
-// 零积压时不占行(无事实可陈述)。
-function ForgingSummary({ tid }) {
-  const { data: claims } = usePolling(`/api/tasks/${tid}/claims`, 4000, {
-    live: [`claims:${tid}`],
-  });
-  const { data: hypos } = usePolling(`/api/tasks/${tid}/hypotheses`, 4000);
-  const forging = (Array.isArray(claims) ? claims : []).filter((c) =>
-    c.status === "candidate" || c.status === "testing" || c.status === "awaiting_round",
-  ).length;
-  const pending = (Array.isArray(claims) ? claims : []).filter((c) => c.status === "pending").length;
-  const guesses = (Array.isArray(hypos) ? hypos : []).filter((h) => h.status === "candidate").length;
-  if (forging + pending + guesses === 0) return null;
-  return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-border/55 bg-card px-4 py-3 text-[13px]">
-      <span className="font-medium">锤炼中：</span>
-      <span className="num" title="正在反证锤炼流程中的判断(含待安排、反证进行中、待下一轮)">
-        反证中 {forging}
-      </span>
-      <span className="text-muted-foreground">·</span>
-      <span className="num" title="暂不成立挂起的判断，有新证据自动重开">
-        待确认 {pending}
-      </span>
-      <span className="text-muted-foreground">·</span>
-      <span className="num" title="虫群已提交、等待主宰评估的猜测">
-        待验证猜测 {guesses}
-      </span>
-    </div>
-  );
-}
-
-// ClaimsSection 发现页签:成果(Confirmed,按级别排)/ 锤炼中(过程态,
-// 待确认必附搁置理由)两视图切换——默认成果,主动切换才盯过程。
-// P2-13:行内复现步骤折叠展开(点击展开步骤详情,含 Burp 可验证数据包,
-// 惰性拉取详情,与报告同源);复选 + 「导出」走格式 × 范围矩阵弹窗。
-function ClaimsSection({ tid }) {
+// ResultsSection 成果页签:Confirmed(含已修复标记)按级别排——四页签
+// 漏斗的终点,打开即战果。P2-13:行内复现步骤折叠展开(点击展开步骤
+// 详情,含 Burp 可验证数据包,惰性拉取详情,与报告同源);复选 +
+// 「导出」走格式 × 范围矩阵弹窗。
+function ResultsSection({ tid }) {
   // P3-08:发现新增 / 状态迁移 / 复测重放结论由实时推送驱动刷新;
   // 推送未连接时按 2s 轮询降级。
   const { data, error } = usePolling(`/api/tasks/${tid}/claims`, 2000, {
     live: [`claims:${tid}`],
   });
-  const [view, setView] = React.useState("wins");
   const [textFilter, setTextFilter] = React.useState("");
   const [sheet, setSheet] = React.useState(null);
   const [selected, setSelected] = React.useState(() => new Set());
   const [exportOpen, setExportOpen] = React.useState(false);
 
-  const claims = Array.isArray(data) ? data : [];
-  // 成果视图含已修复(P3-06:fixed 是已确认发现的修复标记,不消失);
-  // 锤炼中视图仍是过程态。
-  const visible = claims.filter((c) =>
-    view === "wins"
-      ? c.status === "confirmed" || c.status === "fixed"
-      : FORGING_STATUSES.has(c.status),
+  const claims = (Array.isArray(data) ? data : []).filter((c) =>
+    RESULT_DISPLAYS.has(c.display || ""),
   );
-  const filtered = visible.filter((c) => {
+  const filtered = claims.filter((c) => {
     const q = textFilter.trim().toLowerCase();
     if (
       q &&
@@ -296,13 +301,11 @@ function ClaimsSection({ tid }) {
       return false;
     return true;
   });
-  // 成果视图按级别排(级别缺省沉底,同级按入账序)。
-  if (view === "wins") {
-    filtered.sort((a, b) => {
-      const ra = SEVERITY.indexOf(a.severity), rb = SEVERITY.indexOf(b.severity);
-      return (ra < 0 ? 99 : ra) - (rb < 0 ? 99 : rb) || a.created_rev - b.created_rev;
-    });
-  }
+  // 成果按级别排(级别缺省沉底,同级按入账序)。
+  filtered.sort((a, b) => {
+    const ra = SEVERITY.indexOf(a.severity), rb = SEVERITY.indexOf(b.severity);
+    return (ra < 0 ? 99 : ra) - (rb < 0 ? 99 : rb) || a.created_rev - b.created_rev;
+  });
 
   const toggleSel = (id) => {
     setSelected((prev) => {
@@ -335,31 +338,12 @@ function ClaimsSection({ tid }) {
       {claims.length === 0 ? (
         <EmptyState
           icon="shieldAlert"
-          title="暂无发现"
-          hint={error ? `读取失败:${error}` : "虫群单位提交待反证的判断并经反证后在此呈现"}
+          title="暂无成果"
+          hint={error ? `读取失败:${error}` : "反证确认成立的漏洞在此按级别列出;过程态切「锤炼」查看"}
         />
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-2">
-            <div className="flex w-fit rounded-lg border border-border/55 bg-card p-1">
-              {[
-                ["wins", "成果"],
-                ["forging", "锤炼中"],
-              ].map(([v, label]) => (
-                <button
-                  key={v}
-                  className={
-                    "rounded-md px-3 py-2 text-[13px] transition-colors cursor-pointer " +
-                    (view === v
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:text-foreground")
-                  }
-                  onClick={() => setView(v)}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
             <div className="relative w-56">
               {React.createElement(iconOf("search"), {
                 className: "absolute top-3 left-2 size-4 text-muted-foreground",
@@ -380,7 +364,7 @@ function ClaimsSection({ tid }) {
               导出
             </Button>
             <Label className="ml-auto text-xs text-muted-foreground">
-              {filtered.length}/{visible.length}
+              {filtered.length}/{claims.length}
             </Label>
           </div>
 
@@ -398,7 +382,7 @@ function ClaimsSection({ tid }) {
 
             {filtered.length === 0 && (
               <div className="rounded-lg border border-dashed py-8 text-center text-sm text-muted-foreground">
-                {view === "wins" ? "暂无锤炼完成成果;过程态切「锤炼中」查看" : "无过程态判断"}
+                无匹配成果
               </div>
             )}
           </div>
@@ -423,10 +407,10 @@ function ClaimsSection({ tid }) {
   );
 }
 
-// ClaimRow 单条发现卡:复选 + 徽标行 + 声明 + 待确认搁置理由 + 复现步骤
-// 折叠区(有定稿才显示入口;展开时惰性拉取详情,缓存到组件外层状态)。
-// 卡片点击开详情抽屉;复选/折叠/复测入口独立点击,不冒泡。P3-06:行内
-// 复测按钮(锤炼完成的发现可发起,发起后开详情盯会话)与最近复测结论徽标。
+// ClaimRow 成果卡:复选 + 徽标行 + 声明 + 复现步骤折叠区(有定稿才显示
+// 入口;展开时惰性拉取详情,缓存到组件外层状态)。卡片点击开详情抽屉;
+// 复选/折叠/复测入口独立点击,不冒泡。P3-06:行内复测按钮(锤炼完成的
+// 发现可发起,发起后开详情盯会话)与最近复测结论徽标。
 function ClaimRow({ tid, claim, checked, onToggle, onOpen }) {
   const [expanded, setExpanded] = React.useState(false);
   const [detail, setDetail] = React.useState(null);
@@ -478,6 +462,7 @@ function ClaimRow({ tid, claim, checked, onToggle, onOpen }) {
 
   const retestVD = claim.retest_verdict ? RETEST_VERDICT[claim.retest_verdict] : null;
   const replayVD = claim.replay_verdict ? REPLAY_VERDICT[claim.replay_verdict] : null;
+  const st = claimDisplayMeta(claim) || CLAIM_STATUS[claim.status] || { label: claim.status, variant: "info" };
   return (
     <div
       className="flex flex-col gap-2 rounded-xl border border-border/55 bg-card p-4 text-left transition-shadow hover:shadow-card cursor-pointer"
@@ -487,7 +472,7 @@ function ClaimRow({ tid, claim, checked, onToggle, onOpen }) {
         <span onClick={(e) => e.stopPropagation()}>
           <Checkbox checked={checked} onCheckedChange={onToggle} />
         </span>
-        <StatusBadge meta={CLAIM_STATUS[claim.status] || { label: claim.status, variant: "info" }} />
+        <StatusBadge meta={st} />
         {(() => {
           const sev = severityMeta(claim.severity);
           return sev ? <Badge variant={sev.variant}>{sev.label}</Badge> : null;
@@ -549,11 +534,6 @@ function ClaimRow({ tid, claim, checked, onToggle, onOpen }) {
         </span>
       </div>
       <div className="text-sm">{claim.statement}</div>
-      {claim.status === "pending" && claim.pending_reason && (
-        <div className="rounded-md bg-status-warning-soft px-3 py-2 text-xs text-status-warning">
-          搁置理由:{claim.pending_reason}
-        </div>
-      )}
       {claim.report_excluded && (
         <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
           不纳入报告:{claim.report_excluded_reason || "信息性观察,无直接危害"}
@@ -597,9 +577,124 @@ function ClaimRow({ tid, claim, checked, onToggle, onOpen }) {
   );
 }
 
-// FactsSection 事实页签(P2-10):已确认事实一等列表,筛选 = 类型(成果
-// 类)/ 资产 / 时间;条目点击开事实抽屉(抽屉内「在图中查看」跳图聚焦,
-// 图上事实节点「在事实列表查看」跳回本页签定位)。
+// 锤炼页签筛选(P4-56:按显示键筛,词与徽标同源)。
+const FORGING_FILTERS = [
+  ["all", "全部状态"],
+  ["wait_falsify", "等待反证"],
+  ["falsifying", "反证中"],
+  ["falsify_paused", "反证暂停"],
+  ["insufficient", "证据不足"],
+  ["discarded", "已废弃"],
+];
+
+// ForgingSection 锤炼页签:漏洞怀疑的全部锤炼态(等待反证→反证中→
+// 结论;证据不足/已废弃留在本页可见、理由直陈)。显示徽标带悬停细分
+// (重派轮次/换法/等待主宰判定/任务完成中断);血缘引用的事实可点回
+// (P4-56 ④ 迁移血缘)。确认后迁入成果页,本页不留。
+function ForgingSection({ tid }) {
+  const { data, error } = usePolling(`/api/tasks/${tid}/claims`, 2000, {
+    live: [`claims:${tid}`],
+  });
+  const [statusFilter, setStatusFilter] = React.useState("all");
+  const [sheet, setSheet] = React.useState(null);
+
+  const claims = (Array.isArray(data) ? data : []).filter((c) =>
+    !RESULT_DISPLAYS.has(c.display || ""),
+  );
+  const filtered = claims.filter((c) =>
+    statusFilter === "all" ? true : (c.display || "") === statusFilter,
+  );
+
+  return (
+    <div className="flex flex-col gap-6">
+      {claims.length === 0 ? (
+        <EmptyState
+          icon="shieldAlert"
+          title="暂无锤炼条目"
+          hint={error ? `读取失败:${error}` : "有危害的漏洞怀疑经反证锤炼后在此呈现,确认迁入成果"}
+        />
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="w-32">
+              <Select value={statusFilter} onValueChange={setStatusFilter}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {FORGING_FILTERS.map(([v, label]) => (
+                    <SelectItem key={v} value={v}>
+                      {label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <Label className="ml-auto text-xs text-muted-foreground">
+              {filtered.length}/{claims.length}
+            </Label>
+          </div>
+
+          <div className="flex flex-col gap-4">
+            {filtered.map((c) => {
+              const st = claimDisplayMeta(c) || CLAIM_STATUS[c.status] || { label: c.status, variant: "info" };
+              return (
+                <button
+                  key={c.id}
+                  className="flex flex-col gap-2 rounded-xl border border-border/55 bg-card p-4 text-left transition-shadow hover:shadow-card cursor-pointer"
+                  onClick={() => setSheet({ type: "testclaim", id: c.id })}
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StatusBadge meta={st} />
+                    {/* 暂停态标"等待审批"(P4-56 ②:静止+标,单位在 RoE 等批准) */}
+                    {c.display === "falsify_paused" && (
+                      <span className="rounded-md bg-status-running-soft px-2 py-0.5 text-[10px] text-status-running">
+                        等待审批
+                      </span>
+                    )}
+                    {c.vulnclass && <Badge variant="outline">{c.vulnclass}</Badge>}
+                    {(c.fact_refs || []).map((f) => (
+                      <span
+                        key={f.id}
+                        className="rounded-md border px-2 py-0.5 text-[10px] text-muted-foreground"
+                        title={`引用事实:${f.title}`}
+                      >
+                        事实:{f.title.length > 24 ? f.title.slice(0, 24) + "…" : f.title}
+                      </span>
+                    ))}
+                    <CopyIDButton id={c.id} noun="判断标识" className="size-5" />
+                    <span className="ml-auto num text-xs text-muted-foreground" title={`版本号 ${c.created_rev}`}>
+                      {c.verifier ? `验证 ${c.verifier}` : ""}
+                    </span>
+                  </div>
+                  <div className="text-sm">{c.statement}</div>
+                  {(c.display === "insufficient" || c.status === "pending") && c.pending_reason && (
+                    <div className="rounded-md bg-status-warning-soft px-3 py-2 text-xs text-status-warning">
+                      证据不足:{c.pending_reason}
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+            {filtered.length === 0 && (
+              <div className="rounded-lg border border-dashed py-8 text-center text-sm text-muted-foreground">
+                无匹配锤炼条目
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      <NodeSheetHost tid={tid} value={sheet} onChange={setSheet} />
+    </div>
+  );
+}
+
+// FactsSection 事实页签(P2-10 + P4-56):已确认事实一等列表 + 新进
+// 标"新"(收割确认后自动转正) + 已成立假设迁入(带"由假设升级"来路,
+// 点击开假设抽屉);筛选 = 类型(成果类)/ 资产 / 时间;条目点击开事实
+// 抽屉(抽屉内「在图中查看」跳图聚焦,图上事实节点「在事实列表查看」
+// 跳回本页签定位)。
 function FactsSection({ tid, focus }) {
   const { data, error } = usePolling(`/api/tasks/${tid}/facts`, 3000);
   const [lootFilter, setLootFilter] = React.useState("all");
@@ -671,7 +766,7 @@ function FactsSection({ tid, focus }) {
       {(data?.facts || []).length === 0 ? (
         <EmptyState
           icon="check"
-          title="暂无已确认事实"
+          title="暂无事实"
           hint={error ? `读取失败:${error}` : "经主宰检查归纳确认的事实在此一等列出"}
         />
       ) : (
@@ -736,9 +831,20 @@ function FactsSection({ tid, focus }) {
                     "flex flex-col gap-2 rounded-xl border border-border/55 bg-card p-4 text-left transition-shadow hover:shadow-card cursor-pointer",
                     focusPulse === f.id && "border-primary ring-2 ring-primary",
                   )}
-                  onClick={() => setSheet({ type: "fact", id: f.id })}
+                  onClick={() =>
+                    setSheet({ type: f.kind === "hypothesis" ? "hypothesis" : "fact", id: f.id })
+                  }
                 >
                   <div className="flex flex-wrap items-center gap-2">
+                    {f.kind === "hypothesis" ? (
+                      // 迁入来路(P4-56 ④):验证成立迁入事实页,点开回假设抽屉
+                      <Badge variant="success">已确认</Badge>
+                    ) : f.is_new ? (
+                      <StatusBadge meta={FACT_STATUS.candidate} />
+                    ) : (
+                      <StatusBadge meta={FACT_STATUS.confirmed} />
+                    )}
+                    {f.from_hypothesis && <Badge variant="outline">由假设升级</Badge>}
                     <StatusBadge meta={loot} />
                     {(f.assets || []).map((a) => (
                       <span
@@ -754,7 +860,7 @@ function FactsSection({ tid, focus }) {
                       className="ml-auto num text-xs text-muted-foreground"
                       title={`版本号 ${f.confirmed_rev}`}
                     >
-                      确认 {f.confirmed_at?.slice(5) || "—"}
+                      {f.is_new ? "新进" : "确认"} {f.confirmed_at?.slice(5) || "—"}
                     </span>
                   </div>
                   <div className="text-sm">{f.statement}</div>
@@ -780,31 +886,28 @@ function FactsSection({ tid, focus }) {
   );
 }
 
-// 假设状态筛选(P4-28 ⑥:candidate/testing 显示层合并"锤炼中",筛选项
-// 同口径合并;held/confirmed/discarded 不在合并范围,词照旧)。
-const HYP_STATUS_FILTERS = [
+// 假设页签筛选(P4-56:按显示键筛;成立条目不在本页)。
+const HYP_FILTERS = [
   ["all", "全部状态"],
-  ["forging", "锤炼中"],
+  ["wait_verify", "等待验证"],
+  ["verifying", "验证中"],
+  ["verify_paused", "验证暂停"],
   ["held", "搁置"],
-  ["confirmed", "成立"],
   ["discarded", "已废弃"],
 ];
 
-const HYP_FORGING = new Set(["candidate", "testing"]);
-
-// HypothesesSection 假设列表:候选 → 主宰评估三去向(转验证/挂账/废弃)
-// → 验证结论;挂账与废弃必带理由(R10 直觉有账、废案有理由)。
+// HypothesesSection 假设页签:虫群直觉,等待验证→验证中→结论;搁置与
+// 已废弃留档可见(理由直陈,R10 直觉有账、废案有理由);验证成立迁入
+// 事实页(带"由假设升级"),本页不留。
 function HypothesesSection({ tid }) {
   const { data, error } = usePolling(`/api/tasks/${tid}/hypotheses`, 2000);
   const [statusFilter, setStatusFilter] = React.useState("all");
   const [sheet, setSheet] = React.useState(null);
 
-  const hypos = Array.isArray(data) ? data : [];
-  const filtered = hypos.filter((h) => {
-    if (statusFilter === "all") return true;
-    if (statusFilter === "forging") return HYP_FORGING.has(h.status);
-    return h.status === statusFilter;
-  });
+  const hypos = (Array.isArray(data) ? data : []).filter((h) => h.status !== "confirmed");
+  const filtered = hypos.filter((h) =>
+    statusFilter === "all" ? true : (h.display || "") === statusFilter,
+  );
 
   return (
     <div className="flex flex-col gap-6">
@@ -812,7 +915,7 @@ function HypothesesSection({ tid }) {
         <EmptyState
           icon="sparkles"
           title="暂无假设"
-          hint={error ? `读取失败:${error}` : "虫群单位提交直觉猜测,主宰检查归纳判定后在此呈现"}
+          hint={error ? `读取失败:${error}` : "虫群单位提交直觉猜测,等待安排验证;成立迁入事实页"}
         />
       ) : (
         <>
@@ -823,7 +926,7 @@ function HypothesesSection({ tid }) {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {HYP_STATUS_FILTERS.map(([v, label]) => (
+                  {HYP_FILTERS.map(([v, label]) => (
                     <SelectItem key={v} value={v}>
                       {label}
                     </SelectItem>
@@ -838,7 +941,7 @@ function HypothesesSection({ tid }) {
 
           <div className="flex flex-col gap-4">
             {filtered.map((h) => {
-              const st = HYP_STATUS[h.status] || { label: h.status, variant: "info" };
+              const st = hypDisplayMeta(h) || HYP_STATUS[h.status] || { label: h.status, variant: "info" };
               return (
                 <button
                   key={h.id}
@@ -847,6 +950,11 @@ function HypothesesSection({ tid }) {
                 >
                   <div className="flex flex-wrap items-center gap-2">
                     <StatusBadge meta={st} />
+                    {h.display === "verify_paused" && (
+                      <span className="rounded-md bg-status-running-soft px-2 py-0.5 text-[10px] text-status-running">
+                        等待审批
+                      </span>
+                    )}
                     {(() => {
                       const vd = HYP_VERDICT[h.verdict];
                       return vd ? (
@@ -871,7 +979,7 @@ function HypothesesSection({ tid }) {
                     </div>
                   )}
                   {h.status === "discarded" && h.reason && (
-                    <div className="rounded-md bg-status-danger-soft px-3 py-2 text-xs text-status-danger">
+                    <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
                       废弃理由:{h.reason}
                     </div>
                   )}

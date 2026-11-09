@@ -31,6 +31,9 @@ type hypothesisView struct {
 	Reason       string   `json:"reason,omitempty"`          // 最近评估理由
 	Verdict      string   `json:"verdict,omitempty"`         // 最近验证结论(supported|refuted|inconclusive)
 	CreatedRev   int64    `json:"created_rev"`
+	// Display 四页签显示键(P4-56:验证步骤现值推导,等待验证/验证中/
+	// 验证暂停/搁置/已废弃;confirmed 显示层迁入事实页,假设页不留)。
+	Display string `json:"display,omitempty"`
 }
 
 // hypListView 输出 view 或 nil(列表项可复用)。P4-36 起评估/验证结论
@@ -96,9 +99,13 @@ func (s *Server) handleHypothesesList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
+	// P4-56 显示键推导(验证步骤现值:验证中/验证暂停等细分)。
+	dc := s.loadDisplayCtx(ctx, taskID)
 	out := make([]*hypothesisView, 0, len(hyps))
 	for _, h := range hyps {
-		out = append(out, s.hypothesisViewOf(h, abouts, produces, verifies, hypStates[h.ID]))
+		v := s.hypothesisViewOf(h, abouts, produces, verifies, hypStates[h.ID])
+		v.Display = HypDisplayFor(dc, h.ID, h.Status)
+		out = append(out, v)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -172,7 +179,12 @@ func (s *Server) handleHypothesisDetail(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	evs, err := s.Store.Events(ctx, taskID, 0, 0)
+	// P4-58:详情只消费四类事件(假设时间线 node.added/node.state_changed
+	// + hypothesis.record 审计流 + swarm.record session_started 归属),
+	// 按 kind 定向直查,不再全量扫事件流。
+	evs, err := s.Store.EventsByKinds(ctx, taskID,
+		rings.EventNodeAdded, rings.EventNodeStateChanged,
+		rings.EventHypothesisRecord, rings.EventSwarmRecord)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return

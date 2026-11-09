@@ -125,7 +125,7 @@ type claimDetailView struct {
 	Repro           *report.ReproFinal  `json:"repro,omitempty"`
 	Evidence        []claimEvidenceView `json:"evidence"`                // 绑定的流量证据(首绑次序,去重)
 	EvidenceVersion int64               `json:"evidence_version"`        // 声明证据版本(绑定+定稿累计)
-	Reopenable      bool                `json:"reopenable"`              // Confirmed/待确认 可重开(结论可反驳)
+	Reopenable      bool                `json:"reopenable"`              // Confirmed/不成立/待确认 可重开(结论可反驳;不成立=P4-55 ②)
 	Retests         []retestView        `json:"retests"`                 // 复测历史(第 1 轮起,最新在尾;P3-06)
 	Replays         []replayView        `json:"replays"`                 // 重放校验历史(第 1 轮起,最新在尾;P3-07)
 	Origin          claimOriginView     `json:"origin"`                  // 成果溯源:发现单位与反证单位(P3-13b ①)
@@ -185,7 +185,9 @@ type replayItemView struct {
 
 // chainLinksOf 组合声明的攻击链环节装配(P2-06;P2-11 起列表与详情
 // 共用——年轮图·攻击链透镜读列表即得链序与角色,不另建投影)。
-func (s *Server) chainLinksOf(ctx context.Context, taskID string, node *rings.NodeFull) []ChainLinkView {
+// polished 为定稿校对后的事实描述优先表(P4-59 ①,空表 = 无校对稿,
+// 全部退节点标题)。
+func (s *Server) chainLinksOf(ctx context.Context, taskID string, node *rings.NodeFull, polished map[string]string) []ChainLinkView {
 	raw, ok := node.Detail["chain"].([]any)
 	if !ok {
 		return nil
@@ -202,11 +204,29 @@ func (s *Server) chainLinksOf(ctx context.Context, taskID string, node *rings.No
 		if link.FactID != "" {
 			if f, err := s.Store.Node(ctx, taskID, link.FactID); err == nil && f.Type == rings.NodeFact {
 				link.Title = f.Title
+				if p := polished[link.FactID]; p != "" {
+					link.Title = p
+				}
 			}
 		}
 		links = append(links, link)
 	}
 	return links
+}
+
+// polishedFactMapOf 任务级"定稿校对后的事实描述"优先表(P4-59 ①):
+// 反查自各判断的声明摘要(claim_cases.summary 小列),后定稿覆盖先
+// 定稿——取代语义同其他冻结文本;读侧退节点标题。
+func polishedFactMapOf(digests map[string]rings.ClaimDigest) map[string]string {
+	out := map[string]string{}
+	for _, d := range digests {
+		for _, f := range d.Facts {
+			if f.Statement != "" {
+				out[f.FactID] = f.Statement
+			}
+		}
+	}
+	return out
 }
 
 // handleClaimDetail 发现详情 API(GET /api/tasks/{id}/claims/{cid}):
@@ -245,12 +265,6 @@ func (s *Server) handleClaimDetail(w http.ResponseWriter, r *http.Request) {
 			v.Claim.AssetIDs = append(v.Claim.AssetIDs, e.To)
 		}
 	}
-	// 攻击链环节(P2-06 组合声明):detail.chain 逐环节下钻事实陈述
-	//(血缘边即 derived_from→Fact,两侧同源)。列表与详情共用同一装配。
-	if combined, _ := node.Detail["combined"].(bool); combined {
-		v.Claim.Combined = true
-		v.Claim.Chain = s.chainLinksOf(ctx, taskID, node)
-	}
 
 	cs, err := report.ClaimCaseOf(ctx, s.Store, nil, taskID, claimID)
 	if err != nil {
@@ -259,6 +273,30 @@ func (s *Server) handleClaimDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	v.Alternatives = cs.Alternatives
 	v.Timeline = cs.Timeline
+	// 声明文本优先定稿校对稿(P4-59 ①:报告级文风——描述/危害/事实
+	// 描述;未生成退节点原文,机器判定与审计仍读节点)。
+	polished := map[string]string{}
+	if cs.Summary != nil {
+		if cs.Summary.Statement != "" {
+			v.Claim.Statement = cs.Summary.Statement
+		}
+		if cs.Summary.Impact != "" {
+			v.Claim.Impact = cs.Summary.Impact
+		}
+		for _, f := range cs.Summary.Facts {
+			if f.Statement != "" {
+				polished[f.FactID] = f.Statement
+			}
+		}
+	}
+	// 攻击链环节(P2-06 组合声明):detail.chain 逐环节下钻事实陈述
+	//(血缘边即 derived_from→Fact,两侧同源)。列表与详情共用同一装配;
+	// 环节事实标题优先定稿校对稿(P4-59 ①,链上事实即本判断摘要里的
+	// 事实,读侧退节点标题)。
+	if combined, _ := node.Detail["combined"].(bool); combined {
+		v.Claim.Combined = true
+		v.Claim.Chain = s.chainLinksOf(ctx, taskID, node, polished)
+	}
 	// 定稿轻量视图(P4-36 ②:详情按条取,复现步骤按步分段取——步骝始终
 	// 走分段端点 /claims/{cid}/repro,详情只带小字段与计数,巨记录详情
 	// 打开不卡死;blob 原文回放随分段逐页渲染)。
@@ -272,8 +310,30 @@ func (s *Server) handleClaimDetail(w http.ResponseWriter, r *http.Request) {
 	v.Claim.FalsifyStep = cs.FalsifyStep()
 	v.Claim.PendingReason = cs.PendingReason()
 	v.Claim.VerdictRev = cs.VerdictRev()
+	// 四页签显示键(P4-56:详情头与列表同词同口径——等待反证/反证中/
+	// 反证暂停/证据不足/已废弃,带重派与判定悬停细分)。
+	detailDC := s.loadDisplayCtx(ctx, taskID)
+	v.Claim.Display, v.Claim.DisplayHint = ClaimDisplayFor(detailDC, claimID, node.Status, v.Claim.PendingReason)
+	// 血缘引用的事实(锤炼条目点回事实,详情同源;标题优先定稿校对稿)。
+	{
+		derivedEdges, derr := s.Store.Edges(ctx, taskID, rings.EdgeDerivedFrom)
+		if derr == nil {
+			for _, e := range derivedEdges {
+				if e.From != claimID {
+					continue
+				}
+				if n, nerr := s.Store.Node(ctx, taskID, e.To); nerr == nil && n.Type == rings.NodeFact {
+					title := n.Title
+					if p := polished[n.ID]; p != "" {
+						title = p
+					}
+					v.Claim.FactRefs = append(v.Claim.FactRefs, FactRefView{ID: n.ID, Title: title})
+				}
+			}
+		}
+	}
 	v.Claim.ReportExcluded, v.Claim.ReportExcludedReason = cs.ReportExcluded, cs.ReportExcludedReason
-	v.Reopenable = node.Status == rings.TestClaimConfirmed || node.Status == rings.TestClaimPending
+	v.Reopenable = node.Status == rings.TestClaimConfirmed || node.Status == rings.TestClaimRefuted || node.Status == rings.TestClaimPending
 	v.Remediation = report.Remediation(v.Claim.Vulnclass)
 	v.Evidence, v.EvidenceVersion = s.claimEvidenceOf(ctx, taskID, claimID)
 	// 复测面(P3-06):历史轮次与最新结论;活会话从执行器登记读(进程

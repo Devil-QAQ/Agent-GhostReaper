@@ -47,12 +47,22 @@ type unitEnv struct {
 	stepPass     *gateStepPass      // P4-27 ⑧ 同步骤放行(审批门槛批准一次后武装,本步骤后续命令不再逐条弹门)
 	deniedReason string             // 拒绝即熔断:非空 = 单位以 approval_denied 终态收场
 
-	// P4-44 范围判定的 DNS 缓存(种子给 IP 的闭包下,域名目标按解析到
-	// 闭包 IP 判同机):单位生命周期内 host → 是否在闭包内,解析一次
-	// 不再重复(并行工具调用下加锁)。
-	scopeMu    sync.Mutex
-	scopeHits  map[string]bool
-	scopeTried map[string]bool
+	// P4-44 范围判定的 DNS 缓存:单位生命周期内 host[:port] → 是否在
+	// 闭包内,一次判定不再重复(并行工具调用下加锁)。P4-50 ②种子域名
+	// 的解析缓存在闭包内(多单位共享);scopeResolve 为解析器注入点
+	//(nil=DefaultScopeResolver,测试打桩)。
+	scopeMu      sync.Mutex
+	scopeHits    map[string]bool
+	scopeTried   map[string]bool
+	scopeResolve rings.ScopeResolver
+	// P4-51 范围等待批准的段状态(denyScope 命中范围外时置位,drive 收段
+	// 后消费):scopeHold=出待决卡＋冻结收场让位名额(步骤落 scope_wait
+	// 态);scopeReclaim=目标已获准但本单位闭包是领取时快照(步骤回可领
+	// 取重领新包);scopeNow 为范围判定"现值"缓存(现 RoE/现资产,与
+	// 领取时冻结闭包区分)。
+	scopeHold    *scopeHoldInfo
+	scopeReclaim bool
+	scopeNow     *scopeNowState
 
 	// P2-08 单位暂停/任务冬眠的段状态(暂停请求由 guard 在调用边界置位,
 	// drive 消费;审批挂起锚点在进票时记录)。
@@ -69,10 +79,6 @@ type unitEnv struct {
 	// 措辞随之不同;转录缺失/为空时在首段续跑处降级回全新会话接力。
 	resumed    bool
 	resumeKind string // ""(全新)| adoption(崩溃残留)| blocked(受阻保留)| checkpoint(断点存档)
-
-	// oneShot 单发调用路径(P3-05:研判后放行的合成单位):没有后续会话
-	// 去读后台输出,bash 超时即杀、不转后台。
-	oneShot bool
 
 	// retest 复测会话绑定(P3-06):非 nil = 复测单位——工具集收窄为
 	// 复测受限集(bash/只读探测/read + submit_retest_result),结论
@@ -329,9 +335,7 @@ func (env *unitEnv) bashTool() tool.CoreTool {
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				return tool.Errorf("建工作目录失败: " + err.Error()), nil
 			}
-			// 单发路径(研判后放行)不转后台:没有后续会话去读输出,
-			// 超时即杀是唯一诚实话义。
-			if args.RunInBackground && !env.oneShot {
+			if args.RunInBackground {
 				return env.runBashBG(args.Command, dir)
 			}
 			return env.runBashFG(ctx, args.Command, dir, bashTimeoutOf(args.TimeoutMS))
@@ -373,7 +377,7 @@ func (env *unitEnv) runBashFG(ctx context.Context, command, dir string, timeout 
 			return finish(), nil
 		default:
 		}
-		if env.oneShot || !bashAutoBackgroundAllowed(command) {
+		if !bashAutoBackgroundAllowed(command) {
 			killBashGroup(p.cmd)
 			<-p.exited
 			p.f.Close()
@@ -568,9 +572,9 @@ const (
 	toolDescBash                   = "在授权范围内执行 shell 命令(单条或管道),返回合并输出。单条命令默认限时 120 秒,可用 timeout_ms 自行调整(上限 600 秒);超时未完成的命令自动转入后台继续运行(输出落文件可稍后读取,sleep 类等待命令除外),也可用 run_in_background 直接后台跑。后台命令输出上限 100MB(超出省略)、最长运行 30 分钟。大输出会被存档并截断,需要全文时按存档引用查阅。"
 	toolDescPortProbe              = "只读探测:检测 host:port 的 TCP 开放状态并尝试读取服务 banner。banner 只取前 256 字节且可能静默——勿据此认为已测完;需要更多服务特征时改用 http_probe 或 bash 通道。"
 	toolDescHTTPProbe              = "只读 HTTP 探测:对指定 URL 发起 HTTP 请求(GET 或 HEAD),返回状态码、关键响应头(Server/Content-Type/Content-Length)与响应体开头内容。响应体只返回前 1536 字节——勿据此认为已读全,需要完整响应时改用 bash(curl)并注意该意图的审批分级。"
-	toolDescSubmitCandidateFact    = "提交一条待确认事实(你本次真实观察到的结论)。须经主宰检查归纳后才成为正式事实。陈述须有本次执行取得的证据。观察到图上没有的对象(新域名/主机/服务/接口/泄漏信息等)时,随本条事实一并申报 new_asset(12 类选型+标识)——检查归纳时对象入图,后续工作可锚定它;已知对象用 asset_id 锚定,两者不得同时给。本机回环(127.0.0.1/localhost/::1)与镜等测试环境自身设施不是发现对象——对它们的观察会被拒收并记为环境观察;任务资产清单内的目标不受此限。"
+	toolDescSubmitCandidateFact    = "提交一条新进事实(你本次真实观察到的结论)。须经主宰检查归纳确认后才成为正式事实。陈述须有本次执行取得的证据。观察到图上没有的对象(新域名/主机/服务/接口/泄漏信息等)时,随本条事实一并申报 new_asset(12 类选型+标识)——检查归纳时对象入图,后续工作可锚定它;已知对象用 asset_id 锚定,两者不得同时给。本机回环(127.0.0.1/localhost/::1)与镜等测试环境自身设施不是发现对象——对它们的观察会被拒收并记为环境观察;任务资产清单内的目标不受此限。"
 	toolDescSubmitHypothesis       = "提交一条待验证的猜测(直觉/线索/疑似问题,尚未取得直接证据)。必须指向具体资产并写明依据;每个任务包最多附带 3 条。不指向本机回环上的发现型资产(测试环境自身,入口拒收)。"
-	toolDescSubmitHypothesisResult = "假设验证任务专用:写回你独立验证的结构化结论。verdict=supported(成立)|refuted(不成立)|inconclusive(未能定论);须附本轮真实取得的证据;note 文本不构成结论。验证中取得的可保留观察仍走 submit_candidate_fact / submit_test_claim 正常回传。"
+	toolDescSubmitHypothesisResult = "假设验证任务专用:写回你独立验证的结构化结论。verdict=supported(成立)|refuted(被推翻)|inconclusive(未能定论);须附本轮真实取得的证据;note 文本不构成结论。验证中取得的可保留观察仍走 submit_candidate_fact / submit_test_claim 正常回传。"
 	toolDescSubmitTestClaim        = "提交一条待反证的漏洞判断(你本次真实触发并取得可复现证据的发现)。提交前先用 list_claims 查已报清单:同一资产上已报过的漏洞不得重复报(入口会拒收)。存在性与影响面必须分开申报;须尽力列出其他可能原因(否则系统兜底四条基线:缓存污染/不可复现/影响高估/归属错误)。判断将交由独立单位多轮反证、仲裁者机器判定,不得自评已确认、不得自报严重级别。立判门槛:" + ClaimHarmGate + "。本机回环(127.0.0.1/localhost/::1)与镜等测试环境自身设施不是目标攻击面——锚点或证据流量指向它们的判断会被拒收并记为环境观察;任务资产清单内的目标不受此限。"
 	toolDescSubmitFalsifyResult    = "反证任务专用:写回你本轮独立反证的结构化结论。existence_refuted=你能否推翻存在性判断;impact_supported=影响面证据是否足以支撑所申报的影响(成立时必须给 impact_level:critical|high|medium|low);" + SeverityAnchor + "。alternatives=任务包列出的每条其他可能原因按 ID 写回 refuted(本轮是否排除)。须附本轮真实取得的证据;note 文本不参与机器判定。"
 	toolDescListClaims             = "只读查询:列出本任务已报的漏洞判断清单(ID、状态、锚定资产、判断摘要)。提交 submit_test_claim 之前先查一遍——同一资产上已报过的漏洞不要重复报(重复提交会被入口直接拒收);确有新证据或不同影响面的,改写判断另立。"
@@ -615,7 +619,7 @@ func (env *unitEnv) submitCandidateFactTool() tool.CoreTool {
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"statement": map[string]any{"type": "string", "description": "待确认事实陈述:一句话可复核命题,写明资产与完整定位要素(域名或 IP 起头、host:port 形态,不用裸端口/裸路径指代目标),使他人可独立重验"},
+				"statement": map[string]any{"type": "string", "description": "新进事实陈述:一句话可复核命题,写明资产与完整定位要素(域名或 IP 起头、host:port 形态,不用裸端口/裸路径指代目标),使他人可独立重验"},
 				"evidence":  map[string]any{"type": "string", "description": "支撑证据:须含可独立复核的关键原文(请求/响应片段、命令与其输出);只写结论不附原文的证据过不了检查归纳"},
 				"asset_id":  map[string]any{"type": "string", "description": "关联资产节点 ID(可选;已知对象锚定用,与 new_asset 互斥)"},
 				"new_asset": map[string]any{
@@ -654,7 +658,7 @@ func (env *unitEnv) submitCandidateFactTool() tool.CoreTool {
 			if err != nil {
 				return tool.Errorf("提交失败: " + err.Error()), nil
 			}
-			return tool.Text(fmt.Sprintf("已提交待确认事实 %s(status=candidate),待主宰检查归纳", id)), nil
+			return tool.Text(fmt.Sprintf("已提交新进事实 %s(status=candidate),待主宰检查归纳确认", id)), nil
 		},
 	})
 }
@@ -677,7 +681,7 @@ type NewAssetDecl struct {
 // 入图(虫群无写权,收割通道点亮 source=discovered)。
 func (env *unitEnv) SubmitCandidateFact(ctx context.Context, statement, evidence, assetID string, newAsset *NewAssetDecl) (string, error) {
 	if strings.TrimSpace(statement) == "" || strings.TrimSpace(evidence) == "" {
-		return "", fmt.Errorf("swarm: 待确认事实须同时具备陈述与证据")
+		return "", fmt.Errorf("swarm: 新进事实须同时具备陈述与证据")
 	}
 	if newAsset != nil {
 		if strings.TrimSpace(assetID) != "" {
@@ -701,17 +705,17 @@ func (env *unitEnv) SubmitCandidateFact(ctx context.Context, statement, evidence
 	// 回即不立,拒收并记为环境观察(信息不丢,供排查)。
 	if newAsset != nil {
 		if a, hit := env.selfRefAnchor(ctx, newAsset.Title); hit {
-			env.recordEnvObservation("待确认事实", a, statement, evidence)
+			env.recordEnvObservation("新进事实", a, statement, evidence)
 			return "", fmt.Errorf("swarm: 新对象 %s 属本机环回(测试环境自身,镜等系统设施),不作为发现对象;观察已记为环境观察供排查,任务目标不受影响", a)
 		}
 	} else if assetID != "" {
 		if a, hit := env.selfRefAssetAnchor(ctx, assetID); hit {
-			env.recordEnvObservation("待确认事实", a, statement, evidence)
+			env.recordEnvObservation("新进事实", a, statement, evidence)
 			return "", fmt.Errorf("swarm: 锚点资产 %s 属本机环回(发现型,测试环境自身),不作为发现对象;观察已记为环境观察供排查,任务目标不受影响", a)
 		}
 	}
 	if e, hit := env.selfRefEvidence(ctx, evidence); hit {
-		env.recordEnvObservation("待确认事实", e, statement, evidence)
+		env.recordEnvObservation("新进事实", e, statement, evidence)
 		return "", fmt.Errorf("swarm: 证据流量指向本机环回 %s(测试环境自身,镜等系统设施),不作为发现对象;观察已记为环境观察供排查,任务目标不受影响", e)
 	}
 	id := shortID("f")
@@ -749,7 +753,7 @@ func (env *unitEnv) SubmitCandidateFact(ctx context.Context, statement, evidence
 		})
 	}
 	if _, err := env.Executor.Store.Append(ctx, env.TaskID, events...); err != nil {
-		return "", fmt.Errorf("swarm: 待确认事实写入: %w", err)
+		return "", fmt.Errorf("swarm: 新进事实写入: %w", err)
 	}
 	return id, nil
 }
@@ -1247,7 +1251,7 @@ func (env *unitEnv) submitFalsifyResultTool() tool.CoreTool {
 			"type": "object",
 			"properties": map[string]any{
 				"claim_id":          map[string]any{"type": "string", "description": "你正在反证的判断 ID(任务包反证节给出)"},
-				"existence_refuted": map[string]any{"type": "boolean", "description": "是否推翻了存在性判断(true=判断不成立)"},
+				"existence_refuted": map[string]any{"type": "boolean", "description": "是否推翻了存在性判断(true=判断被推翻)"},
 				"impact_supported":  map[string]any{"type": "boolean", "description": "影响面证据是否足以支撑申报的影响"},
 				"impact_level":      map[string]any{"type": "string", "enum": []string{"critical", "high", "medium", "low"}, "description": "影响面定级(impact_supported=true 时必填;定级锚:critical=系统级权限或大量敏感数据;high=管理员或敏感数据访问;medium=普通业务越权或有限敏感信息;low=需苛刻前提才有影响——级别只跟直接影响走)"},
 				"alternatives": map[string]any{

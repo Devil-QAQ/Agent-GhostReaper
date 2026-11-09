@@ -151,11 +151,12 @@ func TestP444ScopeEndpoints(t *testing.T) {
 		t.Fatal("资产树应含发现资产")
 	}
 
-	// 放行:待批转范围内(清单入 scope_approved,审计 note 人话)。
+	// 放行(P4-52 ⑤ 审批集中 RoE:待批资产经审批卡端点裁决,卡 ID=
+	// 资产 ID):待批转范围内(清单入 scope_approved,审计 note 人话)。
 	var res map[string]any
-	post(t, h, http.MethodPost, "/api/tasks/"+task+"/scope/approve",
-		`{"assets":["`+assetID+`"]}`, http.StatusOK, &res)
-	if res["handled"] != float64(1) || res["pending"] != float64(0) {
+	post(t, h, http.MethodPost, "/api/tasks/"+task+"/approvals/"+assetID,
+		`{"approved":true}`, http.StatusOK, &res)
+	if res["target"] != "api.example.com" {
 		t.Fatalf("放行回执不符: %+v", res)
 	}
 	roe, err := store.CurrentRoE(context.Background(), task)
@@ -169,29 +170,28 @@ func TestP444ScopeEndpoints(t *testing.T) {
 		}
 	}
 
-	// 忽略路径:再造一项待批 → 忽略 → 进摘除清单、待批清零。
+	// 忽略路径:再造一项待批 → 禁止测试 → 进摘除清单、待批清零。
 	p444DiscoverMore(t, task, "a-out2", "10.0.0.9:9999")
-	post(t, h, http.MethodPost, "/api/tasks/"+task+"/scope/ignore",
-		`{"assets":["a-out2"]}`, http.StatusOK, &res)
-	if res["handled"] != float64(1) || res["pending"] != float64(0) {
-		t.Fatalf("忽略回执不符: %+v", res)
+	post(t, h, http.MethodPost, "/api/tasks/"+task+"/approvals/a-out2",
+		`{"approved":false}`, http.StatusOK, &res)
+	if res["target"] != "10.0.0.9:9999" {
+		t.Fatalf("禁止测试回执不符: %+v", res)
 	}
 	roe, _ = store.CurrentRoE(context.Background(), task)
 	if len(roe.ExcludedAssets) != 1 || roe.ExcludedAssets[0] != "a-out2" {
-		t.Fatalf("忽略应进摘除清单: %+v", roe.ExcludedAssets)
+		t.Fatalf("禁止测试应进摘除清单: %+v", roe.ExcludedAssets)
 	}
 
-	// 非待批条目如实拒收;空清单拒收(先造一项待批,走条目校验分支)。
-	p444DiscoverMore(t, task, "a-out3", "sib.example.org")
+	// 非待批条目如实拒收(重复裁决 409);批量空清单拒收。
 	var errBody map[string]string
-	post(t, h, http.MethodPost, "/api/tasks/"+task+"/scope/approve",
-		`{"assets":["`+assetID+`"]}`, http.StatusBadRequest, &errBody)
+	post(t, h, http.MethodPost, "/api/tasks/"+task+"/approvals/"+assetID,
+		`{"approved":true}`, http.StatusConflict, &errBody)
 	if !strings.Contains(errBody["error"], "不是待批资产") {
 		t.Fatalf("非待批条目应人话拒收: %v", errBody)
 	}
-	post(t, h, http.MethodPost, "/api/tasks/"+task+"/scope/approve",
-		`{"assets":[]}`, http.StatusBadRequest, &errBody)
-	if !strings.Contains(errBody["error"], "至少勾选一项") {
+	post(t, h, http.MethodPost, "/api/tasks/"+task+"/approvals/batch",
+		`{"ids":[],"approved":true}`, http.StatusBadRequest, &errBody)
+	if !strings.Contains(errBody["error"], "至少勾选一张范围卡") {
 		t.Fatalf("空清单应拒收: %v", errBody)
 	}
 }
@@ -199,11 +199,11 @@ func TestP444ScopeEndpoints(t *testing.T) {
 func TestP444ScopeEndpointsRedteam(t *testing.T) {
 	h, _ := newP444Server(t)
 	task, _ := p444ScopeSeed(t, h, "p444-red", "redteam", "api.example.com", rings.AssetScopeOut)
-	// 红队任务:范围外发现直接可测,无待批——端点人话拒绝。
+	// 红队任务:范围外发现直接可测,无待批——待批资产卡端点人话拒绝。
 	var errBody map[string]string
-	post(t, h, http.MethodPost, "/api/tasks/"+task+"/scope/approve",
-		`{"assets":["a-out"]}`, http.StatusBadRequest, &errBody)
-	if !strings.Contains(errBody["error"], "没有待批资产") {
+	post(t, h, http.MethodPost, "/api/tasks/"+task+"/approvals/a-out",
+		`{"approved":true}`, http.StatusConflict, &errBody)
+	if !strings.Contains(errBody["error"], "不是待批资产") {
 		t.Fatalf("红队任务应人话拒绝: %v", errBody)
 	}
 	// 资产树:范围外呈现态为 out_open(发现的其他资产分组)。
@@ -234,8 +234,8 @@ func TestP444ScopeEndpointsRedteam(t *testing.T) {
 func TestP444RoEPassthroughScopeApproved(t *testing.T) {
 	h, store := newP444Server(t)
 	task, assetID := p444ScopeSeed(t, h, "p444-roe", "pentest", "api.example.com", rings.AssetScopeOut)
-	post(t, h, http.MethodPost, "/api/tasks/"+task+"/scope/approve",
-		`{"assets":["`+assetID+`"]}`, http.StatusOK, nil)
+	post(t, h, http.MethodPost, "/api/tasks/"+task+"/approvals/"+assetID,
+		`{"approved":true}`, http.StatusOK, nil)
 	// RoE 整体快照提交(不带放行清单):现值保持,不误清。
 	post(t, h, http.MethodPost, "/api/tasks/"+task+"/roe",
 		`{"allowed_tools":[],"denied_tools":[]}`, http.StatusOK, nil)

@@ -23,7 +23,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { ASSET_CLASSES, postJSON, taskTypeMeta, TASK_TYPES, usePolling } from "@/lib/api";
+import { ASSET_CLASSES, postJSON, TASK_TYPES, usePolling } from "@/lib/api";
 import { toast } from "sonner";
 
 const emptyRow = () => ({ cls: "domain", title: "", parent: "" });
@@ -33,9 +33,13 @@ const emptyConstraint = () => ({ action: "", disposition: "forbid", quota: "", s
 // 资产框即粘贴口,提交前对框内残余文本兜底解析;P4-05 资产页"新增资产"
 // 弹窗同款能力(不复制平行实现)。条目按换行与常见分隔符(顿号/逗号/
 // 分号/空白)切分——标识(域名/IP/网址)不含这些字符,切分无损。
+// P4-50 ③新增范围写法:`*.域`(通配,含全部子域名)与`域名:端口`(仅
+// 此端口)。
 //   http(s)://…      → 服务
 //   IP:端口          → 服务
+//   域名:端口        → 服务
 //   纯 IP            → 主机
+//   *.域             → 子域名
 //   点分域名         → 子域名
 //   其余             → 其他
 export function recognizeLines(text) {
@@ -47,12 +51,65 @@ export function recognizeLines(text) {
       let cls = "other";
       if (/^https?:\/\//i.test(s)) cls = "service";
       else if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(s)) cls = "service";
+      else if (/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9-]+)+:\d+$/i.test(s)) cls = "service";
       else if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) cls = "host";
+      else if (/^\*\.[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9-]+)+$/i.test(s)) cls = "subdomain";
       else if (/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9-]+)+$/i.test(s)) cls = "subdomain";
       rows.push({ cls, title: s, parent: "" });
     }
   }
   return rows;
+}
+
+// 范围写法 → 效果短语(P4-53 ①,问题清单 #73⑤):填啥说啥,口径 =
+// P4-50 写法粒度——*.域 含基域与全部子域名;裸 IP 整台全部端口;
+// host:端口 仅此端口;URL 等同裸域名(全端口)。与 recognizeLines
+// 同一套写法正则;认不出的写法返回 null(不显示,不误导)。
+export function scopeHintOf(title) {
+  const s = title.trim();
+  if (!s) return null;
+  if (/^https?:\/\//i.test(s)) return "只测它";
+  if (/^\*\.[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9-]+)+$/i.test(s)) return "含全部子域名";
+  if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(s)) return "只测此端口";
+  if (/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9-]+)+:\d+$/i.test(s)) return "只测此端口";
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) return "整台可测";
+  if (/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9-]+)+$/i.test(s)) return "只测它";
+  return null;
+}
+
+// 资产标识 → 主机锚点键(P4-53 ③:摘除清单与种子表的冲突校验用,
+// 口径 = scopeHintOf 同套写法;同锚点 = 同一授权对象)。返回 null =
+// 无主机锚点(不参与冲突判定)。
+export function scopeAnchorKeyOf(title) {
+  const s = title.trim();
+  if (!s) return null;
+  let wildcard = false;
+  let host = s;
+  if (/^https?:\/\//i.test(s)) {
+    try {
+      host = new URL(s).hostname.toLowerCase();
+    } catch {
+      return null;
+    }
+  } else if (s.startsWith("*.")) {
+    wildcard = true;
+    host = s.slice(2).toLowerCase();
+  } else {
+    const i = s.lastIndexOf(":");
+    if (i > 0 && /^\d+$/.test(s.slice(i + 1))) host = s.slice(0, i).toLowerCase();
+    else host = s.toLowerCase();
+  }
+  const ok = /^[\w.-]+$/.test(host);
+  if (!ok) return null;
+  return (wildcard ? "*." : "") + host + (hostPortSuffix(s) || "");
+}
+
+// hostPortSuffix 标识的端口后缀(非 URL 写法的 ":端口";URL 等同
+// 裸域名不带端口)。
+function hostPortSuffix(title) {
+  if (/^https?:\/\//i.test(title) || title.startsWith("*.")) return "";
+  const i = title.lastIndexOf(":");
+  return i > 0 && /^\d+$/.test(title.slice(i + 1)) ? title.slice(i) : "";
 }
 
 // 字段标题:小号淡色标签 + 必填标记(问题清单 #29 ③ 视觉层次——提示
@@ -66,14 +123,41 @@ function FieldLabel({ htmlFor, children, required = false }) {
   );
 }
 
+// ScopeHints 范围说明行(P4-53 ①,问题清单 #73⑤):每条标识跟手显示
+// 该写法的测试范围,用户不用学规则、效果在眼前。实时随输入变(调用
+// 方传 useMemo 派生的条目);认不出的写法不显示。
+function ScopeHints({ items }) {
+  const hints = [];
+  const seen = new Set();
+  for (const t of items) {
+    const h = scopeHintOf(t);
+    if (!h || seen.has(t)) continue;
+    seen.add(t);
+    hints.push([t, h]);
+  }
+  if (hints.length === 0) return null;
+  return (
+    <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+      {hints.map(([t, h]) => (
+        <span key={t}>
+          <span className="num">{t}</span> {h}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 // NewTaskDialog 新建任务(也承载复制草稿:draft 传入时按其预填,操作者
 // 确认后才创建——复制 = 同种子/同目标的草稿确认流)。
 // P4-16(问题清单 #29)表单按定稿布局:任务名(可选)→ 任务分类(可选,
-// 搜索或输入新名称回车创建)→ 描述(可选,贴"粘贴描述一键提取"——LLM
+// 搜索或输入新名称回车创建)→ 任务类型(P4-44 必填,两选项旁各一行
+// 定稿说明小字,P4-53 ②)→ 描述(可选,贴"粘贴描述一键提取"——LLM
 // 从描述回填目标与资产,复用既有提取通道)→ 目标(必填,每行一条)→
 // 注意事项(P4-49,可选多行,对做法的软要求)→
 // 资产(必填,可批量粘贴,贴"一键优化整理格式"——LLM 只规整不增删,
-// 守恒红线由服务端确定性把关)→ 高级选项折叠(最长跑多久 · 拦截规则 ·
+// 守恒红线由服务端确定性把关;栏下范围说明行跟手显示每条写法的
+// 效果,P4-53 ①)→ 不要测的资产(P4-53 ③,可选多行,建任务的初始
+// 摘除,确认创建才落库)→ 高级选项折叠(最长跑多久 · 拦截规则 ·
 // 纠偏步数)→ 按钮沉底。
 // P4-40(问题清单 #59)按钮区三键:暂存(全部字段存为服务端草稿并关
 // 闭;从草稿行打开继续编辑时暂存=覆盖原草稿不新增)/ 取消(有内容先
@@ -91,6 +175,11 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
   // 与拦截规则分工——方法偏好写这里,绝对红线配拦截规则。随 roe 快照
   // 落库,建后可在 RoE 页改。
   const [notes, setNotes] = React.useState("");
+  // 不要测的资产(P4-53 ③,问题清单 #73⑥):建任务的初始摘除,多行每条
+  // 一个标识,确认创建才落库(图上排除态资产 + RoE 排除清单,与运行中
+  // 摘除同一机制);留空 = 无。写法粒度与资产栏同套(*.域/裸域名/裸
+  // IP/host:端口)。
+  const [excluded, setExcluded] = React.useState("");
   const [rows, setRows] = React.useState([]);
   const [paste, setPaste] = React.useState("");
   const [timeout, setTimeoutSecs] = React.useState("");
@@ -128,6 +217,7 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
     const goalsIn = src ? src.goals : Array.isArray(draft?.goals) ? draft.goals.join("\n") : "";
     setGoalsText(typeof goalsIn === "string" ? goalsIn : "");
     setNotes(src?.notes ?? "");
+    setExcluded(src?.excluded ?? "");
     const rowsIn = src?.rows ?? draft?.rows;
     setRows(
       Array.isArray(rowsIn) && rowsIn.length > 0
@@ -218,6 +308,13 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
   }, [rows, paste]);
   const formIDs = assetsOfForm.map((r) => r.title.trim()).filter(Boolean);
 
+  // 摘除清单条目(与资产栏同套批量识别:换行与顿号/逗号等分隔符切分,
+  // 每条一个标识;冲突校验与提交用)。
+  const excludedLines = React.useMemo(
+    () => recognizeLines(excluded).map((r) => r.title),
+    [excluded]
+  );
+
   // 从描述提取:单次模型调用,候选回填表单(可改可删,确认前不落库)。
   const extract = async () => {
     const text = description.trim();
@@ -269,6 +366,18 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
         return [...lines, ...gotNotes.filter((g) => !known.has(g))].join("\n");
       });
     }
+    // 摘除清单回填(P4-53 ③):描述里"X 不要测"类范围语句辨认的候选,
+    // 预填"不要测的资产"栏(仅预填可改,确认创建才落库);已有条目去重。
+    const gotExcluded = (body.excluded_assets || [])
+      .map((a) => (a && typeof a.title === "string" ? a.title.trim() : ""))
+      .filter(Boolean);
+    if (gotExcluded.length > 0) {
+      setExcluded((t) => {
+        const lines = t.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        const known = new Set(lines);
+        return [...lines, ...gotExcluded.filter((g) => !known.has(g))].join("\n");
+      });
+    }
     setConstraints((cs) => [
       ...cs,
       ...(body.constraints || []).map((c) => ({
@@ -287,6 +396,7 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
       goals.length > 0 ? `目标 ${goals.length}` : "",
       gotNotes.length > 0 ? `注意事项 ${gotNotes.length}` : "",
       assets.length > 0 ? `资产 ${assets.length}` : "",
+      gotExcluded.length > 0 ? `不要测 ${gotExcluded.length}` : "",
       (body.constraints || []).length > 0 ? `拦截规则 ${body.constraints.length}` : "",
     ].filter(Boolean);
     toast.success(parts.length > 0 ? `已回填：${parts.join(" · ")},逐条核对` : "描述里没有可提取的内容");
@@ -336,6 +446,7 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
         description.trim() ||
         goalsText.trim() ||
         notes.trim() ||
+        excluded.trim() ||
         paste.trim() ||
         timeout.trim() ||
         anchor.trim() ||
@@ -368,6 +479,7 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
       task_type: taskType,
       goals: goalsText,
       notes,
+      excluded,
       rows: rows.map((r) => ({ class: r.cls, title: r.title.trim(), parent: r.parent.trim() })),
       paste,
       timeout,
@@ -450,8 +562,24 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
         ...(c.basis ? { note: `从授权描述提取:${c.basis}` } : {}),
       });
     }
+    // 摘除清单冲突校验(P4-53 ③):同一条既在资产栏又在"不要测的资产"
+    // = 既授权又禁止,按主机锚点对比(x.com 与 https://x.com 同一对象),
+    // 命中人话拒建。无锚点的写法(其他类)不参与判定。
+    const seedKeys = new Map();
+    for (const id of formIDs) {
+      const k = scopeAnchorKeyOf(id);
+      if (k) seedKeys.set(k, id);
+    }
+    for (const line of excludedLines) {
+      const k = scopeAnchorKeyOf(line);
+      if (k && seedKeys.has(k)) {
+        toast.error(`「${line}」既在资产栏又在不要测的资产,先去掉一处`);
+        return;
+      }
+    }
     setBusy(true);
     const body = { title: title.trim(), task_type: taskType, assets, goals: goalTitles };
+    if (excludedLines.length > 0) body.excluded_seeds = excludedLines;
     if (description.trim()) body.description = description.trim();
     if (catID) body.category = catID;
     if (Number.isFinite(t) && t > 0) body.timeout_seconds = t;
@@ -479,6 +607,7 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
     const extra = [
       `目标 ${goalTitles.length} 个`,
       `资产 ${assets.length} 个`,
+      excludedLines.length > 0 ? `不要测 ${excludedLines.length} 条` : "",
       rules.length > 0 ? `拦截规则 ${rules.length} 条` : "",
     ].filter(Boolean);
     toast.success(`已建任务 · ${extra.join(",")},主宰已唤醒`);
@@ -617,25 +746,28 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
 
             <div className="grid gap-2">
               <FieldLabel required>任务类型</FieldLabel>
-              {/* P4-44:必填二选一,默认渗透,建后不可改;当前项说明一行 */}
+              {/* P4-44:必填二选一,默认渗透,建后不可改。P4-53 ②:两选项
+                  旁各一行小字(文案定稿逐字,问题清单 #73⑤),选中态由
+                  按钮高亮表达,两行说明恒显——选之前就能看清差异。 */}
               <div className="flex gap-2">
                 {Object.entries(TASK_TYPES).map(([v, meta]) => (
-                  <button
-                    key={v}
-                    type="button"
-                    className={
-                      "h-8 flex-1 rounded-md border px-3 text-[13px] transition-colors cursor-pointer " +
-                      (taskType === v
-                        ? "border-primary/60 bg-primary/15 font-medium text-foreground"
-                        : "border-border text-muted-foreground hover:text-foreground")
-                    }
-                    onClick={() => setTaskType(v)}
-                  >
-                    {meta.label}
-                  </button>
+                  <div key={v} className="flex-1">
+                    <button
+                      type="button"
+                      className={
+                        "h-8 w-full rounded-md border px-3 text-[13px] transition-colors cursor-pointer " +
+                        (taskType === v
+                          ? "border-primary/60 bg-primary/15 font-medium text-foreground"
+                          : "border-border text-muted-foreground hover:text-foreground")
+                      }
+                      onClick={() => setTaskType(v)}
+                    >
+                      {meta.label}
+                    </button>
+                    <div className="mt-1 px-1 text-xs text-muted-foreground">{meta.hint}</div>
+                  </div>
                 ))}
               </div>
-              <div className="text-xs text-muted-foreground">{taskTypeMeta(taskType).hint}</div>
             </div>
 
             <div className="grid gap-2">
@@ -716,6 +848,8 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
                   {organizeIssues.join(";")}
                 </div>
               )}
+              {/* 范围说明行(P4-53 ①):每条种子的写法 → 效果,实时跟手 */}
+              <ScopeHints items={assetsOfForm.map((r) => r.title.trim())} />
               {rows.length > 0 && (
                 <div className="grid gap-2">
                   {rows.map((row, i) => (
@@ -765,6 +899,21 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
                   ))}
                 </div>
               )}
+            </div>
+
+            {/* 不要测的资产(P4-53 ③):建任务的初始摘除,确认创建才落库;
+                写法粒度与资产栏同套,说明行同款跟手 */}
+            <div className="grid gap-2">
+              <FieldLabel htmlFor="nt-excluded">不要测的资产</FieldLabel>
+              <Textarea
+                id="nt-excluded"
+                rows={2}
+                placeholder="如：*.x.com、bbb.x.com（留空 = 无）"
+                className="num text-xs"
+                value={excluded}
+                onChange={(e) => setExcluded(e.target.value)}
+              />
+              <ScopeHints items={excludedLines} />
             </div>
 
             <div className="grid gap-4">

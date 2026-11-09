@@ -50,7 +50,8 @@ type taskDraftRule struct {
 // taskDraftBody 草稿表单字段全量(P4-40 ②):任务名/分类/描述/目标/
 // 资产(行 + 批量粘贴框残余)/整体超时/拦截规则/纠偏步数/收口提醒;
 // TaskType 任务类型(P4-44:必填字段的草稿形态,空 = 表单按默认渗透);
-// Notes 注意事项(P4-49:多行,空 = 无)。
+// Notes 注意事项(P4-49:多行,空 = 无);Excluded 不要测的资产(P4-53:
+// 初始摘除清单的文本形态,空 = 无)。
 type taskDraftBody struct {
 	Title       string            `json:"title"`
 	Category    string            `json:"category"`
@@ -58,6 +59,7 @@ type taskDraftBody struct {
 	TaskType    string            `json:"task_type"`
 	Goals       string            `json:"goals"`
 	Notes       string            `json:"notes"`
+	Excluded    string            `json:"excluded"`
 	Rows        []taskDraftRow    `json:"rows"`
 	Paste       string            `json:"paste"`
 	Timeout     string            `json:"timeout"`

@@ -249,7 +249,7 @@ func TestRenderTaskReport(t *testing.T) {
 
 	// 聚合摘要:1 Confirmed / 1 待确认 / 覆盖 1/2 / 事实 1。
 	for _, want := range []string{
-		"已确认发现:**1** 条;待确认:1 条",
+		"已确认发现:**1** 条;证据不足:1 条",
 		"资产覆盖:1 / 2(覆盖率 50%)",
 		"已确认事实:1 条",
 	} {
@@ -291,12 +291,11 @@ func TestRenderTaskReport(t *testing.T) {
 	// 收);⑥:请求行 origin-form(Host 头承载)。
 	for _, want := range []string{
 		"级别分布(已确认,跟影响面证据走):high 1",
-		// P4-28 ⑥:过程态计数按合并口径(candidate/testing/awaiting_round
-		// 合计"锤炼中";本账本无过程态判断,如实为 0)。
-		"判断在途:锤炼中 0",
+		// P4-56:零在途不输出"判断在途"行;退役词零出现由闸门保证。
+		"机器判定:已确认",
 		"反证记录:",
 		"判断已记录，等待安排反证(发现单位 `u1`)",
-		"反证(单位 `u2`):存在性未推翻 · 影响面成立(high)",
+		"反证(单位 `u2`):存在性未推翻 · 影响面:证据充分(high)",
 		"机器判定:已确认",
 		"其他可能原因(创建时冻结):",
 		"复现步骤(检查归纳定稿",
@@ -318,19 +317,20 @@ func TestRenderTaskReport(t *testing.T) {
 		t.Fatalf("P4-08 ⑥:请求行须 origin-form(绝对 URI 不得出现):\n%s", md)
 	}
 
-	// 待确认条目:搁置理由直陈(R4)。
+	// 证据不足条目(P4-56 改词):理由直陈(R4)。
 	for _, want := range []string{
 		"### P-1 /api/version 公开暴露服务版本号 · 信息暴露",
-		"搁置理由:反证未推翻存在性,但影响面证据不足以支撑所声明的实际影响",
+		"证据不足:反证未推翻存在性,但影响面证据不足以支撑所声明的实际影响",
 	} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("报告缺待确认片段 %q:\n%s", want, md)
 		}
 	}
 
-	// 审计摘要:审批统计、无熔断、事件构成。
+	// 审计摘要:审批统计、无熔断、事件构成(P4-51 ⑤:规划后放行废除,
+	// 零 forced 不占行)。
 	for _, want := range []string{
-		"需批准:请求 1 · 批准 1 · 拒绝 0 · 规划后放行 0",
+		"需批准:请求 1 · 批准 1 · 拒绝 0\n",
 		"终止记录:无",
 		"testclaim.record ×5",
 	} {
@@ -399,7 +399,7 @@ func TestRenderEdgeStates(t *testing.T) {
 	for _, want := range []string{
 		"任务状态:运行中(started)",
 		"本轮无经独立反证与机器判定确认的发现。",
-		"无待确认发现。",
+		"无证据不足发现。",
 		"资产覆盖:0 / 0",
 	} {
 		if !strings.Contains(md, want) {

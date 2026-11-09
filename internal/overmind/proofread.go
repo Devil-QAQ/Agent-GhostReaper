@@ -2,12 +2,13 @@ package overmind
 
 // P4-24 ①(问题清单 #39):定稿校对——收割定稿冻结入账前,对将上面板
 // 的模型文本(复现步骤描述 P4-08 ④ / 来龙去脉叙述 P4-13)在同一会话
-// 里跑一次自我校对改写(人话标准 = 平实书面白话 + 锚例);失败保留
-// 上一稿(生成稿 / 确定性兜底),不阻塞确认裁决。与 ② 模式闸门
-// (machinegate.go)串联:校对 → 特征扫描 → 不合格退回重写一次 →
-// 再不合格如实标注(Unpolished / NarrativeUnpolished)不阻塞。
-// 成本有界:每冻结文本族校对恰一次、闸门重写至多一次;同会话续问,
-// 转录与 token 记账同锚点连续(用量可见)。
+// 里跑一次自我校对改写;失败保留上一稿(生成稿 / 确定性兜底),不阻塞
+// 确认裁决。与 ② 模式闸门(machinegate.go)串联:校对 → 特征扫描 →
+// 不合格退回重写一次 → 再不合格如实标注(Unpolished /
+// NarrativeUnpolished)不阻塞。成本有界:每冻结文本族校对恰一次、闸门
+// 重写至多一次;同会话续问,转录与 token 记账同锚点连续(用量可见)。
+// P4-59 ①(问题清单 #80①③):人话标准升级为报告级锚(四段正反样例,
+// proofreadHumanStandard);声明摘要族(claimsummary.go)入通道。
 
 import (
 	"context"
@@ -104,12 +105,19 @@ func (s *genSession) ask(ctx context.Context, user string) (string, error) {
 
 // ---- ① 定稿校对(同会话自我校对改写) ----
 
-// proofreadHumanStandard 人话标准与锚例(两族文本共用;锚例本身须过
-// 模式闸门——模型照锚例写的句子不会再被闸门打回)。P4-27 ③ 追加
-// 目标完整标识约束(裸端口/裸路径不上界面,问题清单 #44)。
-const proofreadHumanStandard = `人话标准:平实书面白话,像写给同事看的工作说明;短句,数字精确;无 emoji;不写原理与实现细节。
+// proofreadHumanStandard 人话标准与锚例(P4-59 ① 起升级为报告级锚,
+// 问题清单 #80①③;造物主定方向"靠硬规则不够、升级模型能力"——四段
+// 正反样例泛化自造物主本人报告文风,不含任何报告原始信息)。P4-27 ③
+// 目标完整标识约束保留。锚例自身须过模式闸门(模型照锚例写的句子不会
+// 再被闸门打回;改文风标准时先跑 machinegate_test.go 的锚例用例)。
+const proofreadHumanStandard = `人话标准(报告级,写给不懂技术的读者也能读懂):平实书面白话,短句;数字一律写精确实际值(3,214 条、8 次、200),不写"大量/部分/若干/较多";无 emoji;不写工具名与实现细节。
 提到目标一律用完整标识:域名或 IP 起头、host:port 形态(如 jkysd.cn:9902、10.0.0.5:8080);不用裸端口、裸路径指代目标(读者不知道说的是哪个目标)。
-锚例:向 10.0.0.5 发 GET /admin,无需凭据;返回 200 且响应含"管理后台"字样即复现
+四类文本的正例(照这个口径写):
+- 描述(说清这是什么问题):一句话本质+影响对象,如"10.0.0.5 的管理接口没有登录校验,任何知道地址的人都能进入管理后台";问题本身不好懂时补一句通俗原理,用"就是…从而…"句式,如"就是服务器把访客提交的内容原样拼进了数据库查询,从而精心构造的内容能改变这条查询的本意"。
+- 危害(说清能拿到什么、能干什么):直接说结果与数字,如"无需任何账号口令,可下载全部 3,214 名用户的姓名、手机号和证件号"。
+- 验证过程(说清怎么证实的):按"做了什么→看到什么→说明了什么"的链条写,如"向该接口直接发 GET 请求,不携带登录凭据;返回 200,内容是 1,847 条员工记录;说明该接口的数据不登录也能拿到";同类请求验证了多条时,写明"仅获取 N 条展示"。
+- 修复建议(说清怎么改):每条一个具体动作,如"对该接口增加登录与权限校验";要改多处才分条,每条仍是一个具体动作;不写"加强防护"这类没有动作的空话。
+反例(出现即不合格):"存在未授权访问漏洞,风险较高,建议加强防护"(哪个目标、能拿到什么、具体改什么都没说);"获取了大量敏感数据"(数字不清);"已对该方面进行了安全加固与综合整改"(空话)。
 禁这些机器语:内部编号、解释编号、裸版本号数字、程序报错原文、英文状态词、无动词的压缩名词堆。`
 
 // reproProofreadAsk 步骤三层描述的校对续问(同会话,模型可见自己刚写
@@ -124,6 +132,13 @@ const narrativeProofreadAsk = `校对改写你刚写的叙述:只改文风,事�
 只输出 JSON:{"narrative":"…"}`
 
 // ---- ② 模式闸门(扫描 + 退回重写一次 + 如实标注) ----
+
+// talkRewriteReferralNote 闸门退回重写的指代条款(P4-59 活体实锤补:口令
+// 等必须照抄的原文值本身可撞机器语特征——如"Adm!2026xQ"的"!2026"命中
+// 句首裸端口、长口令串成压缩名词堆;事实一字不动与特征清零在此冲突,
+// 重写时该处改用指代,事实不失)。
+const talkRewriteReferralNote = `命中特征若出自必须照抄的原文值(如口令、密钥里的数字与符号),该处改用指代写法(如「备份包内的管理员口令」),不再贴原值;除此之外事实一字不动。
+`
 
 // polishReproDescs 步骤三层描述的校对+闸门链:① 同会话校对改写(失败
 // 保留生成稿,如实 WARN);② 逐步特征扫描(P4-35 ② 起扫短名/做什么/
@@ -198,7 +213,7 @@ func (l *Loop) rewriteReproDescs(ctx context.Context, claimID string, gs *genSes
 			b.WriteString("- " + line + "\n")
 		}
 	}
-	b.WriteString(proofreadHumanStandard + "\n")
+	b.WriteString(talkRewriteReferralNote + proofreadHumanStandard + "\n")
 	b.WriteString(`只输出 JSON:{"steps":[{"seq":1,"short":"…","desc":"…","purpose":"…"},…]},只含上面点名的步骤。`)
 	text, err := gs.ask(ctx, b.String())
 	if err != nil {
@@ -248,7 +263,7 @@ func (l *Loop) rewriteNarrative(ctx context.Context, gs *genSession, hits []talk
 	for _, line := range talkHitLines(hits) {
 		b.WriteString("- " + line + "\n")
 	}
-	b.WriteString(proofreadHumanStandard + "\n")
+	b.WriteString(talkRewriteReferralNote + proofreadHumanStandard + "\n")
 	b.WriteString(`只输出 JSON:{"narrative":"…"}`)
 	text, err := gs.ask(ctx, b.String())
 	if err != nil {

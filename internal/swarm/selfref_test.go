@@ -113,7 +113,7 @@ func TestSelfRefGateFactAndClaim(t *testing.T) {
 	if len(obs) != 1 || obs[0].UnitID != "u1" || obs[0].StepID != "s1" {
 		t.Fatalf("应恰 1 条环境观察并带单位/步骤: %+v", obs)
 	}
-	if note, _ := obs[0].Detail["note"].(string); !strings.Contains(note, "拒收待确认事实") || !strings.Contains(note, "127.0.0.1:60437") {
+	if note, _ := obs[0].Detail["note"].(string); !strings.Contains(note, "拒收新进事实") || !strings.Contains(note, "127.0.0.1:60437") {
 		t.Fatalf("环境观察 note 应含提交类与命中提法: %q", note)
 	}
 

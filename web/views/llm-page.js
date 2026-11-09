@@ -59,6 +59,7 @@ const EMPTY_FORM = {
   stream_disabled: false,
   thinking: "",
   thinking_effort: "",
+  thinking_passback: "", // 思考回传规则(P4-57:传回/剔除/不干预;空=按端点推断)
   retry_connect: 0,
   retry_empty: 0,
   retry_replay: 0,
@@ -141,6 +142,7 @@ export function LLMPage() {
       stream_disabled: Boolean(f.stream_disabled),
       thinking: f.thinking || "",
       thinking_effort: f.thinking_effort || "",
+      thinking_passback: f.thinking_passback || "",
       retry_connect: intOf(f.retry_connect),
       retry_empty: intOf(f.retry_empty),
       retry_replay: intOf(f.retry_replay),
@@ -271,6 +273,8 @@ export function LLMPage() {
         presets={data?.presets}
         platforms={data?.platforms}
         ocModes={data?.opencode_modes}
+        passbackPresets={data?.passback_presets}
+        passbackOptions={data?.passback_options}
         onForm={setForm}
         onSave={save}
         onClose={() => { setDialogOpen(false); setForm(null); }}
@@ -420,7 +424,7 @@ const RETRY_FIELDS = [
 // 模型与拉取合并,选模型按三段式带上上下文窗口(端点值 / 对照表近似 /
 // 保守默认);测试连通;代理/限速/轮询/输出与思考/重试覆盖在「高级
 // 选项」折叠内。
-function ModelDialog({ open, form, busy, presets, platforms, ocModes, onForm, onSave, onClose }) {
+function ModelDialog({ open, form, busy, presets, platforms, ocModes, passbackPresets, passbackOptions, onForm, onSave, onClose }) {
   const [fetched, setFetched] = React.useState(null); // [{id, context_window}]
   const [fetching, setFetching] = React.useState(false);
   const [advanced, setAdvanced] = React.useState(false);
@@ -497,11 +501,14 @@ function ModelDialog({ open, form, busy, presets, platforms, ocModes, onForm, on
   // 平台/格式/接入方式选定后的端点预填:仅当当前端点为空或仍是某个预设
   // 值时跟动(用户改过的地址不覆盖);非预设组合无预填,走纯手动。opencode
   // 双形态(P4-10):接入方式切换 go/api 换默认端点(Go 订阅走专用网关,
-  // API 按量走 zen)。
+  // API 按量走 zen)。思考回传规则(P4-57 ①)同款联动:平台×格式预设
+  // 预填,无预设组合落剔除默认;仍是三值之一时才跟动(用户显式选过且
+  // 换的不是平台/格式时不抢)。
   const presetValues = new Set([
     ...Object.values(presets || {}).flatMap((m) => Object.values(m)),
     ...Object.values(ocModes || {}).flatMap((m) => Object.values(m)),
   ]);
+  const passbackValues = new Set((passbackOptions || []).map((o) => o.value));
   const applyPreset = (patch) => {
     const platform = patch.platform !== undefined ? patch.platform : f.platform || "";
     const format = patch.format !== undefined ? patch.format : f.format || "openai";
@@ -511,7 +518,11 @@ function ModelDialog({ open, form, busy, presets, platforms, ocModes, onForm, on
       url = ocModes?.[ocMode]?.[format] || url;
     }
     const base_url = url && (!f.base_url || presetValues.has(f.base_url)) ? url : f.base_url;
-    onForm({ ...f, ...patch, platform, format, oc_mode: ocMode, base_url });
+    let thinking_passback = f.thinking_passback || "";
+    if (!thinking_passback || passbackValues.has(thinking_passback)) {
+      thinking_passback = passbackPresets?.[platform]?.[format] || "strip";
+    }
+    onForm({ ...f, ...patch, platform, format, oc_mode: ocMode, base_url, thinking_passback });
   };
 
   const test = async () => {
@@ -744,6 +755,31 @@ function ModelDialog({ open, form, busy, presets, platforms, ocModes, onForm, on
                   </SelectContent>
                 </Select>
                 <span className="text-xs text-muted-foreground">强度</span>
+              </Field>
+              {/* 思考回传(P4-57 ①):按平台×格式预填,自定义默认剔除;历史
+                  思考内容随请求带上与否按各家端点要求 */}
+              <Field label="思考回传">
+                <Select
+                  value={f.thinking_passback || "strip"}
+                  onValueChange={(v) => onForm({ ...f, thinking_passback: v })}
+                >
+                  <SelectTrigger className={cn(INPUT, "w-24")}><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {(passbackOptions && passbackOptions.length
+                      ? passbackOptions
+                      : [
+                          { value: "passback", label: "传回" },
+                          { value: "strip", label: "剔除" },
+                          { value: "none", label: "不干预" },
+                        ]
+                    ).map((o) => (
+                      <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <span className="text-xs text-muted-foreground">
+                  {(passbackOptions || []).find((o) => o.value === (f.thinking_passback || "strip"))?.hint || "历史思考是否随请求带上"}
+                </span>
               </Field>
               {RETRY_FIELDS.map(([key, label, hint]) => (
                 <Field key={key} label={label}>

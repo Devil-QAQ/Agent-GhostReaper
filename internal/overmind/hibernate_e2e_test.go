@@ -41,7 +41,7 @@ func TestHibernateSettlingResumeE2E(t *testing.T) {
 			return scriptedReply{Text: `{"new_intents":[]}`, Finish: "stop"}
 		}
 		switch {
-		case !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实"):
+		case !seenToolResult(rr, "submit_candidate_fact", "已提交新进事实"):
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
 				ID: "w1", Name: "submit_candidate_fact",
 				Args: `{"statement":"靶站首页可访问","evidence":"探测响应 200","asset_id":"web1"}`,

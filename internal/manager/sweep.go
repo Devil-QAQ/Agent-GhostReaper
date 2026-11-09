@@ -39,29 +39,58 @@ func sweepPendingReason(terminal string) string {
 
 // sweepAtTerminal 终局清点本体:单批事务落账(步骤中止 + 判断回挂起),
 // 无在途对象零落笔(幂等)。事件序紧邻终态生命周期事件(挂点保证)。
+// P4-51:范围等待中(scope_wait)的步骤一并收场——任务终局无裁决通道
+// (待决卡冻结),等待单位如实落中止(与无主排队同款"任务收场");
+// 遗留的未决范围卡同步按拒绝结案(与弹门票 ExpireTickets 同纪律,
+// 红点不留僵尸)。
 func (m *Manager) sweepAtTerminal(taskID, terminal string) error {
 	ctx := context.Background()
 	dispatched, err := m.cfg.Store.NodesByType(ctx, taskID, rings.NodeStep, "dispatched")
 	if err != nil {
 		return fmt.Errorf("manager: 终局清点查无主排队步骤: %w", err)
 	}
+	waiting, err := m.cfg.Store.NodesByType(ctx, taskID, rings.NodeStep, rings.StepScopeWait)
+	if err != nil {
+		return fmt.Errorf("manager: 终局清点查等待批准步骤: %w", err)
+	}
 	testing, err := m.cfg.Store.NodesByType(ctx, taskID, rings.NodeTestClaim, rings.TestClaimTesting)
 	if err != nil {
 		return fmt.Errorf("manager: 终局清点查在途判断: %w", err)
 	}
-	if len(dispatched) == 0 && len(testing) == 0 {
+	// 未决范围卡(approval_records 投影按 RequestID 取最新,恰为
+	// scope_wait 即未决)。
+	scopeCards := 0
+	events := make([]rings.Event, 0, len(dispatched)+2*len(testing)+4)
+	if rows, err := m.cfg.Store.ApprovalRows(ctx, taskID); err == nil {
+		latestType := map[string]string{} // RequestID → 最新记录类型
+		for _, r := range rows {
+			latestType[r.RequestID] = r.Type // rev 升序,后见覆盖前见
+		}
+		for _, r := range rows {
+			if r.Type != rings.ApprovalRecScopeWait || latestType[r.RequestID] != rings.ApprovalRecScopeWait {
+				continue
+			}
+			delete(latestType, r.RequestID) // 同卡多笔卡面只结一张
+			card := sweepScopeCardDeny(r)
+			events = append(events, rings.Event{
+				Kind: rings.EventApprovalRecord, Actor: "manager", Payload: card,
+			})
+			scopeCards++
+		}
+	}
+	dispatched = append(dispatched, waiting...)
+	if len(dispatched) == 0 && len(testing) == 0 && scopeCards == 0 {
 		return nil
 	}
-	rev, err := m.cfg.Store.CurrentRevision(ctx, taskID)
-	if err != nil {
-		return fmt.Errorf("manager: 终局清点查图版本: %w", err)
-	}
-	events := make([]rings.Event, 0, len(dispatched)+2*len(testing))
 	for _, s := range dispatched {
 		events = append(events, rings.Event{
 			Kind: rings.EventNodeStateChanged, Actor: "manager",
 			Payload: rings.NodeStateChanged{NodeID: s.ID, Status: "aborted", Note: sweepStepNote},
 		})
+	}
+	rev, err := m.cfg.Store.CurrentRevision(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("manager: 终局清点查图版本: %w", err)
 	}
 	reason := sweepPendingReason(terminal)
 	for _, c := range testing {
@@ -86,7 +115,19 @@ func (m *Manager) sweepAtTerminal(taskID, terminal string) error {
 	if _, err := m.cfg.Store.Append(ctx, taskID, events...); err != nil {
 		return fmt.Errorf("manager: 终局清点记账: %w", err)
 	}
-	runlog.Infof("任务终局清点: %s 无主排队步骤中止 %d 个,在途判断回挂起 %d 个(原因: %s)",
-		taskID, len(dispatched), len(testing), sweepStepNote)
+	runlog.Infof("任务终局清点: %s 无主排队步骤中止 %d 个,在途判断回挂起 %d 个,未决范围卡结案 %d 张(原因: %s)",
+		taskID, len(dispatched), len(testing), scopeCards, sweepStepNote)
 	return nil
+}
+
+// sweepScopeCardDeny 终局遗留范围卡的结案记录(按拒绝结案,与弹门票
+// closeout 同语义:任务级中断不是审批裁决)。
+func sweepScopeCardDeny(row rings.ApprovalRow) rings.ApprovalRecord {
+	return rings.ApprovalRecord{
+		RequestID: row.RequestID, StepID: row.StepID, UnitID: row.UnitID,
+		Type: rings.ApprovalRecDenied, Intent: row.Intent,
+		ToolName: row.ToolName, ToolArgs: []byte(row.ToolArgs), Note: row.Note,
+		DenyLine: rings.DenyLineCloseout, DecidedBy: "manager",
+		Reason: "任务收场,等待批准的范围卡按拒绝结案",
+	}
 }

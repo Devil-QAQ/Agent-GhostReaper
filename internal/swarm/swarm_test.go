@@ -261,7 +261,7 @@ func TestExecutorE2E(t *testing.T) {
 				ID: "c2", Name: "bash",
 				Args: `{"command":"printf 'A%.0s' $(seq 1 6000)"}`,
 			}}, Finish: "tool_calls"}
-		case !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实"):
+		case !seenToolResult(rr, "submit_candidate_fact", "已提交新进事实"):
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
 				ID: "c3", Name: "submit_candidate_fact",
 				Args: fmt.Sprintf(`{"statement":"%s:%d 端口开放,服务为 OpenSSH 9.6","evidence":"port_probe 实测 state=open banner=SSH-2.0-OpenSSH_9.6;bash 侧 6000 字节输出已内容寻址存档","asset_id":"target"}`, host, port),
@@ -491,7 +491,7 @@ func TestSwarmNoOffCourseDigging(t *testing.T) {
 				ID: "c1", Name: "port_probe",
 				Args: fmt.Sprintf(`{"host":%q,"port":%d}`, host, port),
 			}}, Finish: "tool_calls"}
-		case !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实"):
+		case !seenToolResult(rr, "submit_candidate_fact", "已提交新进事实"):
 			// 服从红线的虫群:意图外线索 → 只提交候选,不深挖
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
 				ID: "c2", Name: "submit_candidate_fact",
@@ -657,7 +657,7 @@ func TestBudgetExhausted(t *testing.T) {
 	model := newScriptedModel(func(rr *recordedRequest) scriptedReply {
 		// 收尾轮(引擎注入预算耗尽提示):写回发现后收口
 		if strings.Contains(rr.LastUser, "运行预算即将耗尽") {
-			if !seenToolResult(rr, "submit_candidate_fact", "已提交待确认事实") {
+			if !seenToolResult(rr, "submit_candidate_fact", "已提交新进事实") {
 				return scriptedReply{ToolCalls: []scriptedToolCall{{
 					ID: "w1", Name: "submit_candidate_fact",
 					Args: `{"statement":"目标端口开放","evidence":"预算内 port_probe 实测 state=open","asset_id":"target"}`,

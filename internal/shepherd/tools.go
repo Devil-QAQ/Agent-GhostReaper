@@ -34,7 +34,9 @@ func shortID(prefix string) string {
 func allowAll(context.Context, json.RawMessage, permission.Context) permission.Decision {
 	return permission.Allowed()
 } // toolset 组装一个任务的牧者工具。messageID 为当前应答的消息锚点
-// (建议等跨消息对象借此回到对话流的原位呈现)。
+// (建议等跨消息对象借此回到对话流的原位呈现)。P4-54 起操作面全量
+// 对齐面板(最高权限:任务/目标/注意事项/优先级/聚焦/范围/单位/约束
+// 皆可经对话操作,同一账本动作)。
 func (s *Service) toolset(taskID, messageID string) []tool.CoreTool {
 	return []tool.CoreTool{
 		s.readProgressTool(taskID),
@@ -43,8 +45,15 @@ func (s *Service) toolset(taskID, messageID string) []tool.CoreTool {
 		s.adviseTool(taskID, messageID),
 		s.urgentIntentTool(taskID),
 		s.addGoalTool(taskID),
+		s.updateGoalTool(taskID),
+		s.deleteGoalTool(taskID),
+		s.setFocusTool(taskID),
+		s.setPriorityTool(taskID),
+		s.setNotesTool(taskID),
 		s.addConstraintTool(taskID),
 		s.setAssetScopeTool(taskID),
+		s.taskControlTool(taskID),
+		s.unitControlTool(taskID),
 	}
 }
 
@@ -74,7 +83,11 @@ func (s *Service) readProgressTool(taskID string) tool.CoreTool {
 				b.WriteString("  (无)\n")
 			}
 			for _, g := range goals {
-				fmt.Fprintf(&b, "  - %s [%s] %s\n", g.ID, g.Status, g.Title)
+				mark := ""
+				if f, _ := g.Detail["focus"].(bool); f {
+					mark = " ★聚焦中(只做该方向)"
+				}
+				fmt.Fprintf(&b, "  - %s [%s]%s %s\n", g.ID, g.Status, mark, g.Title)
 			}
 			steps, _ := s.Store.NodesByType(ctx, taskID, rings.NodeStep, "")
 			b.WriteString("步骤:\n")
@@ -257,11 +270,13 @@ func toolCallBrief(args json.RawMessage) string {
 // ---- 说:建议(纳谏)/ 紧急意图 / 新目标 / 新约束 ----
 
 // adviseTool 对主宰的建议(纳谏语义,第四章 §7:建议进正式规划,裁决
-// 后改——入账 pending,主宰下一轮研判裁决,理由回写)。
+// 后改——入账 pending,主宰下一轮研判裁决,理由回写)。P4-54 指令
+// 语义定稿:纳谏只适用于牧者自发的建议(造物主没要求的想法);造物
+// 主的话语是指令,直接用操作工具执行,不走本工具。
 func (s *Service) adviseTool(taskID, messageID string) tool.CoreTool {
 	return tool.Build(tool.Spec{
 		Name:        "advise_overmind",
-		Description: "向主宰提交规划建议(纳谏:记录后由主宰在下一轮规划判定,采纳与否都带理由回写,不由牧者代决)。造物主表达方向性意见(纠方向)时用本工具,不用于登记要立即执行的具体意图(那用 urgent_intent)。",
+		Description: "向主宰提交你自发提出的规划建议(纳谏:记录后由主宰在下一轮规划判定,采纳与否都带理由回写,不由牧者代决)。只用于造物主没要求、你自己认为值得做的改进想法;造物主的指令不走本工具——他说改什么就直接用对应操作工具执行。",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -432,22 +447,25 @@ func (s *Service) addConstraintTool(taskID string) tool.CoreTool {
 	})
 }
 
-// setAssetScopeTool 资产范围操作(P4-45 ②,问题清单 #61 ④):纳入/摘除
-// 两向,与 RoE 面板同源——同一 roe.updated 账本状态、同一条止损链路
-// (swarm 资产范围操作),面板实时可见,无旁路(R7)。纳入=渗透任务放行
-// 待批资产/移回已摘除;摘除=立即终止覆盖该资产的在途单位(熔断同款)
-// 并取消排队步骤,主宰下一轮不再派发。
+// setAssetScopeTool 资产范围操作(P4-45 ② + P4-54 通配与标识扩展):
+// 纳入/摘除两向,与 RoE 面板同源——同一 roe.updated 账本状态、同一条
+// 止损链路(swarm 资产范围操作),面板实时可见,无旁路(R7)。纳入=
+// 渗透任务放行待批资产/移回已摘除(图上没有的标识按写法入图,来源
+// 手动、默认范围内);红队任务本就全部可测,如实答复。摘除=资产不再
+// 测试:覆盖它的在途单位立即终止、排队步骤取消,主宰下一轮不再派发
+// 它;图上没有的标识(含 `*.域` 通配写法)按写法入图后摘除——通配
+// 摘除对其后新发现的子域同样生效(派发守卫按通配排除模式判定)。
 func (s *Service) setAssetScopeTool(taskID string) tool.CoreTool {
 	return tool.Build(tool.Spec{
-		Name: "set_asset_scope",
-		Description: "调整资产的测试范围(与 RoE 面板同源,面板实时可见)。纳入=让资产可测:渗透任务的待批资产放行、已摘除的移回范围;红队任务本就全部可测,如实答复。摘除=资产不再测试:覆盖它的在途单位立即终止、排队步骤取消,主宰不再派发它。造物主说「把 X 纳入范围/可以测了」用 include,「X 不能测了/摘除」用 exclude。资产 ID 从 read_progress 查。",
+		Name:        "set_asset_scope",
+		Description: "调整资产的测试范围(与 RoE 面板同源,面板实时可见)。纳入=让资产可测:渗透任务的待批资产放行、已摘除的移回范围;图上没有的标识按写法入图(来源手动,默认可测)。红队任务本就全部可测,如实答复。摘除=资产不再测试:覆盖它的在途单位立即终止、排队步骤取消,主宰不再派发它;支持 *.域 通配写法(摘除后该域与全部子域不再测,含其后新发现的)。造物主说「把 X 纳入范围/可以测了」用 include,「X 不能测了/摘除」用 exclude。资产给 ID(a-*)或标识(域名/IP/通配写法)皆可。",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"action": map[string]any{"type": "string", "enum": []string{"include", "exclude"},
 					"description": "include=纳入(可测) / exclude=摘除(不测,止损终止在途)"},
 				"assets": map[string]any{"type": "array", "items": map[string]any{"type": "string"},
-					"description": "任务内资产 ID 清单(read_progress 结果里的 a-* 标识)"},
+					"description": "资产清单:任务内资产 ID(a-*)或资产标识(域名/IP/host:端口/*.域 通配写法)"},
 			},
 			"required": []string{"action", "assets"},
 		},
@@ -462,7 +480,31 @@ func (s *Service) setAssetScopeTool(taskID string) tool.CoreTool {
 			}
 			args.Assets = trimAll(args.Assets)
 			if len(args.Assets) == 0 {
-				return tool.Errorf("assets 不能为空:给出任务内资产 ID(read_progress 可查)"), nil
+				return tool.Errorf("assets 不能为空:给出资产 ID(a-*)或标识(域名/IP/通配写法)"), nil
+			}
+			// 标识解析入图:图上已有(ID/标题/同锚点写法)直接复用;
+			// 没有的——纳入按手动来源入图(默认范围内),摘除按发现
+			// 形态入图再摘(与建任务初始摘除同形态,P4-53 注意事项 1)。
+			source := rings.AssetSourceManual
+			if args.Action == "exclude" {
+				source = rings.AssetSourceDiscovered
+			}
+			var ids []string
+			for _, ident := range args.Assets {
+				// a- 开头且无点无通配的写法按资产 ID 引用对待:图上
+				// 没有即陈旧引用,报错带可用资产供自纠(不把笔误 ID 当
+				// 主机名入图);带点/通配的标识才是主机写法,按写法入图。
+				if looksLikeAssetID(ident) {
+					if n, err := s.Store.Node(ctx, taskID, ident); err != nil || n.Type != rings.NodeAsset {
+						assets, _ := s.Store.NodesByType(ctx, taskID, rings.NodeAsset, "")
+						return tool.Errorf(fmt.Sprintf("资产 %s 不在本任务图上(可用资产: %s)", ident, joinAssetIDs(assets))), nil
+					}
+				}
+				id, _, err := swarm.EnsureScopeAsset(ctx, s.Store, taskID, ident, source, ActorShepherd)
+				if err != nil {
+					return tool.Errorf("资产解析失败: " + err.Error()), nil
+				}
+				ids = append(ids, id)
 			}
 			title := func(id string) string {
 				if a, err := s.Store.Node(ctx, taskID, id); err == nil && a.Type == rings.NodeAsset {
@@ -472,7 +514,7 @@ func (s *Service) setAssetScopeTool(taskID string) tool.CoreTool {
 			}
 			switch args.Action {
 			case "include":
-				res, err := swarm.IncludeAssets(ctx, s.Store, taskID, args.Assets, ActorShepherd)
+				res, err := swarm.IncludeAssets(ctx, s.Store, taskID, ids, ActorShepherd)
 				if err != nil {
 					return tool.Errorf("纳入失败: " + err.Error()), nil
 				}
@@ -493,7 +535,7 @@ func (s *Service) setAssetScopeTool(taskID string) tool.CoreTool {
 				}
 				return tool.Text(strings.TrimRight(b.String(), ";\n") + "。RoE 面板同步可见,主宰已被通知。"), nil
 			case "exclude":
-				res, err := swarm.ExcludeAssets(ctx, s.Store, s.helm(), taskID, args.Assets, ActorShepherd)
+				res, err := swarm.ExcludeAssets(ctx, s.Store, s.helm(), taskID, ids, ActorShepherd)
 				if err != nil {
 					return tool.Errorf("摘除失败: " + err.Error()), nil
 				}
@@ -524,6 +566,29 @@ func (s *Service) taskTypeIs(ctx context.Context, taskID string, want string) bo
 		return false
 	}
 	return rings.TaskTypeOf(detail) == want
+}
+
+// looksLikeAssetID 是否按资产 ID 引用对待(a- 开头、无点、无通配、
+// 无端口——与收割入图/范围卡入图的 a-<hex8> 同族前缀;带点或通配的是
+// 主机写法,不在此列)。
+func looksLikeAssetID(ident string) bool {
+	return strings.HasPrefix(ident, "a-") &&
+		!strings.ContainsAny(ident, ".*:") && len(ident) > 2
+}
+
+// joinAssetIDs 可用资产 ID 摘要(错误提示用,≤12 条防刷屏)。
+func joinAssetIDs(assets []rings.NodeFull) string {
+	ids := make([]string, 0, len(assets))
+	for _, a := range assets {
+		ids = append(ids, a.ID)
+	}
+	if len(ids) > 12 {
+		ids = append(ids[:12], fmt.Sprintf("…共 %d 个", len(ids)))
+	}
+	if len(ids) == 0 {
+		return "(图上暂无资产)"
+	}
+	return strings.Join(ids, "、")
 }
 
 func trimAll(in []string) []string {

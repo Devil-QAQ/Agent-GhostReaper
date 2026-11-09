@@ -83,9 +83,13 @@ type ModelConfig struct {
 	// 逻辑无感知。默认流式。
 	StreamDisabled bool `json:"stream_disabled,omitempty"`
 	// Thinking 思考开关:""(随端点默认)|enabled|disabled;ThinkingEffort
-	// 思考强度:""|low|medium|high|max。
-	Thinking       string `json:"thinking,omitempty"`
-	ThinkingEffort string `json:"thinking_effort,omitempty"`
+	// 思考强度:""|low|medium|high|max。ThinkingPassback 思考回传规则
+	// (P4-57 ①):""=按端点推断(平台预设匹配/未知剔除)|passback 传回
+	// |strip 剔除|none 不干预——历史 assistant 思考内容按当前服务腿的
+	// 规则确定性处理,见 thinking.go。
+	Thinking         string `json:"thinking,omitempty"`
+	ThinkingEffort   string `json:"thinking_effort,omitempty"`
+	ThinkingPassback string `json:"thinking_passback,omitempty"`
 	// Retry* 重试覆盖四层(第七章「重试分层」①~④;P4-27 ① 起意图级
 	// 重跑改长退避循环,次数上限语义退场,原⑤字段随之移除),三态:
 	// 0=全局默认 / -1=关闭 / >0=值。
@@ -109,21 +113,22 @@ type MaskedConfig struct {
 	// ProxyMask 代理去凭据视图(如 http://***@127.0.0.1:7890);空=未配。
 	ProxyMask string `json:"proxy_mask,omitempty"`
 	// v2 非敏感字段原样。
-	RatePerSecond  float64 `json:"rate_per_second,omitempty"`
-	RatePerMinute  float64 `json:"rate_per_minute,omitempty"`
-	PollPriority   int     `json:"poll_priority,omitempty"`
-	PollDisabled   bool    `json:"poll_disabled,omitempty"`
-	MaxTokens      int     `json:"max_tokens,omitempty"`
-	MaxTokensField string  `json:"max_tokens_field,omitempty"`
-	StreamDisabled bool    `json:"stream_disabled,omitempty"`
-	Thinking       string  `json:"thinking,omitempty"`
-	ThinkingEffort string  `json:"thinking_effort,omitempty"`
-	RetryConnect   int     `json:"retry_connect,omitempty"`
-	RetryEmpty     int     `json:"retry_empty,omitempty"`
-	RetryReplay    int     `json:"retry_replay,omitempty"`
-	RetryBreaker   int     `json:"retry_breaker,omitempty"`
-	UpdatedBy      string  `json:"updated_by"`
-	UpdatedAt      string  `json:"updated_at"`
+	RatePerSecond    float64 `json:"rate_per_second,omitempty"`
+	RatePerMinute    float64 `json:"rate_per_minute,omitempty"`
+	PollPriority     int     `json:"poll_priority,omitempty"`
+	PollDisabled     bool    `json:"poll_disabled,omitempty"`
+	MaxTokens        int     `json:"max_tokens,omitempty"`
+	MaxTokensField   string  `json:"max_tokens_field,omitempty"`
+	StreamDisabled   bool    `json:"stream_disabled,omitempty"`
+	Thinking         string  `json:"thinking,omitempty"`
+	ThinkingEffort   string  `json:"thinking_effort,omitempty"`
+	ThinkingPassback string  `json:"thinking_passback,omitempty"` // P4-57 思考回传规则(非敏感,原样)
+	RetryConnect     int     `json:"retry_connect,omitempty"`
+	RetryEmpty       int     `json:"retry_empty,omitempty"`
+	RetryReplay      int     `json:"retry_replay,omitempty"`
+	RetryBreaker     int     `json:"retry_breaker,omitempty"`
+	UpdatedBy        string  `json:"updated_by"`
+	UpdatedAt        string  `json:"updated_at"`
 }
 
 // Masked 打码视图转换。
@@ -138,7 +143,8 @@ func (c ModelConfig) Masked() MaskedConfig {
 		MaxTokens: c.MaxTokens, MaxTokensField: c.MaxTokensField,
 		StreamDisabled: c.StreamDisabled,
 		Thinking:       c.Thinking, ThinkingEffort: c.ThinkingEffort,
-		RetryConnect: c.RetryConnect, RetryEmpty: c.RetryEmpty,
+		ThinkingPassback: c.ThinkingPassback,
+		RetryConnect:     c.RetryConnect, RetryEmpty: c.RetryEmpty,
 		RetryReplay: c.RetryReplay, RetryBreaker: c.RetryBreaker,
 		UpdatedBy: "", UpdatedAt: "", // 由调用方补审计字段(键值表携带)
 	}
@@ -255,6 +261,11 @@ func validateV2(cfg ModelConfig) error {
 	case "", "low", "medium", "high", "max":
 	default:
 		return fmt.Errorf("failover: 思考强度 %q 不在词汇表内(low|medium|high|max|空=不设)", cfg.ThinkingEffort)
+	}
+	switch cfg.ThinkingPassback {
+	case "", ThinkingPassback, ThinkingStrip, ThinkingNone:
+	default:
+		return fmt.Errorf("failover: 思考回传规则 %q 不在词汇表内(passback 传回|strip 剔除|none 不干预|空=按端点推断)", cfg.ThinkingPassback)
 	}
 	for name, v := range map[string]int{
 		"建连重试": cfg.RetryConnect, "空响应重试": cfg.RetryEmpty,
@@ -469,4 +480,15 @@ func TaskOverrideName(ctx context.Context, store *rings.Store, taskID, role stri
 		return "", false
 	}
 	return name, true
+}
+
+// EffectiveThinkingPassback 配置的生效思考回传规则(P4-57 ② 出站组装
+// 的判定面):显式字段 > 按端点地址与格式推断(平台预设)> 剔除默认
+// (自定义/未知端点;剔除恒安全——最坏多耗一轮思考,传错规则则端点
+// 确定性 400)。确定性:同配置恒同规则,前缀缓存友好。
+func (c ModelConfig) EffectiveThinkingPassback() string {
+	if c.ThinkingPassback != "" {
+		return c.ThinkingPassback
+	}
+	return PassbackByBaseURL(c.BaseURL, c.Format)
 }

@@ -7,7 +7,7 @@
 // 防御性定义——任何组合都必须落且只落一个词)。冻结态本身即"世界
 // 暂停",矩阵里冻结×受阻=1 的格子取「冬眠中」(受阻唤醒后再论)。
 
-import { TASK_BLOCKED_HINT, taskStatusBadge } from "../lib/task-status.mjs";
+import { TASK_BLOCKED_HINT, taskStatusBadge, taskBlockedDot, blockedHint } from "../lib/task-status.mjs";
 
 const STATUSES = [
   "created",
@@ -94,6 +94,45 @@ if (noSteps.title.includes("冻结前有")) {
 if (!taskStatusBadge({ status: "stopped" }).title.includes("手动终止")) {
   console.error("已停止默认悬停应为手动终止");
   fails++;
+}
+
+// 受阻红点取态(P4-57 ⑤ 三层递进):活动态亮(计数+归因悬停)、冻结/
+// 终态不亮、零步不亮;归因文案逐字——模型故障类/程序异常类/两类并存。
+{
+  const on = taskBlockedDot({ status: "started", blocked_steps: 4, blocked_fault: 3, blocked_defect: 1 });
+  if (!on || on.count !== 4) {
+    console.error(`运行中受阻红点应亮且计数=总步数: ${JSON.stringify(on)}`);
+    fails++;
+  } else if (on.title !== "受阻 3 步，恢复后自动继续\n受阻 1 步，程序异常已记录，更新修复后自动恢复") {
+    console.error(`两类并存悬停应逐行分列归因文案: ${JSON.stringify(on.title)}`);
+    fails++;
+  }
+  const faultOnly = blockedHint({ blocked_steps: 2, blocked_fault: 2, blocked_defect: 0 });
+  if (faultOnly !== "受阻 2 步，恢复后自动继续") {
+    console.error(`模型故障类文案逐字不符: ${faultOnly}`);
+    fails++;
+  }
+  const defectOnly = blockedHint({ blocked_steps: 2, blocked_fault: 0, blocked_defect: 2 });
+  if (defectOnly !== "受阻 2 步，程序异常已记录，更新修复后自动恢复") {
+    console.error(`程序异常类文案逐字不符: ${defectOnly}`);
+    fails++;
+  }
+  for (const st of ["paused", "hibernated", "checkpointed", "stopped", "completed"]) {
+    if (taskBlockedDot({ status: st, blocked_steps: 3 })) {
+      console.error(`冻结/终态 ${st} 不应亮受阻红点`);
+      fails++;
+    }
+  }
+  if (taskBlockedDot({ status: "started", blocked_steps: 0 })) {
+    console.error("零受阻步不应亮红点");
+    fails++;
+  }
+  // 归因拆分缺位(旧负载):回退总数+模型故障文案,不撒谎也不瞎标。
+  const legacy = blockedHint({ blocked_steps: 5 });
+  if (legacy !== "受阻 5 步，恢复后自动继续") {
+    console.error(`归因缺位回退文案不符: ${legacy}`);
+    fails++;
+  }
 }
 
 if (fails > 0) {

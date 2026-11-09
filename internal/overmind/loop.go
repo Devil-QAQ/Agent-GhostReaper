@@ -628,6 +628,11 @@ func (l *Loop) cycle(ctx context.Context) bool {
 		if l.isSettling() {
 			return false // 在飞单位由 settle 流程等齐;终局判定由 settle 做
 		}
+		// P4-51 ①②③:范围等待对账——冻结在 scope_wait 的步骤按当前
+		// RoE 现值重判(已入范围回队队首/已排除收口)。轮起点统一对账,
+		// 通道无关由构造保证(卡两键/RoE 面板/牧者改范围都落 roe.updated
+		// 并唤醒本轮);重启收养的拉起轮同样覆盖。
+		l.ResolveScopeWaits(ctx)
 		triggers, diveTriggered, err := l.planningTriggers(ctx)
 		if err != nil {
 			l.setErr(err)
@@ -720,6 +725,14 @@ func (l *Loop) cycle(ctx context.Context) bool {
 			for _, ep := range reply.ReportExclusions {
 				if err := l.applyReportExclusion(ctx, ep, evalRev); err != nil {
 					l.noteGuardReject(fmt.Sprintf("标记判断 %s 不纳入报告被拒：%v", ep.ClaimID, err))
+				}
+			}
+			// 待裁决判断的裁决(P4-55 审核迭代:程序禁止连坐——操作者
+			// 终止的反证与目标删除后的挂起,去留归主宰)。程序校验形状
+			// 与状态,单条被拒不拖垮其余,拒因回流简报。
+			for _, cr := range reply.ClaimRulings {
+				if err := l.applyClaimRuling(ctx, cr, evalRev); err != nil {
+					l.noteGuardReject(fmt.Sprintf("判断 %s 判定被拒：%v", cr.ClaimID, err))
 				}
 			}
 			// 组合发现(五问第③问的产物):多条已确认 Fact 合并为攻击链级
@@ -819,11 +832,39 @@ func (l *Loop) cycle(ctx context.Context) bool {
 		}
 		l.mu.Lock()
 		quiet := l.flight == 0 && !l.finished
-		if quiet && settled {
-			l.finished = true
-		}
 		l.mu.Unlock()
-		return quiet && settled
+		if quiet && settled {
+			// 收口闸(P4-55,问题清单 #75:终态只从完整的锤炼产生):静默
+			// 判定的裁决与计数之间存在窗口——单位恰在本轮裁决之后、
+			// flight 读数之前落地(留有缓冲落地通知),其声明本轮未判即
+			// 随循环退场被终局清点兜成"中断挂起"。补一道终判:有新可
+			// 裁决声明、或有反证中断待重派(预算未尽即不算静默,与不落
+			// 待确认装死同义),即不收口——吃掉缓冲通知再走一轮;两者
+			// 皆空才算真静默(收口前最后一刻的裁决/重派照常落账)。
+			n, jerr := l.judgeClaims(ctx)
+			if jerr != nil {
+				l.setErr(jerr)
+				return false
+			}
+			res, herr := HarvestClaims(ctx, l.Store, l.TaskID)
+			if herr != nil {
+				l.setErr(herr)
+				return false
+			}
+			if n > 0 || len(res.Redispatched) > 0 || len(res.Dispatched) > 0 {
+				return false // 新裁决或新派反证在手:不算静默,落地通知驱动再走一轮
+			}
+			l.mu.Lock()
+			if l.flight == 0 && !l.finished {
+				l.finished = true
+			} else {
+				l.mu.Unlock()
+				return false // 终判期间又有单位起飞:回到循环
+			}
+			l.mu.Unlock()
+			return true
+		}
+		return false
 	}
 	return false
 }
@@ -884,11 +925,14 @@ func (l *Loop) judgeGoals(ctx context.Context) (bool, error) {
 
 // judgeClaims 逐个裁决 testing 状态的声明:当前反证轮已到终态者交
 // 仲裁者机器求值,裁决审计流(testclaim.record verdict)+ 状态迁移
-// (confirmed|pending|awaiting_round)一批事务落账(actor=arbiter);
+// (confirmed|refuted|pending|awaiting_round)一批事务落账(actor=arbiter);
 // Confirmed 的同批再落收割定稿(testclaim.record repro:复现步骤 +
-// 严重级别,P2-02)。反证未完(ErrClaimNotReady)留待下轮;单声明
-// 完整性错误如实暴露到 LastErr 但不拖垮其余声明。待确认/待下轮从此
-// 带机器生成的搁置/推进理由(R4)。返回本轮落账的裁决数(静默判定依据)。
+// 严重级别,P2-02)。反证未完(ErrClaimNotReady)与反证轮被中断且重派
+// 预算未尽(ErrClaimInterrupted,P4-55 ①:声明留在锤炼,收割侧同轮
+// 自动重派)留待下轮;重派用尽落待确认时,若中断步骤 blocked 终结则
+// 同批收场(不再等模型恢复)。单声明完整性错误如实暴露到 LastErr 但
+// 不拖垮其余声明。待确认/待下轮从此带机器生成的搁置/推进理由(R4)。
+// 返回本轮落账的裁决数(静默判定依据)。
 func (l *Loop) judgeClaims(ctx context.Context) (int, error) {
 	claims, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeTestClaim, rings.TestClaimTesting)
 	if err != nil {
@@ -900,6 +944,9 @@ func (l *Loop) judgeClaims(ctx context.Context) (int, error) {
 		if errors.Is(err, arbiter.ErrClaimNotReady) {
 			continue // 当前反证轮未结束,留待下轮
 		}
+		if errors.Is(err, arbiter.ErrClaimInterrupted) {
+			continue // 反证轮被中断且重派预算未尽:收割侧自动重派(P4-55 ①)
+		}
 		if err != nil {
 			l.setErr(fmt.Errorf("overmind: 判定判断 %s: %w", c.ID, err))
 			continue
@@ -907,6 +954,17 @@ func (l *Loop) judgeClaims(ctx context.Context) (int, error) {
 		// 落账次序:裁决 → (确认时)收割定稿 → 状态迁移,同一批事务。
 		events := []rings.Event{
 			{Kind: rings.EventTestClaimRecord, Actor: arbiter.ActorArbiter, Payload: j.Verdict},
+		}
+		// 重派用尽落待确认时,blocked 终结的中断步骤一并收场(已判多轮
+		// 无结论,不再等模型恢复重开旧步骤;P4-55 ③)。
+		if j.Status == rings.TestClaimPending && j.Verdict.StepID != "" {
+			if st, serr := l.Store.Node(ctx, l.TaskID, j.Verdict.StepID); serr == nil && st.Status == "blocked" {
+				events = append(events, rings.Event{
+					Kind: rings.EventNodeStateChanged, Actor: ActorOvermind,
+					Payload: rings.NodeStateChanged{NodeID: st.ID, Status: "cancelled",
+						Note: "反证多轮未取得结论,不再等待该步骤"},
+				})
+			}
 		}
 		if j.Status == rings.TestClaimConfirmed {
 			// 收割定稿(P2-02):复现步骤(镜留痕交换+操作方法)与
@@ -923,6 +981,12 @@ func (l *Loop) judgeClaims(ctx context.Context) (int, error) {
 				// P4-13:来龙去脉叙述同批生成冻结(链上事实包 → 模型人话,
 				// 失败回退拼句不阻塞裁决;重开再确认随新定稿重新生成)。
 				l.genClaimNarrative(ctx, c.ID, j, repro)
+				// P4-56 ⑤:反证时间线人话三段(疑点→怎么验的→结论)同批
+				// 生成冻结,读侧默认只展示人话层、机器原文折叠。
+				l.genRoundHumans(ctx, c.ID, repro)
+				// P4-59 ①:声明摘要(存在性描述/影响面/链上事实描述)
+				// 报告级校对同批冻结——节点原文不动,读侧优先校对稿。
+				l.genClaimSummary(ctx, c.ID, repro)
 				events = append(events, rings.Event{
 					Kind: rings.EventTestClaimRecord, Actor: ActorOvermind, Payload: *repro})
 			}
@@ -1003,8 +1067,22 @@ type decomposeReply struct {
 	CombinedClaims   []CombinedClaimPlan   `json:"combined_claims"`
 	Advices          []adviceVerdictPlan   `json:"advices"`           // 待裁决建议的裁决(P2-07 纳谏)
 	ReportExclusions []reportExclusionPlan `json:"report_exclusions"` // 信息性判断复核标记(P4-30 ③)
+	ClaimRulings     []claimRulingPlan     `json:"claim_rulings"`     // 待裁决判断的裁决(P4-55 审核迭代:操作者终止反证/目标已删除的去留)
 
 	sessionID string // 研判会话锚点(研判记录下钻转录用;不参与 JSON)
+}
+
+// claimRulingPlan 待裁决判断的裁决(P4-55 审核迭代,造物主 2026-11-08
+// 定案:动"意图"删目标或动"人"杀单位→交主宰裁决,程序禁止连坐)。
+// 快照「待判定判断」区逐条列出;action 词表:
+//   - continue:恢复锤炼——testing 且反证被操作者终止的,程序重派反证
+//     (计入该轮重派额度);挂起(目标已删除)的,经 reopen 重开反证;
+//   - suspend:挂起——声明转待确认并落挂起记录,理由必填(目标已删
+//     除且资产无人需要时用"目标已删除";新建目标或深入可再唤醒)。
+type claimRulingPlan struct {
+	ClaimID string `json:"claim_id"`
+	Action  string `json:"action"` // continue|suspend
+	Reason  string `json:"reason"` // suspend 必填
 }
 
 // SettingKeyPromptOvermind 主宰拆解基线可编辑正文(A 段)的配置键
@@ -1036,7 +1114,7 @@ const overmindDisciplineRules = `态势规划标准五问(逐问给一句结论,
    - 主动测试:向目标发送测试载荷检验响应(注入探测、目录枚举、弱口令尝试、畸形请求);发了非正常业务流量但不利用成功结果、不落地持久物。
    - 利用深入:以利用已确认弱点为前提,实际取得未授权访问或数据(读敏感文件、无副作用命令回显、凭据试用、横向探测);仍不修改目标状态。
    - 修改与持久化:改变目标状态或留下长期存在物(写文件、上传 webshell、建账号、改配置、删数据);执行时逐次需批准,等待造物主批准。
-5. 危害申报(harm_class):意图属数据销毁(data_destruction)或拒绝服务类(denial_of_service)时必须申报——此类动作无论审批门槛多宽都直接拒绝,仅当造物主在面板规划后放行才执行;普通意图留空。
+5. 危害申报(harm_class):意图属数据销毁(data_destruction)或拒绝服务类(denial_of_service)时必须申报——此类动作无论审批门槛多宽都直接拒绝,不提供放行通道;普通意图留空。
 6. 预算耗尽(exhausted)的步骤是暂停接力,不是失败:其单位撞预算前已把发现写回图(见"预算耗尽步骤"轨迹)。同一条工作线值得继续时,派"接着上次进度继续"的意图(接力单位在任务包里能看到前序尝试与已确认事实,从暂停点续跑);不值得继续或方向应换时,按态势另派。接续意图要写明从哪条轨迹续起。
 7. 每条意图可带优先级(high|normal|low,缺省 normal)与前置步骤(depends_on,Step ID 清单;前置完成后才执行——只在后一步必须用到前一步产出时才声明,不设多余依赖)。
 8. 被审批拒绝终止(approval_denied)的步骤:拒绝原因见"审批拒绝"节——被拒单位不得换法重试;规划后确有必要再走该方向时,须依据新的证据或方法另派意图,不得原样重派。
@@ -1056,6 +1134,7 @@ const overmindDisciplineRules = `态势规划标准五问(逐问给一句结论,
 // 展示字段的文风收口与正反样例(只管新生成,不改写图上已有步骤)。
 const overmindOutputContract = `只输出 JSON:{"assessment":{"q_access":"…","q_privilege":"…","q_combination":"…","q_unlock":"…","q_overturn":"…","note":"…"},"new_intents":[{"intent":"一句话意图","expected_observation":"预期观察","action_level":"只读探测|主动测试|利用深入|修改与持久化","harm_class":"data_destruction|denial_of_service(仅危害类意图,普通意图省略)","covers":["资产ID"],"priority":"high|normal|low","depends_on":["StepID"]}],"combined_claims":[{"statement":"存在性判断(攻击链整体效果)","impact":"影响面判断","rationale":"组合理由","chain":[{"fact_id":"f-…","role":"入口"}],"asset_id":"资产ID","vulnclass":"漏洞类型","alternatives":["其他可能原因(每条一句话)"]}],"advices":[{"id":"av-…","adopt":true,"reason":"判定理由(不采纳须基于图上事实)"}]}
 可选取消字段:"cancel_steps":[{"step_id":"sN","reason":"最新证据表明重复、过时或前提已失败的具体理由","evidence":["图上依据节点ID"]}]。取消后仍保留节点与轨迹；没有应取消步骤时输出空列表。
+可选判定字段(快照「待判定判断」区有条目时逐条输出):"claim_rulings":[{"claim_id":"tc-…","action":"continue|suspend","reason":"suspend 必填(目标已删除且资产无人需要用「目标已删除」);continue 重开挂起判断时写依据"}]。
 可选复核字段:"report_exclusions":[{"claim_id":"tc-…","reason":"该判断为纯信息性观察(无直接危害)的具体理由"}]。标记该判断不纳入报告；已标记过的不重复标记，无可标记时省略该字段。
 (advices 仅在快照存在待判定建议时输出,无则省略该字段。)
 字段文风(intent 与判断是面板高频展示字段,生成时收口;只管新写,不改写图上已有步骤):
@@ -1396,8 +1475,21 @@ func (l *Loop) buildSnapshot(ctx context.Context) (string, int64, QueueWatermark
 	if len(goals) == 0 {
 		b.WriteString("  (无)\n")
 	}
+	// 方向聚焦(P4-54 停聚焦):造物主指令"其他都停掉只做 X"——聚焦行
+	// 置顶声明,派发守卫同判(非聚焦方向的意图与反证会被拒收,别浪费
+	// 提交);聚焦目标行带[聚焦中]标注。
+	focusGoalID := FocusGoalID(ctx, l.Store, l.TaskID)
+	if focusGoalID != "" {
+		if fg, gerr := l.Store.Node(ctx, l.TaskID, focusGoalID); gerr == nil {
+			fmt.Fprintf(&b, "  ★ 方向聚焦中:只做「%s」(%s)——其他方向不再派发(派发入口会拒收)\n", fg.Title, fg.ID)
+		}
+	}
 	for _, g := range goals {
-		fmt.Fprintf(&b, "  - %s [%s] %s\n", g.ID, g.Status, g.Title)
+		mark := ""
+		if g.ID == focusGoalID {
+			mark = " [聚焦中]"
+		}
+		fmt.Fprintf(&b, "  - %s [%s]%s %s\n", g.ID, g.Status, mark, g.Title)
 	}
 
 	b.WriteString("\n资产(已覆盖=已有步骤 covers):\n")
@@ -1563,6 +1655,18 @@ func (l *Loop) buildSnapshot(ctx context.Context) (string, int64, QueueWatermark
 			b.WriteString(" [已标记不纳入报告]")
 		}
 		b.WriteString("\n")
+	}
+
+	// 待判定判断(P4-55 审核迭代:程序禁止连坐——操作者终止的反证与
+	// 目标删除后的挂起,去留交主宰)。每条附资产需要情况的确定性事实,
+	// 判定经 claim_rulings 输出(continue=恢复锤炼/suspend=挂起)。
+	if lines, rerr := l.pendingRulingBriefs(ctx, goals, steps, abouts); rerr != nil {
+		fmt.Fprintf(&b, "\n待判定判断(读取失败: %v)\n", rerr)
+	} else if len(lines) > 0 {
+		b.WriteString("\n待判定判断(反证被操作者终止或目标已删除;逐条在 claim_rulings 判定,不判定则停在原地):\n")
+		for _, line := range lines {
+			fmt.Fprintf(&b, "%s\n", line)
+		}
 	}
 
 	// 待裁决建议(P2-07 纳谏):牧者代造物主提交的方向性建议,逐条
@@ -1946,9 +2050,13 @@ func (l *Loop) currentGoalID(ctx context.Context) string {
 	return CurrentGoalID(ctx, l.Store, l.TaskID)
 }
 
-// CurrentGoalID 图上最新目标(优先 active;无目标返回空)。牧者紧急
-// 意图派发(UrgentDispatch)与主宰拆解共用——归属目标同源。
+// CurrentGoalID 图上最新目标(优先聚焦方向(P4-54 停聚焦:拆解产物与
+// 急活默认服务聚焦方向)、再 active):牧者紧急意图派发(UrgentDispatch)
+// 与主宰拆解共用——归属目标同源。
 func CurrentGoalID(ctx context.Context, store *rings.Store, taskID string) string {
+	if fg := FocusGoalID(ctx, store, taskID); fg != "" {
+		return fg
+	}
 	pick := func(nodes []rings.NodeFull) string {
 		if len(nodes) == 0 {
 			return ""
@@ -2011,6 +2119,9 @@ func UrgentDispatch(ctx context.Context, store *rings.Store, taskID, intent, exp
 func (l *Loop) schedule(ctx context.Context) int {
 	if ctx.Err() != nil {
 		return 0
+	}
+	if l.Swarm == nil {
+		return 0 // 未装配执行器(测试/空转循环):无可派单位,不进起飞路径
 	}
 	// 任务总闸到点:不再起新单位,推进收尾(enterSettling 内部持 l.mu,
 	// 须在临界区外调用)。
@@ -2108,9 +2219,13 @@ func selectRunnable(dispatched, all []rings.NodeFull, depEdges []rings.EdgeView)
 }
 
 // StepLaunchLess 步骤领取次序的全序比较(调度器与面板排队列表同源,
-// 展示与操作同源纪律):优先级降序 → 同级急活 → 同级反证 → 创建版本
-// 升序 → ID 兜底(全图无同 rev 同 ID,仅为全序确定性)。
+// 展示与操作同源纪律):范围批准回队(P4-51 ②,scope_head——被打断的
+// 老单位优先于一切新排队者)→ 优先级降序 → 同级急活 → 同级反证 →
+// 创建版本升序 → ID 兜底(全图无同 rev 同 ID,仅为全序确定性)。
 func StepLaunchLess(a, b rings.NodeFull) bool {
+	if ha, hb := scopeHeadOf(a), scopeHeadOf(b); ha != hb {
+		return ha
+	}
 	pa, pb := stepPriorityRank(a), stepPriorityRank(b)
 	if pa != pb {
 		return pa > pb
@@ -2123,6 +2238,13 @@ func StepLaunchLess(a, b rings.NodeFull) bool {
 		return a.CreatedRev < b.CreatedRev
 	}
 	return a.ID < b.ID
+}
+
+// scopeHeadOf 步骤是否带范围批准回队标记(领取排序首位;detail 由
+// 投影层从 NodeStateChanged Note="scope_head" 合并而来)。
+func scopeHeadOf(s rings.NodeFull) bool {
+	h, _ := s.Detail["scope_head"].(bool)
+	return h
 }
 
 // stepClassRank 同优先级内的类别权重(P4-08 ①):急活(造物主插急活)
@@ -2182,19 +2304,16 @@ func (l *Loop) modelNow(sid string) func() string {
 
 // denialBriefs 审批拒绝简报(P2-06b,第四章 §3 v2:主宰收割可见拒绝
 // 原因):扫事件流里 denial 类 approval.record(排除等待期间任务收尾的
-// closeout 结案——那是任务级中断不是审批裁决),逐步骤取最新一笔拒绝
-// 及其后的研判后放行(forced)。确定性拼装,零 LLM。
+// closeout 结案——那是任务级中断不是审批裁决),逐步骤取最新一笔拒绝。
+// P4-51 ⑤:"规划后放行"写路径废除(历史 forced 记录留档,简报不再
+// 消费)。确定性拼装,零 LLM。
 func (l *Loop) denialBriefs(ctx context.Context) []string {
 	evs, err := l.Store.Events(ctx, l.TaskID, 0, 0)
 	if err != nil {
 		l.setErr(fmt.Errorf("overmind: 审批拒绝查事件: %w", err))
 		return nil
 	}
-	type denialInfo struct {
-		rec    rings.ApprovalRecord
-		forced *rings.ApprovalRecord
-	}
-	latest := map[string]*denialInfo{} // requestID -> 最新拒绝与放行
+	latest := map[string]rings.ApprovalRecord{} // requestID -> 最新拒绝
 	order := []string{}
 	for _, ev := range evs {
 		if ev.Kind != rings.EventApprovalRecord {
@@ -2204,30 +2323,23 @@ func (l *Loop) denialBriefs(ctx context.Context) []string {
 		if err := json.Unmarshal(ev.Payload, &rec); err != nil {
 			continue
 		}
-		switch rec.Type {
-		case rings.ApprovalRecDenied:
-			if rec.DenyLine == rings.DenyLineCloseout {
-				continue
-			}
-			if _, ok := latest[rec.RequestID]; !ok {
-				order = append(order, rec.RequestID)
-			}
-			latest[rec.RequestID] = &denialInfo{rec: rec}
-		case rings.ApprovalRecForced:
-			if d, ok := latest[rec.RequestID]; ok {
-				d.forced = &rec
-			}
+		if rec.Type != rings.ApprovalRecDenied {
+			continue
 		}
+		if rec.DenyLine == rings.DenyLineCloseout {
+			continue
+		}
+		if _, ok := latest[rec.RequestID]; !ok {
+			order = append(order, rec.RequestID)
+		}
+		latest[rec.RequestID] = rec
 	}
 	var out []string
 	for _, id := range order {
-		d := latest[id]
+		rec := latest[id]
 		var b strings.Builder
-		fmt.Fprintf(&b, "%s %s | 工具 %s | 原因: %s", d.rec.StepID, clipEval(d.rec.Intent),
-			d.rec.ToolName, clipEval(d.rec.Reason))
-		if d.forced != nil {
-			fmt.Fprintf(&b, " | 造物主已规划后放行(逐次执行,全记账)")
-		}
+		fmt.Fprintf(&b, "%s %s | 工具 %s | 原因: %s", rec.StepID, clipEval(rec.Intent),
+			rec.ToolName, clipEval(rec.Reason))
 		out = append(out, b.String())
 	}
 	return out

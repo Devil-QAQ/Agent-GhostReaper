@@ -974,54 +974,61 @@ func ClaimFalsifySteps(ctx context.Context, store *rings.Store, taskID, claimID 
 // 裁决同批落库的复现步骤与严重级别。确定性组装、零 LLM:
 //   - Severity = 末轮反证的影响面定级(级别只跟影响面证据走,发现者
 //     无级别通道);
-//   - 复现步骤 = 当前战役反证 Step 的镜留痕 HTTP(S)交换(P3-01 起
-//     https 解密留痕同收;独立验证单位的真实重放,天然可复现),每步
-//     携带操作方法(该 Step 的工具调用:工具名+参数,受控回流入口
-//     不计;证据包收,面板/报告正文不显,P4-08 ⑤;P4-35 ④ 起总量
-//     封顶——枚举型反证的成千上万条试错命令不再全量内嵌)、短名与
-//     一句话描述(P4-08 ④/P4-35 ②:组装时先落确定性兜底,定稿落账
-//     前由 Loop 用模型挑最小集并改写为三层人话冻结;失败回退确定性
-//     兜底)与交换原文的 blob 引用(Burp 可验证数据包,完整原文经
-//     内容寻址回放,R18);
-//   - P3-05b ①:交换按目标流量过滤——请求 host 在任务授权范围
-//     (种子资产标识)内才收,外网查证流量(web_fetch 等)不进步骤;
-//     流量页不受影响(审计链全量保留);
-//   - P4-08 ③ 组装侧去同型:同方法+同路径+同状态的重复交换只保留
-//     构成复现流程的一条(确定性保留规则 = 该型首条;非成功状态自成
-//     一型不合并,401→绕过→200 式流程叙事保留);反证变体流量(换
-//     UA / 防缓存参数 / 近似 body)不进复现步骤;不同 URL / 步骤的
-//     多步流程不受影响。
-//   - P4-35 ①④ 最小集与存储瘦身(问题清单 #57):去同型结果只是
-//     候选池(Steps 返回,模型据此挑必要步骤);战役范围内全部交换
-//     另记 Process 引用清单(仅交换 ID 与 blob 编号,原文大块头一律
-//     在仓库,数据库不内嵌)。Variants 不再填充——旧口径变体随步骤
-//     全量内嵌曾把单条记录撑到百 MB 级;证据包导出按 Process 全量
-//     收(审计不丢)。无步骤数上限、无异常报警(造物主拍板:最小集
-//     天然几步,出现几十步属装配错误,不设闸)。
+//   - 复现步骤 = 候选池(去同型后),P4-35 ① 起最小集由定稿时模型从中
+//     挑选(P4-62 A:挑选失败/空选不再倒池——见 reprodesc.go);组装侧
+//     只建池与过程清单,直出渲染路径已废;
+//   - P3-05b ①:交换按目标流量过滤(任务授权范围,种子资产标识);
+//   - P4-08 ③ 组装侧去同型:同方法+同路径+同状态的重复交换只保留构成
+//     复现流程的一条(该型首条;非成功状态自成一型不合并);反证变体
+//     流量不进复现步骤;不同 URL/步骤的多步流程不受影响;
+//   - P4-35 ①④:战役范围内全部交换记 Process 引用清单(原文大块头一律
+//     在仓库,R18);证据包导出按 Process 全量收(审计不丢);
+//   - P4-62 B(问题清单 #83)池入口两道过滤:error 交换(未获响应)与
+//     交换目标 host 不在声明锚定资产(含组合链上资产与种子解析 IP,
+//     P4-50 ② 口径)内的成功交换只进过程清单,不进候选池——失败请求
+//     证明不了任何东西,旁支探测(如顺手 GET 无关主机)不构成复现;
+//   - P4-62 C(b):直连旁路流量从工具调用记录确定性组包入池(http_probe
+//     参数结构化直接组;bash curl 仅可静态解析的简单形态,复杂的跳过
+//     并如实计入缺料——不编造),组包文档与镜留痕同构入仓库;
+//   - P4-35 ①:无步骤数上限、无异常报警(最小集天然几步)。
 //
-// 只读账本,不写;由主宰循环与确认裁决同批落账。
-func AssembleRepro(ctx context.Context, store *rings.Store, taskID, claimID, severity string) (*rings.TestClaimRecord, error) {
+// 返回候选池记录与入池诊断(过滤/缺料计数,组原因句用,不落账)。
+// 只读账本;由主宰循环与确认裁决同批落账。
+func AssembleRepro(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore,
+	resolve rings.ScopeResolver, taskID, claimID, severity string) (*rings.TestClaimRecord, ReproPoolDiag, error) {
+	diag := ReproPoolDiag{}
 	falsifySteps, err := ClaimFalsifySteps(ctx, store, taskID, claimID)
 	if err != nil {
-		return nil, err
+		return nil, diag, err
 	}
 	byID := map[string]rings.NodeFull{}
 	for _, s := range falsifySteps {
 		byID[s.ID] = s
 	}
-	// 目标流量过滤口径(P3-05b ①):任务授权范围 = 种子资产标识解析出的
+	// 目标流量过滤口径(P3-05b ①):任务授权范围 = 资产标识解析出的
 	// 目标源(host:port 精确;无端口的 host 级授权)。RoE 的资产引用与
 	// 意图拦截均锚定同一批资产节点,口径同源。
 	scope, err := loadTargetScope(ctx, store, taskID)
 	if err != nil {
-		return nil, err
+		return nil, diag, err
+	}
+	// 声明锚定资产闭包(P4-62 B ②):声明 about 资产(组合声明含链上
+	// 事实的资产),P4-50 ② 写法粒度与种子解析 IP 口径;锚点全无主机
+	// 形态时退 nil(仅按任务范围过滤,不过度收窄)。
+	anchors, err := claimAnchorScope(ctx, store, taskID, claimID)
+	if err != nil {
+		return nil, diag, err
 	}
 	// 每 Step 的操作方法:工具调用记录(工具名+参数截取;submit_* 回流
 	// 入口不是对目标的操作,不计)。
 	ops := map[string][]string{}
+	// 账次序收全部范围内交换(候选池与过程清单共用一次收集;P4-35 ①:
+	// 全量交换先进 Process 引用清单留档,再由去同型收出候选步骤)。
+	var all []rings.ReproStep
+	process := []rings.ReproProcessRef{}
 	evs, err := store.Events(ctx, taskID, 0, 0)
 	if err != nil {
-		return nil, fmt.Errorf("overmind: 定稿读事件流: %w", err)
+		return nil, diag, fmt.Errorf("overmind: 定稿读事件流: %w", err)
 	}
 	for _, ev := range evs {
 		if ev.Kind != rings.EventSwarmRecord {
@@ -1029,7 +1036,7 @@ func AssembleRepro(ctx context.Context, store *rings.Store, taskID, claimID, sev
 		}
 		var r rings.SwarmRecord
 		if err := json.Unmarshal(ev.Payload, &r); err != nil {
-			return nil, fmt.Errorf("overmind: 定稿解码 swarm.record: %w", err)
+			return nil, diag, fmt.Errorf("overmind: 定稿解码 swarm.record: %w", err)
 		}
 		if r.Type != rings.SwarmRecToolCall || r.IsError {
 			continue
@@ -1043,17 +1050,13 @@ func AssembleRepro(ctx context.Context, store *rings.Store, taskID, claimID, sev
 		op := r.ToolName + " " + clipArgs(string(r.ToolArgs), 200)
 		ops[r.StepID] = append(ops[r.StepID], op)
 	}
-	// 账次序收全部范围内交换(候选池与过程清单共用一次收集;P4-35 ①:
-	// 全量交换先进 Process 引用清单留档,再由去同型收出候选步骤)。
-	var all []rings.ReproStep
-	process := []rings.ReproProcessRef{}
 	for _, ev := range evs {
 		if ev.Kind != rings.EventMirrorRecord {
 			continue
 		}
 		var m rings.MirrorRecord
 		if err := json.Unmarshal(ev.Payload, &m); err != nil {
-			return nil, fmt.Errorf("overmind: 定稿解码 mirror.record: %w", err)
+			return nil, diag, fmt.Errorf("overmind: 定稿解码 mirror.record: %w", err)
 		}
 		s, ok := byID[m.StepID]
 		if !ok || (m.Type != rings.MirrorRecHTTP && m.Type != rings.MirrorRecHTTPS) {
@@ -1065,45 +1068,223 @@ func AssembleRepro(ctx context.Context, store *rings.Store, taskID, claimID, sev
 		if m.BlobRef != "" {
 			process = append(process, rings.ReproProcessRef{ExchangeID: m.ExchangeID, BlobRef: m.BlobRef})
 		}
+		// B ①:error 交换(未获响应的任意形态)只进过程清单——失败请求
+		// 证明不了任何东西,不进候选池(P4-62,问题清单 #83)。
+		if m.Error != "" {
+			diag.ErrExchanges++
+			continue
+		}
+		// B ②:交换目标 host 不在声明锚定资产内只进过程清单(旁支探测
+		// 不构成复现;锚定口径含种子解析 IP,P4-50 ②)。
+		if anchors != nil && !anchorsCoverURL(anchors, resolve, m.URL) {
+			diag.OffAnchor++
+			continue
+		}
 		round, _ := s.Detail["round"].(float64)
-		step := rings.ReproStep{
+		all = append(all, rings.ReproStep{
 			Round: int(round), StepID: m.StepID, UnitID: m.UnitID,
-			Short:  reproStepShort(m),
-			Desc:   reproStepDesc(m),
+			Short: reproStepShort(m), Desc: reproStepDesc(m),
 			Method: m.Method, URL: m.URL, Status: m.Status, BlobRef: m.BlobRef,
 			ExchangeID: m.ExchangeID,
+		})
+	}
+	// C(b):直连旁路流量从工具调用记录确定性组包入候选池(镜交换优先:
+	// 同型既有镜留痕时组包条目让位——镜是逐字节的捕获,组包是重构)。
+	if blobs != nil {
+		for _, ev := range evs {
+			if ev.Kind != rings.EventSwarmRecord {
+				continue
+			}
+			var r rings.SwarmRecord
+			if err := json.Unmarshal(ev.Payload, &r); err != nil || r.Type != rings.SwarmRecToolCall || r.IsError {
+				continue
+			}
+			s, bound := byID[r.StepID]
+			if !bound || (r.ToolName != "http_probe" && r.ToolName != "bash") {
+				continue
+			}
+			result := toolCallResult(blobs, r)
+			var pkt *toolPacket
+			if r.ToolName == "http_probe" {
+				pkt = assembleProbePacket(taskID, r.StepID, r.UnitID, r.ToolArgs, result)
+			} else {
+				pkt = assembleBashPacket(taskID, r.StepID, r.UnitID, r.ToolArgs, result)
+			}
+			if pkt.Skipped {
+				diag.ToolSkipped++ // 流量命令不可静态还原:如实缺料,不编造
+				continue
+			}
+			if pkt.Ex == nil {
+				continue // 非流量命令:不是复现原料
+			}
+			// 直连流量同按声明锚定口径过滤(B ②):非锚定目标的组包不进
+			// 候选池(旁支探测无关于声明,镜交换与组包一视同仁)。
+			if anchors != nil && !anchorsCoverURL(anchors, resolve, pkt.Ex.Request.URL) {
+				continue
+			}
+			round, _ := s.Detail["round"].(float64)
+			st, ok := writeToolPacket(blobs, taskID, pkt.Ex, int(round), r.StepID, r.UnitID)
+			if !ok {
+				continue
+			}
+			diag.ToolBuilt++
+			all = append(all, st)
 		}
-		if m.Error != "" {
-			step.Note = "该请求未完成" // 原始错误串在流量页悬停与交换详情,不进复现正文
-		}
-		if list := ops[m.StepID]; len(list) > 0 {
-			step.Op = joinOps(list)
-		}
-		all = append(all, step)
 	}
 	// 去同型(P4-08 ③):型 = 方法+host+路径(不含查询串)+状态,
 	// 保留规则 = 该型首条(型内同状态,"首条成功交换"退化为首条——
 	// 非成功状态自成一型不合并,如 401→绕过→200 的流程叙事保留);
 	// 查询串值差异(防缓存参数等)不另立型,不同路径的多步流程原样保留。
 	// P4-35 ①:去同型结果是候选池——最小集由定稿时模型从中挑选
-	// (Loop.genReproDescs),未选中的交换只留 Process 清单。
-	seen := map[string]bool{}
+	// (pickReproSteps),未选中的交换只留 Process 清单。同型竞争时镜
+	// 留痕优先于工具组包(捕获优于重构,P4-62 C(b))。
+	seen := map[string]int{} // 型 → all 内下标
+	toolOnly := map[string]bool{}
 	rec := &rings.TestClaimRecord{
 		ClaimID: claimID, Type: rings.TestClaimRecRepro, Severity: severity,
 		Process: process,
 	}
 	for _, st := range all {
 		key := reproShapeKey(st.Method, st.URL, st.Status)
-		if seen[key] {
+		if idx, dup := seen[key]; dup {
+			if toolOnly[key] && st.Source == "" {
+				// 镜留痕到位:顶替同型的组包条目(位次保持账次序)。
+				rec.Steps[idx] = st
+				delete(toolOnly, key)
+			}
 			continue // 同型候选只留首条;后续交换在 Process 清单留档
 		}
-		seen[key] = true
+		seen[key] = len(rec.Steps)
+		if st.Source != "" {
+			toolOnly[key] = true
+		}
 		rec.Steps = append(rec.Steps, st)
 	}
 	for i := range rec.Steps {
 		rec.Steps[i].Seq = i + 1
 	}
-	return rec, nil
+	// 操作方法按步骤归并(P4-08 ⑤:证据包收,面板/报告正文不显)。
+	for i := range rec.Steps {
+		if list := ops[rec.Steps[i].StepID]; len(list) > 0 {
+			rec.Steps[i].Op = joinOps(list)
+		}
+	}
+	return rec, diag, nil
+}
+
+// ReproPoolDiag 候选池入池诊断(P4-62:过滤与缺料计数,组"无可用复现
+// 包"原因句用;确定性事实,不落账)。
+type ReproPoolDiag struct {
+	ErrExchanges int // error 交换条数(只进过程清单,B ①)
+	OffAnchor    int // 目标不在声明锚定资产内的成功交换条数(只进过程清单,B ②)
+	ToolSkipped  int // 流量命令不可静态还原的直连调用条数(缺料,C(b))
+	ToolBuilt    int // 由工具调用记录组包的候选条数(C(b))
+}
+
+// Empty 各计数是否全零。
+func (d ReproPoolDiag) Empty() bool {
+	return d.ErrExchanges == 0 && d.OffAnchor == 0 && d.ToolSkipped == 0 && d.ToolBuilt == 0
+}
+
+// toolCallResult 工具调用的结果文本(blob 优先,读不到退截头)。
+func toolCallResult(blobs *swarm.BlobStore, r rings.SwarmRecord) string {
+	if r.ResultRef != "" {
+		if doc, err := blobs.Read(r.ResultRef); err == nil {
+			return string(doc)
+		}
+	}
+	return r.ResultHead
+}
+
+// claimAnchorScope 声明锚定资产的闭包(P4-62 B ②):声明 about 资产,
+// 组合声明并集链上事实(derived_from→Fact)的 about 资产;P4-50 ③ 写法
+// 粒度(裸域名=全端口、host:port=仅此端口、URL 等同裸域名)与 ② 种子
+// 域名当前解析 IP 并入(CoversTarget 判定时解析、闭包级缓存)。RoE 摘除
+// 的资产不贡献锚点。锚点全无主机形态(或声明节点缺失)返回 nil——
+// 调用方仅按任务范围过滤,不过度收窄。
+func claimAnchorScope(ctx context.Context, store *rings.Store, taskID, claimID string) (*rings.ScopeClosure, error) {
+	claim, err := store.Node(ctx, taskID, claimID)
+	if err != nil || claim.Type != rings.NodeTestClaim {
+		return nil, nil
+	}
+	abouts, err := store.Edges(ctx, taskID, rings.EdgeAbout)
+	if err != nil {
+		return nil, fmt.Errorf("overmind: 定稿查判断的资产锚点: %w", err)
+	}
+	anchorIDs := map[string]bool{}
+	collect := func(from string) {
+		for _, e := range abouts {
+			if e.From == from {
+				anchorIDs[e.To] = true
+			}
+		}
+	}
+	collect(claimID)
+	// 组合声明:链上事实的资产同入锚定集(声明由链构成,链环节的目标
+	// 即声明的目标)。
+	if combined, _ := claim.Detail["combined"].(bool); combined {
+		derived, err := store.Edges(ctx, taskID, rings.EdgeDerivedFrom)
+		if err != nil {
+			return nil, fmt.Errorf("overmind: 定稿查组合链: %w", err)
+		}
+		for _, e := range derived {
+			if e.From != claimID {
+				continue
+			}
+			n, err := store.Node(ctx, taskID, e.To)
+			if err == nil && n.Type == rings.NodeFact {
+				collect(n.ID)
+			}
+		}
+	}
+	if len(anchorIDs) == 0 {
+		return nil, nil
+	}
+	var seeds []rings.ScopeSeed
+	approved := map[string]bool{}
+	for id := range anchorIDs {
+		a, err := store.Node(ctx, taskID, id)
+		if err != nil || a.Type != rings.NodeAsset {
+			continue
+		}
+		// 声明锚点自身即判定的"关于哪些资产":发现的资产按已放行对待
+		// (锚定语义先于来源;RoE 摘除在下方 excluded 统一去权)。
+		approved[id] = true
+		seeds = append(seeds, rings.ScopeSeed{ID: a.ID, Title: a.Title, Source: rings.AssetSourceOf(a.Detail)})
+	}
+	if len(seeds) == 0 {
+		return nil, nil
+	}
+	excluded := map[string]bool{}
+	if roe, err := store.CurrentRoE(ctx, taskID); err == nil {
+		excluded = roe.ExcludedAssetSet()
+	}
+	closure := rings.BuildScopeClosure(seeds, approved, excluded)
+	if closure.Empty() {
+		return nil, nil
+	}
+	return closure, nil
+}
+
+// anchorsCoverURL 交换 URL 的目标是否在锚定闭包内(解析失败/无 host =
+// 不在,如实不收;端口缺省按 scheme 取默认)。
+func anchorsCoverURL(c *rings.ScopeClosure, resolve rings.ScopeResolver, rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	if resolve == nil {
+		resolve = rings.DefaultScopeResolver
+	}
+	return c.CoversTarget(u.Hostname(), port, resolve)
 }
 
 // reproOpClip 单步操作方法(完整命令)的落账总量上限(P4-35 ④,问题
@@ -1249,8 +1430,6 @@ func reproStepDesc(m rings.MirrorRecord) string {
 	}
 	var tail string
 	switch {
-	case m.Status == 0 && m.Error != "":
-		tail = "未获响应(" + clipLine(m.Error, 60) + ")"
 	case m.Status >= 300 && m.Status < 400:
 		tail = fmt.Sprintf("目标 %d 跳转", m.Status)
 	case m.Status >= 200 && m.Status < 300 && m.RespBytes > 0:

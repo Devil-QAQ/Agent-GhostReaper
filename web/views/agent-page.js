@@ -141,6 +141,7 @@ export function AgentPage() {
 // 覆盖审计只在有覆盖时出现,操作沉底;hover 微投影(与模型卡同款)。
 function AgentCard({ id, icon, view, params, onEdit }) {
   const paramLine = cardParamLine(id, params);
+  const fixed = view.fixed || []; // 空固定段防崩(服务端恒非空,防患)
   return (
     <Card className="h-full transition-shadow duration-150 hover:shadow-card">
       <CardContent className="flex h-full flex-col gap-4 p-5">
@@ -159,7 +160,7 @@ function AgentCard({ id, icon, view, params, onEdit }) {
         <div className="flex flex-col gap-1">
           <div className="text-[13px]">{view.summary}</div>
           <div className="text-xs text-muted-foreground">
-            固定段 {view.fixed.length} 段 · 内置,编辑不可删
+            固定段 {fixed.length} 段 · 内置,编辑不可删
           </div>
           {paramLine && (
             <div className="truncate num text-xs text-muted-foreground" title={paramLine}>{paramLine}</div>
@@ -216,6 +217,7 @@ function AgentDialog({ roleId, view, params, onReply, onClose }) {
 
   if (!open) return null;
   const fields = PARAM_FIELDS[roleId] || [];
+  const fixed = view.fixed || []; // 空固定段防崩(服务端恒非空,防患)
   const promptDirty = text.trim() !== view.editable_now;
   const paramsDirty = fields.some((f) => fieldValue(f, form) !== f.get(params));
   const dirty = promptDirty || paramsDirty;
@@ -321,11 +323,11 @@ function AgentDialog({ roleId, view, params, onReply, onClose }) {
 
         {/* 固定段折叠:横线 — 箭头 — 文字 — 横线 */}
         <Fold open={fixedOpen} onToggle={() => setFixedOpen((v) => !v)}>
-          固定段 · {view.fixed.length} 段(只读)
+          固定段 · {fixed.length} 段(只读)
         </Fold>
         {fixedOpen && (
           <div className="flex animate-rise flex-col gap-2">
-            {view.fixed.map((seg) => (
+            {fixed.map((seg) => (
               <div key={seg.label} className="rounded-md border border-border/55 bg-input-surface p-3">
                 <div className="mb-2 text-xs font-medium text-muted-foreground">{seg.label}</div>
                 <div className="whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">

@@ -184,11 +184,24 @@ func (l *Loop) evaluateHypotheses(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// P4-64 ④⑥⑧:假设文本(标题/依据/评估理由)评估批次同批改写冻结
+	// ——随各假设的评估记录同一批事务落账;未评估的假设保持原文,
+	// 已挂账且裁决维持的不重复记账(零新信息)。
+	hypoTexts := l.polishHypoTexts(ctx, plans)
 	moved := 0
 	for _, p := range plans {
 		h, ok := pending[p.HypothesisID]
 		if !ok {
 			continue // 未知/已不在待评估集:忽略,不猜
+		}
+		ht := hypoTexts[p.HypothesisID]
+		textEvent := func(events []rings.Event) []rings.Event {
+			if ht.Title == "" && ht.Basis == "" && ht.Reason == "" {
+				return events
+			}
+			return append(events, rings.Event{
+				Kind: rings.EventHypoText, Actor: ActorOvermind, Payload: ht,
+			})
 		}
 		reason := strings.TrimSpace(p.Reason)
 		switch p.Decision {
@@ -201,7 +214,7 @@ func (l *Loop) evaluateHypotheses(ctx context.Context) (int, error) {
 				l.setErr(fmt.Errorf("overmind: 假设 %s 转 verify 意图分级 %q 缺失或非法,保持待评估", p.HypothesisID, p.ActionLevel))
 				continue
 			}
-			if err := l.dispatchVerifyStep(ctx, h, p.VerifyIntent, p.ActionLevel, reason); err != nil {
+			if err := l.dispatchVerifyStep(ctx, h, p.VerifyIntent, p.ActionLevel, reason, ht); err != nil {
 				return moved, err
 			}
 			moved++
@@ -213,13 +226,13 @@ func (l *Loop) evaluateHypotheses(ctx context.Context) (int, error) {
 			if h.Status == rings.HypothesisHeld {
 				continue // 维持挂账:零新信息,不重复记账
 			}
-			if _, err := l.Store.Append(ctx, l.TaskID,
-				rings.Event{Kind: rings.EventHypothesisRecord, Actor: ActorOvermind,
+			if _, err := l.Store.Append(ctx, l.TaskID, textEvent([]rings.Event{
+				{Kind: rings.EventHypothesisRecord, Actor: ActorOvermind,
 					Payload: rings.HypothesisRecord{HypothesisID: h.ID, Type: rings.HypothesisRecEvaluation,
 						Decision: rings.HypothesisHold, Reason: reason}},
-				rings.Event{Kind: rings.EventNodeStateChanged, Actor: ActorOvermind,
+				{Kind: rings.EventNodeStateChanged, Actor: ActorOvermind,
 					Payload: rings.NodeStateChanged{NodeID: h.ID, Status: rings.HypothesisHeld}},
-			); err != nil {
+			})...); err != nil {
 				return moved, fmt.Errorf("overmind: 假设 %s 搁置: %w", h.ID, err)
 			}
 			moved++
@@ -228,13 +241,13 @@ func (l *Loop) evaluateHypotheses(ctx context.Context) (int, error) {
 				l.setErr(fmt.Errorf("overmind: 假设 %s 废弃缺理由(R10 废案有理由),保持待评估", p.HypothesisID))
 				continue
 			}
-			if _, err := l.Store.Append(ctx, l.TaskID,
-				rings.Event{Kind: rings.EventHypothesisRecord, Actor: ActorOvermind,
+			if _, err := l.Store.Append(ctx, l.TaskID, textEvent([]rings.Event{
+				{Kind: rings.EventHypothesisRecord, Actor: ActorOvermind,
 					Payload: rings.HypothesisRecord{HypothesisID: h.ID, Type: rings.HypothesisRecEvaluation,
 						Decision: rings.HypothesisDiscard, Reason: reason}},
-				rings.Event{Kind: rings.EventNodeStateChanged, Actor: ActorOvermind,
+				{Kind: rings.EventNodeStateChanged, Actor: ActorOvermind,
 					Payload: rings.NodeStateChanged{NodeID: h.ID, Status: rings.HypothesisDiscarded}},
-			); err != nil {
+			})...); err != nil {
 				return moved, fmt.Errorf("overmind: 假设 %s 废弃: %w", h.ID, err)
 			}
 			moved++
@@ -249,7 +262,8 @@ func (l *Loop) evaluateHypotheses(ctx context.Context) (int, error) {
 // 验证 Step(detail.kind=verify,绑定假设)+ verifies 边(验证 Step→假设,
 // 回流轨迹)+ 假设迁移 testing,同一批事务落账(不出现"步骤在跑而假设
 // 不在验证中"的中间态)。验证 Step covers 假设锚定的资产,归当前目标。
-func (l *Loop) dispatchVerifyStep(ctx context.Context, h rings.NodeFull, intent, level, reason string) error {
+// ht 为假设文本包装(P4-64 ④⑥⑧:随评估记录同批落账;零值不落)。
+func (l *Loop) dispatchVerifyStep(ctx context.Context, h rings.NodeFull, intent, level, reason string, ht rings.HypoTextPolish) error {
 	abouts, err := l.Store.Edges(ctx, l.TaskID, rings.EdgeAbout)
 	if err != nil {
 		return fmt.Errorf("overmind: 转验证 %s: 查资产锚点: %w", h.ID, err)
@@ -271,6 +285,12 @@ func (l *Loop) dispatchVerifyStep(ctx context.Context, h rings.NodeFull, intent,
 			Decision: rings.HypothesisVerify, Reason: reason, VerifyIntent: strings.TrimSpace(intent),
 		},
 	}}
+	// P4-64 ④⑥⑧:假设文本包装随评估记录同批(空字段不落)。
+	if ht.Title != "" || ht.Basis != "" || ht.Reason != "" {
+		events = append(events, rings.Event{
+			Kind: rings.EventHypoText, Actor: ActorOvermind, Payload: ht,
+		})
+	}
 	stepEvs, err := stepEvents(ctx, l.Store, l.TaskID, stepID, "验证假设: "+h.Title, DispatchOptions{
 		source:              sourceVerify,
 		GoalID:              l.currentGoalID(ctx),

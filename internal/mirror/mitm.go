@@ -7,9 +7,14 @@ package mirror
 // 内层按 HTTP/1.1 逐交换全量留痕(请求行/头/体 + 状态行/头/体,与
 // http 类型同粒度),交换文档入 blob(R18),账本摘要带目标证书校验结论。
 //
-// 目标侧:标准信任链验证,结论如实分类(trusted/self_signed/expired/
-// hostname_mismatch/untrusted/invalid)——不据此拒绝流量。镜是审计通道
-// 不是信任闸:自签/过期的授权目标照常处理,校验事实入档,裁决在审计侧。
+// 目标侧(P4-62 C(a) 起):一律不校验目标证书(定死,不做配置项)——
+// 目标证书无效是渗透常态,镜是留痕设施不是验证者;校验事实仍由
+// classifyConnState 如实分类入档(trusted/self_signed/expired/
+// hostname_mismatch/untrusted/invalid,留痕口径不变)。目标侧握手在
+// 接管前先试(mirror.serveTunnel 经 mitmUp.ensure 预建):协议层拒签
+// 等握手失败时整条隧道退透传(工具与目标端到端直连,镜只留隧道元
+// 数据)——镜不因目标证书/TLS 形态阻断流量,内容原料由工具调用记录
+// 组包补(问题清单 #83)。
 //
 // 兜底:首字节非 TLS ClientHello 的 CONNECT 照旧透传(tunnel 元数据
 // 留痕);客户端拒绝镜 CA(TLS 握手失败)如实记 tunnel 错误,不冒充、
@@ -43,16 +48,16 @@ const peekTimeout = 10 * time.Second
 
 // serveMITM 对已判型为 TLS 的隧道做解密接管。client 为原始连接,
 // br 为已窥探的读缓冲(可能已缓冲 ClientHello 后续字节,连同已消费的
-// 首字节一并经 peekedConn 回放给 TLS 层);rawTarget 为已拨通的目标
-// TCP 连接(首次用,后续重拨由 mitmUp 自理)。started 为隧道起点
-// (留痕计时)。first 为窥探到的 ClientHello 首字节。
-func (s *Session) serveMITM(client net.Conn, br *bufio.Reader, rawTarget net.Conn, target string, started time.Time, first byte) {
+// 首字节一并经 peekedConn 回放给 TLS 层);up 为目标侧已就绪的 mitmUp
+// (serveTunnel 预建,含握手与证书分类;后续重拨由 mitmUp 自理)。
+// started 为隧道起点(留痕计时);first 为窥探到的 ClientHello 首字节。
+func (s *Session) serveMITM(client net.Conn, br *bufio.Reader, up *mitmUp, started time.Time, first byte) {
 	tlsConn := tls.Server(&peekedConn{Conn: client, r: io.MultiReader(bytes.NewReader([]byte{first}), br)}, &tls.Config{
 		NextProtos: []string{"http/1.1"}, // 镜只解 HTTP/1.1;ALPN 依此协商
 		GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			h := chi.ServerName
 			if h == "" {
-				h = hostOf(target) // IP 目标等无 SNI 场景退 CONNECT 目标
+				h = hostOf(up.target) // IP 目标等无 SNI 场景退 CONNECT 目标
 			}
 			return s.m.leafFor(h)
 		},
@@ -60,18 +65,17 @@ func (s *Session) serveMITM(client net.Conn, br *bufio.Reader, rawTarget net.Con
 	_ = tlsConn.SetDeadline(time.Now().Add(tlsHandshakeTimeout))
 	if err := tlsConn.Handshake(); err != nil {
 		// 客户端不信任镜 CA 等:接管失败如实入账(元数据级)。
-		ex := s.newTunnelExchange(target, started)
+		ex := s.newTunnelExchange(up.target, started)
 		ex.Error = "解密接管: 客户端 TLS 握手失败: " + err.Error()
 		s.record(ex)
 		_ = tlsConn.Close()
-		_ = rawTarget.Close()
+		up.close()
 		return
 	}
 	_ = tlsConn.SetDeadline(time.Time{})
 
 	untrack := s.trackTunnel(client)
 	defer untrack()
-	up := &mitmUp{s: s, target: target, raw: rawTarget}
 	defer up.close()
 	var exch atomic.Int64
 	deadline := time.AfterFunc(tunnelMaxLife, func() { _ = client.Close(); up.close() })
@@ -96,7 +100,7 @@ func (s *Session) serveMITM(client net.Conn, br *bufio.Reader, rawTarget net.Con
 	err := inner.Serve(ln)
 	if exch.Load() == 0 {
 		// 握手成功但零交换(空连/内层非 HTTP/寿命到顶):元数据级留痕。
-		ex := s.newTunnelExchange(target, started)
+		ex := s.newTunnelExchange(up.target, started)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			ex.Error = "解密接管: " + err.Error()
 		}

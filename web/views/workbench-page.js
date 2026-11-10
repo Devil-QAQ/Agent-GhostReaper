@@ -232,7 +232,7 @@ export function WorkbenchPage({ currentTask, focus }) {
           )}
           {(currentTask.targets || []).length > 0 && (
             <div className="flex flex-wrap gap-2">
-              {currentTask.targets.map((t) => (
+              {currentTask.targets?.map((t) => (
                 <span
                   key={t}
                   className="rounded-full border px-2 py-0.5 num text-xs text-muted-foreground"

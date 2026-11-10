@@ -107,7 +107,7 @@ func (l *Loop) heartbeatLoop(ctx context.Context) {
 				Detail: map[string]any{
 					"interval_seconds": int(interval.Seconds()),
 					"findings":         len(findings),
-					"note":             "心跳巡检拍(到点必醒,看门狗活性)",
+					"note":             "定时巡检(无事件也到点查看)",
 				},
 			}); berr != nil {
 			l.setErr(berr)
@@ -242,7 +242,7 @@ func (l *Loop) prescreen(ctx context.Context) ([]rings.BlackboxRecord, error) {
 				Detail: map[string]any{
 					"burned_tokens": burn,
 					"threshold":     l.hbBurnTokens(),
-					"note":          "预算消耗异常:单拍窗口 token 消耗超阈",
+					"note":          "预算消耗异常:一个巡检周期内 token 消耗超阈",
 				},
 			})
 		}

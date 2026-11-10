@@ -308,6 +308,22 @@ func main() {
 		if e == nil {
 			return
 		}
+		// P4-64(问题清单 #82)显示层包装钩子:swarm 侧入账点(反证轮
+		// 结论/复测结论)按任务路由到在跑主宰循环生成包装文本——钩子
+		// 读注册表实时取循环,循环退出后自然退 nil(读侧退原文,不阻塞
+		// 入账);执行器为全局一个、循环每任务一个,故经注册表分发。
+		e.RoundHumanGen = func(ctx context.Context, taskID, claimID string, rec *rings.TestClaimRecord) *rings.ClaimRoundHuman {
+			if l := loops.Get(taskID); l != nil {
+				return l.GenRoundHumanFor(ctx, claimID, rec)
+			}
+			return nil
+		}
+		e.RetestNotePolisher = func(ctx context.Context, taskID, claimID string, round int, verdict, note string) *rings.RetestNotePolish {
+			if l := loops.Get(taskID); l != nil {
+				return l.PolishRetestNote(ctx, claimID, round, verdict, note)
+			}
+			return nil
+		}
 		mgr.SetOnTaskRun(taskLoopOf(e))
 		srv.AttachRuntime(e)
 		ij.SetHelm(e.Helm)

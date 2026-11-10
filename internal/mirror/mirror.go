@@ -282,6 +282,13 @@ func (s *Session) serveExchange(w http.ResponseWriter, r *http.Request) {
 // serveTunnel 处理 CONNECT:首字节判型——TLS ClientHello 走解密接管
 // (逐交换全量留痕,与 http 同粒度);其余照旧双向透传(非 TLS 协议
 // 兜底,元数据留痕,tunnel 类型如实区分)。
+//
+// P4-62 C(a)(问题清单 #83):TLS 隧道先与目标侧握手(镜上游不校验
+// 目标证书,定死;见 mitm.go)——目标侧握手失败(协议层拒签等目标
+// TLS 形态问题)时整条隧道退透传:已窥探的 ClientHello 原样回放给
+// 目标(重新拨号,握手失败的连接状态不可信),工具与目标端到端直连,
+// 镜只留隧道元数据。镜是留痕设施不是验证者,不因目标证书/TLS 形态
+// 阻断流量;解密内容缺失时的复现原料由工具调用记录组包补(overmind)。
 func (s *Session) serveTunnel(w http.ResponseWriter, r *http.Request) {
 	target := tunnelTarget(r)
 	started := time.Now()
@@ -332,7 +339,23 @@ func (s *Session) serveTunnel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if first == tlsFirstByte {
-		s.serveMITM(client, br, targetConn, target, started, first)
+		up := &mitmUp{s: s, target: target, raw: targetConn}
+		if err := up.ensure(); err != nil {
+			// 目标侧握手失败:退透传(重拨,失败的连接状态不可信);
+			// 原因随透传留痕一并入账(单条 tunnel 记录)。
+			fresh, derr := net.DialTimeout("tcp", target, tunnelDial)
+			if derr != nil {
+				ex := s.newTunnelExchange(target, started)
+				ex.Error = "解密接管不可行(" + err.Error() + ");透传重拨失败: " + derr.Error()
+				_ = client.Close()
+				s.record(ex)
+				return
+			}
+			s.servePassthroughNote(client, br, fresh, target, started, first,
+				"解密接管不可行,退透传: "+err.Error())
+			return
+		}
+		s.serveMITM(client, br, up, started, first)
 		return
 	}
 	s.servePassthrough(client, br, targetConn, target, started, first)
@@ -342,7 +365,14 @@ func (s *Session) serveTunnel(w http.ResponseWriter, r *http.Request) {
 // 内容;隧道元数据(目标、双向字节、时长、错误)入账。首字节经
 // MultiReader 回放,窥探缓冲一并交还。
 func (s *Session) servePassthrough(client net.Conn, br *bufio.Reader, target net.Conn, url string, started time.Time, first byte) {
+	s.servePassthroughNote(client, br, target, url, started, first, "")
+}
+
+// servePassthroughNote 透传(可携带注记:P4-62 C(a) 上游握手失败退
+// 透传时,原因随本条 tunnel 记录一并如实入账)。
+func (s *Session) servePassthroughNote(client net.Conn, br *bufio.Reader, target net.Conn, url string, started time.Time, first byte, note string) {
 	ex := s.newTunnelExchange(url, started)
+	ex.Error = note
 	untrack := s.trackTunnel(client)
 	defer untrack()
 	// 寿命上限防长隧道挂死;会话 Close 亦强制收拢(trackTunnel)。

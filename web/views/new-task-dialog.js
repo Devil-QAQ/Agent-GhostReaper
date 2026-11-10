@@ -214,7 +214,7 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
     setTitle(src?.title ?? draft?.title ?? "");
     setDescription(src?.description ?? draft?.description ?? "");
     setTaskType(src?.task_type === "redteam" ? "redteam" : "pentest");
-    const goalsIn = src ? src.goals : Array.isArray(draft?.goals) ? draft.goals.join("\n") : "";
+    const goalsIn = src ? src.goals : Array.isArray(draft?.goals) ? draft.goals?.join("\n") : "";
     setGoalsText(typeof goalsIn === "string" ? goalsIn : "");
     setNotes(src?.notes ?? "");
     setExcluded(src?.excluded ?? "");
@@ -397,7 +397,7 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
       gotNotes.length > 0 ? `注意事项 ${gotNotes.length}` : "",
       assets.length > 0 ? `资产 ${assets.length}` : "",
       gotExcluded.length > 0 ? `不要测 ${gotExcluded.length}` : "",
-      (body.constraints || []).length > 0 ? `拦截规则 ${body.constraints.length}` : "",
+      (body.constraints || []).length > 0 ? `拦截规则 ${body.constraints?.length}` : "",
     ].filter(Boolean);
     toast.success(parts.length > 0 ? `已回填：${parts.join(" · ")},逐条核对` : "描述里没有可提取的内容");
   };

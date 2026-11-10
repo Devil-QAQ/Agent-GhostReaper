@@ -41,6 +41,13 @@ export function processUnlisted(repro, stepsTotal = 0) {
   return n + (repro.variants_count || 0);
 }
 
+// emptyReproText 空复现区文案:P4-62 A 起兜底直出废除——无复现包的
+// 定稿带冻结原因句(no_repro_reason,面板与报告同句);旧记录无原因
+// 退既有空态句。
+function emptyReproText(repro) {
+  return repro?.no_repro_reason || "(反证轮未产生可复现的流量记录)";
+}
+
 export function ReproStepsList({ tid, steps, process = 0 }) {
   if (!steps || steps.length === 0) {
     return (
@@ -157,16 +164,14 @@ export function ReproStepsPaged({ tid, claimID, repro, stepsTotal = 0 }) {
     );
   }
   if (failed && steps.length === 0) {
-    return <span className="text-xs text-status-danger">读取失败:{failed}</span>;
+    return <span className="text-xs text-status-danger">读取失败:{failed}</span>
   }
   if (steps.length === 0) {
     return done ? (
-      <span className="text-xs text-muted-foreground">
-        (反证轮未产生可复现的流量记录)
-      </span>
+      <span className="text-xs text-muted-foreground">{emptyReproText(repro)}</span>
     ) : (
       <span className="text-xs text-muted-foreground">读取复现步骤…</span>
-    );
+    )
   }
   return (
     <ReproStepsList tid={tid} steps={steps} process={processUnlisted(repro, stepsTotal || steps.length)} />

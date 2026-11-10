@@ -326,7 +326,9 @@ func (s *Server) handleShepherdPost(w http.ResponseWriter, r *http.Request) {
 
 // handleNodeDetail 图上节点详情(fact# / claim / step / asset 引用的
 // 点击核对面;会话页与后续页面共用)。事实节点带深入按钮禁用态
-// (P4-48:成果详情走发现详情端点同款字段)。
+// (P4-48:成果详情走发现详情端点同款字段)。P4-64 ⑤:节点抽屉定制
+// 字段区按类型补发数据面——步骤的执行单位与会话记录、事实的关联
+// 资产与文本包装(node_polish)。
 func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 	if !s.taskExists(taskID) {
@@ -343,8 +345,40 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 		"asset_class": string(n.AssetClass), "detail": n.Detail,
 		"created_rev": n.CreatedRev, "updated_rev": n.UpdatedRev,
 	}
-	if n.Type == rings.NodeFact {
+	switch n.Type {
+	case rings.NodeFact:
 		view["dive_disabled"] = s.diveDisabledOf(r.Context(), taskID)
+		// 关联资产(about 边直查,带标题)。
+		if abouts, aerr := s.Store.Edges(r.Context(), taskID, rings.EdgeAbout); aerr == nil {
+			assets := []map[string]string{}
+			if ag, gerr := s.Store.AssetGraph(r.Context(), taskID); gerr == nil {
+				titles := map[string]string{}
+				for _, a := range ag.Assets {
+					titles[a.ID] = a.Title
+				}
+				for _, e := range abouts {
+					if e.From != n.ID {
+						continue
+					}
+					assets = append(assets, map[string]string{"id": e.To, "title": titles[e.To]})
+				}
+			}
+			view["assets"] = assets
+		}
+		// 事实文本包装(P4-64 ③⑥:标题短句+描述;读侧优先,节点原文仍在
+		// 标题区与原始数据)。
+		if np, nerr := s.Store.NodePolish(r.Context(), taskID); nerr == nil {
+			if p := np[n.ID]; p.Title != "" || p.Statement != "" {
+				view["polished_title"] = p.Title
+				view["polished_statement"] = p.Statement
+			}
+		}
+	case rings.NodeStep:
+		// 执行单位与会话记录(最近一次单位会话;重派轮各有会话时取最近)。
+		if unit, sid, ok, uerr := s.Store.StepLatestSession(r.Context(), taskID, n.ID); uerr == nil && ok {
+			view["unit_id"] = unit
+			view["transcript_id"] = sid
+		}
 	}
 	writeJSON(w, http.StatusOK, view)
 }

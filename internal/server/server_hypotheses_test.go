@@ -97,6 +97,13 @@ func TestServerHypotheses(t *testing.T) {
 		h1["verifier_unit"] != "u2" || h1["discoverer_unit"] != "u1" || h1["discover_step"] != "s1" {
 		t.Fatalf("h1 列表视图不符: %+v", h1)
 	}
+	// 立账时刻下发(P4-61 排序口径:假设页三区时间倒序的比较键)。
+	if at, _ := h1["added_at"].(string); at == "" {
+		t.Fatalf("h1 应带立账时刻(P4-61): %+v", h1)
+	}
+	if at, _ := byID["h3"]["added_at"].(string); at == "" {
+		t.Fatalf("h3 应带立账时刻(P4-61): %+v", byID["h3"])
+	}
 	if ids, _ := h1["asset_ids"].([]any); len(ids) != 1 || ids[0] != "web2" {
 		t.Fatalf("h1 应锚定 web2: %+v", h1["asset_ids"])
 	}

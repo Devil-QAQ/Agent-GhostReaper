@@ -24,6 +24,7 @@ import (
 	"ghostreaper/internal/mirror"
 	"ghostreaper/internal/report"
 	"ghostreaper/internal/rings"
+	"ghostreaper/internal/swarm"
 )
 
 // 流量原文分段口径:默认段 64KiB,单段上限 1MiB(16MB 正文最多 256 段,
@@ -174,6 +175,12 @@ func (s *Server) mirrorExchange(ctx context.Context, taskID, exID string) (*ring
 		break
 	}
 	if rec == nil {
+		// P4-62 C(b):组包复现步骤的交换文档(工具调用记录重构,"ta-"
+		// 前缀)不在镜事件流——按定稿步骤的编号回退取回,与镜交换同一
+		// 渲染通道(展示与操作同源)。
+		if st, ok := s.reproToolStep(ctx, taskID, exID); ok {
+			return st.record(), st.exchange(s.blobStore()), st.at, nil
+		}
 		return nil, nil, time.Time{}, fmt.Errorf("流量记录 %s 不在任务 %s 留痕内", exID, taskID)
 	}
 	var ex mirror.Exchange
@@ -187,6 +194,62 @@ func (s *Server) mirrorExchange(ctx context.Context, taskID, exID string) (*ring
 		}
 	}
 	return rec, &ex, at, nil
+}
+
+// reproToolStep 定稿步骤里的组包交换(P4-62 C(b)):扫任务的 repro
+// 记录,按 ExchangeID 命中 source=tool 的步骤(P4-35 后记录 KB 级,
+// 定稿记录有限,定向读不触全量事件)。读不到返回 ok=false(按不存在
+// 处理,调用方如实 404)。
+func (s *Server) reproToolStep(ctx context.Context, taskID, exID string) (*reproToolStepRef, bool) {
+	evs, err := s.Store.EventsByKinds(ctx, taskID, rings.EventTestClaimRecord)
+	if err != nil {
+		return nil, false
+	}
+	for i := range evs {
+		var r rings.TestClaimRecord
+		if json.Unmarshal(evs[i].Payload, &r) != nil || r.Type != rings.TestClaimRecRepro {
+			continue
+		}
+		for _, st := range r.Steps {
+			if st.ExchangeID == exID && st.Source == "tool" {
+				return &reproToolStepRef{step: st, at: evs[i].OccurredAt}, true
+			}
+		}
+	}
+	return nil, false
+}
+
+// reproToolStepRef 组包步骤的回放引用。
+type reproToolStepRef struct {
+	step rings.ReproStep
+	at   time.Time
+}
+
+// record 镜摘要形态(元数据条口径;Type http——组包文档本身是 http
+// 请求包形态,与镜交换同渲染)。
+func (ref *reproToolStepRef) record() *rings.MirrorRecord {
+	return &rings.MirrorRecord{
+		ExchangeID: ref.step.ExchangeID, Type: rings.MirrorRecHTTP,
+		StepID: ref.step.StepID, UnitID: ref.step.UnitID,
+		Method: ref.step.Method, URL: ref.step.URL, Status: ref.step.Status,
+		BlobRef: ref.step.BlobRef,
+	}
+}
+
+// exchange blob 交换文档(读不到如实 nil:调用方按无原文处理)。
+func (ref *reproToolStepRef) exchange(blobs *swarm.BlobStore) *mirror.Exchange {
+	if blobs == nil || ref.step.BlobRef == "" {
+		return nil
+	}
+	doc, err := blobs.Read(ref.step.BlobRef)
+	if err != nil {
+		return nil
+	}
+	var ex mirror.Exchange
+	if json.Unmarshal(doc, &ex) != nil {
+		return nil
+	}
+	return &ex
 }
 
 // handleTrafficDetail 单条交换元数据:请求/响应行与头 + 正文尺寸(正文

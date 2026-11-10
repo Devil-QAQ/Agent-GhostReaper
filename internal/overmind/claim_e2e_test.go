@@ -127,6 +127,11 @@ func TestClaimLifecycleE2E(t *testing.T) {
 	packURLRe := regexp.MustCompile(`-\s+web1 \[service\] (http://\S+)`)
 	model := newGatedScriptedModel(func(rr *recordedRequest) scriptedReply {
 		if len(rr.ToolsOffered) == 0 {
+			// P4-62 A:定稿最小集挑选会话(候选池事实包→选择 JSON)——
+			// 如实挑 seq 1(字段留空退确定性兜底)。
+			if strings.Contains(rr.LastUser, "复现步骤事实") {
+				return scriptedReply{Text: `{"steps":[{"seq":1}]}`, Finish: "stop"}
+			}
 			if strings.Contains(rr.LastUser, "审计主站敏感路径") {
 				return scriptedReply{Text: `{"new_intents":[]}`, Finish: "stop"}
 			}

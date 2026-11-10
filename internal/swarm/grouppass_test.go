@@ -383,10 +383,11 @@ func TestGroupPassKeepsDenyLines(t *testing.T) {
 	pack := &TaskPack{TaskID: task, StepID: "s1", StepIntent: "直连对照", ActionLevel: rings.ActionReadOnly, Authorization: RoE{}}
 	approveBypass(t, gate, env, pack, json.RawMessage(`{"command":"curl --noproxy '*' http://127.0.0.1:1/a"}`))
 
-	// 组内拒绝处置:放行态不越过,直接拒绝熔断。
+	// 组内拒绝处置:放行态不越过,直接拒绝(P4-63 B:拒动作不熔断单位,
+	// 拒绝文案为换路指引)。
 	d := env.approvalGate(pack)(ctx, "bash", json.RawMessage(`{"command":"echo p417-deny-cmd"}`), permission.Context{})
-	if d.Behavior != permission.Deny || env.deniedReason == "" {
-		t.Fatalf("拒绝处置的组内规则应照旧拒绝: %+v", d)
+	if d.Behavior != permission.Deny || env.deniedReason != "" || !strings.Contains(d.Message, "命令已被拦截") {
+		t.Fatalf("拒绝处置的组内规则应照旧拒绝(不熔断单位): %+v", d)
 	}
 	recs := approvalEvents(t, store, task)
 	if last := recs[len(recs)-1]; last.Type != rings.ApprovalRecDenied || last.DenyLine != rings.DenyLineHardRule {

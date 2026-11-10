@@ -192,7 +192,7 @@ func TestAssembleReproDedupShapes(t *testing.T) {
 		}
 	}
 
-	got, err := AssembleRepro(ctx, store, task, "tc-x", "high")
+	got, _, err := AssembleRepro(ctx, store, nil, nil, task, "tc-x", "high")
 	if err != nil {
 		t.Fatalf("定稿组装失败: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestGenReproDescs(t *testing.T) {
 		}
 		l := &Loop{TaskID: task, Store: store, Provider: prov}
 		rec := mkRec("")
-		l.genReproDescs(ctx, "tc-x", rec)
+		l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{})
 		if len(rec.Steps) != 2 {
 			t.Fatalf("最小集应恰选 2 步(seq 2/3;候选 1 是对比交换不选): %+v", rec.Steps)
 		}
@@ -302,7 +302,7 @@ func TestGenReproDescs(t *testing.T) {
 		}
 	})
 
-	t.Run("坏回复回退候选池", func(t *testing.T) {
+	t.Run("坏回复重试一次后标注未生成", func(t *testing.T) {
 		model := newGatedScriptedModel(func(rr *recordedRequest) scriptedReply {
 			return scriptedReply{Text: "这不是 JSON", Finish: "stop"}
 		})
@@ -313,14 +313,18 @@ func TestGenReproDescs(t *testing.T) {
 		}
 		l := &Loop{TaskID: task, Store: store, Provider: prov}
 		rec := mkRec("")
-		l.genReproDescs(ctx, "tc-x", rec)
-		if len(rec.Steps) != 3 || rec.Steps[0].Desc != "请求 /admin,目标返回 200" ||
-			rec.Steps[0].Short != "GET /admin" {
-			t.Fatalf("坏回复应回退候选池确定性兜底: %+v", rec.Steps[0])
+		l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{})
+		// P4-62 A:兜底直出废除——挑选失败重试一次,再失败复现区如实
+		// 标注未生成,候选池不再倒出。
+		if len(rec.Steps) != 0 || rec.NoReproReason != reproNoReproFailed {
+			t.Fatalf("坏回复重试后应标注未生成而非倒池: steps=%d reason=%q", len(rec.Steps), rec.NoReproReason)
+		}
+		if n := len(model.requests()); n != 2 {
+			t.Fatalf("重试恰一次(共 2 次请求),得到 %d", n)
 		}
 	})
 
-	t.Run("未命中seq丢弃全未命中整体回退", func(t *testing.T) {
+	t.Run("未命中seq丢弃全未命中整体按失败处理", func(t *testing.T) {
 		model := newGatedScriptedModel(func(rr *recordedRequest) scriptedReply {
 			return scriptedReply{Text: `{"steps":[{"seq":99,"short":"x","desc":"y","purpose":"z"},{"seq":1,"desc":"向 k3.local 发 GET /admin,无需凭据;返回 200 即复现"}]}`, Finish: "stop"}
 		})
@@ -331,7 +335,7 @@ func TestGenReproDescs(t *testing.T) {
 		}
 		l := &Loop{TaskID: task, Store: store, Provider: prov}
 		rec := mkRec("")
-		l.genReproDescs(ctx, "tc-x", rec)
+		l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{})
 		if len(rec.Steps) != 1 || rec.Steps[0].Seq != 1 || rec.Steps[0].ExchangeID != "m1" {
 			t.Fatalf("未命中 seq 99 应丢弃,有效选择 seq 1 生效: %+v", rec.Steps)
 		}
@@ -340,12 +344,13 @@ func TestGenReproDescs(t *testing.T) {
 		}
 	})
 
-	t.Run("无Provider零外呼", func(t *testing.T) {
+	t.Run("无Provider零外呼如实标注", func(t *testing.T) {
 		l := &Loop{TaskID: task, Store: store}
 		rec := mkRec("")
-		l.genReproDescs(ctx, "tc-x", rec) // 不应 panic/改写
-		if len(rec.Steps) != 3 || rec.Steps[0].Desc != "请求 /admin,目标返回 200" {
-			t.Fatalf("无 Provider 应原样保留候选池: %+v", rec.Steps[0])
+		l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{}) // 不应 panic/外呼
+		// P4-62 A:未配挑选模型时零外呼,复现区如实标注,不倒池。
+		if len(rec.Steps) != 0 || rec.NoReproReason == "" {
+			t.Fatalf("无 Provider 应标注未生成而非倒池: steps=%d reason=%q", len(rec.Steps), rec.NoReproReason)
 		}
 	})
 }

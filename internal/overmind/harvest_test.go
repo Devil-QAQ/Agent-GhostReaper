@@ -189,7 +189,7 @@ func TestAssembleReproIncludesHTTPS(t *testing.T) {
 		}
 	}
 
-	got, err := AssembleRepro(ctx, store, task, "tc-x", "high")
+	got, _, err := AssembleRepro(ctx, store, nil, nil, task, "tc-x", "high")
 	if err != nil {
 		t.Fatalf("定稿组装失败: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestAssembleReproTargetScopeFilter(t *testing.T) {
 		}
 	}
 
-	got, err := AssembleRepro(ctx, store, task, "tc-s", "medium")
+	got, _, err := AssembleRepro(ctx, store, nil, nil, task, "tc-s", "medium")
 	if err != nil {
 		t.Fatalf("定稿组装失败: %v", err)
 	}
@@ -291,8 +291,11 @@ func TestReproStepDesc(t *testing.T) {
 			[]string{"请求 /a/b", "目标返回 200(335 字节)"}, nil},
 		{rings.MirrorRecord{Method: "DELETE", URL: "http://h/item/1", Status: 204},
 			[]string{"请求删除 /item/1", "目标返回 204"}, nil},
-		{rings.MirrorRecord{Method: "GET", URL: "http://h/x", Status: 0, Error: "connection refused"},
-			[]string{"未获响应", "connection refused"}, nil},
+		// P4-62 B ①:error 交换只进过程清单,不再进候选步骤——确定性描述
+		// 的"未获响应(错误原文)"分支已随直出路径删除;Status 0 无错误仍
+		// 如实说"未获响应"。
+		{rings.MirrorRecord{Method: "GET", URL: "http://h/x", Status: 0},
+			[]string{"未获响应"}, []string{"connection refused"}},
 		{rings.MirrorRecord{Method: "GET", URL: "http://h/" + strings.Repeat("p", 300), Status: 200},
 			[]string{"…"}, nil},
 	}

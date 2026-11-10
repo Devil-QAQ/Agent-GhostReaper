@@ -43,6 +43,14 @@ build-all: web
 # 前置闸(P4-31 ⑨):融合设计律扫描——字号五级/间距阶梯/组件高度/圆角
 # 尺寸表/写死色值,覆盖 views 与 components 全部文件(含 ui/ 原件与
 # 弹窗抽屉模板),越级值过不了构建。
+# 前置闸(P4-60 ③):无保护成员方法调用扫描——属性链直调
+# startsWith/map/length 等且成员名前无 ?.,上游字段缺失即整页白屏
+# (v1.2.1 审批记录详情崩溃同类);存量安全点人工核定入白名单
+# (web/scripts/unprotected-methods-whitelist.txt)随仓维护,新增违例
+# 与白名单失配都过不了构建。
+# 前置闸(P4-61):发现区四页签排序类级测试——时间倒序口径(立账时刻,
+# 同刻版本号)/三区归类(过程置顶/正常/废弃沉底)/区优先于时间/重开再
+# 确认位置不变/乱序落位确定/筛选与排序交换;比较器改动过不了构建。
 web:
 	node $(WEB_DIR)/scripts/check-jsx-refs.mjs
 	node $(WEB_DIR)/scripts/check-ui-words.mjs
@@ -50,7 +58,9 @@ web:
 	node $(WEB_DIR)/scripts/check-status-words.mjs
 	node $(WEB_DIR)/scripts/check-fusion-rules.mjs
 	node $(WEB_DIR)/scripts/check-unbounded-events.mjs
+	node $(WEB_DIR)/scripts/check-unprotected-methods.mjs
 	node $(WEB_DIR)/scripts/test-task-status-matrix.mjs
+	node $(WEB_DIR)/scripts/test-finding-sort.mjs
 	cd $(WEB_DIR) && { [ -f package-lock.json ] && npm ci || npm install; } && NEXT_TELEMETRY_DISABLED=1 npm run build
 	rm -rf $(WEB_DIST) && cp -R $(WEB_DIR)/out $(WEB_DIST)
 
@@ -62,6 +72,7 @@ test:
 	node $(WEB_DIR)/scripts/check-unbounded-events.mjs
 	node $(WEB_DIR)/scripts/test-fusion-rules.mjs
 	node $(WEB_DIR)/scripts/test-task-status-matrix.mjs
+	node $(WEB_DIR)/scripts/test-finding-sort.mjs
 	go test ./...
 
 run: build

@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -117,21 +118,25 @@ func (s *Server) claimTimingOf(ctx context.Context, taskID, claimID string) clai
 // 建议区:report.Remediation 确定性查表,与报告导出同源同一张表)+
 // 绑定的流量证据与声明证据版本(P3-02)。
 // Timeline/Alternatives/Repro 即 report 卷宗类型(JSON 口径不变)。
+// RoundHumans 逐轮反证人话(P4-64 ①:每轮随 falsify 记录入账冻结,
+// 锤炼中声明即有;存量旧定稿的 repro.Rounds 由前端合读,同轮号新
+// 事件优先)。
 type claimDetailView struct {
-	Claim           claimView           `json:"claim"`
-	Alternatives    []report.AltView    `json:"alternatives"`
-	Timeline        []report.CaseEntry  `json:"timeline"`
-	Remediation     []string            `json:"remediation"` // 查表修复建议(未命中为空,读侧如实呈现)
-	Repro           *report.ReproFinal  `json:"repro,omitempty"`
-	Evidence        []claimEvidenceView `json:"evidence"`                // 绑定的流量证据(首绑次序,去重)
-	EvidenceVersion int64               `json:"evidence_version"`        // 声明证据版本(绑定+定稿累计)
-	Reopenable      bool                `json:"reopenable"`              // Confirmed/不成立/待确认 可重开(结论可反驳;不成立=P4-55 ②)
-	Retests         []retestView        `json:"retests"`                 // 复测历史(第 1 轮起,最新在尾;P3-06)
-	Replays         []replayView        `json:"replays"`                 // 重放校验历史(第 1 轮起,最新在尾;P3-07)
-	Origin          claimOriginView     `json:"origin"`                  // 成果溯源:发现单位与反证单位(P3-13b ①)
-	Timing          claimTimingView     `json:"timing"`                  // 确认耗时拆解(P4-08 ②:落地→终态 排队/执行/轮次)
-	Followup        claimFollowupView   `json:"followup"`                // 成果追问会话摘要(P4-14:入口按钮"已 N 问"的数据面)
-	DiveDisabled    string              `json:"dive_disabled,omitempty"` // 深入按钮禁用态(P4-48:空 = 可用;终态任务 = 悬停文案"任务已结束")
+	Claim           claimView             `json:"claim"`
+	Alternatives    []report.AltView      `json:"alternatives"`
+	Timeline        []report.CaseEntry    `json:"timeline"`
+	RoundHumans     []rings.FalsifyRoundHuman `json:"round_humans,omitempty"`
+	Remediation     []string              `json:"remediation"` // 查表修复建议(未命中为空,读侧如实呈现)
+	Repro           *report.ReproFinal    `json:"repro,omitempty"`
+	Evidence        []claimEvidenceView   `json:"evidence"`                // 绑定的流量证据(首绑次序,去重)
+	EvidenceVersion int64                 `json:"evidence_version"`        // 声明证据版本(绑定+定稿累计)
+	Reopenable      bool                  `json:"reopenable"`              // Confirmed/不成立/待确认 可重开(结论可反驳;不成立=P4-55 ②)
+	Retests         []retestView          `json:"retests"`                 // 复测历史(第 1 轮起,最新在尾;P3-06)
+	Replays         []replayView          `json:"replays"`                 // 重放校验历史(第 1 轮起,最新在尾;P3-07)
+	Origin          claimOriginView       `json:"origin"`                  // 成果溯源:发现单位与反证单位(P3-13b ①)
+	Timing          claimTimingView       `json:"timing"`                  // 确认耗时拆解(P4-08 ②:落地→终态 排队/执行/轮次)
+	Followup        claimFollowupView     `json:"followup"`                // 成果追问会话摘要(P4-14:入口按钮"已 N 问"的数据面)
+	DiveDisabled    string                `json:"dive_disabled,omitempty"` // 深入按钮禁用态(P4-48:空 = 可用;终态任务 = 悬停文案"任务已结束")
 }
 
 // claimFollowupView 成果追问摘要(P4-14):当前轮次(0 = 尚未追问)、
@@ -229,6 +234,38 @@ func polishedFactMapOf(digests map[string]rings.ClaimDigest) map[string]string {
 	return out
 }
 
+// overlayFactPolish 事实确认批次文本覆盖(P4-64 ③,问题清单 #82):
+// node_polish 投影里的事实描述(收割确认时生成,不限于已定稿判断链
+// 上的事实)优先于判断摘要反查——直接覆盖进优先表;读侧空表零变化。
+func (s *Server) overlayFactPolish(ctx context.Context, taskID string, polished map[string]string) {
+	np, err := s.Store.NodePolish(ctx, taskID)
+	if err != nil {
+		return // 读包装失败如实退既有优先表,不影响其余装配
+	}
+	for id, p := range np {
+		if p.Statement != "" {
+			polished[id] = p.Statement
+		}
+	}
+}
+
+// polishedNodeTitleOf 任务级"节点标题短句"优先表(P4-64 ⑥:事实/假设
+// 标题短句标准校对,年轮图/进度图节点卡与链路图等全站消费点共用;
+// 空表 = 全退节点标题)。
+func (s *Server) polishedNodeTitleOf(ctx context.Context, taskID string) map[string]string {
+	out := map[string]string{}
+	np, err := s.Store.NodePolish(ctx, taskID)
+	if err != nil {
+		return out
+	}
+	for id, p := range np {
+		if p.Title != "" {
+			out[id] = p.Title
+		}
+	}
+	return out
+}
+
 // handleClaimDetail 发现详情 API(GET /api/tasks/{id}/claims/{cid}):
 // 列表接口保持轻量,详情按 finding_id 惰性拉取(第五章 §4)。全部读账本
 // 确定性组装,零 LLM(R17 同源);卷宗(时间线/解释/定稿+原文回放)与
@@ -273,6 +310,17 @@ func (s *Server) handleClaimDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	v.Alternatives = cs.Alternatives
 	v.Timeline = cs.Timeline
+	// 逐轮人话(P4-64 ①:按轮升序下发;锤炼中声明无需等定稿)。
+	if len(cs.RoundHumans) > 0 {
+		rounds := make([]int, 0, len(cs.RoundHumans))
+		for r := range cs.RoundHumans {
+			rounds = append(rounds, r)
+		}
+		sort.Ints(rounds)
+		for _, r := range rounds {
+			v.RoundHumans = append(v.RoundHumans, cs.RoundHumans[r])
+		}
+	}
 	// 声明文本优先定稿校对稿(P4-59 ①:报告级文风——描述/危害/事实
 	// 描述;未生成退节点原文,机器判定与审计仍读节点)。
 	polished := map[string]string{}
@@ -289,6 +337,9 @@ func (s *Server) handleClaimDetail(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// P4-64 ③:事实自身的确认批次文本(node_polish)优先于判断摘要反查
+	// ——不限于已定稿判断链上的事实;标题短句(P4-64 ⑥)。
+	s.overlayFactPolish(ctx, taskID, polished)
 	// 攻击链环节(P2-06 组合声明):detail.chain 逐环节下钻事实陈述
 	//(血缘边即 derived_from→Fact,两侧同源)。列表与详情共用同一装配;
 	// 环节事实标题优先定稿校对稿(P4-59 ①,链上事实即本判断摘要里的
@@ -389,10 +440,16 @@ func (s *Server) claimRetestOf(ctx context.Context, taskID, claimID string) ([]r
 		if json.Unmarshal(ent.P, &rec) != nil {
 			continue
 		}
+		note := rec.Note
+		// P4-64 ⑦:复测备注优先校对稿(入账时过通道冻结);无校对稿退
+		// 机器记录 Note 原文(存量旧轮/未生成)。
+		if n := proj.RetestNotes[rec.Round]; n != "" {
+			note = n
+		}
 		rv := retestView{
 			Round: rec.Round, Verdict: rec.RetestVerdict,
 			At:           rings.FmtLocal(ent.At),
-			Note:         rec.Note,
+			Note:         note,
 			EvidenceHead: rec.EvidenceHead, EvidenceRef: rec.EvidenceRef,
 			SessionID: rec.StepID, UnitID: rec.UnitID,
 		}
@@ -606,14 +663,16 @@ func (s *Server) handleClaimReopen(w http.ResponseWriter, r *http.Request) {
 const reproPageSize = 8
 
 // reproStepsPage 分段页视图:步骤(含 blob 原文回放,与报告同源同一
-// 装配)+ 分段游标。
+// 装配)+ 分段游标。NoReproReason 为无复现包的原因(P4-62 A:空选/挑选
+// 失败如实呈现,前端空态渲染)。
 type reproStepsPage struct {
-	Rev      int64                  `json:"rev"`
-	Severity string                 `json:"severity,omitempty"`
-	Steps    []report.ReproStepView `json:"steps"`
-	Offset   int                    `json:"offset"`
-	Total    int                    `json:"total"`
-	HasMore  bool                   `json:"has_more"`
+	Rev           int64                  `json:"rev"`
+	Severity      string                 `json:"severity,omitempty"`
+	NoReproReason string                 `json:"no_repro_reason,omitempty"`
+	Steps         []report.ReproStepView `json:"steps"`
+	Offset        int                    `json:"offset"`
+	Total         int                    `json:"total"`
+	HasMore       bool                   `json:"has_more"`
 }
 
 // handleClaimRepro 复现步骤分段 API(GET /api/tasks/{id}/claims/{cid}/repro
@@ -649,7 +708,7 @@ func (s *Server) handleClaimRepro(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, page)
 		return
 	}
-	page.Rev, page.Severity = proj.Repro.Rev, proj.Repro.Severity
+	page.Rev, page.Severity, page.NoReproReason = proj.Repro.Rev, proj.Repro.Severity, proj.Repro.NoReproReason
 	steps := proj.Repro.Steps
 	page.Total = len(steps)
 	if offset < len(steps) {

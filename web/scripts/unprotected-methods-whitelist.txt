@@ -1,0 +1,68 @@
+# 无保护成员方法调用 · 存量安全点白名单(P4-60 ③,问题清单 #81)
+# 格式: 相对路径::点链表达式  # 核定依据
+# 闸门见 web/scripts/check-unprotected-methods.mjs;白名单失配(代码
+# 已改、表达式不存在)同样过不了构建——改代码时同步本文件。
+# 核定原则:本地状态/本地构造/浏览器与标准库契约/后端值类型字段无
+# omitempty 恒存在/代码已有守卫,五类放行;API 切片类字段(可能 null)
+# 一律 ?. 或守卫,不进本名单。
+# 行号仅核定时定位参考,键按表达式匹配(同文件同表达式多处共用一条)。
+
+# —— 浏览器/DOM 事件与标准库契约(恒字符串) ——
+components/app-shell.js::e.key.toLowerCase  # 键盘事件 e.key 浏览器契约恒字符串(131)
+components/app-shell.js::location.hash.replace  # location.hash 浏览器契约恒字符串(86)
+views/roe-page.js::e.target.value.replace  # 输入框 e.target.value DOM 契约恒字符串(1189)
+views/new-task-dialog.js::hostname.toLowerCase  # new URL().hostname 标准库契约恒字符串(90)
+
+# —— 后端值类型字段无 omitempty,恒存在(Go string 零值序列化为 "") ——
+components/chat-blocks.js::msg.text.split  # MessageView.Text 无 omitempty(server_shepherd.go)(113)
+views/findings-page.js::f.title.length  # FactRefView.Title 无 omitempty(server.go:1962)(662)
+views/findings-page.js::f.title.slice  # 同上(662)
+views/new-task-dialog.js::c.name.toLowerCase  # categoryView.Name 无 omitempty(server_tasks_meta.go)(301)
+views/settings-page.js::rule.name.startsWith  # guardRuleBody.Name 无 omitempty(server_guard.go:55)(446)
+views/settings-page.js::rule.name.replace  # 同上(461/493/511)
+
+# —— 模板串接收者(拼接结果恒字符串) ——
+views/findings-page.js::c.id.toLowerCase  # 接收者是模板串 `${...}` 拼接,恒字符串(298)
+
+# —— 代码已有守卫(提前返回/Array.isArray/typeof) ——
+components/app-shell.js::detail.pending.filter  # 上行 if (!detail || !Array.isArray(detail.pending)) return(202)
+views/new-task-dialog.js::src.constraints.map  # Array.isArray(src?.constraints) 三元守卫(242)
+views/new-task-dialog.js::a.title.trim  # a && typeof a.title === "string" 守卫内(372)
+views/tasks-page.js::body.assets.map  # if (ok && Array.isArray(body?.assets)) 块内(217/220)
+views/tasks-page.js::g.body.map  # if (g.ok && Array.isArray(g.body)) 守卫内(224)
+
+# —— 本地构造恒数组(年轮图/资产网投影,构造函数返回值恒含数组) ——
+views/annulus-page.js::s.extras.length  # cardSpec 本地构造 extras=[](266)
+views/annulus-page.js::s.extras.map  # 同上(268)
+views/annulus-page.js::out.edges.filter  # buildAssetsNet 返回 edges 恒数组(760)
+views/annulus-page.js::chainData.rfEdges.filter  # buildChain 返回 rfEdges 恒数组(1093)
+views/annulus-page.js::e.id.startsWith  # e 来自本地构造 rfEdges,元素恒含 id(1093)
+views/annulus-page.js::assetsEl.nodes.map  # buildAssetsNet 返回 nodes 恒数组(1083)
+views/annulus-page.js::assetsEl.edges.filter  # 同上(1084)
+views/annulus-page.js::el.nodes.length  # buildElements 返回 nodes 恒数组(1159)
+views/annulus-page.js::assetsEl.nodes.length  # 同 assetsEl.nodes(1165)
+views/node-sheets.js::lineage.up.length  # lineage useMemo 本地构造 up=[](259)
+views/node-sheets.js::lineage.up.map  # 同上(265)
+views/node-sheets.js::lineage.down.length  # 本地构造 down=[](259)
+views/node-sheets.js::lineage.down.map  # 同上(277)
+
+# —— 本地表单状态(useState 初始化字面量,字段恒存在) ——
+views/asset-add-dialog.js::r.title.trim  # rows 本地行编辑器状态,title 恒字符串(57/64/86)
+views/asset-add-dialog.js::r.parent.trim  # 同上(64)
+views/new-task-dialog.js::r.title.trim  # rows 本地状态恒字符串(305/307/309/354/410/457/483/514/852)
+views/new-task-dialog.js::r.parent.trim  # 同上(457/483/514)
+views/new-task-dialog.js::c.action.trim  # constraints 本地状态 emptyConstraint() 恒字符串(456/543)
+views/new-task-dialog.js::c.quota.trim  # 同上(549)
+views/new-task-dialog.js::c.scope.includes  # constraints 构造恒 scope=[](433/994)
+views/new-task-dialog.js::c.scope.filter  # 同上(433/558/1001/1003)
+views/new-task-dialog.js::c.patterns.length  # constraints 构造恒 patterns=[](561)
+views/roe-page.js::form.notes.trim  # 表单本地状态恒字符串(946/961)
+views/roe-page.js::form.note.trim  # 同上(947/970)
+views/roe-page.js::form.action.trim  # 规则编辑表单本地状态恒字符串(1094/1106/1112/1138)
+views/roe-page.js::form.patterns.split  # 同上(1134)
+views/roe-page.js::form.asset_ids.join  # 同上,asset_ids 恒数组(1099)
+views/roe-page.js::form.asset_ids.includes  # 同上(1207)
+views/roe-page.js::form.asset_ids.filter  # 同上(1211)
+views/settings-page.js::form.name.trim  # 凭据/规则表单本地状态恒字符串(509/1121)
+views/settings-page.js::form.pattern.trim  # 同上(509)
+views/settings-page.js::form.secret.trim  # 同上(1131)

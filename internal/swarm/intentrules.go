@@ -255,13 +255,13 @@ func (env *unitEnv) liveIntentRules(fallback []rings.IntentRule) []rings.IntentR
 // 两路:规则带 Patterns(描述推导或手写的正则)→ 对调用参数文本逐条
 // 正则匹配(确定性,同硬规则);不带 → 按内置动作词表分类比对(描述
 // 恰好是词表词的兼容路径,旧规则继续生效)。命中禁止或超额返回拒绝
-// 原因——只拒绝本次调用、单位继续其余工作(拒绝即熔断仅保留给系统级
-// 硬规则与危害拒绝线);允许 + 次数上限在此计数入账(guard.record,
-// 临界区防并发重号;额度全任务共享)。
-func (env *unitEnv) checkIntentRules(pack *TaskPack, toolName string, input json.RawMessage) (string, bool) {
+// 原因与规则 ID(P4-63 B:同规则累计拒绝升级杀的计数键)——只拒绝本次
+// 调用、单位继续其余工作(升级保险在 denyIntentAction);允许 + 次数
+// 上限在此计数入账(guard.record,临界区防并发重号;额度全任务共享)。
+func (env *unitEnv) checkIntentRules(pack *TaskPack, toolName string, input json.RawMessage) (string, string, bool) {
 	rules := env.liveIntentRules(pack.Authorization.IntentRules)
 	if len(rules) == 0 {
-		return "", false
+		return "", "", false
 	}
 	action := classifyIntentAction(toolName, input)
 	covered := make(map[string]bool, len(pack.Assets))
@@ -284,16 +284,16 @@ func (env *unitEnv) checkIntentRules(pack *TaskPack, toolName string, input json
 				used := countQuotaUsed(guardLedgerCtx, env.Executor.Store, env.TaskID, r.ID)
 				if used >= r.Quota {
 					env.Executor.quotaMu.Unlock()
-					return intentDenyReason(r, pack.Assets, true), true
+					return intentDenyReason(r, pack.Assets, true), r.ID, true
 				}
 				env.recordQuotaCount(r, action, used+1, toolName)
 				env.Executor.quotaMu.Unlock()
 			}
 			continue
 		}
-		return intentDenyReason(r, pack.Assets, false), true
+		return intentDenyReason(r, pack.Assets, false), r.ID, true
 	}
-	return "", false
+	return "", "", false
 }
 
 // intentRuleActionHit 动作匹配:带 Patterns 走正则(对参数文本,同硬
@@ -301,17 +301,18 @@ func (env *unitEnv) checkIntentRules(pack *TaskPack, toolName string, input json
 // 词或旧规则)。正则编译失败的条目跳过(存入口已校验,防脏数据)。
 func intentRuleActionHit(r rings.IntentRule, classified rings.IntentAction, toolName string, input json.RawMessage) bool {
 	if len(r.Patterns) > 0 {
-		text := argStringValues(input)
-		if strings.TrimSpace(text) == "" {
-			return false
-		}
 		for _, p := range r.Patterns {
 			re, err := regexp.Compile(p)
 			if err != nil {
 				continue
 			}
-			if re.MatchString(text) {
-				return true
+			for _, value := range argStringValuesSlice(input) {
+				if strings.TrimSpace(value) == "" {
+					continue
+				}
+				if re.MatchString(value) {
+					return true
+				}
 			}
 		}
 		return false

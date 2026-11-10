@@ -556,6 +556,8 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 	// 反证记录:完整时间线(面板发现详情同源同一装配)。P4-56 ⑤:
 	// 定稿冻结的人话三段(疑点→怎么验的→结论)先于人话对应轮次的
 	// 机器行——报告与面板同口径(人话层默认可见,机器原文随后)。
+	// P4-64 ①:逐轮事件(claim.round_human)优先,存量旧定稿的
+	// repro.Rounds 照读(新事件覆盖同轮号)。
 	if cs != nil && len(cs.Timeline) > 0 {
 		b.WriteString("- 反证记录:\n")
 		humanOf := map[int]rings.FalsifyRoundHuman{}
@@ -563,6 +565,9 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 			for _, rh := range cs.Repro.Rounds {
 				humanOf[rh.Round] = rh
 			}
+		}
+		for _, rh := range cs.RoundHumans {
+			humanOf[rh.Round] = rh
 		}
 		for _, e := range cs.Timeline {
 			if e.Kind == "falsify" && e.Round > 0 {
@@ -620,7 +625,12 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 		}
 		fmt.Fprintf(b, "):\n")
 		if len(cs.Repro.Steps) == 0 {
-			b.WriteString("  - (反证轮未产生可复现的流量记录)\n")
+			// P4-62 A:无复现包如实呈现原因(新定稿);旧记录退既有空态句。
+			if cs.Repro.NoReproReason != "" {
+				fmt.Fprintf(b, "  - %s\n", cs.Repro.NoReproReason)
+			} else {
+				b.WriteString("  - (反证轮未产生可复现的流量记录)\n")
+			}
 		}
 		for i, st := range cs.Repro.Steps {
 			fmt.Fprintf(b, "  - %s\n", reproStepHead(i+1, st))

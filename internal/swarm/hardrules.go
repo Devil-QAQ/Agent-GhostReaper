@@ -15,8 +15,8 @@ import (
 
 // ---- 全局内置硬规则(P2-08e,第四章 §3 v2.1 判定次序②) ----
 //
-// 参数级确定性正则清单:命中直接拒绝留痕,不依赖模型声明(补 harm_class
-// 声明漏报的洞),插在 RoE 工具边界之后、意图分级之前——分级无论怎么
+// 参数级确定性正则清单:命中即拒(不依赖模型声明,补 harm_class 声明
+// 漏报的洞),插在 RoE 工具边界之后、意图分级之前——分级无论怎么
 // 声明都拦。默认最保守:系统级自毁与目标数据破坏类均 deny;授权确需
 // 破坏性验证时逃生门 = 面板禁用 / 编辑对应规则(操作本身留痕,做完
 // 重新启用)。规则是数据不是代码:内置清单只在启动时播种进键值表,
@@ -24,6 +24,9 @@ import (
 // 不动)。删除内置规则记墓碑,重启播种不复活。外泄管道组播种为禁用
 // 态——反弹 shell / 数据回传是渗透合法动作,不误伤,需要时手动开。
 // 不做优先级链、不做 LLM 裁判:弹门即人审兜底,保持确定性哲学。
+// P4-63:系统破坏/数据库破坏两组按三档判定位收窄(动作位拒/非动作位
+// 放/模糊弹门,见 hardpos.go);确定性拒绝只拒本次动作,同规则累计
+// HardDenyEscalateAfter 次升级杀单位(denyHardAction)。
 
 // 硬规则配置键(rings v6 通用配置键值表)。
 const (
@@ -449,15 +452,17 @@ func activeHardRules(ctx context.Context, store *rings.Store) []HardRule {
 	return out
 }
 
-// matchHardRule 对一次工具调用匹配硬规则:命中返回规则与匹配串。
-// 匹配目标 = 参数 JSON 递归抽取的全部字符串值(对 bash 是 command、对
-// http_probe 是 url 等);禁用的规则不参与;适用工具不符的不参与;
-// 模式编译失败的条目跳过(存入口已校验,仅防键值表脏数据)。
-func matchHardRule(ctx context.Context, store *rings.Store, toolName string, input json.RawMessage) (HardRule, string, bool) {
-	text := argStringValues(input)
-	if strings.TrimSpace(text) == "" {
-		return HardRule{}, "", false
-	}
+// matchHardRule 对一次工具调用匹配硬规则:命中返回规则、匹配串与判定位
+// 三档之一(P4-63 A)。匹配目标 = 参数 JSON 递归抽取的全部字符串值(对
+// bash 是 command、对 http_probe 是 url 等,逐值判定);禁用的规则不参
+// 与;适用工具不符的不参与;模式编译失败的条目跳过(存入口已校验,仅防
+// 键值表脏数据)。
+//
+// 三档语义(收窄组 = 系统破坏/数据库破坏):任一命中处动作位 → 动作位
+// 拒;无动作位但有模糊形态 → 模糊弹门;全部处非动作位 → 该规则不命中
+// (放行,不当动作)。非收窄组命中即动作位(现行语义)。规则序即优先
+// 序:先命中的规则先裁决。
+func matchHardRule(ctx context.Context, store *rings.Store, toolName string, input json.RawMessage) (HardRule, string, hardTier, bool) {
 	for _, r := range activeHardRules(ctx, store) {
 		if !r.Enabled {
 			continue
@@ -469,27 +474,41 @@ func matchHardRule(ctx context.Context, store *rings.Store, toolName string, inp
 		if err != nil {
 			continue
 		}
-		if m := re.FindString(text); m != "" {
-			return r, m, true
+		ambiguous, ambMatch := false, ""
+		for _, value := range argStringValuesSlice(input) {
+			if strings.TrimSpace(value) == "" {
+				continue
+			}
+			for _, loc := range re.FindAllStringIndex(value, -1) {
+				m := value[loc[0]:loc[1]]
+				switch judgeMatchPosition(value, loc[0], m, r.Group) {
+				case hardTierAction:
+					return r, m, hardTierAction, true
+				case hardTierAmbiguous:
+					ambiguous, ambMatch = true, m
+				}
+			}
+		}
+		if ambiguous {
+			return r, ambMatch, hardTierAmbiguous, true
 		}
 	}
-	return HardRule{}, "", false
+	return HardRule{}, "", hardTierAction, false
 }
 
-// argStringValues 递归抽取 JSON 参数里的全部字符串值,拼成多行文本
-// (参数级匹配的载体:正则对值生效,不对键名与 JSON 转义形态生效)。
-func argStringValues(input json.RawMessage) string {
+// argStringValuesSlice 递归抽取 JSON 参数里的全部字符串值(逐值为判定
+// 载体:每个值是独立语义单元,命令/URL/包体互不粘连)。
+func argStringValuesSlice(input json.RawMessage) []string {
 	var v any
 	if err := json.Unmarshal(input, &v); err != nil {
-		return string(input) // 非 JSON 入参退化为原文整体匹配
+		return []string{string(input)} // 非 JSON 入参退化为原文整体
 	}
-	var b strings.Builder
+	var out []string
 	var walk func(x any)
 	walk = func(x any) {
 		switch t := x.(type) {
 		case string:
-			b.WriteString(t)
-			b.WriteByte('\n')
+			out = append(out, t)
 		case []any:
 			for _, item := range t {
 				walk(item)
@@ -501,7 +520,7 @@ func argStringValues(input json.RawMessage) string {
 		}
 	}
 	walk(v)
-	return b.String()
+	return out
 }
 
 // hardRuleDenyReason 硬规则拒绝原因(审批记录 reason 字段,面板与模型
@@ -523,4 +542,40 @@ func hardRuleGateNote(r HardRule, matched string) string {
 		note += " · " + n
 	}
 	return note
+}
+
+// ---- P4-63 B:确定性拒绝改"拒动作不杀单位" ----
+//
+// 硬规则与意图拦截的确定性拒绝只拒那一条命令:工具层返回拒绝结果(含
+// 规则名与人话换路指引——"报错文案写成路由教学"既有机制),单位存活
+// 读到反馈自行换路(工作不丢,与 P4-51 范围拦截改等批同一哲学延伸)。
+// 防硬撞/试探保险:同单位生命周期内同规则累计命中 HardDenyEscalateAfter
+// 次(不重置)升级杀单位;面板人工拒绝(弹门拒)语义不同,照旧杀单位。
+
+// HardDenyEscalateAfter 同规则累计确定性拒绝达到此次数后升级杀单位
+// (问题清单 #85 ⑤,数字实测可调)。
+const HardDenyEscalateAfter = 3
+
+// hardGroupHarmWords 拒绝反馈的组级危害句(锚例:数据库破坏组逐字取自
+// 造物主 2026-11-09 拍板文案,其余组同构)。
+var hardGroupHarmWords = map[string]string{
+	HardGroupDBDestroy:   "删除目标数据的操作禁止执行",
+	HardGroupSysDestroy:  "破坏目标系统运行的操作禁止执行",
+	HardGroupHTTPKill:    "删除目标服务数据的操作禁止执行",
+	HardGroupBulkWipe:    "批量删除目标数据的操作禁止执行",
+	HardGroupExfilPipe:   "把数据发往外部的操作禁止执行",
+	HardGroupProxyBypass: "绕过流量镜像的操作禁止执行",
+}
+
+// hardRuleRejectText 工具层拒绝结果文案(模型读的换路指引;审批留痕的
+// 规则身份仍走 hardRuleDenyReason,P4-07 据其解析)。锚例:"命令已被拦截:
+// 数据库破坏·清空表——删除目标数据的操作禁止执行。请改用只读方式验证;
+// 确需破坏性验证时由操作者在拦截规则面板处理。"
+func hardRuleRejectText(r HardRule) string {
+	harm := hardGroupHarmWords[r.Group]
+	if harm == "" {
+		harm = "该操作禁止执行"
+	}
+	return fmt.Sprintf("命令已被拦截:%s·%s——%s。请改用只读方式验证;确需破坏性验证时由操作者在拦截规则面板处理。",
+		r.Group, strings.TrimPrefix(r.Name, HardRuleBuiltinPrefix), harm)
 }

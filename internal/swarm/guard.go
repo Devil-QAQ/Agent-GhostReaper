@@ -141,8 +141,9 @@ const ActorOvermindHelm = "overmind"
 // 管线第 3 阶段自动放行、不进 CanUseTool——硬规则与任务级拦截在调用
 // 边界兜住,触达目标的工具全部逐次判定;非只读工具(bash)已在审批门
 // 判过,此处不重复(防配额双重计数)。回流入口(submit_*)只写自家
-// 账本不碰目标,豁免(防证据原文里的破坏性字样误伤)。拒绝即熔断单位
-// (与审批门拒绝线同纪律)。
+// 账本不碰目标,豁免(防证据原文里的破坏性字样误伤)。P4-63:硬规则
+// 确定性拒绝只拒本次动作(单位存活换路),同规则累计 3 次升级杀;
+// 模糊形态弹门人审。
 func (g *toolGuard) call(inner tool.CoreTool, ctx context.Context, in json.RawMessage, tc *tool.ToolContext) (tool.Result, error) {
 	if g.env.Executor.unitShouldPark(g.env) {
 		g.env.parkArmed = true
@@ -199,16 +200,17 @@ func guardExemptTool(toolName string) bool {
 }
 
 // guardReadOnlyCall 只读工具的拦截判定(P2-08e 判定链②③):命中拒绝
-// 返回原因(调用方以错误结果回给模型,单位由 denyGuard 熔断);放行
-// 返回空串。允许 + 次数上限在此计数入账(与审批门同一条入账路径)。
-// P4-03 ②:弹门处置的规则命中走人审(与审批门 ② 同款挂起——段收拢
-// 后停在票上等裁决,批准后模型重发同调用按放行配额通过)。
+// 返回原因(调用方以错误结果回给模型);放行返回空串。P4-63:硬规则
+// 确定性拒绝只拒本次动作不熔断单位(denyHardAction,同规则累计 3 次
+// 升级杀),模糊形态与弹门处置走人审(与审批门 ② 同款挂起——段收拢
+// 后停在票上等裁决,批准后模型重发同调用按放行配额通过)。允许 + 次
+// 数上限在此计数入账(与审批门同一条入账路径)。
 func (g *toolGuard) guardReadOnlyCall(toolName string, in json.RawMessage) string {
 	if guardExemptTool(toolName) {
 		return ""
 	}
-	if r, m, hit := matchHardRule(guardLedgerCtx, g.env.Executor.Store, toolName, in); hit {
-		if r.Action == HardActionGate {
+	if r, m, tier, hit := matchHardRule(guardLedgerCtx, g.env.Executor.Store, toolName, in); hit {
+		if r.Action == HardActionGate || tier == hardTierAmbiguous {
 			if a := g.env.allowance; a != nil && a.toolName == toolName && jsonEquiv(a.args, string(in)) {
 				g.env.allowance = nil
 				return ""
@@ -220,14 +222,17 @@ func (g *toolGuard) guardReadOnlyCall(toolName string, in json.RawMessage) strin
 				return ""
 			}
 			if g.env.Executor.Gate == nil {
-				reason := "无审批门可用(fail-safe):命中拦截规则(需批准处置)的动作须有人在环批准"
-				g.env.denyGuard(g.pack, toolName, in, rings.DenyLineNoGate, reason)
-				return reason
+				return g.env.denyHardAction(g.pack, toolName, in, r, m, rings.DenyLineNoGate,
+					"无审批门可用(fail-safe):命中拦截规则(需人审处置)的动作无人在环,本次调用拒绝")
+			}
+			note := hardRuleGateNote(r, m)
+			if tier == hardTierAmbiguous {
+				note += " · 判位模糊,待批准或拒绝"
 			}
 			ticket, err := g.env.Executor.Gate.Enter(ApprovalRequest{
 				TaskID: g.pack.TaskID, StepID: g.pack.StepID, UnitID: g.env.UnitID,
 				Intent: g.pack.StepIntent, ActionLevel: g.pack.ActionLevel, HarmClass: g.pack.HarmClass,
-				ToolName: toolName, ToolArgs: string(in), Note: hardRuleGateNote(r, m),
+				ToolName: toolName, ToolArgs: string(in), Note: note,
 				GateGroup: r.Group,
 			})
 			if err != nil {
@@ -238,9 +243,7 @@ func (g *toolGuard) guardReadOnlyCall(toolName string, in json.RawMessage) strin
 			return fmt.Sprintf("%s(请求 %s):命令命中拦截规则(%s · %s),已提交面板审批,批准后继续执行",
 				approvalPendingNote, ticket.Req.ID, r.Group, strings.TrimPrefix(r.Name, HardRuleBuiltinPrefix))
 		}
-		reason := hardRuleDenyReason(r, m)
-		g.env.denyGuard(g.pack, toolName, in, rings.DenyLineHardRule, reason)
-		return reason
+		return g.env.denyHardAction(g.pack, toolName, in, r, m, rings.DenyLineHardRule, "")
 	}
 	// P4-51 ① 范围外拦截(渗透任务):只读探测的目标不在种子闭包内
 	// ——denyScope 内部分流(出待决卡＋单位冻结收场让位/已排除直接拒;
@@ -248,10 +251,9 @@ func (g *toolGuard) guardReadOnlyCall(toolName string, in json.RawMessage) strin
 	if reason := g.env.denyScope(g.pack, toolName, in); reason != "" {
 		return reason
 	}
-	if reason, deny := g.env.checkIntentRules(g.pack, toolName, in); deny {
-		// 任务级拦截:只留痕不熔断(同审批门路径的审核迭代定则)。
-		g.env.denyIntentRecord(g.pack, toolName, in, reason)
-		return reason
+	if reason, rid, deny := g.env.checkIntentRules(g.pack, toolName, in); deny {
+		// 任务级拦截:只拒本次调用并留痕(P4-63 B:同规则累计 3 次升级杀)。
+		return g.env.denyIntentAction(g.pack, toolName, in, reason, rid)
 	}
 	return ""
 }

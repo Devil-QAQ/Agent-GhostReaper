@@ -199,6 +199,51 @@ func applyEvent(tx *sql.Tx, taskID string, rev int64, kind EventKind, actor stri
 			return fmt.Errorf("rings: 解码 operator.dive 负载: %w", err)
 		}
 		return validateOperatorDive(p)
+	case EventClaimRoundHuman:
+		var p ClaimRoundHuman
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return fmt.Errorf("rings: 解码 claim.round_human 负载: %w", err)
+		}
+		return applyClaimRoundHuman(tx, taskID, rev, p)
+	case EventClaimSummaryPol:
+		var p ClaimSummaryPolish
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return fmt.Errorf("rings: 解码 claim.summary 负载: %w", err)
+		}
+		return applyClaimSummaryPolish(tx, taskID, rev, p)
+	case EventFactText:
+		var p FactTextPolish
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return fmt.Errorf("rings: 解码 fact.text 负载: %w", err)
+		}
+		return applyNodePolish(tx, taskID, rev, p.FactID, p.Title, p.Statement, "", "", p.Unpolished)
+	case EventHypoText:
+		var p HypoTextPolish
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return fmt.Errorf("rings: 解码 hypo.text 负载: %w", err)
+		}
+		return applyNodePolish(tx, taskID, rev, p.HypothesisID, p.Title, "", p.Basis, p.Reason, p.Unpolished)
+	case EventClaimRetextNote:
+		var p RetestNotePolish
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return fmt.Errorf("rings: 解码 claim.retest_note 负载: %w", err)
+		}
+		return applyRetestNotePolish(tx, taskID, rev, p)
+	case EventOvermindPolish:
+		var p OvermindPolish
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return fmt.Errorf("rings: 解码 overmind.record_polish 负载: %w", err)
+		}
+		return validateOvermindPolish(p)
+	case EventStepTitle:
+		var p StepTitlePolish
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return fmt.Errorf("rings: 解码 step.title 负载: %w", err)
+		}
+		if err := validateStepTitle(p); err != nil {
+			return err
+		}
+		return applyNodePolish(tx, taskID, rev, p.StepID, p.Title, "", "", "", false)
 	default:
 		return fmt.Errorf("%w: %s", ErrUnknownKind, string(kind))
 	}
@@ -524,6 +569,31 @@ func validateBlackboxRecord(p BlackboxRecord) error {
 	return nil
 }
 
+// validateOvermindPolish 校验研判记录校对稿(P4-65 ⑨)。不进投影(审计流
+// 侧表,同 overmind.record——读侧从事件流按 rec_rev 合并)。物理校验
+// 拒空事件(P4-64 先例):锚定版本必填且为正,六字段全空不落(生成侧
+// 控制零内容不落账,空事件无信息量)。
+func validateOvermindPolish(p OvermindPolish) error {
+	if p.RecRev <= 0 {
+		return fmt.Errorf("rings: overmind.record_polish 缺锚定规划记录版本")
+	}
+	if strings.TrimSpace(p.QAccess) == "" && strings.TrimSpace(p.QPrivilege) == "" &&
+		strings.TrimSpace(p.QCombination) == "" && strings.TrimSpace(p.QUnlock) == "" &&
+		strings.TrimSpace(p.QOverturn) == "" && strings.TrimSpace(p.Note) == "" {
+		return fmt.Errorf("rings: overmind.record_polish 字段全空(不落空事件)")
+	}
+	return nil
+}
+
+// validateStepTitle 校验步骤意图标题校对稿(P4-65 ⑩)。物理校验拒空
+// 事件(P4-64 先例):步骤与标题必填。
+func validateStepTitle(p StepTitlePolish) error {
+	if p.StepID == "" || strings.TrimSpace(p.Title) == "" {
+		return fmt.Errorf("rings: step.title 缺步骤或标题(不落空事件)")
+	}
+	return nil
+}
+
 // validateTestClaimRecord 校验 TestClaim 状态机记录。不进 nodes/edges
 // 投影(审计流,同 swarm.record/arbiter.verdict)。结构性强制:
 //   - falsify_result 须绑反证 Step 与单位(写回无主即不可审计);逐条
@@ -663,6 +733,11 @@ func validateTestClaimRecord(tx *sql.Tx, taskID string, p TestClaimRecord) error
 	default: // repro
 		if p.Severity != "" && !impactLevels[p.Severity] {
 			return fmt.Errorf("%w: %s", ErrUnknownImpactLevel, p.Severity)
+		}
+		// P4-62 A:无复现包原因与复现步骤互斥——原因非空即本次定稿
+		// 无步骤(兜底直出已废,倒池形态物理进不了账本)。
+		if p.NoReproReason != "" && len(p.Steps) > 0 {
+			return fmt.Errorf("%w: repro 记录不得同时携带步骤与无复现包原因", ErrTestClaimRecMissingField)
 		}
 		return nil
 	}

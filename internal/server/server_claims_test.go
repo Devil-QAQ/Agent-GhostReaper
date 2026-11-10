@@ -132,6 +132,14 @@ func TestServerClaimsList(t *testing.T) {
 		a["impact"] != "备份文件可被未授权下载" || a["vulnclass"] != "信息暴露" {
 		t.Fatalf("Confirmed 条目字段不符: %+v", a)
 	}
+	// 立账时刻下发(P4-61 排序口径:nodes 投影 added_at,成果时间倒序的
+	// 比较键;两条声明都有)。
+	if aa, _ := a["added_at"].(string); aa == "" {
+		t.Fatalf("Confirmed 条目应带立账时刻(P4-61): %+v", a)
+	}
+	if ba, _ := b["added_at"].(string); ba == "" {
+		t.Fatalf("待确认条目应带立账时刻(P4-61): %+v", b)
+	}
 	if ids, _ := a["asset_ids"].([]any); len(ids) != 1 || ids[0] != "web1" {
 		t.Fatalf("资产锚点不符: %+v", a["asset_ids"])
 	}

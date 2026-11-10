@@ -131,9 +131,37 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 			return sreply{Text: `{"rounds":[{"round":1,"doubt":"会不会是 /old-backup/ 的列举来自共享缓存,而不是目标真实文件?","how":"绕开缓存直接请求 /old-backup/,连续 2 次都返回同样的备份文件列举","conclusion":"已排除"}]}`}
 		}
 		// P4-59 ① 判断摘要会话(零工具,系统段带"判断文本"):回报告级
-		// 锚口径的摘要 JSON(坏回复路径由 overmind 单测覆盖)。
+		// 锚口径的摘要 JSON(坏回复路径由 overmind 单测覆盖)。P4-64 ②
+		// 起立账批次(收割立判断)复用同一系统段,同分支覆盖——按声明
+		// 原文精确区分(事实包里常见"版本号"字样,宽词会劫走备份声明的
+		// 会话);校对/重写轮按会话内已写稿区分(同会话上下文可见);
+		// 版本号句写为不撞机器语闸门的形态。
 		if len(rr.ToolsOffered) == 0 && strings.Contains(rr.System, "判断文本") {
+			versionClaim := strings.Contains(rr.LastUser, `"statement":"/api/version`) ||
+				strings.Contains(rr.LastUser, "原文:/api/version 接口") ||
+				strings.Contains(rr.LastUser, "原文:/api/version 公开")
+			if !versionClaim {
+				for _, m := range rr.Messages {
+					if m.Role == "assistant" && strings.Contains(m.Content, `"/api/version`) {
+						versionClaim = true
+						break
+					}
+				}
+			}
+			if versionClaim {
+				return sreply{Text: `{"statement":"/api/version 接口无需登录即可读取,返回内容带有服务版本号","impact":"","facts":[]}`}
+			}
 			return sreply{Text: `{"statement":"主站备份目录没有登录校验,任何知道地址的人都能下载备份文件","impact":"无需任何账号口令,可下载 1 个数据库备份压缩包","facts":[]}`}
+		}
+		// P4-64 ③⑥ 事实文本会话(零工具,系统段带"确认的事实改写"):
+		// 回标题短句+描述 JSON(坏回复路径由 overmind 单测覆盖)。
+		if len(rr.ToolsOffered) == 0 && strings.Contains(rr.System, "确认的事实改写") {
+			return sreply{Text: `{"facts":[{"fact_id":"f-any","title":"主站服务在线,HTTP 指纹已确认","statement":"主站服务在线,HTTP 指纹已确认"}]}`}
+		}
+		// P4-64 ④⑥⑧ 假设文本会话(零工具,系统段带"待验证猜测改写"):
+		// 回标题/依据/理由 JSON(坏回复路径由 overmind 单测覆盖)。
+		if len(rr.ToolsOffered) == 0 && strings.Contains(rr.System, "待验证猜测改写") {
+			return sreply{Text: `{"hypotheses":[]}`}
 		}
 		if len(rr.ToolsOffered) == 0 {
 			hasAudit := strings.Contains(rr.LastUser, "审计主站敏感路径")
@@ -423,9 +451,11 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 		"任务状态:已完成(completed)",
 		"已确认发现:**1** 条;证据不足:1 条",
 		// P4-59 ①:标题/存在性判断优先定稿校对稿(报告级锚),节点原文
-		// 不再进标题;待确认发现无定稿,退节点原文。
+		// 不再进标题。P4-64 ②:立账批次摘要生效——证据不足发现无定稿,
+		// 读立账稿(P-1);已确认发现由定稿稿覆盖(C-1,scripted 两稿
+		// 同句)。
 		"### C-1 主站备份目录没有登录校验,任何知道地址的人都能下载备份文件",
-		"### P-1 /api/version 公开暴露服务版本号",
+		"### P-1 /api/version 接口无需登录即可读取,返回内容带有服务版本号",
 		"证据不足:",
 		"资产锚点:`" + assetID,
 		"需批准:请求 1 · 批准 1 · 拒绝 0",

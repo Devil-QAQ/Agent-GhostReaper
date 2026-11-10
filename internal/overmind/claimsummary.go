@@ -69,32 +69,12 @@ type summaryReply struct {
 	Facts     []rings.FactStatement `json:"facts"`
 }
 
-// genClaimSummary 定稿声明摘要生成:装配事实包 → 模型按报告级锚改写 →
-// 校对+闸门链 → 冻结入 rec。零 Provider 直接返回(单测与未配模型路径,
-// 零外呼;读侧按节点原文呈现)。
+// genClaimSummary 定稿声明摘要生成(P4-59 ①;P4-64 ② 起与立账批次
+// 共用 genClaimSummaryText 全链):确认定稿时把校对稿冻结进 repro 记录
+// (Statement/Impact/Facts),重开再确认随新定稿重新生成(取代语义)。
 func (l *Loop) genClaimSummary(ctx context.Context, claimID string, rec *rings.TestClaimRecord) {
-	if l.Provider == nil {
-		return
-	}
-	pack, err := l.summaryPack(ctx, claimID)
-	if err != nil {
-		runlog.Warnf("判断摘要生成失败: 任务 %s 判断 %s 原因 %s(读侧按原文呈现)",
-			l.TaskID, claimID, clipEval(err.Error()))
-		return
-	}
-	gs := l.newGenSession(summarySystem)
-	defer gs.close()
-	text, err := gs.ask(ctx, summaryAskHead(pack))
-	if err != nil {
-		runlog.Warnf("判断摘要生成失败: 任务 %s 判断 %s 原因 %s(读侧按原文呈现)",
-			l.TaskID, claimID, clipEval(err.Error()))
-		return
-	}
-	if applySummary(rec, parseSummary(text, pack)) {
-		l.polishSummary(ctx, claimID, gs, rec, pack)
-	} else {
-		runlog.Warnf("判断摘要解析失败: 任务 %s 判断 %s(读侧按原文呈现)", l.TaskID, claimID)
-	}
+	s := l.genClaimSummaryText(ctx, claimID)
+	rec.Statement, rec.Impact, rec.Facts = s.Statement, s.Impact, s.Facts
 }
 
 // summaryPack 事实包装配(只读账本):声明两维原文 + 链上事实(组合声明

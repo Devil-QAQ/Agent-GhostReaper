@@ -163,14 +163,14 @@ func TestOperatorDiveDispatchExemption(t *testing.T) {
 
 	l := &Loop{Store: store, TaskID: task}
 	plan := IntentPlan{Intent: "普通探索", ActionLevel: "只读探测"}
-	if err := l.dispatch(ctx, plan, sourceExplore); err != nil {
+	if _, err := l.dispatch(ctx, plan, sourceExplore); err != nil {
 		t.Fatalf("首个普通探索应可派: %v", err)
 	}
-	if err := l.dispatch(ctx, plan, sourceExplore); err == nil {
+	if _, err := l.dispatch(ctx, plan, sourceExplore); err == nil {
 		t.Fatal("队列满时普通探索应拒收")
 	}
 	// 深入轮(sourceUrgent 受控来源):满队照派,豁免标记入账。
-	if err := l.dispatch(ctx, IntentPlan{Intent: "从 f-weak 继续深入", ActionLevel: "主动测试"}, sourceUrgent); err != nil {
+	if _, err := l.dispatch(ctx, IntentPlan{Intent: "从 f-weak 继续深入", ActionLevel: "主动测试"}, sourceUrgent); err != nil {
 		t.Fatalf("深入轮派发应豁免背压: %v", err)
 	}
 	steps, err := store.NodesByType(ctx, task, rings.NodeStep, "")

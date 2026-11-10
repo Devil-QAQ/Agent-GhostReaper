@@ -3,17 +3,18 @@ package overmind
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"ghostreaper/internal/rings"
 )
 
-// ---- P4-56 ⑤(问题清单 #80②):反证时间线人话三段 ----
+// ---- P4-56 ⑤(问题清单 #80②)+P4-64 ①:反证时间线人话三段 ----
 //
-// 确认定稿时对当前战役每轮反证冻结"疑点→怎么验的→结论";模型失败回退
-// 确定性拼句(疑问句词形 + 结论词 已排除/未排除/推翻);解析宽容
-// (剥围栏、按轮归位、漏答轮次保留拼句)。R17:读定稿零 LLM。
+// P4-64 起逐轮生成:每轮 falsify 记录入账时同链冻结"疑点→怎么验的→
+// 结论"(claim.round_human 事件);模型失败回退确定性拼句(疑问句词形 +
+// 结论词 已排除/未排除/推翻);解析宽容(剥围栏、按轮归位)。拼句与
+// 管线类级测试见 p464_test.go;此处钉解析契约与存量 repro.Rounds 投影
+// 透出(读侧兼容)。R17:读侧零 LLM。
 
 func appendLoopEvents(t *testing.T, s *rings.Store, task string, evs ...rings.Event) {
 	t.Helper()
@@ -64,33 +65,6 @@ func p456SeedClaimWithRounds(t *testing.T) (*rings.Store, string) {
 			EvidenceHead:     "重放二十余次全 404"}},
 	)
 	return s, task
-}
-
-// TestP456GenRoundHumansFallback 零 Provider:确定性拼句冻结(疑问句词形
-// + 结论词逐轮正确),素材按当前战役轮次装配。
-func TestP456GenRoundHumansFallback(t *testing.T) {
-	s, task := p456SeedClaimWithRounds(t)
-	l := &Loop{Store: s, TaskID: task} // Provider nil:保留拼句,零外呼
-	rec := &rings.TestClaimRecord{ClaimID: "tc-1", Type: rings.TestClaimRecRepro}
-	l.genRoundHumans(context.Background(), "tc-1", rec)
-
-	if len(rec.Rounds) != 2 {
-		t.Fatalf("应冻结 2 轮人话,得 %d(%+v)", len(rec.Rounds), rec.Rounds)
-	}
-	r1 := rec.Rounds[0]
-	if !strings.Contains(r1.Doubt, "会不会是「缓存污染」") || !strings.Contains(r1.Doubt, "会不会是「不可复现」") {
-		t.Errorf("第 1 轮疑点应为疑问句逐条列出: %q", r1.Doubt)
-	}
-	if r1.Conclusion != "未排除" {
-		t.Errorf("第 1 轮 alt2 未排除,结论应未排除: %q", r1.Conclusion)
-	}
-	r2 := rec.Rounds[1]
-	if r2.Conclusion != "推翻" {
-		t.Errorf("第 2 轮存在性被推翻,结论应推翻: %q", r2.Conclusion)
-	}
-	if !strings.Contains(r2.How, "u3") || !strings.Contains(r2.How, "重放二十余次全 404") {
-		t.Errorf("第 2 轮怎么验的应含单位与证据: %q", r2.How)
-	}
 }
 
 // TestP456ParseRoundHumans 解析宽容:围栏剥除、按轮归位、越界轮次丢弃、

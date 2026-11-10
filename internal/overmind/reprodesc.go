@@ -25,9 +25,12 @@ import (
 // ("① 拿会话凭据"式标题段)与作用(这步在复现里干什么);未选中的
 // 交换只在 Process 引用清单留档(仓库与证据包全量,面板不进)。
 //
-// 生成失败(模型错误/解析失败/无效选择)不阻塞确认裁决:候选池原样
-// 落账(短名/描述为组装时已落的确定性兜底,作用为空),如实留 WARN
-// ——确认是机器裁决(R2),描述是包装。
+// P4-62 A(问题清单 #83:兜底直出废除):挑选失败与空选不再倒池——
+// 复现区只呈现模型挑选过的最小集。模型调用/解析失败重试 1 次(同会话
+// 二次请求),再失败如实标注"复现包未生成(挑选失败)";模型空选 =
+// 池中无可证明漏洞的包,如实呈现"无可用复现包＋原因";候选池为空时
+// 直接给确定性原因句(零外呼)。任何情况下未经模型挑选的交换不进
+// 复现区(确定性装配只建池与过程清单)。
 
 // reproDescClip 单步描述(做什么)的落账上限(超长截断;面板与报告同文)。
 const reproDescClip = 400
@@ -38,9 +41,16 @@ const reproShortClip = 24
 
 const reproPurposeClip = 160
 
+// reproNoReproFailed 挑选失败(重试一次后仍失败)的固定标注(子计划
+// P4-62 定稿文案)。
+const reproNoReproFailed = "复现包未生成（挑选失败）"
+
+// reproNoReproPrefix 无可用复现包原因句前缀。
+const reproNoReproPrefix = "无可用复现包："
+
 // reproFactAskCap 喂给模型的候选交换上限(账次序取首尾各半——枚举型
 // 反证候选可达数百条,链式流程的关键交换在两端;超出的候选模型选不
-// 到,生成失败整体回退候选池,如实不静默)。
+// 到,如实按挑选失败处理,不倒池)。
 const reproFactAskCap = 60
 
 // reproFactBodyClip 喂给模型的请求/响应正文头截取(指令只需关键内容,
@@ -55,13 +65,29 @@ type reproDescStep struct {
 	Purpose string `json:"purpose"`
 }
 
-// genReproDescs 定稿最小集选择与三层描述(P4-35):模型从 rec.Steps
-// (去同型候选池)挑必要步骤并写短名/做什么/作用,选中者按账本次序
-// 重编 1..n。零步骤/无 Provider 直接返回(单测与未配模型路径,零外呼;
-// 候选池原样落账)。P4-24:生成后接定稿校对+模式闸门(同会话,见
-// proofread.go)。
-func (l *Loop) genReproDescs(ctx context.Context, claimID string, rec *rings.TestClaimRecord) {
-	if l.Provider == nil || len(rec.Steps) == 0 {
+// pickReproSteps 定稿最小集挑选与三层描述(P4-35 选择 + P4-62 A 兜底
+// 废除):模型从 rec.Steps(去同型候选池)挑必要步骤并写短名/做什么/
+// 作用,选中者按账本次序保留候选 Seq。挑选结果三态,总保证"未经模型
+// 挑选的交换不进复现区":
+//   - 挑中:rec.Steps = 挑中步骤(缺省字段退该步确定性兜底);
+//   - 空选:模型判定池中无可证明漏洞的包,rec.Steps 清空、NoReproReason
+//     = 模型理由(过闸门;不过退确定性原因句);
+//   - 失败:调用/解析失败重试 1 次后仍失败,rec.Steps 清空、
+//     NoReproReason = reproNoReproFailed。
+//
+// 候选池为空(零原料)或未配模型时零外呼,直接确定性原因句。P4-24:
+// 挑中后接定稿校对+模式闸门(同会话,见 proofread.go)。
+func (l *Loop) pickReproSteps(ctx context.Context, claimID string, rec *rings.TestClaimRecord, diag ReproPoolDiag) {
+	if len(rec.Steps) == 0 {
+		rec.Steps = nil
+		rec.NoReproReason = noReproReason(diag, "")
+		return
+	}
+	if l.Provider == nil {
+		rec.Steps = nil
+		rec.NoReproReason = noReproReason(diag, "")
+		runlog.Warnf("定稿最小集挑选模型不可用: 任务 %s 判断 %s(复现区如实标注未生成)",
+			l.TaskID, claimID)
 		return
 	}
 	claimTitle := ""
@@ -71,24 +97,71 @@ func (l *Loop) genReproDescs(ctx context.Context, claimID string, rec *rings.Tes
 	facts := reproFactClip(l.reproFacts(rec))
 	gs := l.newGenSession(reproDescSystem)
 	defer gs.close()
-	picks, err := l.askReproDescs(ctx, gs, claimTitle, facts, len(rec.Steps))
+	head := reproAskHead(claimTitle, facts, len(rec.Steps))
+	picks, skipReason, err := l.askReproDescs(ctx, gs, head)
 	if err != nil {
-		runlog.Warnf("定稿最小集生成失败: 任务 %s 判断 %s 原因 %s(回退确定性兜底)",
+		runlog.Warnf("定稿最小集挑选失败,重试一次: 任务 %s 判断 %s 原因 %s",
 			l.TaskID, claimID, clipEval(err.Error()))
+		picks, skipReason, err = l.askReproDescs(ctx, gs, head)
+		if err != nil {
+			rec.Steps = nil
+			rec.NoReproReason = reproNoReproFailed
+			runlog.Warnf("定稿最小集挑选重试仍失败,复现区标注未生成: 任务 %s 判断 %s 原因 %s",
+				l.TaskID, claimID, clipEval(err.Error()))
+			return
+		}
+	}
+	if len(picks) == 0 {
+		// 模型空选:池中无可证明漏洞的包(模型的判断成立,不再倒池)。
+		rec.Steps = nil
+		rec.NoReproReason = noReproReason(diag, skipReason)
+		runlog.Infof("定稿最小集为空(模型判定池中无可证明漏洞的包): 任务 %s 判断 %s 原因 %s",
+			l.TaskID, claimID, rec.NoReproReason)
 		return
 	}
 	if !applyReproPick(rec, picks) {
-		runlog.Warnf("定稿最小集无效(无命中步骤),回退确定性兜底: 任务 %s 判断 %s",
-			l.TaskID, claimID)
+		// 选择全部未命中候选池(契约违背):按挑选失败重试一次。
+		runlog.Warnf("定稿最小集选择未命中复现池,重试一次: 任务 %s 判断 %s", l.TaskID, claimID)
+		picks, skipReason, err = l.askReproDescs(ctx, gs, head)
+		if err != nil || !applyReproPick(rec, picks) {
+			rec.Steps = nil
+			rec.NoReproReason = reproNoReproFailed
+			runlog.Warnf("定稿最小集选择重试仍未命中,复现区标注未生成: 任务 %s 判断 %s", l.TaskID, claimID)
+			return
+		}
+		_ = skipReason
 	}
 	l.polishReproDescs(ctx, claimID, gs, rec)
+}
+
+// noReproReason 无可用复现包的原因句:模型理由过文风闸门则用模型句,
+// 否则(及池空/理由缺失)按入池诊断确定性拼装(8.5:陈述事实、数字
+// 精确、能短则短)。
+func noReproReason(diag ReproPoolDiag, modelReason string) string {
+	if s := clipLine(strings.TrimSpace(modelReason), reproPurposeClip); s != "" && len(ScanMachineTalk(s)) == 0 {
+		return reproNoReproPrefix + s
+	}
+	var parts []string
+	if diag.ErrExchanges > 0 {
+		parts = append(parts, fmt.Sprintf("%d 条交换未获响应", diag.ErrExchanges))
+	}
+	if diag.OffAnchor > 0 {
+		parts = append(parts, fmt.Sprintf("%d 条交换的目标不是判断锚定的资产", diag.OffAnchor))
+	}
+	if diag.ToolSkipped > 0 {
+		parts = append(parts, fmt.Sprintf("%d 条直连命令无法还原请求包", diag.ToolSkipped))
+	}
+	if len(parts) == 0 {
+		return reproNoReproPrefix + "池内交换均不能证明该问题成立"
+	}
+	return reproNoReproPrefix + strings.Join(parts, "；") + "。"
 }
 
 // applyReproPick 应用模型的最小集选择(P4-35 ①):seq 须命中候选池
 // (未命中的条目丢弃),选中步骤保留候选 Seq 与账本次序(不重编——校对
 // 轮的 seq 契约"与你上一轮一致"靠它成立;呈现序号按列表位置,读侧
 // reproStepHead 定);short/desc/purpose 缺省退该步确定性兜底;返回是
-// 否存在有效选择(全未命中 = false,调用方回退候选池)。
+// 否存在有效选择(全未命中 = false,调用方按挑选失败处理)。
 func applyReproPick(rec *rings.TestClaimRecord, picks []reproDescStep) bool {
 	cand := make([]rings.ReproStep, len(rec.Steps))
 	copy(cand, rec.Steps)
@@ -239,22 +312,29 @@ func headerValue(headers []mirror.Header, name string) string {
 	return ""
 }
 
-// askReproDescs 一次无工具单轮会话:候选步骤事实包 → 最小集选择与
-// 三层描述 JSON(引擎链路与转录/用量记账同拆解会话)。claimTitle 是
-// 声明的存在性陈述,给模型"什么构成复现"的上下文(只进提示词,不复述
-// 进步骤描述);total 是候选总数(超过喂入上限时如实告知)。
-func (l *Loop) askReproDescs(ctx context.Context, gs *genSession, claimTitle string, facts []reproFact, total int) ([]reproDescStep, error) {
+// reproAskHead 挑选提问的 user 段(候选步骤事实包;claimTitle 是声明的
+// 存在性陈述,给模型"什么构成复现"的上下文;total 是候选总数,超过
+// 喂入上限时如实告知)。
+func reproAskHead(claimTitle string, facts []reproFact, total int) string {
 	payload, err := json.Marshal(facts)
 	if err != nil {
-		return nil, err
+		payload = []byte("[]")
 	}
 	head := "判断: " + claimTitle + "\n复现步骤事实:\n" + string(payload)
 	if total > len(facts) {
 		head = fmt.Sprintf("步骤共 %d 条,此处列前 %d 条与最近 %d 条:\n", total, len(facts)/2, len(facts)-len(facts)/2) + head
 	}
+	return head
+}
+
+// askReproDescs 一次无工具单轮会话:候选步骤事实包 → 最小集选择与三层
+// 描述 JSON(引擎链路与转录/用量记账同拆解会话)。空选合法返回(模型
+// 判定池中无可证明漏洞的包),skip_reason 携带原因;错误 = 调用/解析
+// 失败(调用方重试一次)。
+func (l *Loop) askReproDescs(ctx context.Context, gs *genSession, head string) (picks []reproDescStep, skipReason string, err error) {
 	text, err := gs.ask(ctx, head)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	return parseReproDescs(text)
 }
@@ -272,9 +352,10 @@ func reproFactClip(facts []reproFact) []reproFact {
 	return out
 }
 
-// parseReproDescs 宽容解析模型回复:剥围栏、取首尾大括号主体;空选择
-// 与漏步骤由调用方回退(不整体作废——已生成的选择照常冻结)。
-func parseReproDescs(text string) ([]reproDescStep, error) {
+// parseReproDescs 宽容解析模型回复:剥围栏、取首尾大括号主体。空选择
+// (steps 为空)是合法回答——须携带 skip_reason(模型判定池中无可证明
+// 漏洞的包时如实说原因);既无选择又无原因按解析失败处理(调用方重试)。
+func parseReproDescs(text string) ([]reproDescStep, string, error) {
 	body := strings.TrimSpace(text)
 	if m := jsonFenceRe.FindStringSubmatch(body); m != nil {
 		body = strings.TrimSpace(m[1])
@@ -285,34 +366,41 @@ func parseReproDescs(text string) ([]reproDescStep, error) {
 		}
 	}
 	if body == "" {
-		return nil, fmt.Errorf("回复为空")
+		return nil, "", fmt.Errorf("回复为空")
 	}
 	var r struct {
-		Steps []reproDescStep `json:"steps"`
+		Steps      []reproDescStep `json:"steps"`
+		SkipReason string          `json:"skip_reason"`
 	}
 	if err := json.Unmarshal([]byte(body), &r); err != nil {
-		return nil, fmt.Errorf("不是合法 JSON: %w", err)
+		return nil, "", fmt.Errorf("不是合法 JSON: %w", err)
 	}
 	if len(r.Steps) == 0 {
-		return nil, fmt.Errorf("steps 为空")
+		if strings.TrimSpace(r.SkipReason) == "" {
+			return nil, "", fmt.Errorf("steps 为空且未说明原因")
+		}
+		return nil, r.SkipReason, nil
 	}
-	return r.Steps, nil
+	return r.Steps, "", nil
 }
 
 // reproDescSystem 最小集选择与三层描述的系统段(代码固定;稳定短段
 // 利于前缀缓存)。文风即面板文风(8.5):陈述事实、数字精确、无 emoji、
 // 无服务腔;提到目标用完整标识(P4-27 ③:裸端口/裸路径不上界面)。
-const reproDescSystem = `为渗透测试发现挑选复现最小集并写步骤说明。输入是验证过程中的交换事实(已按方法+路径+状态去重)。任务:
+// P4-62:空选是合法回答(池中无可证明漏洞的包时如实说原因,程序不再
+// 倒池)。
+const reproDescSystem = `为渗透测试发现挑选复现最小集并写步骤说明。输入是验证过程中的交换事实(已按方法+路径+状态去重;部分请求包由工具命令还原,响应可能未留存)。任务:
 
-1. 挑出构成复现流程的必要步骤:一步就能复现的(如接口未授权访问)恰选 1 条;复现真要多步(如 拿会话凭据 → 凭据换票据 → 带票据请求最终接口)就选 N 条。对比交换(如带凭据的对照请求)、反证变体(换 UA / 防缓存参数 / 近似请求体)、枚举试错(大量同型尝试)一律不选。该几步就几步,不凑数。
-2. 对选中的每步写三段:
+1. 挑出构成复现流程的必要步骤:一步就能复现的(如接口未授权访问)恰选 1 条;复现真要多步(如 拿会话凭据 → 凭据换票据 → 带票据请求最终接口)就选 N 条。对比交换(如带凭据的对照请求)、反证变体(换 UA / 防缓存参数 / 近似请求体)、枚举试错(大量同型尝试)、无关流量(与该问题无关的主页、资源请求)一律不选。该几步就几步,不凑数。
+2. 全部交换都不能证明该问题成立时,steps 给空数组,并写 skip_reason 一句说明原因(如"池内交换均为无关流量,不能证明该问题"式,陈述事实)。
+3. 对选中的每步写三段:
    - short:步骤短名,不超过 8 个字,动宾短语(如"拿会话凭据""带票据请求");
    - desc:一句可照做的中文指令,口径示例:向 10.0.0.5 发 GET /admin,无需凭据;返回 200 且响应含"管理后台"字样即复现;
    - purpose:这步在复现里的作用,一句(如"取得后续请求所需的会话凭据";只有一步时写"直接复现该问题"式)。
 
 规则:
-1. 只用给出的事实:方法、目标、路径(含查询串)、凭据有无及形态、请求体关键内容、响应状态码与关键特征。不编造未给出的细节,不加原理解释。
+1. 只用给出的事实:方法、目标、路径(含查询串)、凭据有无及形态、请求体关键内容、响应状态码与关键特征。不编造未给出的细节,不加原理解释;响应未留存的步骤,desc 写清"返回未留存"。
 2. 数字精确(字节数、状态码照抄);短句;无 emoji;提到目标用完整标识(域名或 IP 起头,如 jkysd.cn:9902)。
 3. 请求体较长时只取复现必需的字段,可加"等 N 字节表单"式说明。
 
-只输出 JSON:{"steps":[{"seq":1,"short":"…","desc":"…","purpose":"…"},…]},seq 与输入一致,只含选中的步骤。`
+只输出 JSON:{"steps":[{"seq":1,"short":"…","desc":"…","purpose":"…"},…]} 或 {"steps":[],"skip_reason":"…"},seq 与输入一致,只含选中的步骤。`

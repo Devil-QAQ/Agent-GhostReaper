@@ -27,7 +27,8 @@ type factAssetView struct {
 // 假设页不留成立条目。
 type factRow struct {
 	ID             string          `json:"id"`
-	Kind           string          `json:"kind"` // fact|hypothesis(迁入的已成立假设)
+	Kind           string          `json:"kind"`   // fact|hypothesis(迁入的已成立假设)
+	Status         string          `json:"status"` // confirmed|candidate(被推翻为防御性词位,P4-61 三区沉底归类用)
 	Statement      string          `json:"statement"`
 	Loot           string          `json:"loot,omitempty"` // credential|data|permission|foothold(空=普通观察)
 	Assets         []factAssetView `json:"assets"`
@@ -82,10 +83,14 @@ func (s *Server) handleFactsList(w http.ResponseWriter, r *http.Request) {
 	// 各判断的声明摘要(claim_cases.summary 小列),后定稿覆盖先定稿;
 	// 未被任何确认判断携带的事实无校对稿,退节点原文(其陈述受生成时
 	// 结构化字段约束)。
+	// P4-64 ③(P4-64 ⑥ 同族):事实确认批次文本(node_polish)优先于判断
+	// 摘要反查——收割确认时生成,不限于已定稿判断链上的事实;Loot 成果
+	// 类判定仍用节点原文标题(机器侧口径,包装不改变分类)。
 	polishedFact := map[string]string{}
 	if digests, derr := s.Store.ClaimDigests(ctx, taskID); derr == nil {
 		polishedFact = polishedFactMapOf(digests)
 	}
+	s.overlayFactPolish(ctx, taskID, polishedFact)
 
 	out := make([]factRow, 0, len(facts)+len(hypos))
 	for _, f := range facts {
@@ -93,7 +98,7 @@ func (s *Server) handleFactsList(w http.ResponseWriter, r *http.Request) {
 			continue // 其余状态(防御性词位)如实跳过,不进一等列表
 		}
 		row := factRow{
-			ID: f.ID, Kind: "fact", Statement: f.Title, Loot: report.LootClass(f.Title),
+			ID: f.ID, Kind: "fact", Status: f.Status, Statement: f.Title, Loot: report.LootClass(f.Title),
 			CreatedRev: f.CreatedRev, IsNew: f.Status == "candidate",
 			Assets: []factAssetView{},
 		}
@@ -119,11 +124,17 @@ func (s *Server) handleFactsList(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, row)
 	}
+	// P4-64 ⑥:迁入事实页的已成立假设标题优先评估批次短句校对稿
+	//(node_polish);Loot 判定同事实口径用节点原文。
+	hypTitlePolish := s.polishedNodeTitleOf(ctx, taskID)
 	for _, h := range hypos {
 		row := factRow{
-			ID: h.ID, Kind: "hypothesis", Statement: h.Title, Loot: report.LootClass(h.Title),
+			ID: h.ID, Kind: "hypothesis", Status: h.Status, Statement: h.Title, Loot: report.LootClass(h.Title),
 			CreatedRev: h.CreatedRev, FromHypothesis: true,
 			Assets: []factAssetView{},
+		}
+		if t := hypTitlePolish[h.ID]; t != "" {
+			row.Statement = t
 		}
 		row.CreatedAt = h.AddedAt
 		if h.ConfirmedAt != "" {

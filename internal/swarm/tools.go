@@ -47,6 +47,11 @@ type unitEnv struct {
 	stepPass     *gateStepPass      // P4-27 ⑧ 同步骤放行(审批门槛批准一次后武装,本步骤后续命令不再逐条弹门)
 	deniedReason string             // 拒绝即熔断:非空 = 单位以 approval_denied 终态收场
 
+	// P4-63 B:同单位生命周期内按规则累计的确定性拒绝次数(键
+	// hr:<硬规则ID> / ir:<意图规则ID>,累计不重置;并行工具调用下加锁)。
+	denyMu   sync.Mutex
+	denyHits map[string]int
+
 	// P4-44 范围判定的 DNS 缓存:单位生命周期内 host[:port] → 是否在
 	// 闭包内,一次判定不再重复(并行工具调用下加锁)。P4-50 ②种子域名
 	// 的解析缓存在闭包内(多单位共享);scopeResolve 为解析器注入点
@@ -1392,9 +1397,20 @@ func (env *unitEnv) SubmitFalsifyResult(ctx context.Context, claimID string, exi
 	} else {
 		rec.EvidenceHead = clipLine(evidence, 2048)
 	}
-	if _, err := env.Executor.Store.Append(ctx, env.TaskID, rings.Event{
+	events := []rings.Event{{
 		Kind: rings.EventTestClaimRecord, Actor: "swarm:" + env.UnitID, Payload: rec,
-	}); err != nil {
+	}}
+	// P4-64 ①(问题清单 #82):反证轮人话三段逐轮同链生成——与机器记录
+	// 同批落账(钩子侧失败回退拼句,不阻塞本轮入账;无在跑主宰循环时
+	// 不落人话,读侧退机器层)。
+	if env.Executor.RoundHumanGen != nil {
+		if rh := env.Executor.RoundHumanGen(ctx, env.TaskID, claimID, &rec); rh != nil {
+			events = append(events, rings.Event{
+				Kind: rings.EventClaimRoundHuman, Actor: "overmind", Payload: *rh,
+			})
+		}
+	}
+	if _, err := env.Executor.Store.Append(ctx, env.TaskID, events...); err != nil {
 		return fmt.Errorf("swarm: 反证结论写入: %w", err)
 	}
 	return nil

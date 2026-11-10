@@ -517,6 +517,11 @@ func downgradeForP436Test(path string) error {
 	if _, err := s.db.Exec(`ALTER TABLE roe_state DROP COLUMN creator_notes`); err != nil {
 		return err
 	}
+	// v15(P4-64)node_polish 整表剥除(claim_cases 的 v15 两列随表 DROP
+	// 重建消失);升级重放路径随新增迁移同步。
+	if _, err := s.db.Exec(`DROP TABLE node_polish`); err != nil {
+		return err
+	}
 	_, err = s.db.Exec(`PRAGMA user_version = 9`)
 	return err
 }

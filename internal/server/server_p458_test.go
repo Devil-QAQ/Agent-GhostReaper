@@ -101,7 +101,7 @@ func TestP458PanoramaLiveParity(t *testing.T) {
 			deps[e.From] = append(deps[e.From], e.To)
 		}
 	}
-	want := panoramaRows(steps, covers, deps, assetTitle)
+	want := panoramaRows(steps, covers, deps, assetTitle, nil)
 
 	resp, err := http.Get(ts.URL + "/api/tasks/" + task + "/panorama")
 	if err != nil {
@@ -446,14 +446,14 @@ func TestP458ReadPathBeforeAfter(t *testing.T) {
 				deps[e.From] = append(deps[e.From], e.To)
 			}
 		}
-		return len(panoramaRows(steps, covers, deps, assetTitle))
+		return len(panoramaRows(steps, covers, deps, assetTitle, nil))
 	}
 	afterPano := func() int {
 		pl, err := srv.Store.PanoramaFlight(ctx, task)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return len(panoramaRows(pl.Steps, pl.Covers, pl.Deps, pl.AssetTitle))
+		return len(panoramaRows(pl.Steps, pl.Covers, pl.Deps, pl.AssetTitle, nil))
 	}
 	run("在途全景(投影直查)", beforePano, afterPano)
 }

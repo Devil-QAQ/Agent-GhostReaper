@@ -331,6 +331,27 @@ var migrations = [][]string{
 		// 禁重读纪律);旧库默认空 = 无校对摘要,读侧退节点原文。
 		`ALTER TABLE claim_cases ADD COLUMN summary TEXT NOT NULL DEFAULT ''`,
 	},
+	{
+		// v15:P4-64 全站文风·发现族过程态(问题清单 #82):显示层包装族
+		// 投影——claim_cases 加逐轮人话(round_humans,按轮 upsert 的小
+		// JSON:轮号→三段)与复测备注校对稿(retest_notes,轮号→备注)两
+		// 列;新表 node_polish(事实/假设的标题与文本校对稿,latest-wins,
+		// 立账摘要走既有 summary 列由 claim.summary 事件同列覆盖)。旧库
+		// 默认空 = 无包装稿,读侧退原文(存量不回填)。
+		`ALTER TABLE claim_cases ADD COLUMN round_humans TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE claim_cases ADD COLUMN retest_notes TEXT NOT NULL DEFAULT ''`,
+		`CREATE TABLE node_polish (
+			task_id TEXT NOT NULL,
+			node_id TEXT NOT NULL,
+			title TEXT NOT NULL DEFAULT '',
+			statement TEXT NOT NULL DEFAULT '',
+			basis TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT '',
+			unpolished INTEGER NOT NULL DEFAULT 0,
+			rev INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (task_id, node_id)
+		) WITHOUT ROWID`,
+	},
 }
 
 // projectionFloor 投影初次落库的 schema 版本(v10,P4-36):升级跨过本版本

@@ -6,6 +6,7 @@ import * as React from "react";
 
 import { cn } from "@/lib/utils";
 import { FloatingLayer, useFloatingLayer, floatingShadow } from "@/components/ui/floating-layer";
+import { ErrorBoundary } from "@/components/error-boundary";
 
 // Sheet 抽屉:大对象详情专用(发现详情/资产详情),右侧滑出不离开列表上下文。
 function Sheet({ nested = false, children, ...props }) {
@@ -53,7 +54,9 @@ function SheetContent({ className, children, side = "right", ...props }) {
         )}
         {...props}
       >
-        {children}
+        {/* 浮层渲染错误边界(P4-60 ④):内容崩降级为区块错误,抽屉框
+            与关闭钮在、不塌整页。 */}
+        <ErrorBoundary level="overlay">{children}</ErrorBoundary>
         <SheetPrimitive.Close className="absolute top-4 right-4 flex size-8 items-center justify-center rounded-md opacity-70 transition-colors hover:bg-hover-lift hover:opacity-100 focus:outline-none disabled:pointer-events-none cursor-pointer">
           <XIcon />
           <span className="sr-only">关闭</span>

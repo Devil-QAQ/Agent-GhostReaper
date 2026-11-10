@@ -86,6 +86,17 @@ type Executor struct {
 	// 实例;nil = 无断点语义(单测)。
 	Ckpt *ckpt.Gate
 
+	// RoundHumanGen 反证轮人话生成钩子(P4-64 ①,问题清单 #82):每轮
+	// falsify 结构化结论入账时同链生成该轮"疑点→怎么验的→结论"三段
+	// 人话,与机器记录同批落账(生成失败由钩子侧回退拼句,不阻塞轮次
+	// 入账)。装配层按任务路由到在跑主宰循环;nil 或返回 nil = 本轮
+	// 不落人话(无在跑循环等,读侧退机器层)。
+	RoundHumanGen func(ctx context.Context, taskID, claimID string, rec *rings.TestClaimRecord) *rings.ClaimRoundHuman
+	// RetestNotePolisher 复测结论备注校对钩子(P4-64 ⑦):复测结论入账
+	// 时过既有校对通道,校对稿与 retest 记录同批落账(机器 Note 原文
+	// 一字不动)。nil 或返回 nil = 不落校对稿,读侧退机器记录原文。
+	RetestNotePolisher func(ctx context.Context, taskID, claimID string, round int, verdict, note string) *rings.RetestNotePolish
+
 	mu      sync.Mutex
 	unitSeq int
 
@@ -1452,18 +1463,20 @@ func isEngineInterrupt(text string) bool {
 }
 
 // approvalGate 安全闸门的执行层挂接点(Norma CanUseTool 回调,第二章
-// §3③):三级处置(第四章 §3 v2,P2-06b 重构;v2.1 判定链 P2-08e)。
-// 审批对象是 Step 意图(分级 + 危害声明随任务包),不是工具。判定次序:
+// §3③):三级处置(第四章 §3 v2,P2-06b 重构;v2.1 判定链 P2-08e;P4-63
+// 拒动作不杀单位)。审批对象是 Step 意图(分级 + 危害声明随任务包),
+// 不是工具。判定次序:
 //
 //	① 拒绝线·超 RoE 授权范围:工具不在 RoE 边界内直接拒绝留痕
 //	   (工具表已经过 RoE 过滤,此处二次校验防未来工具动态发现绕过
 //	   静态过滤);
-//	② 拒绝线·全局内置硬规则:参数级确定性正则命中直接拒绝留痕
-//	   (P2-08e)——不依赖模型声明(补 harm_class 漏报的洞),插在
-//	   意图分级之前,分级无论怎么声明都拦;
+//	② 拒绝线·全局内置硬规则:参数级确定性正则 + 三档判定位(P4-63 A,
+//	   动作位拒/非动作位放/模糊弹门)——不依赖模型声明(补 harm_class
+//	   漏报的洞),插在意图分级之前,分级无论怎么声明都拦;确定性拒绝
+//	   只拒本次动作不熔断单位,同规则累计 3 次升级杀(P4-63 B);
 //	③ 拒绝线·任务级意图拦截:资产范围 × 动作类型 × 处置(P2-08e)
-//	   ——禁止命中直接拒绝留痕;允许 + 次数上限计数入账,超额自动
-//	   转禁止(量化额度);
+//	   ——禁止命中/超额只拒本次调用并留痕,同规则累计 3 次升级杀
+//	   (P4-63 B);允许 + 次数上限计数入账,超额自动转禁止(量化额度);
 //	④ 拒绝线·分级缺失/非法:fail-safe 拒绝(派发侧本应校验,此处兜住
 //	   绕过 overmind.DispatchStep 的直接入账);危害声明非法同理;
 //	⑤ 拒绝线·非常严重:数据销毁/拒绝服务类(harm_class)直接拒绝且
@@ -1478,11 +1491,13 @@ func isEngineInterrupt(text string) bool {
 //	⑧ 其余一律放行留痕:不列举、不预判(留痕=tool_call 执行记录,
 //	   全量记录兜底审计)。
 //
-// 拒绝(①②③④⑤的 fail-safe 与面板拒绝)= 熔断该虫群单位会话:单位级
-// 终止,Step 终态"审批拒绝终止"(approval_denied),主宰收割可见原因,
-// 被拒单位不得换法重试。只读工具(引擎侧 ReadOnly,如 port_probe 与
-// 受控回流入口)在权限管线第 3 阶段自动放行,不进本回调——回流入口
-// 只写自家账本、不碰目标,不设门是防审批疲劳,RoE 工具过滤照常生效。
+// 熔断该单位会话的拒绝(①④⑤与升级保险触发):单位级终止,Step 终态
+// "审批拒绝终止"(approval_denied),主宰收割可见原因。面板拒绝(弹门
+// 拒)同样熔断——人否决的是这个单位正在做的事,语义不同(P4-63 B⑥)。
+// 硬规则与意图拦截的确定性拒绝只拒那一条命令,单位存活读到反馈自行换
+// 路。只读工具(引擎侧 ReadOnly,如 port_probe 与受控回流入口)在权限
+// 管线第 3 阶段自动放行,不进本回调——回流入口只写自家账本、不碰目标,
+// 不设门是防审批疲劳,RoE 工具过滤照常生效。
 func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 	return func(ctx context.Context, toolName string, input json.RawMessage, _ permission.Context) permission.Decision {
 		// denyUnit 拒绝线处置:留痕 → 熔断单位 → 拒绝该次调用。
@@ -1504,8 +1519,12 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 		// 拒绝照旧熔断。其余处置(拒绝)命中直接拒绝留痕。
 		// P4-17:该单位代理旁路组已批准过一次的,同组任何命中(不同
 		// 规则、不同参数)直接放行执行、逐次留痕,不再弹门。
-		if r, m, hit := matchHardRule(guardLedgerCtx, env.Executor.Store, toolName, input); hit {
-			if r.Action == HardActionGate {
+		// P4-63 A:系统破坏/数据库破坏组按三档判定位收窄——动作位拒、
+		// 非动作位放行不当动作、模糊形态弹门人审(人即兜底)。
+		// P4-63 B:确定性拒绝只拒本次动作不熔断单位(denyHardAction),
+		// 同规则累计 3 次升级杀;面板弹门拒绝照旧熔断(drive 侧)。
+		if r, m, tier, hit := matchHardRule(guardLedgerCtx, env.Executor.Store, toolName, input); hit {
+			if r.Action == HardActionGate || tier == hardTierAmbiguous {
 				if a := env.allowance; a != nil && a.toolName == toolName && jsonEquiv(a.args, string(input)) {
 					env.allowance = nil
 					return permission.Allowed()
@@ -1515,13 +1534,17 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 					return permission.Allowed()
 				}
 				if env.Executor.Gate == nil {
-					return denyUnit(rings.DenyLineNoGate,
-						"无审批门可用(fail-safe):命中拦截规则(需批准处置)的动作须有人在环批准")
+					return permission.Denied(env.denyHardAction(pack, toolName, input, r, m, rings.DenyLineNoGate,
+						"无审批门可用(fail-safe):命中拦截规则(需人审处置)的动作无人在环,本次调用拒绝"))
+				}
+				note := hardRuleGateNote(r, m)
+				if tier == hardTierAmbiguous {
+					note += " · 判位模糊,待批准或拒绝"
 				}
 				ticket, err := env.Executor.Gate.Enter(ApprovalRequest{
 					TaskID: pack.TaskID, StepID: pack.StepID, UnitID: env.UnitID,
 					Intent: pack.StepIntent, ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
-					ToolName: toolName, ToolArgs: string(input), Note: hardRuleGateNote(r, m),
+					ToolName: toolName, ToolArgs: string(input), Note: note,
 					GateGroup: r.Group,
 				})
 				if err != nil {
@@ -1533,7 +1556,7 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 					"%s(请求 %s):命令命中拦截规则(%s · %s),已提交面板审批,批准后继续执行",
 					approvalPendingNote, ticket.Req.ID, r.Group, strings.TrimPrefix(r.Name, HardRuleBuiltinPrefix)))
 			}
-			return denyUnit(rings.DenyLineHardRule, hardRuleDenyReason(r, m))
+			return permission.Denied(env.denyHardAction(pack, toolName, input, r, m, rings.DenyLineHardRule, ""))
 		}
 		// ②b 范围外拦截(P4-51 ①,问题清单 #73②):渗透任务的命令目标
 		// 不在种子闭包内——拦下出待决卡(同一目标一张卡)＋单位冻结收
@@ -1546,10 +1569,9 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 		// ③ 任务级意图拦截(P2-08e,审核迭代:现读+范围过滤+不熔断):
 		// 禁止命中 / 超额只拒本次调用并留痕,单位继续其余工作(告知走
 		// 舵杆定向投递,见 server 侧规则变更端点);允许 + 次数上限在此
-		// 计数入账。
-		if reason, deny := env.checkIntentRules(pack, toolName, input); deny {
-			env.denyIntentRecord(pack, toolName, input, reason)
-			return permission.Denied(reason)
+		// 计数入账。P4-63 B:同规则累计 3 次拒绝升级杀单位(防硬撞)。
+		if reason, rid, deny := env.checkIntentRules(pack, toolName, input); deny {
+			return permission.Denied(env.denyIntentAction(pack, toolName, input, reason, rid))
 		}
 		// ④ 分级缺失/非法、危害声明非法:fail-safe。
 		if ActionLevelRank(pack.ActionLevel) == 0 {
@@ -1701,8 +1723,10 @@ func (env *unitEnv) fuseUnit() {
 }
 
 // denyGuard 拒绝线统一处置(P2-08e 起审批门回调与门卫边界共用):
-// 留痕(approval.record denied + DenyLine)→ 熔断单位。硬规则与危害
-// 拒绝线走本入口:单位级终止、主宰收割可见原因、被拒单位不得换法重试。
+// 留痕(approval.record denied + DenyLine)→ 熔断单位。适用拒绝线:
+// RoE 工具边界、分级缺失/危害声明非法 fail-safe、危害类拒绝。
+// P4-63 B 起硬规则与意图拦截改走 denyHardAction/denyIntentAction——
+// 拒动作不杀单位,同规则累计 3 次升级杀。
 func (env *unitEnv) denyGuard(pack *TaskPack, toolName string, input json.RawMessage, denyLine, reason string) {
 	env.deniedReason = "审批拒绝终止: " + reason
 	env.recordApproval(rings.ApprovalRecord{
@@ -1713,15 +1737,68 @@ func (env *unitEnv) denyGuard(pack *TaskPack, toolName string, input json.RawMes
 	env.fuseUnit()
 }
 
-// denyIntentRecord 任务级拦截拒绝:只留痕、不熔断(审核迭代定则)——
-// 只拒绝本次调用,单位继续其余工作;模型读到拒绝原因自行调整,规则
-// 变更的提前告知走舵杆定向投递。熔断保留给系统级硬规则与危害拒绝线。
-func (env *unitEnv) denyIntentRecord(pack *TaskPack, toolName string, input json.RawMessage, reason string) {
+// bumpDenyHits 同单位生命周期内按规则累计确定性拒绝次数(P4-63 B⑤,
+// 键 hr:<硬规则ID> / ir:<意图规则ID>,累计不重置),返回累计值。
+func (env *unitEnv) bumpDenyHits(key string) int {
+	env.denyMu.Lock()
+	defer env.denyMu.Unlock()
+	if env.denyHits == nil {
+		env.denyHits = map[string]int{}
+	}
+	env.denyHits[key]++
+	return env.denyHits[key]
+}
+
+// denyHardAction P4-63 B:硬规则确定性拒绝——只拒本次动作(模型读到
+// 换路指引,单位存活自行换路),不熔断单位;同规则累计
+// HardDenyEscalateAfter 次升级杀单位(防硬撞/试探)。denyLine 取
+// hard_rule(命中拒绝)或 no_gate(无门 fail-safe,reason 由调用方给)。
+// 留痕走 approval.record denied(Reason 保持 hardRuleDenyReason 的可解析
+// 身份格式,升级说明并入同一笔尾注)。返回给模型的拒绝文案。
+func (env *unitEnv) denyHardAction(pack *TaskPack, toolName string, input json.RawMessage, r HardRule, matched string, denyLine, reason string) string {
+	if reason == "" {
+		reason = hardRuleDenyReason(r, matched)
+	}
+	escalated := false
+	if n := env.bumpDenyHits("hr:" + r.ID); n >= HardDenyEscalateAfter {
+		escalated = true
+		reason += fmt.Sprintf(" · 同规则累计命中 %d 次,升级终止单位", n)
+		env.deniedReason = "审批拒绝终止: " + reason
+		env.fuseUnit()
+	}
+	env.recordApproval(rings.ApprovalRecord{
+		StepID: pack.StepID, UnitID: env.UnitID, Type: rings.ApprovalRecDenied,
+		ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass, DenyLine: denyLine,
+		Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input, Reason: reason,
+	})
+	text := hardRuleRejectText(r)
+	if escalated {
+		text += "(同规则累计命中已到上限,单位终止)"
+	}
+	return text
+}
+
+// denyIntentAction 任务级拦截拒绝(P2-08e 起只留痕不熔断;P4-63 B 加
+// 升级保险):只拒绝本次调用,单位继续其余工作;同规则累计
+// HardDenyEscalateAfter 次升级杀单位。规则变更的提前告知走舵杆定向
+// 投递。返回给模型的拒绝文案。
+func (env *unitEnv) denyIntentAction(pack *TaskPack, toolName string, input json.RawMessage, reason, ruleID string) string {
+	escalated := false
+	if n := env.bumpDenyHits("ir:" + ruleID); n >= HardDenyEscalateAfter {
+		escalated = true
+		reason += fmt.Sprintf(" · 同规则累计命中 %d 次,升级终止单位", n)
+		env.deniedReason = "审批拒绝终止: " + reason
+		env.fuseUnit()
+	}
 	env.recordApproval(rings.ApprovalRecord{
 		StepID: pack.StepID, UnitID: env.UnitID, Type: rings.ApprovalRecDenied,
 		ActionLevel: pack.ActionLevel, DenyLine: rings.DenyLineIntentRule,
 		Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input, Reason: reason,
 	})
+	if escalated {
+		return reason + ";同规则累计命中已到上限,单位终止"
+	}
+	return reason
 }
 
 // recordApproval 审批审计流入口(拒绝等不进弹门的判定也要留痕)。

@@ -22,6 +22,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -47,6 +50,7 @@ type ReproDigest struct {
 	NarrativeUnpolished bool                `json:"narrative_unpolished,omitempty"`
 	Rounds              []FalsifyRoundHuman `json:"rounds,omitempty"`
 	Steps               []ReproStep         `json:"steps,omitempty"`
+	NoReproReason       string              `json:"no_repro_reason,omitempty"`
 	ProcessCount        int                 `json:"process_count,omitempty"`
 	VariantsCount       int                 `json:"variants_count,omitempty"`
 }
@@ -112,6 +116,10 @@ type claimCaseRow struct {
 	discoverSess         string
 	timing               TimingDigest
 	summary              *SummaryDigest
+	// roundHumans 逐轮人话(P4-64 ①)/retestNotes 复测备注校对稿(P4-64 ⑦):
+	// 显示层包装列,按轮 upsert(轮号全局续号),存储 JSON 键为轮号字符串。
+	roundHumans   map[int]ClaimRoundHuman
+	retestNotes   map[int]string
 	// changed* 脏列标记(save 只写触碰过的列组)。
 	changedDigest   bool
 	changedTimeline bool
@@ -121,6 +129,8 @@ type claimCaseRow struct {
 	changedOrigin   bool
 	changedTiming   bool
 	changedSummary  bool
+	changedRounds   bool
+	changedNotes    bool
 }
 
 // loadClaimCase 读行;不存在时建默认行(幂等)。
@@ -128,12 +138,13 @@ func loadClaimCase(tx *sql.Tx, taskID, claimID string) (*claimCaseRow, error) {
 	row := &claimCaseRow{claimID: claimID, altKilled: map[string]bool{}}
 	var hasEvidence, reportExcluded int
 	var rawTimeline, rawAlts, rawKilled, rawRepro, rawEvidence, rawTiming, rawSummary string
+	var rawRounds, rawNotes string
 	err := tx.QueryRow(
 		`SELECT falsify_step, verifier, pending_reason, verdict_rev, severity, repro_steps,
 		   retest_verdict, retest_round, retest_at, replay_verdict, replay_round, replay_at,
 		   has_evidence, report_excluded, report_excluded_reason, evidence_binds, repro_events,
 		   timeline, alternatives, alt_killed, repro, evidence, discoverer, discover_step,
-		   discover_session, timing, summary
+		   discover_session, timing, summary, round_humans, retest_notes
 		 FROM claim_cases WHERE task_id = ? AND claim_id = ?`, taskID, claimID,
 	).Scan(&row.falsifyStep, &row.verifier, &row.pendingReason, &row.verdictRev, &row.severity,
 		&row.reproSteps, &row.retestVerdict, &row.retestRound, &row.retestAt,
@@ -142,6 +153,7 @@ func loadClaimCase(tx *sql.Tx, taskID, claimID string) (*claimCaseRow, error) {
 		&row.evidenceBinds, &row.reproEvents,
 		&rawTimeline, &rawAlts, &rawKilled, &rawRepro, &rawEvidence,
 		&row.discoverer, &row.discoverStep, &row.discoverSess, &rawTiming, &rawSummary,
+		&rawRounds, &rawNotes,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		if _, err := tx.Exec(
@@ -189,6 +201,28 @@ func loadClaimCase(tx *sql.Tx, taskID, claimID string) (*claimCaseRow, error) {
 		row.summary = &SummaryDigest{}
 		if json.Unmarshal([]byte(rawSummary), row.summary) != nil {
 			row.summary = nil
+		}
+	}
+	if rawRounds != "" {
+		var m map[string]ClaimRoundHuman
+		if json.Unmarshal([]byte(rawRounds), &m) == nil {
+			row.roundHumans = map[int]ClaimRoundHuman{}
+			for k, v := range m {
+				if n, err := strconv.Atoi(k); err == nil {
+					row.roundHumans[n] = v
+				}
+			}
+		}
+	}
+	if rawNotes != "" {
+		var m map[string]string
+		if json.Unmarshal([]byte(rawNotes), &m) == nil {
+			row.retestNotes = map[int]string{}
+			for k, v := range m {
+				if n, err := strconv.Atoi(k); err == nil {
+					row.retestNotes[n] = v
+				}
+			}
 		}
 	}
 	return row, nil
@@ -313,7 +347,60 @@ func (r *claimCaseRow) save(tx *sql.Tx, taskID string) error {
 			return fmt.Errorf("rings: 投影写入判断摘要: %w", err)
 		}
 	}
+	if r.changedRounds {
+		b, err := marshalRoundKeyed(r.roundHumans)
+		if err != nil {
+			return fmt.Errorf("rings: 序列化逐轮人话: %w", err)
+		}
+		if _, err := tx.Exec(
+			`UPDATE claim_cases SET round_humans = ? WHERE task_id = ? AND claim_id = ?`,
+			string(b), taskID, r.claimID,
+		); err != nil {
+			return fmt.Errorf("rings: 投影写入逐轮人话: %w", err)
+		}
+	}
+	if r.changedNotes {
+		b, err := marshalRoundKeyed(r.retestNotes)
+		if err != nil {
+			return fmt.Errorf("rings: 序列化复测备注校对稿: %w", err)
+		}
+		if _, err := tx.Exec(
+			`UPDATE claim_cases SET retest_notes = ? WHERE task_id = ? AND claim_id = ?`,
+			string(b), taskID, r.claimID,
+		); err != nil {
+			return fmt.Errorf("rings: 投影写入复测备注校对稿: %w", err)
+		}
+	}
 	return nil
+}
+
+// marshalRoundKeyed 轮号键 JSON(map 键升序,重放确定性:同输入同输出)。
+func marshalRoundKeyed[V any](m map[int]V) ([]byte, error) {
+	if len(m) == 0 {
+		return []byte(""), nil
+	}
+	keys := make([]int, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		v, err := json.Marshal(m[k])
+		if err != nil {
+			return nil, err
+		}
+		kb, _ := json.Marshal(strconv.Itoa(k))
+		b.Write(kb)
+		b.WriteByte(':')
+		b.Write(v)
+	}
+	b.WriteByte('}')
+	return []byte(b.String()), nil
 }
 
 // appendTimeline 时间线追一条。
@@ -512,7 +599,8 @@ func applyClaimRecord(tx *sql.Tx, taskID string, rev int64, p TestClaimRecord, p
 		row.repro = &ReproDigest{
 			Rev: rev, Severity: p.Severity, Narrative: p.Narrative,
 			NarrativeUnpolished: p.NarrativeUnpolished, Rounds: p.Rounds, Steps: steps,
-			ProcessCount: len(p.Process), VariantsCount: len(p.Variants),
+			NoReproReason: p.NoReproReason,
+			ProcessCount:  len(p.Process), VariantsCount: len(p.Variants),
 		}
 		row.changedRepro = true
 		// 声明摘要(P4-59 ①):字段全空 = 本次定稿未生成校对摘要,摘要列
@@ -569,5 +657,90 @@ func applyClaimRecord(tx *sql.Tx, taskID string, rev int64, p TestClaimRecord, p
 		// 本条目与 node.state_changed Note。
 		row.appendTimeline(rev, occurredAt, "discard", payload)
 	}
+	return row.save(tx, taskID)
+}
+
+// applyClaimRoundHuman claim.round_human → 卷宗逐轮人话(P4-64 ①):
+// 按轮 upsert(轮号全局续号,重开后新轮次增量补);机器 falsify 记录
+// 原文一字不动。
+func applyClaimRoundHuman(tx *sql.Tx, taskID string, rev int64, p ClaimRoundHuman) error {
+	if p.ClaimID == "" || p.Round <= 0 ||
+		(p.Doubt == "" && p.How == "" && p.Conclusion == "") {
+		return fmt.Errorf("rings: claim.round_human 缺判断、轮次不合法或三段全空(不落空事件)")
+	}
+	row, err := loadClaimCase(tx, taskID, p.ClaimID)
+	if err != nil {
+		return err
+	}
+	if row.roundHumans == nil {
+		row.roundHumans = map[int]ClaimRoundHuman{}
+	}
+	row.roundHumans[p.Round] = ClaimRoundHuman{
+		ClaimID: p.ClaimID, Round: p.Round,
+		Doubt: p.Doubt, How: p.How, Conclusion: p.Conclusion, Unpolished: p.Unpolished,
+	}
+	row.changedRounds = true
+	return row.save(tx, taskID)
+}
+
+// applyClaimSummaryPolish claim.summary → 摘要列(P4-64 ②:立账即生成
+// 的声明摘要)。与 repro 事件的 summary 写入同列 latest-wins——立账在
+// 先、定稿在后(账本次序),重定稿覆盖立账稿(取代语义既有);全空
+// 字段不入账(生成侧控制,不落空事件)。
+func applyClaimSummaryPolish(tx *sql.Tx, taskID string, rev int64, p ClaimSummaryPolish) error {
+	if p.ClaimID == "" {
+		return fmt.Errorf("rings: claim.summary 缺判断")
+	}
+	if p.Statement == "" && p.Impact == "" && len(p.Facts) == 0 {
+		return fmt.Errorf("rings: claim.summary 字段全空(不落空事件)")
+	}
+	row, err := loadClaimCase(tx, taskID, p.ClaimID)
+	if err != nil {
+		return err
+	}
+	row.summary = &SummaryDigest{Rev: rev, Statement: p.Statement, Impact: p.Impact, Facts: p.Facts}
+	row.changedSummary = true
+	return row.save(tx, taskID)
+}
+
+// applyNodePolish fact.text / hypo.text → node_polish(P4-64 ③④⑥⑧):
+// 节点显示层包装 latest-wins(每类节点只来自自己的生成批次,整行覆盖
+// 无半覆盖);节点原文一字不动。unpolished 为标题未过闸的如实标注。
+func applyNodePolish(tx *sql.Tx, taskID string, rev int64, nodeID, title, statement, basis, reason string, unpolished bool) error {
+	if nodeID == "" {
+		return fmt.Errorf("rings: 节点文本包装缺节点")
+	}
+	if title == "" && statement == "" && basis == "" && reason == "" {
+		return fmt.Errorf("rings: 节点文本包装字段全空(不落空事件)")
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO node_polish (task_id, node_id, title, statement, basis, reason, unpolished, rev)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(task_id, node_id) DO UPDATE SET
+		   title = excluded.title, statement = excluded.statement,
+		   basis = excluded.basis, reason = excluded.reason,
+		   unpolished = excluded.unpolished, rev = excluded.rev`,
+		taskID, nodeID, title, statement, basis, reason, boolNum(unpolished), rev,
+	); err != nil {
+		return fmt.Errorf("rings: 投影写入节点文本包装: %w", err)
+	}
+	return nil
+}
+
+// applyRetestNotePolish claim.retest_note → 复测备注校对稿(P4-64 ⑦):
+// 按轮 upsert;机器 retest 记录 Note 原文一字不动。
+func applyRetestNotePolish(tx *sql.Tx, taskID string, rev int64, p RetestNotePolish) error {
+	if p.ClaimID == "" || p.Round <= 0 || p.Note == "" {
+		return fmt.Errorf("rings: claim.retest_note 缺判断/轮次/备注")
+	}
+	row, err := loadClaimCase(tx, taskID, p.ClaimID)
+	if err != nil {
+		return err
+	}
+	if row.retestNotes == nil {
+		row.retestNotes = map[int]string{}
+	}
+	row.retestNotes[p.Round] = p.Note
+	row.changedNotes = true
 	return row.save(tx, taskID)
 }

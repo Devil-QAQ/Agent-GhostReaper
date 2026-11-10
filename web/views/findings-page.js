@@ -29,13 +29,18 @@ import {
   HYP_VERDICT,
   REPLAY_VERDICT,
   RETEST_VERDICT,
-  SEVERITY,
   claimDisplayMeta,
   hypDisplayMeta,
   postJSON,
   severityMeta,
   usePolling,
 } from "@/lib/api";
+import {
+  byClaimZonesDesc,
+  byFactZonesDesc,
+  byFindingTimeDesc,
+  byHypZonesDesc,
+} from "../lib/finding-sort.mjs";
 import { NodeSheetHost } from "@/views/node-sheets";
 import { cn } from "@/lib/utils";
 
@@ -215,7 +220,7 @@ export function FindingsPage({ currentTask, focus }) {
               ? "已确认事实一等列出 · 凭据 / 数据 / 权限 / 立足点战果清单"
               : tab === "forging"
                 ? "漏洞怀疑在锤炼 · 等待反证 → 反证中 → 结论 · 确认迁入成果"
-                : "打开即成果(已确认按级别排) · 已修复带标记"
+                : "打开即成果(新的最上) · 已修复带标记"
         }
       />
       <div className="flex w-fit rounded-lg border border-border/55 bg-card p-1">
@@ -272,7 +277,8 @@ export function FindingsPage({ currentTask, focus }) {
   );
 }
 
-// ResultsSection 成果页签:Confirmed(含已修复标记)按级别排——四页签
+// ResultsSection 成果页签:Confirmed(含已修复标记)按发现时间倒序
+//(P4-61 ①:新的最上,报告导出仍按级别——两侧口径分离)——四页签
 // 漏斗的终点,打开即战果。P2-13:行内复现步骤折叠展开(点击展开步骤
 // 详情,含 Burp 可验证数据包,惰性拉取详情,与报告同源);复选 +
 // 「导出」走格式 × 范围矩阵弹窗。
@@ -301,11 +307,9 @@ function ResultsSection({ tid }) {
       return false;
     return true;
   });
-  // 成果按级别排(级别缺省沉底,同级按入账序)。
-  filtered.sort((a, b) => {
-    const ra = SEVERITY.indexOf(a.severity), rb = SEVERITY.indexOf(b.severity);
-    return (ra < 0 ? 99 : ra) - (rb < 0 ? 99 : rb) || a.created_rev - b.created_rev;
-  });
+  // 成果按发现时间倒序(P4-61 ①:新的最上,替换原按级别排;重开再确认
+  // 不改立账时刻,位置不变;报告导出仍按级别,面板与报告口径分离)。
+  filtered.sort(byFindingTimeDesc);
 
   const toggleSel = (id) => {
     setSelected((prev) => {
@@ -339,7 +343,7 @@ function ResultsSection({ tid }) {
         <EmptyState
           icon="shieldAlert"
           title="暂无成果"
-          hint={error ? `读取失败:${error}` : "反证确认成立的漏洞在此按级别列出;过程态切「锤炼」查看"}
+          hint={error ? `读取失败:${error}` : "反证确认成立的漏洞新的在上;过程态切「锤炼」查看"}
         />
       ) : (
         <>
@@ -604,6 +608,9 @@ function ForgingSection({ tid }) {
   const filtered = claims.filter((c) =>
     statusFilter === "all" ? true : (c.display || "") === statusFilter,
   );
+  // 三区排序(P4-61 ②):过程态置顶/正常区/废弃沉底,区内时间倒序;
+  // 筛选与 live 重拉共用同一比较器,落位不漂移。
+  filtered.sort(byClaimZonesDesc);
 
   return (
     <div className="flex flex-col gap-6">
@@ -704,7 +711,9 @@ function FactsSection({ tid, focus }) {
   const [focusPulse, setFocusPulse] = React.useState(null);
   const lastFocused = React.useRef(null);
 
-  const facts = (data?.facts || []).slice().reverse(); // 最新确认在先
+  // 三区排序(P4-61 ②):"新"标条目视为过程态置顶、被推翻沉底(防御性
+  // 词位)、已确认/由假设升级正常区,区内时间倒序。
+  const facts = [...(data?.facts || [])].sort(byFactZonesDesc);
 
   // 资产筛选项自数据派生(有已确认事实的资产)。
   const assetOptions = [];
@@ -908,6 +917,8 @@ function HypothesesSection({ tid }) {
   const filtered = hypos.filter((h) =>
     statusFilter === "all" ? true : (h.display || "") === statusFilter,
   );
+  // 三区排序(P4-61 ②):过程态置顶/搁置正常区/已废弃沉底,区内时间倒序。
+  filtered.sort(byHypZonesDesc);
 
   return (
     <div className="flex flex-col gap-6">

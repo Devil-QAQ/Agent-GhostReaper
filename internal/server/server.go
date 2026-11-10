@@ -1924,6 +1924,9 @@ type claimView struct {
 	PendingReason string   `json:"pending_reason,omitempty"`  // 待确认搁置理由(R4)
 	VerdictRev    int64    `json:"verdict_rev,omitempty"`     // 裁决事件 revision
 	CreatedRev    int64    `json:"created_rev"`
+	// AddedAt 判断立账时刻(P4-61 排序口径:nodes 投影 added_at,写侧
+	// 同事务维护)——成果页时间倒序与锤炼页区内排序的比较键。
+	AddedAt string `json:"added_at,omitempty"`
 	// 复测面(P3-06):最新复测结论与轮次、当前是否有活复测会话、状态可否
 	// 复测(已确认/待确认/已修复)。
 	RetestVerdict string `json:"retest_verdict,omitempty"` // fixed|unfixed|inconclusive
@@ -2003,15 +2006,18 @@ func (s *Server) handleClaimsList(w http.ResponseWriter, r *http.Request) {
 	dc := s.loadDisplayCtx(r.Context(), taskID)
 	// 事实标题/类型缓存(锤炼条目点回事实的引用行)。P4-59 ①:定稿
 	// 校对后的事实描述优先(任务级反查自各判断的声明摘要,后定稿覆盖
-	// 先定稿——取代语义同其他冻结文本)。
+	// 先定稿——取代语义同其他冻结文本);P4-64 ③:事实确认批次文本
+	//(node_polish)再覆盖(不限于已定稿判断链上的事实)。
 	factTitle := map[string]string{}
 	factKnown := map[string]bool{}
 	polishedFact := polishedFactMapOf(digests)
+	s.overlayFactPolish(r.Context(), taskID, polishedFact)
 
 	out := make([]claimView, 0, len(claims))
 	for _, c := range claims {
 		v := claimView{
 			ID: c.ID, Status: c.Status, Statement: c.Title, CreatedRev: c.CreatedRev,
+			AddedAt: c.AddedAt,
 		}
 		v.Impact, _ = c.Detail["impact"].(string)
 		// 声明文本优先定稿校对稿(P4-59 ①:描述=一句话本质+影响对象、

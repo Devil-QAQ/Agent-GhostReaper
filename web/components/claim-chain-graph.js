@@ -60,10 +60,10 @@ const NODE_TYPES = { chainNode: ChainNode };
 // derived_from/about/covers/produces/goal/falsify 双向走两跳,收集节点与边。
 function claimChainSubgraph(graph, claimID) {
   if (!graph) return { nodes: [], edges: [] };
-  const byID = new Map(graph.nodes.map((n) => [n.id, n]));
+  const byID = new Map(graph.nodes?.map((n) => [n.id, n]));
   if (!byID.has(claimID)) return { nodes: [], edges: [] };
   const WALK = new Set(["derived_from", "about", "covers", "produces", "goal", "falsify"]);
-  const edges = graph.edges.filter((e) => WALK.has(e.type));
+  const edges = graph.edges?.filter((e) => WALK.has(e.type)) || [];
   const adj = new Map();
   for (const e of edges) {
     for (const [a, b] of [

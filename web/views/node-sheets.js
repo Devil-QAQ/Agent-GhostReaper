@@ -119,36 +119,126 @@ function Muted({ children }) {
 
 // ---- 通用节点抽屉(goal / step / fact)----
 
-// detail 自由字段的操作者语言(表外词按 8.5 术语门槛翻译;未收录键
-// 原样呈现——字段名即数据事实,不编造解释)。
-const DETAIL_KEYS = {
-  cancellation_reason: "取消理由",
-  goal_id: "归属目标",
-  action_level: "意图分级",
-  intent: "意图",
-  unit_id: "单位",
-  transcript_id: "会话记录",
-  expected_observation: "预期观察",
-  harm_class: "危害声明",
-  priority: "优先级",
-  evidence_head: "证据",
-  evidence: "证据原文",
-  evidence_ref: "原始数据",
-  vulnclass: "类别",
-  impact: "影响面",
-  standard: "判定标准",
-  predicate: "完成谓词",
-  kind: "类型",
-  testclaim_id: "判断",
-  new_asset: "新对象申报",
-  reason: "理由",
-  note: "备注",
+// P4-64 ⑤(问题清单 #82):"节点字段"区按对象类型定制——列入清单的字段
+// 按序呈现(标签走术语对照表),未列入的一律收"原始数据"折叠(等宽可
+// 查);detail JSON 倾倒与未映射键裸露绝迹(8.5 第 8 条存量清账)。
+// 列 = [取值键,标签,形态];"端点补发"键(unit_id/transcript_id/assets/
+// polished_statement)不在 detail,由节点详情端点随行补发;goal-ref 形态
+// 为目标引用可下钻,assets 形态为资产引用组,kind 形态按 KIND_LABELS
+// 翻译。无值字段跳过(不造空行)。
+const FIELD_SPECS = {
+  step: [
+    ["expected_observation", "预期观察"],
+    ["unit_id", "单位"],
+    ["priority", "优先级"],
+    ["action_level", "意图分级"],
+    ["transcript_id", "会话记录"],
+    ["goal_id", "归属目标", "goal-ref"],
+    ["harm_class", "危害声明"],
+    ["kind", "类型", "kind"],
+    ["round", "反证轮次"],
+    ["testclaim_id", "判断"],
+    ["hypothesis_id", "假设"],
+    ["verify_intent", "验证意图"],
+    ["redispatch_reason", "重派原因"],
+    ["cancellation_reason", "取消理由"],
+  ],
+  fact: [
+    ["evidence_head", "证据"],
+    ["evidence", "证据"],
+    ["polished_statement", "描述"],
+    ["assets", "关联资产", "assets"],
+    ["unit_id", "发现单位"],
+    ["transcript_id", "会话记录"],
+    ["new_asset", "新对象申报"],
+  ],
+  goal: [
+    ["predicate", "完成条件"],
+  ],
+};
+
+// step.detail.kind 的操作者语言(falsify/verify 之外原样——字段值是
+// 数据事实,未收录不编造解释)。
+const KIND_LABELS = {
+  falsify: "反证",
+  verify: "验证假设",
 };
 
 function detailValue(v) {
   if (v === null || v === undefined) return "(空)";
   if (typeof v === "object") return JSON.stringify(v, null, 2);
   return String(v);
+}
+
+// RawDetailData 未列入清单字段的收容区:等宽折叠,点开可查(原始键名
+// 与值原样呈现——这是审计面,不翻译不删减)。
+function RawDetailData({ rest }) {
+  const [open, setOpen] = React.useState(false);
+  if (Object.keys(rest).length === 0) return null;
+  return (
+    <div className="flex flex-col gap-1">
+      <button
+        className={
+          "flex w-fit items-center gap-1.5 text-xs transition-colors cursor-pointer " +
+          (open ? "text-foreground" : "text-muted-foreground hover:text-foreground")
+        }
+        onClick={() => setOpen(!open)}
+      >
+        {React.createElement(iconOf(open ? "chevronDown" : "chevronRight"), { className: "size-3.5" })}
+        原始数据({Object.keys(rest).length} 项)
+      </button>
+      {open && (
+        <pre className="overflow-auto rounded-md bg-input-surface p-2 num text-xs leading-relaxed whitespace-pre-wrap break-all">
+          {JSON.stringify(rest, null, 2)}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+// NodeFieldRow 单个字段行:标签 + 值(长文本等宽折行;引用形态可下钻;
+// 资产形态带标题;空值如实"(空)")。
+function NodeFieldRow({ label, value, shape, onSelectNode }) {
+  let body;
+  if (shape === "goal-ref" && typeof value === "string" && value) {
+    body = (
+      <NodeRefButton
+        meta={{ id: String(value), type: "goal", typeLabel: "目标" }}
+        onSelectNode={onSelectNode}
+      />
+    );
+  } else if (shape === "assets" && Array.isArray(value)) {
+    body =
+      value.length === 0 ? (
+        <span className="text-xs text-muted-foreground">(无)</span>
+      ) : (
+        <div className="flex flex-wrap gap-1">
+          {value.map((a) => (
+            <NodeRefButton key={a.id} meta={{ id: a.id, type: "asset", typeLabel: "资产" }} onSelectNode={onSelectNode}>
+              {a.title || a.id}
+            </NodeRefButton>
+          ))}
+        </div>
+      );
+  } else if (shape === "kind") {
+    body = <div className="break-all">{KIND_LABELS[value] || String(value)}</div>;
+  } else {
+    const text = detailValue(value);
+    const long = text.length > 96 || typeof value === "object";
+    body = long ? (
+      <pre className="overflow-auto rounded-md bg-input-surface p-2 num text-xs leading-relaxed whitespace-pre-wrap break-all">
+        {text}
+      </pre>
+    ) : (
+      <div className="break-all">{text}</div>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-0.5 rounded-md border border-border/55 bg-card px-3 py-2">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      {body}
+    </div>
+  );
 }
 
 // GenericNodeSheet 目标/步骤/事实详情:节点投影 + detail 字段逐项 +
@@ -221,40 +311,46 @@ export function GenericNodeSheet({ tid, nodeID, nodeType, graph, onClose, onSele
               </SheetDescription>
             </SheetHeader>
             <div className="flex flex-col gap-5 p-5 text-sm">
+              {/* 标题为节点原文(抽屉是审计面,校对标题走事实页/图/链路
+                  等消费点;事实的校对描述在字段区"描述"行)。 */}
               <DetailSection title="标题">
                 <div className="rounded-md border border-border/55 bg-card px-3 py-2 break-words">
                   {n.title || "(无标题)"}
                 </div>
               </DetailSection>
 
-              {n.detail && Object.keys(n.detail).length > 0 && (
-                <DetailSection title="节点字段">
-                  <div className="flex flex-col gap-2">
-                    {Object.entries(n.detail).map(([k, v]) => {
-                      const text = detailValue(v);
-                      const long = text.length > 96 || typeof v === "object";
-                      const goalRef = k === "goal_id" && typeof v === "string";
-                      return (
-                        <div key={k} className="flex flex-col gap-0.5 rounded-md border border-border/55 bg-card px-3 py-2">
-                          <div className="text-xs text-muted-foreground">{DETAIL_KEYS[k] || k}</div>
-                          {goalRef ? (
-                            <NodeRefButton
-                              meta={{ id: String(v), type: "goal", typeLabel: "目标" }}
-                              onSelectNode={onSelectNode}
-                            />
-                          ) : long ? (
-                            <pre className="overflow-auto rounded-md bg-input-surface p-2 num text-xs leading-relaxed whitespace-pre-wrap break-all">
-                              {text}
-                            </pre>
-                          ) : (
-                            <div className="break-all">{text}</div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </DetailSection>
-              )}
+              {/* P4-64 ⑤:按对象类型定制的字段清单;未列入的字段收"原始
+                  数据"折叠(等宽可查),detail JSON 倾倒与未映射键裸露
+                  绝迹。 */}
+              {(() => {
+                const spec = FIELD_SPECS[type] || [];
+                const fields = { ...(n.detail || {}) };
+                // 端点补发字段并入取值面(不在 detail)。
+                for (const k of ["unit_id", "transcript_id", "assets", "polished_statement"]) {
+                  if (data?.[k] !== undefined) fields[k] = data[k];
+                }
+                const listed = new Set(spec.map(([k]) => k));
+                const rest = {};
+                for (const [k, v] of Object.entries(n.detail || {})) {
+                  if (!listed.has(k)) rest[k] = v;
+                }
+                const rows = spec
+                  .map(([k, label, shape]) => ({ k, label, shape, v: fields[k] }))
+                  .filter((r) => r.v !== undefined && r.v !== null && r.v !== "");
+                return (
+                  <DetailSection title="节点字段">
+                    <div className="flex flex-col gap-2">
+                      {rows.length === 0 && (
+                        <div className="text-xs text-muted-foreground">(无)</div>
+                      )}
+                      {rows.map((r) => (
+                        <NodeFieldRow key={r.k} label={r.label} value={r.v} shape={r.shape} onSelectNode={onSelectNode} />
+                      ))}
+                      <RawDetailData rest={rest} />
+                    </div>
+                  </DetailSection>
+                );
+              })()}
 
               {lineage && (lineage.up.length > 0 || lineage.down.length > 0) && (
                 <DetailSection title="血缘(引用可下钻)">
@@ -575,6 +671,11 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
   const sev = severityMeta(claim.severity || data.repro?.severity);
   const repro = data.repro || null;
   const timeline = data.timeline || [];
+  // P4-64 ①:逐轮人话(每轮随反证结论入账冻结)优先;存量旧定稿的
+  // repro.rounds 合读,同轮号新事件优先(锤炼中声明无需等定稿)。
+  const humansByRound = new Map(
+    [...(repro?.rounds || []), ...(data.round_humans || [])].map((r) => [r.round, r]),
+  );
   // 当前结论一句话(P4-28 ③):终态直陈结果,不让人读理由原文猜结果;
   // 过程态(等待反证/反证中)尚未出结论,不呈现本行。
   const conclusion =
@@ -658,7 +759,7 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
               <div className="rounded-md border border-border/55 bg-card px-3 py-2 leading-relaxed">
                 {(data.remediation || []).length > 0 ? (
                   <div className="flex flex-col gap-1 text-sm">
-                    {data.remediation.map((item, i) => (
+                    {data.remediation?.map((item, i) => (
                       <div key={i}>{i + 1}. {item}</div>
                     ))}
                   </div>
@@ -728,9 +829,7 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
                         <TimelineEntry
                           key={`${e.rev}-${e.kind}-${i}`}
                           entry={e}
-                          humanOf={(no) =>
-                            (repro?.rounds || []).find((r) => r.round === no) || null
-                          }
+                          humanOf={(no) => humansByRound.get(no) || null}
                         />
                       ))}
                     </ol>
@@ -905,7 +1004,7 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
               {claim.combined && (claim.chain || []).length > 0 && (
                 <div className="flex flex-wrap items-center gap-2 text-xs">
                   <span className="text-muted-foreground">环节角色:</span>
-                  {claim.chain.map((c, i) => (
+                  {claim.chain?.map((c, i) => (
                     <span key={c.fact_id + String(i)} className="flex items-center gap-1">
                       <Badge variant="outline">{c.role || `环节 ${i + 1}`}</Badge>
                       <NodeRefButton meta={{ id: c.fact_id, type: "fact", typeLabel: "事实" }} onSelectNode={onSelectNode} />
@@ -943,7 +1042,7 @@ export function ClaimDetailSheet({ tid, claimID, onClose, onSelectNode }) {
                 {(data.origin?.falsifiers || []).length === 0 ? (
                   <span className="text-xs text-muted-foreground">(尚未反证)</span>
                 ) : (
-                  data.origin.falsifiers.map((f, i) => (
+                  data.origin.falsifiers?.map((f, i) => (
                     <OriginRow key={`${f.unit_id}-${i}`} tid={tid} o={f} onClose={onClose} onSelectNode={onSelectNode} />
                   ))
                 )}
@@ -1332,7 +1431,7 @@ function TimelineEntry({ entry, humanOf }) {
               {entry.pending_reason && <div>{entry.pending_reason}</div>}
               {(entry.conditions || []).length > 0 && (
                 <div className="mt-1 flex flex-wrap gap-2">
-                  {entry.conditions.map((c, i) => (
+                  {entry.conditions?.map((c, i) => (
                     <span
                       key={i}
                       title={`${condLabel(c.kind)}(${c.kind}): ${c.actual}/${c.required}`}
@@ -1511,7 +1610,7 @@ function FalsifyMachineDetail({ entry }) {
       {(entry.alt_results || []).length > 0 && (
         <span className="flex flex-wrap gap-2">
           解释结论:
-          {entry.alt_results.map((a) => (
+          {entry.alt_results?.map((a) => (
             <span
               key={a.id}
               className={
@@ -1688,6 +1787,45 @@ export function HypothesisDetailSheet({ tid, hypID, onClose, onSelectNode }) {
             <div className="rounded-md border border-border/55 bg-card px-3 py-2">{h.basis || "(未记录)"}</div>
           </section>
 
+          {/* P4-64 ⑧:最近评估结论与理由(评估批次冻结的包装稿优先,
+              未评估如实"(尚未评估)")。 */}
+          <section className="flex flex-col gap-1">
+            <div className="text-xs font-medium tracking-wide text-muted-foreground">评估结论与理由</div>
+            {h.decision ? (
+              <div className="flex flex-col gap-1 rounded-md border border-border/55 bg-card px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <Badge variant={HYP_DECISION[h.decision]?.tone || "info"}>
+                    {HYP_DECISION[h.decision]?.label || h.decision}
+                  </Badge>
+                </div>
+                {h.reason && <div className="text-xs text-muted-foreground">{h.reason}</div>}
+              </div>
+            ) : (
+              <div className="rounded-md border border-border/55 bg-card px-3 py-2 text-xs text-muted-foreground">
+                (尚未评估)
+              </div>
+            )}
+          </section>
+
+          {/* P4-64 ⑤:未映射字段收"原始数据"折叠(等宽可查;映射键为
+              依据/提出单位/提出步骤)。 */}
+          {(() => {
+            const listed = new Set(["basis", "unit_id", "step_id"]);
+            const rest = Object.fromEntries(
+              Object.entries(data.raw_detail || {}).filter(([k]) => !listed.has(k)),
+            );
+            return (
+              <DetailSection title="原始数据">
+                <div className="flex flex-col gap-1">
+                  <RawDetailData rest={rest} />
+                  {Object.keys(rest).length === 0 && (
+                    <div className="text-xs text-muted-foreground">(无未呈现字段)</div>
+                  )}
+                </div>
+              </DetailSection>
+            );
+          })()}
+
           <section className="flex flex-col gap-2">
             <div className="text-xs font-medium tracking-wide text-muted-foreground">
               回传轨迹(提出 → 评估 → 验证)
@@ -1708,7 +1846,7 @@ export function HypothesisDetailSheet({ tid, hypID, onClose, onSelectNode }) {
                 {(traj.assets || []).length === 0 ? (
                   <span className="text-muted-foreground">(无)</span>
                 ) : (
-                  traj.assets.map((id) => (
+                  traj.assets?.map((id) => (
                     <NodeRefButton key={id} meta={{ id, type: "asset", typeLabel: "资产" }} onSelectNode={onSelectNode} />
                   ))
                 )}
@@ -1717,7 +1855,7 @@ export function HypothesisDetailSheet({ tid, hypID, onClose, onSelectNode }) {
               {(traj.verify_steps || []).length === 0 ? (
                 <div className="text-muted-foreground">验证步骤:(尚未派发)</div>
               ) : (
-                traj.verify_steps.map((vs) => {
+                traj.verify_steps?.map((vs) => {
                   const vd = HYP_VERDICT[vs.verdict];
                   return (
                     <div key={vs.step_id} className="flex flex-wrap items-center gap-2">

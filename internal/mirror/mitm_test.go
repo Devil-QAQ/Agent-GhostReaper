@@ -264,9 +264,11 @@ func TestHTTPSUntrustedIssuerAnnotated(t *testing.T) {
 	}
 }
 
-// TestHTTPSTargetNotTLSRecorded 目标端口非 TLS:请求失败如实留痕。
-func TestHTTPSTargetNotTLSRecorded(t *testing.T) {
-	_, sess, store, blobs := newTestMirror(t)
+// TestHTTPSTargetNotTLSPassthroughFallback 目标端口非 TLS(P4-62 C(a)):
+// 上游握手失败不再 502 阻断——整条隧道退透传(客户端与目标端到端直连,
+// 按真实目标行为收到失败),镜留 tunnel 记录并如实注记退透传原因。
+func TestHTTPSTargetNotTLSPassthroughFallback(t *testing.T) {
+	_, sess, store, _ := newTestMirror(t)
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("plain-http"))
 	}))
@@ -274,24 +276,16 @@ func TestHTTPSTargetNotTLSRecorded(t *testing.T) {
 
 	client := proxiedClient(sess)
 	resp, err := client.Get(strings.Replace(origin.URL, "http://", "https://", 1) + "/x")
-	if err != nil {
-		t.Fatalf("代理应回 502 响应而非传输错误: %v", err)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("目标非 TLS:客户端按直连真实结果应收到失败(直连握手对 HTTP 服务必然失败)")
 	}
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("工具侧应见 502: %d", resp.StatusCode)
-	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
 
 	recs := waitRecords(t, store, 1)
-	if recs[0].Type != rings.MirrorRecHTTPS || recs[0].Error == "" || recs[0].Status != 0 {
-		t.Fatalf("目标非 TLS 应留 https 失败记录: %+v", recs[0])
-	}
-	if !strings.Contains(recs[0].Error, "目标 TLS 握手失败") {
-		t.Fatalf("失败原因应如实: %q", recs[0].Error)
-	}
-	if recs[0].BlobRef == "" || !blobs.has(recs[0].BlobRef) {
-		t.Fatalf("失败交换也应有 blob 文档: %+v", recs[0])
+	rec := recs[0]
+	if rec.Type != rings.MirrorRecTunnel || rec.Error == "" ||
+		!strings.Contains(rec.Error, "退透传") || !strings.Contains(rec.Error, "目标 TLS 握手失败") {
+		t.Fatalf("上游握手失败应退透传并如实注记(tunnel): %+v", rec)
 	}
 }
 

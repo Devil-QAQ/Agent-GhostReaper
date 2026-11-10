@@ -240,7 +240,7 @@ func New(cfg Config) (*Manager, error) {
 			detail := map[string]any{"action": action, "from": r.Status}
 			if len(ghosts) > 0 {
 				detail["ghost_steps"] = ghosts
-				detail["ghost_note"] = "崩溃残留 running 的步骤已重置回可领取"
+				detail["ghost_note"] = "崩溃残留的运行中步骤已重置回可领取"
 			}
 			runlog.Infof("进程重启接管: 任务 %s(%s → %s,幽灵步骤 %d 个)", r.ID, r.Status, action, len(ghosts))
 			if err := blackbox.Record(context.Background(), m.cfg.Store, r.ID, "manager",

@@ -259,7 +259,9 @@ func (rep *panoramaReplay) apply(ev rings.RawEvent) {
 // 在跑+排队步骤按领取次序排(调度器同一比较器,面板次序即可核对领取
 // 次序),等前置如实标注,行带 covers 资产归属。panoramaReplay 的按轮
 // 快照与 handlePanoramaLive 的当前投影实时视图共用本装配,两视图不漂移。
-func panoramaRows(steps map[string]rings.NodeFull, covers, deps map[string][]string, assetTitle map[string]string) []PanoramaRow {
+// titlePolish 为步骤意图标题校对稿优先表(P4-65 ⑩:空表零变化——节点
+// 标题原文;与 RoundNode 同一口径,任务包与机器消费不走本装配)。
+func panoramaRows(steps map[string]rings.NodeFull, covers, deps map[string][]string, assetTitle map[string]string, titlePolish map[string]string) []PanoramaRow {
 	var flight []rings.NodeFull
 	for _, st := range steps {
 		if st.Status == "running" || st.Status == "dispatched" {
@@ -269,7 +271,11 @@ func panoramaRows(steps map[string]rings.NodeFull, covers, deps map[string][]str
 	sort.Slice(flight, func(i, j int) bool { return overmind.StepLaunchLess(flight[i], flight[j]) })
 	rows := make([]PanoramaRow, 0, len(flight))
 	for _, st := range flight {
-		row := PanoramaRow{ID: st.ID, Title: st.Title, Status: st.Status}
+		title := st.Title
+		if t := titlePolish[st.ID]; t != "" {
+			title = t
+		}
+		row := PanoramaRow{ID: st.ID, Title: title, Status: st.Status}
 		for _, dep := range deps[st.ID] {
 			if d, ok := steps[dep]; !ok || d.Status != "done" { // 前置未完成/不存在:一律等待(依赖闸同口径)
 				row.Waiting = true
@@ -285,8 +291,8 @@ func panoramaRows(steps map[string]rings.NodeFull, covers, deps map[string][]str
 }
 
 // snapshot 定格当前回放状态的在途全景(历史轮次卡的快照数据面)。
-func (rep *panoramaReplay) snapshot() []PanoramaRow {
-	return panoramaRows(rep.steps, rep.covers, rep.deps, rep.assetTitle)
+func (rep *panoramaReplay) snapshot(titlePolish map[string]string) []PanoramaRow {
+	return panoramaRows(rep.steps, rep.covers, rep.deps, rep.assetTitle, titlePolish)
 }
 
 // handlePanoramaLive 在途全景实时视图(P4-46 ①):当前投影的执行中/
@@ -307,7 +313,9 @@ func (s *Server) handlePanoramaLive(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"panorama": panoramaRows(pl.Steps, pl.Covers, pl.Deps, pl.AssetTitle)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"panorama": panoramaRows(pl.Steps, pl.Covers, pl.Deps, pl.AssetTitle, s.polishedNodeTitleOf(r.Context(), taskID)),
+	})
 }
 
 // OvermindRound 一轮研判:五问结论 + 派发决策 + 本轮收割 + 在途全景。
@@ -365,14 +373,31 @@ func diveTriggerLines(evs []rings.RawEvent, revs []int64) []string {
 // (assessment),逐轮派生窗口内的派发与收割。P4-58:研判轨迹回放只
 // 消费五类事件(overmind.record / operator.dive / node.added /
 // node.state_changed / edge.added),按 kind 定向直查合并(revision
-// 升序 = 账本权威序,回放语义不变),不再全量扫事件流。
+// 升序 = 账本权威序,回放语义不变),不再全量扫事件流。P4-65 ⑨⑩:
+// 额外读 overmind.record_polish(研判叙述校对稿,按 rec_rev 锚定逐轮
+// 匹配)与 node_polish 步骤标题(派发 chip 与全景行显示层优先;研判
+// 记录与节点原文一字不动,会话原文下钻走原文域)。
 func (s *Server) overmindRounds(r *http.Request, taskID string) ([]OvermindRound, error) {
 	evs, err := s.Store.EventsByKinds(r.Context(), taskID,
 		rings.EventOvermindRecord, rings.EventOperatorDive, rings.EventNodeAdded,
-		rings.EventNodeStateChanged, rings.EventEdgeAdded)
+		rings.EventNodeStateChanged, rings.EventEdgeAdded, rings.EventOvermindPolish)
 	if err != nil {
 		return nil, err
 	}
+	// 研判叙述校对稿优先表(P4-65 ⑨:rec_rev → 校对稿;研判记录不可变
+	// 故逐版本唯一,后到覆盖同键即为重放确定性)。
+	assessPolish := map[int64]rings.OvermindPolish{}
+	for _, ev := range evs {
+		if ev.Kind != rings.EventOvermindPolish {
+			continue
+		}
+		var p rings.OvermindPolish
+		if json.Unmarshal(ev.Payload, &p) == nil && p.RecRev > 0 {
+			assessPolish[p.RecRev] = p
+		}
+	}
+	// 步骤意图标题校对稿优先表(P4-65 ⑩:与图节点卡/虫群列表同一口径)。
+	stepTitlePolish := s.polishedNodeTitleOf(r.Context(), taskID)
 	// 节点类型预建(全量:种子资产 / 虫群提交的声明与假设多在首轮研判
 	// 前入账,窗口内的状态迁移要靠它认类型)+ 步骤当前投影。
 	nodeType := map[string]rings.NodeType{}
@@ -400,14 +425,37 @@ func (s *Server) overmindRounds(r *http.Request, taskID string) ([]OvermindRound
 		if json.Unmarshal(ev.Payload, &rec) != nil || rec.Type != rings.OvermindRecAssessment {
 			continue
 		}
-		rounds = append(rounds, OvermindRound{
+		round := OvermindRound{
 			At:        ev.OccurredAt.Local().Format("2006-01-02 15:04:05"),
 			SessionID: rec.SessionID, EvaluatedRev: rec.EvaluatedRev,
 			Triggers: diveTriggerLines(evs, rec.TriggerRevisions),
 			QAccess:  rec.QAccess, QPrivilege: rec.QPrivilege, QCombination: rec.QCombination,
 			QUnlock: rec.QUnlock, QOverturn: rec.QOverturn, Note: rec.Note,
 			Dispatched: rec.Dispatched, Combined: rec.Combined, Queue: rec.Queue,
-		})
+		}
+		// P4-65 ⑨:研判叙述读侧优先校对稿(字段级——未生成/未过闸的字段
+		// 退研判记录原文)。
+		if p, ok := assessPolish[ev.Revision]; ok {
+			if p.QAccess != "" {
+				round.QAccess = p.QAccess
+			}
+			if p.QPrivilege != "" {
+				round.QPrivilege = p.QPrivilege
+			}
+			if p.QCombination != "" {
+				round.QCombination = p.QCombination
+			}
+			if p.QUnlock != "" {
+				round.QUnlock = p.QUnlock
+			}
+			if p.QOverturn != "" {
+				round.QOverturn = p.QOverturn
+			}
+			if p.Note != "" {
+				round.Note = p.Note
+			}
+		}
+		rounds = append(rounds, round)
 	}
 	if len(rounds) == 0 {
 		return []OvermindRound{}, nil
@@ -423,7 +471,7 @@ func (s *Server) overmindRounds(r *http.Request, taskID string) ([]OvermindRound
 	for _, ev := range evs {
 		for r := range rounds {
 			if !snap[r] && ev.Revision > rounds[r].EvaluatedRev {
-				rounds[r].Panorama = rep.snapshot()
+				rounds[r].Panorama = rep.snapshot(stepTitlePolish)
 				snap[r] = true
 			}
 		}
@@ -444,6 +492,9 @@ func (s *Server) overmindRounds(r *http.Request, taskID string) ([]OvermindRound
 			nodeType[p.NodeID] = p.NodeType
 			if p.NodeType == rings.NodeStep {
 				st := RoundNode{ID: p.NodeID, Title: p.Title}
+				if t := stepTitlePolish[p.NodeID]; t != "" {
+					st.Title = t
+				}
 				if now, ok := stepsNow[p.NodeID]; ok {
 					st.Status = now.Status
 					if st.Title == "" {
@@ -480,7 +531,7 @@ func (s *Server) overmindRounds(r *http.Request, taskID string) ([]OvermindRound
 	// 尾部:研判版本 ≥ 账本最新版本的轮(末轮常态),用终态回放定格。
 	for r := range rounds {
 		if !snap[r] {
-			rounds[r].Panorama = rep.snapshot()
+			rounds[r].Panorama = rep.snapshot(stepTitlePolish)
 		}
 	}
 	return rounds, nil

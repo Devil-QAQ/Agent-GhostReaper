@@ -61,7 +61,7 @@ func TestP424ReproProofreadSameSession(t *testing.T) {
 	})
 	defer model.Close()
 	rec := mkP424Rec()
-	l.genReproDescs(ctx, "tc-x", rec)
+	l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{})
 	if !strings.HasPrefix(rec.Steps[0].Desc, "向 k3.local 发 GET /admin") {
 		t.Fatalf("校对稿应冻结: %+v", rec.Steps[0])
 	}
@@ -94,7 +94,7 @@ func TestP424ReproGateRewrite(t *testing.T) {
 	})
 	defer model.Close()
 	rec := mkP424Rec()
-	l.genReproDescs(ctx, "tc-x", rec)
+	l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{})
 	if !strings.HasPrefix(rec.Steps[0].Desc, "向 k3.local 发 GET /admin") || rec.Steps[0].Unpolished {
 		t.Fatalf("重写成功应过闸无标注: %+v", rec.Steps[0])
 	}
@@ -117,7 +117,7 @@ func TestP424ReproGateAnnotate(t *testing.T) {
 	})
 	defer model.Close()
 	rec := mkP424Rec()
-	l.genReproDescs(ctx, "tc-x", rec)
+	l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{})
 	if n := len(model.requests()); n != 3 {
 		t.Fatalf("恰 3 次请求后停(重写一次封顶),得到 %d", n)
 	}
@@ -142,7 +142,7 @@ func TestP424ReproProofreadFallback(t *testing.T) {
 	})
 	defer model.Close()
 	rec := mkP424Rec()
-	l.genReproDescs(ctx, "tc-x", rec)
+	l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{})
 	if !strings.HasPrefix(rec.Steps[0].Desc, "向 k3.local 发 GET /admin") || rec.Steps[0].Unpolished {
 		t.Fatalf("校对失败应保留生成稿: %+v", rec.Steps[0])
 	}

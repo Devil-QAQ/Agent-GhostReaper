@@ -528,6 +528,16 @@ func (env *unitEnv) SubmitRetestResult(ctx context.Context, verdict, evidence, n
 	events := []rings.Event{{
 		Kind: rings.EventTestClaimRecord, Actor: "swarm:" + env.UnitID, Payload: rec,
 	}}
+	// P4-64 ⑦(问题清单 #82):复测结论备注入账时过既有校对通道——校对
+	// 稿与 retest 记录同批落账(机器 Note 原文一字不动;无在跑主宰循环
+	// 或校对失败不落,读侧退机器记录原文)。
+	if env.Executor.RetestNotePolisher != nil {
+		if np := env.Executor.RetestNotePolisher(ctx, env.TaskID, env.retest.ClaimID, env.retest.Round, verdict, rec.Note); np != nil {
+			events = append(events, rings.Event{
+				Kind: rings.EventClaimRetextNote, Actor: "overmind", Payload: *np,
+			})
+		}
+	}
 	var target string
 	switch verdict {
 	case rings.RetestVerdictFixed:

@@ -113,7 +113,7 @@ export function MessageBlock({ msg, taskID, onNode }) {
           <span className="text-[11px] text-muted-foreground">{msg.text.split("。")[0]}</span>
           <span className="h-px flex-1 bg-border" />
         </div>
-        {(msg.thinking || (msg.tool_calls && msg.tool_calls.length) > 0 || msg.reply) && (
+        {(msg.thinking || msg.tool_calls?.length > 0 || msg.reply) && (
           <div className="flex flex-col items-start gap-2">
             {msg.thinking && <ThinkingCard text={msg.thinking} />}
             {(msg.tool_calls || []).map((c, i) => (
@@ -149,7 +149,7 @@ export function MessageBlock({ msg, taskID, onNode }) {
         )}
       </div>
       {/* 牧者 */}
-      {(msg.thinking || (msg.tool_calls && msg.tool_calls.length) > 0 || msg.reply) && (
+      {(msg.thinking || msg.tool_calls?.length > 0 || msg.reply) && (
         <div className="flex flex-col items-start gap-2">
           {msg.thinking && <ThinkingCard text={msg.thinking} />}
           {(msg.tool_calls || []).map((c, i) => (

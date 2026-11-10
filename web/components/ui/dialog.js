@@ -6,6 +6,7 @@ import * as React from "react";
 
 import { cn } from "@/lib/utils";
 import { FloatingLayer, useFloatingLayer, floatingShadow } from "@/components/ui/floating-layer";
+import { ErrorBoundary } from "@/components/error-boundary";
 
 function Dialog({ nested = false, children, ...props }) {
   return (
@@ -48,7 +49,9 @@ function DialogContent({ className, children, hideClose, ...props }) {
       )}
         {...props}
       >
-        {children}
+        {/* 浮层渲染错误边界(P4-60 ④):内容崩降级为区块错误,弹窗框
+            与关闭钮在、不塌整页。 */}
+        <ErrorBoundary level="overlay">{children}</ErrorBoundary>
         {!hideClose && (
           <DialogPrimitive.Close className="absolute top-4 right-4 flex size-8 items-center justify-center rounded-md opacity-70 transition-colors hover:bg-hover-lift hover:opacity-100 focus:outline-none disabled:pointer-events-none cursor-pointer">
             <XIcon />

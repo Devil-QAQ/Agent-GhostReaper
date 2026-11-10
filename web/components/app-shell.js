@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { iconOf } from "@/components/icons";
 import { ClosureDialog } from "@/components/closure-dialog";
 import { CommandPalette } from "@/components/command-palette";
+import { ErrorBoundary } from "@/components/error-boundary";
 import { ThemeMenu } from "@/components/theme-menu";
 import { SettingsPage } from "@/views/settings-page";
 import { LLMPage } from "@/views/llm-page";
@@ -446,7 +447,11 @@ function Shell() {
           {route.kind === "task" ? (
             <TaskSpace tasks={tasks} taskID={route.taskID} tab={route.tab} focus={route.focus} unit={route.unit} />
           ) : (
-            <FlatPage tasks={list} currentTask={current} onReopenClosure={setClosureTarget} />
+            // 页面级渲染错误边界(P4-60 ④):页面崩降级为区块错误,侧栏
+            // 与顶栏不受影响;key 随路由换页重挂(新页不背旧错误)。
+            <ErrorBoundary key={route.id}>
+              <FlatPage tasks={list} currentTask={current} onReopenClosure={setClosureTarget} />
+            </ErrorBoundary>
           )}
         </main>
       </div>

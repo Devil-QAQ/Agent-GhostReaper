@@ -94,6 +94,7 @@ func TestServerFactsList(t *testing.T) {
 	var body struct {
 		Facts []struct {
 			ID        string `json:"id"`
+			Status    string `json:"status"`
 			Statement string `json:"statement"`
 			Loot      string `json:"loot"`
 			Assets    []struct {
@@ -120,11 +121,16 @@ func TestServerFactsList(t *testing.T) {
 	}
 	if f := body.Facts[byID["f-cand"]]; !f.IsNew || f.Kind != "fact" {
 		t.Errorf("f-cand 应为新进事实(is_new, kind=fact),得 is_new=%v kind=%q", f.IsNew, f.Kind)
+	} else if f.Status != "candidate" {
+		t.Errorf("f-cand status 应 candidate(P4-61 三区归类键),得 %q", f.Status)
 	}
 	if i, ok := byID["f-cred"]; ok {
 		f := body.Facts[i]
 		if f.Loot != "credential" {
 			t.Errorf("f-cred 成果类应 credential,得 %q", f.Loot)
+		}
+		if f.Status != "confirmed" {
+			t.Errorf("f-cred status 应 confirmed(P4-61 三区归类键),得 %q", f.Status)
 		}
 		if len(f.Assets) != 1 || f.Assets[0].ID != hostID || f.Assets[0].Title != "backup-01" {
 			t.Errorf("f-cred 资产锚点不符: %+v", f.Assets)

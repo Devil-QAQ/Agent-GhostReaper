@@ -61,7 +61,8 @@ const GROUPS = [
 // 前 5 条 + 「还有 N 条」点击展开。
 const PANORAMA_FOLD = 5;
 
-// 黑匣子事件类型 → 操作者语言。
+// 黑匣子事件类型 → 操作者语言(P4-65 C 复核:22 类型全覆盖,P4-39/42/57
+// 五类此前缺词条界面裸显机器词,已补)。
 const BLACKBOX_LABELS = {
   budget_half: "预算过半",
   unit_exhausted: "单位预算耗尽",
@@ -79,7 +80,12 @@ const BLACKBOX_LABELS = {
   task_resumed: "任务恢复",
   restart_adoption: "进程重启接管",
   env_observation: "环境观察",
-  llm_chain_streak: "同类连环",
+  llm_chain_streak: "同类错误连环",
+  bg_output_trunc: "后台输出截断",
+  bg_lifespan_kill: "后台超时终止",
+  tool_spill: "工具输出落档",
+  micro_compact: "旧结果清理",
+  assess_timeout: "规划超时中断",
 };
 
 // 收养动作 → 操作者语言(restart_adoption 事件的 detail.action,P4-06 ④

@@ -148,7 +148,7 @@ func (l *Loop) polishReproDescs(ctx context.Context, claimID string, gs *genSess
 	if text, err := gs.ask(ctx, reproProofreadAsk); err != nil {
 		runlog.Warnf("定稿校对失败: 任务 %s 判断 %s 原因 %s(保留生成稿)",
 			l.TaskID, claimID, clipEval(err.Error()))
-	} else if descs, perr := parseReproDescs(text); perr != nil {
+	} else if descs, _, perr := parseReproDescs(text); perr != nil {
 		runlog.Warnf("定稿校对解析失败: 任务 %s 判断 %s 原因 %s(保留生成稿)",
 			l.TaskID, claimID, clipEval(perr.Error()))
 	} else {
@@ -219,7 +219,7 @@ func (l *Loop) rewriteReproDescs(ctx context.Context, claimID string, gs *genSes
 	if err != nil {
 		return err
 	}
-	descs, err := parseReproDescs(text)
+	descs, _, err := parseReproDescs(text)
 	if err != nil {
 		return err
 	}

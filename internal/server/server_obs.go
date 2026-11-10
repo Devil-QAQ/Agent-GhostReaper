@@ -513,12 +513,14 @@ func (s *Server) handleObsThroughput(w http.ResponseWriter, r *http.Request) {
 // 拦截命中是审批审计流(approval.record)的只读投影,零新增采集:
 // 拒绝类命中 = Type=denied 且 DenyLine=hard_rule / intent_rule(对账口径,
 // 与账本逐笔相等);弹门类命中 = Type=requested 且 Note 带规则命中上下文
-//(P4-03 ② 弹门处置的硬规则),裁决经 RequestID 关联回命中行、不另计
-// 命中。规则身份从记录自带的拒绝原因 / 命中上下文解析——账本不携带
-// 规则 ID,规则可改名删除,以命中当时的文本分组,数字与账本天然一致。
-// 被拒单位的后续走向(换路成功继续 / 卡死 / 任务已停止等)从事件流
-// 确定性推导,可下钻看被拒后的后续轨迹。误伤模式数据化提前暴露:
-// 高频命中规则排前(问题清单 #14 的初衷)。
+//(P4-03 ② 弹门处置的硬规则、P4-63 A 判位模糊转人审),裁决经 RequestID
+// 关联回命中行、不另计命中。规则身份从记录自带的拒绝原因 / 命中上下文
+// 解析——账本不携带规则 ID,规则可改名删除,以命中当时的文本分组,数字
+// 与账本天然一致(P4-63 B 升级杀的拒绝原因带"同规则累计命中 N 次"尾注,
+// 不影响前缀解析)。被拒单位的后续走向(继续干活 / 换路 / 卡死 / 任务
+// 已停止等)从事件流确定性推导,可下钻看被拒后的后续轨迹——P4-63 B 起
+// 硬规则与意图拦截拒绝不再熔断单位,走向里"继续干活"成为常态形态。
+// 误伤模式数据化提前暴露:高频命中规则排前(问题清单 #14 的初衷)。
 
 // obsHitOutcome 命中结局(拒绝线/弹门裁决的投影词,面板按词表译界面词)。
 const (
@@ -596,7 +598,7 @@ type obsFollowView struct {
 	Outcome   string           `json:"outcome"`
 	TaskNow   string           `json:"task_now,omitempty"` // 任务当前状态词
 	StepsDone int              `json:"steps_done"`         // 被拒后新派发并完成的步骤数
-	UnitCalls int              `json:"unit_calls"`         // 被拒单位被拒后继续的工具调用数(意图拦截不熔断)
+	UnitCalls int              `json:"unit_calls"`         // 被拒单位被拒后继续的工具调用数(P4-63 起硬规则与意图拦截拒后单位存活)
 	UnitEnd   string           `json:"unit_end,omitempty"` // 被拒单位收场状态词(空 = 会话仍在)
 	Events    []obsFollowEvent `json:"events"`
 	Truncated bool             `json:"truncated,omitempty"` // 轨迹超上限截断(保留紧邻被拒的前段)
@@ -875,8 +877,10 @@ func (sc *obsInterceptTaskScan) followOf(unitID string, rev int64) *obsFollowVie
 	return fv
 }
 
-// obsHitNeedsFollow 哪些结局需要走向:弹门批准/待决不熔断单位、无走向;
-// 其余(硬规则拒/意图拦拒/面板拒/收尾结案)单位死在命中上,推导走向。
+// obsHitNeedsFollow 哪些结局需要走向:弹门批准/待决无熔断、无走向;
+// 其余(硬规则拒/意图拦拒/面板拒/收尾结案)推导走向——P4-63 B 起硬
+// 规则与意图拦拒不再熔断单位,走向呈现"继续干活/换路"形态;面板拒
+// 与收尾结案单位死在命中上。
 func obsHitNeedsFollow(outcome string) bool {
 	return outcome == hitDeniedHard || outcome == hitDeniedIntent ||
 		outcome == hitDeniedPanel || outcome == hitCloseout

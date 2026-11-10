@@ -270,6 +270,65 @@ func TestTrafficRawSegmentsBytewise(t *testing.T) {
 	get(t, h, "/api/mirror/exchanges/ms-a.1/raw?task=tA&offset=999999", http.StatusBadRequest, nil)
 }
 
+// TestP462ToolPacketExchangeReplay P4-62 C(b):组包复现步骤("ta-" 交换,
+// 不在镜事件流)经既有交换端点回放——面板复现区的请求包复制(贴 Burp
+// Repeater 即发)与镜交换走同一通道(展示与操作同源);meta 与 origin-form
+// 分侧原文均可取。
+func TestP462ToolPacketExchangeReplay(t *testing.T) {
+	dir := t.TempDir()
+	_, store, h := newTrafficServer(t, dir)
+	seed := seedTrafficTask(t, dir, store, "tT", "组包回放验证")
+
+	// 组包交换文档入仓库 + 定稿记录带 source=tool 步骤(与 overmind 组包
+	// 落账形态同构)。
+	ex := &mirror.Exchange{ID: "ta-9f2c31", Type: rings.MirrorRecHTTP,
+		TaskID: "tT", StepID: "s1", UnitID: "u1",
+		Request: &mirror.Request{Method: "GET", URL: "http://mock.test/api/x?token=1",
+			Proto: "HTTP/1.1", Host: "mock.test"},
+		Response: &mirror.Response{Proto: "HTTP/1.1", Status: 200, StatusText: "OK",
+			Body: []byte(`{"ok":true}`)}}
+	doc, err := json.Marshal(ex)
+	if err != nil {
+		t.Fatalf("序列化组包文档失败: %v", err)
+	}
+	ref, err := seed.blobs.Write(doc)
+	if err != nil {
+		t.Fatalf("组包入仓库失败: %v", err)
+	}
+	if _, err := store.Append(context.Background(), "tT", rings.Event{
+		Kind: rings.EventTestClaimRecord, Actor: "overmind",
+		Payload: rings.TestClaimRecord{ClaimID: "tc-1", Type: rings.TestClaimRecRepro,
+			Steps: []rings.ReproStep{{Seq: 1, StepID: "s1", UnitID: "u1",
+				Method: "GET", URL: ex.Request.URL, Status: 200,
+				BlobRef: ref, ExchangeID: "ta-9f2c31", Source: "tool"}}},
+	}); err != nil {
+		t.Fatalf("铺定稿记录失败: %v", err)
+	}
+
+	var detail struct {
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		RawTotal int    `json:"raw_total"`
+	}
+	get(t, h, "/api/mirror/exchanges/ta-9f2c31?task=tT", http.StatusOK, &detail)
+	if detail.ID != "ta-9f2c31" || detail.Type != rings.MirrorRecHTTP || detail.RawTotal == 0 {
+		t.Fatalf("组包交换 meta 应可取: %+v", detail)
+	}
+	var seg struct {
+		Text string `json:"text"`
+	}
+	get(t, h, "/api/mirror/exchanges/ta-9f2c31/raw?task=tT&side=req", http.StatusOK, &seg)
+	if !strings.HasPrefix(seg.Text, "GET /api/x?token=1 HTTP/1.1\r\nHost: mock.test\r\n") ||
+		!strings.HasSuffix(seg.Text, "Host: mock.test\r\n\r\n") {
+		t.Fatalf("组包请求包应 origin-form＋Host 且 Burp 就绪: %q", seg.Text)
+	}
+	// 镜交换回放不受组包回退影响(正向回归)。
+	get(t, h, "/api/mirror/exchanges/ms-a.1/raw?task=tT&side=req", http.StatusOK, &seg)
+	if !strings.Contains(seg.Text, "GET /old-backup/?page=1 HTTP/1.1") {
+		t.Fatalf("镜交换回放回归无损: %q", seg.Text)
+	}
+}
+
 // TestEvidenceBindAndArchiveFlow 三机制全链路:绑定 → 漏洞详情可见 →
 // 存档(EV 锚定)→ 补绑 → 旧 EV 存档 409 → 旧存档待更新。
 func TestEvidenceBindAndArchiveFlow(t *testing.T) {

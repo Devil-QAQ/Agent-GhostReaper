@@ -57,6 +57,12 @@ func (s *Server) handleTaskGraph(w http.ResponseWriter, r *http.Request) {
 	if roe, err := s.Store.CurrentRoE(r.Context(), taskID); err == nil {
 		excluded = roe.ExcludedAssetSet()
 	}
+	// P4-64 ⑥:事实/假设标题优先短句校对稿(node_polish)——年轮图与
+	// 进度图节点卡、链路图共用本端点,一处替换全站生效;判断标题优先
+	// 链在各自列表/详情装配(P4-59 既有)。P4-65 ⑩:步骤意图标题同样
+	// 优先校对稿(拆解派发落账后异步补写;任务包与机器消费用节点原文)。
+	// 空表零变化(节点原文)。
+	titlePolish := s.polishedNodeTitleOf(r.Context(), taskID)
 	v := struct {
 		Queue overmind.QueueWatermark `json:"queue"`
 		Nodes []graphNodeJSON         `json:"nodes"`
@@ -70,8 +76,12 @@ func (s *Server) handleTaskGraph(w http.ResponseWriter, r *http.Request) {
 	}
 	v.Queue = overmind.QueueWatermarkOf(steps, g.Edges, overmind.QueueLimit(r.Context(), s.Store))
 	for _, n := range g.Nodes {
+		title := n.Title
+		if t := titlePolish[n.ID]; t != "" && (n.Type == rings.NodeFact || n.Type == rings.NodeHypothesis || n.Type == rings.NodeStep) {
+			title = t
+		}
 		v.Nodes = append(v.Nodes, graphNodeJSON{
-			ID: n.ID, Type: string(n.Type), Title: n.Title, Status: n.Status,
+			ID: n.ID, Type: string(n.Type), Title: title, Status: n.Status,
 			AssetClass: string(n.AssetClass), Covered: n.Covered,
 			FactCount: n.FactCount, HypothesisCount: n.HypothesisCount,
 			Source: n.Source, Excluded: excluded[n.ID],

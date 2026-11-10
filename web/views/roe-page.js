@@ -70,14 +70,16 @@ const APPROVAL_TYPE_LABELS = {
 // 处理者 → 操作者语言(机器元数据零裸露;空=未处理的请求/等待记录)。
 function decidedByLabel(v, type) {
   if (v === "creator") return "造物主";
-  if (v === "") return type === "requested" || type === "scope_wait" ? "未处理" : "—";
+  // !v 兼容字段缺失:后端 decided_by 带 omitempty,机器产生的记录
+  // (requested 登记/自动拒绝/scope_wait 挂起)无裁决人时字段整体不出现。
+  if (!v) return type === "requested" || type === "scope_wait" ? "未处理" : "—";
   if (v.startsWith("swarm:")) return `虫群单位 ${v.slice(6)}`;
   return v;
 }
 
 // 记录主语(行内一眼可辨:拦截卡/待批资产卡按目标与说明,命令类按工具)。
 function recordSubject(r) {
-  if (r.request_id?.startsWith("sc-")) return { mono: true, text: r.request_id.slice(3) };
+  if (r.request_id?.startsWith("sc-")) return { mono: true, text: r.request_id?.slice(3) };
   if (r.request_id?.startsWith("ac-") || (!r.tool_name && r.note)) {
     return { mono: false, text: r.note || "范围" };
   }
@@ -316,6 +318,7 @@ function ConfirmRemoveDialog({ pending, onCancel, onConfirm }) {
   );
 }
 
+
 // ---- 审批弹门 ----
 
 // ApprovalSection 审批区(P4-52 呈现层收口):待决卡三类同骨架混排
@@ -364,8 +367,8 @@ function ApprovalSection({ taskID }) {
     const parts = [`${verb} ${resp.handled} 张`];
     if (resp.woken_units > 0) parts.push(`唤醒 ${resp.woken_units} 个单位`);
     if (resp.stopped_units > 0) parts.push(`终止 ${resp.stopped_units} 个单位`);
-    if (Array.isArray(resp.failed) && resp.failed.length > 0) {
-      parts.push(`${resp.failed.length} 张失败(可能已被其他通道处理)`);
+    if (resp.failed?.length > 0) {
+      parts.push(`${resp.failed?.length} 张失败(可能已被其他通道处理)`);
     }
     toast.success(parts.join(","));
     setChecked(new Set());
@@ -846,8 +849,8 @@ function IntentRulesCard({ taskID }) {
                   {r.action}
                 </span>
                 <span className="text-muted-foreground">
-                  {r.asset_titles && r.asset_titles.length > 0
-                    ? r.asset_titles.join("、")
+                  {r.asset_titles?.length > 0
+                    ? r.asset_titles?.join("、")
                     : "全部资产"}
                 </span>
                 <span className="text-xs text-muted-foreground">
@@ -1281,6 +1284,7 @@ function RoERuleDialog({ taskID, assets, rule, onClose }) {
   );
 }
 
+
 // ConfirmRuleDeleteDialog 删除确认(逐条端点)。
 function ConfirmRuleDeleteDialog({ taskID, rule, onClose }) {
   const [busy, setBusy] = React.useState(false);
@@ -1322,6 +1326,7 @@ function ConfirmRuleDeleteDialog({ taskID, rule, onClose }) {
     </Dialog>
   );
 }
+
 
 // ---- 目标管理 ----
 
@@ -1484,6 +1489,7 @@ function GoalDeleteDialog({ taskID, goal, onClose }) {
   );
 }
 
+
 // GoalDialog 新增/修改目标(P4-54 起支持修改:goal 非空 = 修改模式,
 // 预填当前标题与完成条件;完成条件改后重新锁定,达成判定按新条件)。
 function GoalDialog({ taskID, goal, open, onOpenChange }) {
@@ -1598,3 +1604,4 @@ function GoalDialog({ taskID, goal, open, onOpenChange }) {
     </Dialog>
   );
 }
+

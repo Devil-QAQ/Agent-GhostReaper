@@ -343,6 +343,21 @@ const (
 	EventSessionMeta      EventKind = "session.meta"
 	EventClosureRecord    EventKind = "closure.record"
 	EventOperatorDive     EventKind = "operator.dive"
+
+	// P4-64(问题清单 #82)显示层包装族:模型文本的冻结时点＝校对时点,
+	// 包装稿独立事件冻结(R1:节点与机器记录原文一字不动,机器判定/
+	// 任务包/仲裁全走原文;投影 latest-wins,读侧优先链退原文)。
+	EventClaimRoundHuman EventKind = "claim.round_human" // 反证轮人话三段(逐轮,随 falsify 记录同批)
+	EventClaimSummaryPol EventKind = "claim.summary"     // 声明摘要(立判断批次生成;定稿随新定稿 repro 覆盖)
+	EventFactText        EventKind = "fact.text"         // 事实标题短句与描述(收割确认时)
+	EventHypoText        EventKind = "hypo.text"         // 假设标题/依据/评估理由(收割评估批次)
+	EventClaimRetextNote EventKind = "claim.retest_note" // 复测结论备注校对稿(随复测记录同批)
+
+	// P4-65(问题清单 #82 A⑨⑩)界面层包装族:研判记录与拆解派发落账后
+	// 异步补写校对稿(派发与研判轮不等校对;同 P4-64 规矩——原文一字
+	// 不动,校对稿仅显示层,读侧优先链退原文,存量不回填)。
+	EventOvermindPolish EventKind = "overmind.record_polish" // 研判记录五问+叙述校对稿(研判记录落账后异步)
+	EventStepTitle      EventKind = "step.title"             // 步骤意图标题校对稿(拆解派发落账后异步)
 )
 
 // Event 账本事件信封。Payload 按 Kind 对应 NodeAdded/NodeStateChanged/EdgeAdded。
@@ -867,6 +882,11 @@ type ReproStep struct {
 	// 闸门拦截后退回重写一次仍含机器语特征,如实标注原文保留(读侧
 	// 渲染一行说明,不阻塞定稿)。旧记录无本字段。
 	Unpolished bool `json:"unpolished,omitempty"`
+	// Source 步骤原料来源(P4-62 C(b),问题清单 #83):空 = 镜留痕交换
+	// (既有口径);"tool" = 由工具调用记录确定性组包(直连旁路流量,镜
+	// 交换缺失时按工具参数/命令重构请求包,响应侧按工具结果还原或如实
+	// 缺失)。读侧渲染同源(blob 文档同构)。
+	Source string `json:"source,omitempty"`
 }
 
 // ReproProcessRef 过程流量清单条目(P4-35 ④,问题清单 #57):引用形态,
@@ -966,6 +986,13 @@ type TestClaimRecord struct {
 	// (读侧渲染一行说明,不阻塞定稿)。旧记录无本字段。
 	NarrativeUnpolished bool        `json:"narrative_unpolished,omitempty"`
 	Steps               []ReproStep `json:"steps,omitempty"`
+	// NoReproReason 无复现包的原因(P4-62 A,问题清单 #83:兜底直出废除,
+	// 复现区只呈现模型挑选过的最小集):非空 = 本次定稿未生成复现步骤,
+	// 原因句冻结入账,面板与报告如实呈现(读侧零 LLM,R17)。两种来源:
+	// 候选池无可用包(含池空与模型空选,确定性原因句或模型理由)与挑选
+	// 失败(重试一次后仍失败)。旧记录无本字段(旧口径候选池直出)。空 =
+	// 正常定稿(Steps 为模型挑选结果)。
+	NoReproReason string `json:"no_repro_reason,omitempty"`
 	// Variants 去同型时被收起的变体交换(P4-08 ③):同方法+同路径+同
 	// 状态的重复交换不构成复现流程,不进 Steps;账本记录保留(证据包
 	// zip 全量收,审计不丢)。账次序与原交换次序一致,不编 Seq。
@@ -1021,6 +1048,97 @@ type FalsifyRoundHuman struct {
 	Conclusion string `json:"conclusion,omitempty"`
 	// Unpolished 该轮人话未过文风校验(P4-24 ② 同款如实标注,原文保留)。
 	Unpolished bool `json:"unpolished,omitempty"`
+}
+
+// ClaimRoundHuman 是 EventClaimRoundHuman 的负载(P4-64 ①,问题清单
+// #82):反证轮人话三段的逐轮冻结——每轮反证结构化结论(testclaim.record
+// falsify_result)入账时同链生成,与机器记录同批落账(生成失败回退
+// 确定性拼句,不阻塞轮次入账);重开后新轮次增量补(轮号全局续号,
+// 投影按轮 upsert)。机器记录原文一字不动;三段空 = 未生成(读侧退
+// 机器层,存量旧账本无本事件同退)。
+type ClaimRoundHuman struct {
+	ClaimID    string `json:"claim_id"`
+	Round      int    `json:"round"`
+	Doubt      string `json:"doubt,omitempty"`
+	How        string `json:"how,omitempty"`
+	Conclusion string `json:"conclusion,omitempty"`
+	Unpolished bool   `json:"unpolished,omitempty"`
+}
+
+// ClaimSummaryPolish 是 EventClaimSummaryPol 的负载(P4-64 ②):声明
+// 摘要的立账即生成——收割立判断批次(候选声明派反证时)按报告级文风
+// 锚生成(同 genClaimSummary 管线:存在性描述/影响面/链上事实描述),
+// 锤炼中(未定稿)声明读侧即有摘要;确认定稿随新定稿重新生成(repro
+// 记录内嵌字段,投影同列覆盖,取代语义既有)。空字段 = 未生成,读侧
+// 退节点原文。
+type ClaimSummaryPolish struct {
+	ClaimID   string          `json:"claim_id"`
+	Statement string          `json:"statement,omitempty"`
+	Impact    string          `json:"impact,omitempty"`
+	Facts     []FactStatement `json:"facts,omitempty"`
+}
+
+// FactTextPolish 是 EventFactText 的负载(P4-64 ③⑥,问题清单 #82):
+// 事实的显示层包装——收割确认批次生成(不限于已定稿判断链上的事实),
+// Title 为短句标准校对的标题(术语门槛+完整可读资产标识+机器语闸门,
+// 不套报告级四段锚),Statement 为报告级描述口径的一句话描述。节点
+// 原文一字不动;空字段 = 未生成(读侧退节点标题)。
+type FactTextPolish struct {
+	FactID    string `json:"fact_id"`
+	Title     string `json:"title,omitempty"`
+	Statement string `json:"statement,omitempty"`
+	// Unpolished 标题未过机器语闸门(P4-24 ② 同款如实标注,原文保留)。
+	Unpolished bool `json:"unpolished,omitempty"`
+}
+
+// HypoTextPolish 是 EventHypoText 的负载(P4-64 ④⑥⑧,问题清单 #82):
+// 假设的显示层包装——收割评估批次(evaluateHypotheses)对每条被评估
+// 假设同批改写冻结:Title 短句标准校对标题、Basis 依据改写、Reason
+// 本次评估理由校对。未评估(等待验证瞬时态)不生成,读侧保持节点与
+// 评估记录原文。Latest-wins:每次评估的新事件覆盖旧包装(随评估记录
+// 同批落账,不重复记账)。
+type HypoTextPolish struct {
+	HypothesisID string `json:"hypothesis_id"`
+	Title        string `json:"title,omitempty"`
+	Basis        string `json:"basis,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+	// Unpolished 标题未过机器语闸门(P4-24 ② 同款如实标注,原文保留)。
+	Unpolished bool `json:"unpolished,omitempty"`
+}
+
+// RetestNotePolish 是 EventClaimRetextNote 的负载(P4-64 ⑦,问题清单
+// #82):复测结论备注的校对稿——复测结论入账时过既有校对通道(随
+// retest 记录同批落账)。机器记录 Note 原文一字不动;按轮匹配
+// (ClaimID+Round),空 = 未生成(读侧退机器记录原文)。
+type RetestNotePolish struct {
+	ClaimID string `json:"claim_id"`
+	Round   int    `json:"round"`
+	Note    string `json:"note,omitempty"`
+}
+
+// OvermindPolish 是 EventOvermindPolish 的负载(P4-65 ⑨,问题清单 #82):
+// 研判记录(overmind.record assessment)五问与叙述的显示层校对稿——研判
+// 记录落账后异步补写(研判轮与派发不等校对;校对稿就绪前读侧显示原文,
+// 读侧优先链既有语义)。RecRev 锚定研判记录的事件版本(逐轮匹配,研判
+// 记录不可变故无取代语义);机器记录原文一字不动(会话原文下钻走原文
+// 域)。字段空 = 该问未生成校对稿(读侧退研判记录原文)。
+type OvermindPolish struct {
+	RecRev       int64  `json:"rec_rev"` // 锚定的研判记录事件版本
+	QAccess      string `json:"q_access,omitempty"`
+	QPrivilege   string `json:"q_privilege,omitempty"`
+	QCombination string `json:"q_combination,omitempty"`
+	QUnlock      string `json:"q_unlock,omitempty"`
+	QOverturn    string `json:"q_overturn,omitempty"`
+	Note         string `json:"note,omitempty"`
+}
+
+// StepTitlePolish 是 EventStepTitle 的负载(P4-65 ⑩,问题清单 #82):步骤
+// 意图标题的显示层校对稿——拆解派发落账后异步补写(派发不等校对;任务
+// 包与机器消费用节点原文,校对稿仅显示层,与声明摘要同款包装分离)。步
+// 骤节点 Title 一字不动;空 = 未生成(读侧退节点标题)。
+type StepTitlePolish struct {
+	StepID string `json:"step_id"`
+	Title  string `json:"title"`
 }
 
 // 镜留痕记录类型白名单(受控入口,P2-01;P3-01 增 https)。

@@ -478,3 +478,73 @@ func rowByStep(t *testing.T, recent []any, step, outcome string) map[string]any 
 	t.Fatalf("缺步骤 %s 结局 %s 的命中行: %v", step, outcome, recent)
 	return nil
 }
+
+// TestObsInterceptsP463Disposition P4-63 B 新处置形态可见:① 硬规则拒后
+// 单位存活继续干活——走向呈"换路成功继续"且 unit_calls>0(被拒后继续
+// 的工具调用数);② 升级杀的拒绝原因带"同规则累计命中 3 次"尾注,规则
+// 身份仍按前缀正确解析(组·名)。
+func TestObsInterceptsP463Disposition(t *testing.T) {
+	srv, mux, _ := newInterjectTestServer(t)
+
+	// 任务 A:硬规则拒(关机命令)后单位换只读命令继续、正常收场。
+	const ta = "p463-obs-a"
+	lifecycle := []rings.Event{
+		{Kind: rings.EventTaskLifecycle, Actor: "manager", Payload: rings.TaskLifecycle{Action: "created", Title: "A"}},
+		{Kind: rings.EventTaskLifecycle, Actor: "manager", Payload: rings.TaskLifecycle{Action: "started"}},
+	}
+	_, err := srv.Store.Append(t.Context(), ta, append(lifecycle,
+		rings.Event{Kind: rings.EventSwarmRecord, Actor: "swarm:u1",
+			Payload: rings.SwarmRecord{StepID: "s1", UnitID: "u1", TranscriptID: "swarm-u1",
+				Type: rings.SwarmRecSessionStarted}},
+		rings.Event{Kind: rings.EventApprovalRecord, Actor: "swarm:u1",
+			Payload: rings.ApprovalRecord{RequestID: "ap-a", StepID: "s1", UnitID: "u1",
+				Type: rings.ApprovalRecDenied, ToolName: "bash",
+				ToolArgs: []byte(`{"command":"shutdown -h now"}`),
+				DenyLine: rings.DenyLineHardRule,
+				Reason:   `内置硬规则命中:系统破坏命令 · 关机重启(命中片段 "shutdown")`}},
+		rings.Event{Kind: rings.EventSwarmRecord, Actor: "swarm:u1",
+			Payload: rings.SwarmRecord{StepID: "s1", UnitID: "u1", TranscriptID: "swarm-u1",
+				Type: rings.SwarmRecToolCall, ToolName: "bash", ResultHead: "rerouted"}},
+		rings.Event{Kind: rings.EventSwarmRecord, Actor: "swarm:u1",
+			Payload: rings.SwarmRecord{StepID: "s1", UnitID: "u1", TranscriptID: "swarm-u1",
+				Type: rings.SwarmRecSessionEnd,
+				Note: "reason=completed turns=2 status=done billable=2s gate_wait=0s block_wait=0s pause_wait=0s"}},
+	)...)
+	if err != nil {
+		t.Fatalf("造数失败: %v", err)
+	}
+	out := getIntercepts(t, mux, "?task="+ta)
+	rule := ruleOf(t, out, "系统破坏命令", "关机重启")
+	if rule["denied"] != float64(1) {
+		t.Fatalf("硬规则拒绝应计 1: %v", rule)
+	}
+	follow := rule["recent"].([]any)[0].(map[string]any)["follow"].(map[string]any)
+	if follow["outcome"] != "rerouted" {
+		t.Fatalf("拒后继续干活应呈换路成功继续: %v", follow)
+	}
+	if follow["unit_calls"] != float64(1) {
+		t.Fatalf("被拒后继续的工具调用应计 1: %v", follow)
+	}
+
+	// 任务 B:同规则累计 3 次升级杀——尾注不影响规则身份解析。
+	const tb = "p463-obs-b"
+	_, err = srv.Store.Append(t.Context(), tb, append(lifecycle,
+		rings.Event{Kind: rings.EventApprovalRecord, Actor: "swarm:u1",
+			Payload: rings.ApprovalRecord{RequestID: "ap-b", StepID: "s1", UnitID: "u1",
+				Type: rings.ApprovalRecDenied, ToolName: "bash",
+				ToolArgs: []byte(`{"command":"shutdown -h now"}`),
+				DenyLine: rings.DenyLineHardRule,
+				Reason:   `内置硬规则命中:系统破坏命令 · 关机重启(命中片段 "shutdown") · 同规则累计命中 3 次,升级终止单位`}},
+	)...)
+	if err != nil {
+		t.Fatalf("造数失败: %v", err)
+	}
+	out = getIntercepts(t, mux, "?task="+tb)
+	if _, ok := out["rules"].([]any); !ok || len(out["rules"].([]any)) != 1 {
+		t.Fatalf("升级杀拒绝应聚成一条规则: %v", out["rules"])
+	}
+	row := out["rules"].([]any)[0].(map[string]any)
+	if row["group"] != "系统破坏命令" || row["name"] != "关机重启" {
+		t.Fatalf("升级尾注不应破坏规则身份解析: %v", row)
+	}
+}

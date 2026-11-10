@@ -77,6 +77,9 @@ func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 			steps[st.ID] = st
 		}
 	}
+	// 步骤意图标题校对稿优先表(P4-65 ⑩:显示层优先,任务包与机器消费
+	// 用节点原文;空表零变化)。
+	stepTitlePolish := s.polishedNodeTitleOf(r.Context(), taskID)
 	sessions, err := s.Store.UnitSessions(r.Context(), taskID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
@@ -99,6 +102,9 @@ func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 		}
 		if st, ok := steps[sess.StepID]; ok {
 			row.StepTitle = st.Title
+			if t := stepTitlePolish[sess.StepID]; t != "" {
+				row.StepTitle = t
+			}
 		}
 		if sess.EndStatus != "" {
 			row.Status, row.Running, row.FinishedAt = sess.EndStatus, false, sess.FinishedAt
@@ -146,8 +152,12 @@ func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(queued, func(i, j int) bool { return overmind.StepLaunchLess(queued[i], queued[j]) })
 	for _, st := range queued {
+		title := st.Title
+		if t := stepTitlePolish[st.ID]; t != "" {
+			title = t
+		}
 		out = append(out, UnitRow{
-			StepID: st.ID, StepTitle: st.Title,
+			StepID: st.ID, StepTitle: title,
 			Status: "dispatched", Queued: true,
 		})
 	}

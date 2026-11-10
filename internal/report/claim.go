@@ -128,10 +128,13 @@ type ReproFinal struct {
 	NarrativeUnpolished bool                      `json:"narrative_unpolished,omitempty"`
 	Rounds              []rings.FalsifyRoundHuman `json:"rounds,omitempty"`
 	Steps               []ReproStepView           `json:"steps"`
-	Variants            []rings.ReproStep         `json:"variants,omitempty"` // 旧口径过程流量(存量;证据包导出补全,常规装配为空)
-	Process             []rings.ReproProcessRef   `json:"process,omitempty"`  // 过程流量引用清单(P4-35;证据包导出补全,常规装配为空)
-	ProcessCount        int                       `json:"process_count"`      // 过程流量条数(计数行口径;新记录 = Process 长度)
-	VariantsCount       int                       `json:"variants_count"`     // 旧口径变体条数(存量)
+	// NoReproReason 无复现包的原因(P4-62 A:模型空选/挑选失败如实呈现,
+	// 面板与报告同句;旧记录为空——旧口径空步骤退既有空态文案)。
+	NoReproReason string               `json:"no_repro_reason,omitempty"`
+	Variants      []rings.ReproStep    `json:"variants,omitempty"` // 旧口径过程流量(存量;证据包导出补全,常规装配为空)
+	Process       []rings.ReproProcessRef `json:"process,omitempty"` // 过程流量引用清单(P4-35;证据包导出补全,常规装配为空)
+	ProcessCount  int                  `json:"process_count"`      // 过程流量条数(计数行口径;新记录 = Process 长度)
+	VariantsCount int                  `json:"variants_count"`     // 旧口径变体条数(存量)
 }
 
 // ProcessUnlisted 未进最小集的过程交换条数(面板与报告同口径计数行:
@@ -165,8 +168,16 @@ type ClaimCase struct {
 	Retest       *RetestFinal `json:"retest,omitempty"`
 	// Summary 定稿校对后的声明摘要(P4-59 ①,问题清单 #80①③):存在性
 	// 描述/影响面/链上事实描述的报告级文风改写,随 repro 同批冻结;
-	// 空字段读侧退节点原文。只改文风,包装不是证据(R2)。
+	// 空字段读侧退节点原文。只改文风,包装不是证据(R2)。P4-64 ② 起
+	// 立账批次亦写同列(锤炼中声明即有摘要),定稿覆盖(账本次序)。
 	Summary *rings.SummaryDigest `json:"summary,omitempty"`
+	// RoundHumans 逐轮反证人话(P4-64 ①:每轮随 falsify 记录同批冻结,
+	// 按轮 upsert)。读侧与存量 repro.Rounds 合并——新事件优先,存量
+	// 旧定稿的人话照读(重开前的旧轮)。
+	RoundHumans map[int]rings.FalsifyRoundHuman `json:"-"`
+	// RetestNotes 复测备注校对稿(P4-64 ⑦:按轮匹配;空 = 该轮无校对
+	// 稿,读侧退机器记录 Note 原文)。
+	RetestNotes map[int]string `json:"-"`
 	// 复核标记不纳入报告(P4-30 ③):最新 report_review 记录为准(取代
 	// 语义);账本不涂改,判断保留可追溯——报告只收已确认且非信息性。
 	ReportExcluded       bool   `json:"report_excluded,omitempty"`
@@ -252,11 +263,13 @@ func applyProjection(cs *ClaimCase, proj *rings.ClaimCaseProjection, discovererI
 	}
 	cs.ReportExcluded, cs.ReportExcludedReason = proj.ReportExcluded, strings.TrimSpace(proj.ReportExcludedReason)
 	cs.Summary = proj.Summary
+	cs.RoundHumans = proj.RoundHumans
+	cs.RetestNotes = proj.RetestNotes
 	if proj.Repro != nil {
 		out := &ReproFinal{
 			Rev: proj.Repro.Rev, Severity: proj.Repro.Severity,
 			Narrative: proj.Repro.Narrative, NarrativeUnpolished: proj.Repro.NarrativeUnpolished,
-			Rounds:       proj.Repro.Rounds,
+			Rounds: proj.Repro.Rounds, NoReproReason: proj.Repro.NoReproReason,
 			ProcessCount: proj.Repro.ProcessCount, VariantsCount: proj.Repro.VariantsCount,
 		}
 		steps := make([]ReproStepView, 0, len(proj.Repro.Steps))

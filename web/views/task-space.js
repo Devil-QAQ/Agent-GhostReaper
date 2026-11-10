@@ -3,6 +3,7 @@
 import * as React from "react";
 
 import { EmptyState } from "@/components/empty-state";
+import { ErrorBoundary } from "@/components/error-boundary";
 import { iconOf } from "@/components/icons";
 import { AnnulusPage } from "@/views/annulus-page";
 import { AssetsPage } from "@/views/assets-page";
@@ -153,7 +154,13 @@ export function TaskSpace({ tasks, taskID, tab, focus, unit }) {
         </div>
       </div>
       {current.status === "hibernated" && <HibernateBanner task={current} />}
-      {Page ? <Page {...pageProps} /> : null}
+      {/* 页面级渲染错误边界(P4-60 ④):标签页崩降级为区块错误,标签栏
+          与冬眠提醒不受影响、其余标签可用;key 随任务与标签换页重挂。 */}
+      {Page ? (
+        <ErrorBoundary key={`${current.id}:${tab}`}>
+          <Page {...pageProps} />
+        </ErrorBoundary>
+      ) : null}
     </div>
   );
 }

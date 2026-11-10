@@ -100,11 +100,13 @@ func (m *gatedScriptedModel) requests() []recordedRequest {
 	return append([]recordedRequest(nil), m.reqs...)
 }
 
-// decomposeRequests 拆解请求(无工具广告的会话)子集。
+// decomposeRequests 拆解请求子集(P4-65 修正:按拆解会话特征过滤——
+// system 段带"态势规划标准五问";研判校对/摘要族等生成会话同样零工具
+// 广告,不能按"无工具"归入拆解计数)。
 func (m *gatedScriptedModel) decomposeRequests() []recordedRequest {
 	var out []recordedRequest
 	for _, r := range m.requests() {
-		if len(r.ToolsOffered) == 0 {
+		if len(r.ToolsOffered) == 0 && strings.Contains(r.System, "态势规划标准五问") {
 			out = append(out, r)
 		}
 	}

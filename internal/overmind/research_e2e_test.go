@@ -136,6 +136,12 @@ func (m *researchScriptedModel) handle(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case len(tools) == 0: // 主宰拆解(五问研判 + 意图 + 组合声明)
+		if strings.Contains(lastUser, "复现步骤事实") {
+			// P4-62 A:定稿最小集挑选会话(候选池事实包→选择 JSON)——
+			// 如实挑 seq 1(字段留空退确定性兜底)。
+			text = `{"steps":[{"seq":1}]}`
+			break
+		}
 		var facts []string
 		for _, mm := range factLineRe.FindAllStringSubmatch(lastUser, -1) {
 			facts = append(facts, mm[1])

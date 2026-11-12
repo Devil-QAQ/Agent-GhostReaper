@@ -62,7 +62,7 @@ func TestHarvestDiscoveredAsset(t *testing.T) {
 	submitDiscoveryFact(t, store, task, "f-disc", "u5", &swarm.NewAssetDecl{
 		Class: "subdomain", Title: "admin.example.com", Parent: "a-seed"})
 
-	hv, err := Harvest(ctx, store, task)
+	hv, err := Harvest(ctx, store, task, nil)
 	if err != nil {
 		t.Fatalf("收割失败: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestHarvestDiscoveredAsset(t *testing.T) {
 	// 同标识重复发现:不重复入图,发现事实锚定既有对象。
 	submitDiscoveryFact(t, store, task, "f-dup", "u6", &swarm.NewAssetDecl{
 		Class: "host", Title: "admin.example.com"})
-	if _, err := Harvest(ctx, store, task); err != nil {
+	if _, err := Harvest(ctx, store, task, nil); err != nil {
 		t.Fatalf("二次收割失败: %v", err)
 	}
 	assets2, _ := store.NodesByType(ctx, task, rings.NodeAsset, "")
@@ -134,7 +134,7 @@ func TestHarvestDiscoveredAsset(t *testing.T) {
 			NodeID: "f-bare", NodeType: rings.NodeFact, Title: "无证据发现", Status: "candidate", Detail: noEv}}); err != nil {
 		t.Fatalf("种无证据候选失败: %v", err)
 	}
-	hv3, err := Harvest(ctx, store, task)
+	hv3, err := Harvest(ctx, store, task, nil)
 	if err != nil || len(hv3.Skipped) != 1 || hv3.Skipped[0].FactID != "f-bare" {
 		t.Fatalf("无证据候选应如实跳过: %+v err=%v", hv3, err)
 	}

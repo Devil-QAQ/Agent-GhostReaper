@@ -97,6 +97,10 @@ type Executor struct {
 	// 一字不动)。nil 或返回 nil = 不落校对稿,读侧退机器记录原文。
 	RetestNotePolisher func(ctx context.Context, taskID, claimID string, round int, verdict, note string) *rings.RetestNotePolish
 
+	// triageCalls P4-67 研判分诊的调用计数(测试断言用:同 host 第二次
+	// 访问零分诊调用;零锁——计数只作观测)。
+	triageCalls int64
+
 	mu      sync.Mutex
 	unitSeq int
 
@@ -104,6 +108,11 @@ type Executor struct {
 	// 任务级收尾的宽限超时后,主宰对仍挂着的单位逐个硬停(cancel 单位
 	// ctx → 引擎真中断,不进收尾)。单位落地即注销。
 	unitCancels map[string]context.CancelFunc
+	// rulingUnits 在飞单位的调档登记(P4-71 ②:审批记录反向操作
+	// "撤销允许/转为允许"操作在跑单位的攻击档——档在 unitEnv 内存态,
+	// 单位落地即注销,旧攻击记录反向如实答复单位已结束)。unitID → env。
+	rulingMu    sync.Mutex
+	rulingUnits map[string]*unitEnv
 	// stepUnits 在飞单位的步骤索引(task+"\x00"+step → unitID,P2-05
 	// kill_work 止损定位用;一 Step 一单位)。单位落地即注销。
 	stepUnits map[string]string
@@ -150,7 +159,8 @@ func NewExecutor(store *rings.Store, provider llm.Provider, rootDir string, budg
 	e := &Executor{Store: store, Provider: provider, Budget: budget, RootDir: rootDir,
 		unitCancels: map[string]context.CancelFunc{}, stepUnits: map[string]string{},
 		unitLatches: map[string]chan struct{}{}, bgRuns: map[string][]*bgRun{},
-		clocks: map[string]*runClock{}}
+		rulingUnits: map[string]*unitEnv{},
+		clocks:      map[string]*runClock{}}
 	if e.Blobs == nil {
 		e.Blobs = NewBlobStore(filepath.Join(rootDir, "blobs"))
 	}
@@ -188,6 +198,41 @@ type RunningStep struct {
 	StepID string
 	UnitID string
 }
+
+// UnitActive 单位是否在飞(P4-71 ②:攻击卡反向键的可用性——档在
+// unitEnv 内存态,单位终态即失效,旧攻击记录反向键如实置灰)。
+func (e *Executor) UnitActive(taskID, unitID string) bool {
+	e.rulingMu.Lock()
+	env, ok := e.rulingUnits[unitID]
+	e.rulingMu.Unlock()
+	return ok && env.TaskID == taskID
+}
+
+// SetUnitAttackRuling 反向调档(P4-71 ②:审批记录反向操作"撤销允许/
+// 转为允许"只调会话档不动单位):allowed=nil=撤销档(该单位后续同类
+// 攻击重新出卡)、true=授档免卡(该单位后续同类攻击免卡)。host 归一
+// 到裸形态(与 setAttackRuling 的档键一致)。单位不在册=已终态,返回
+// ErrUnitFinished 由调用方如实答复(档已随单位销毁)。
+func (e *Executor) SetUnitAttackRuling(taskID, unitID, host string, allowed *bool) error {
+	if a, ok := rings.ScopeAnchorOf(strings.ToLower(strings.TrimSpace(host))); ok {
+		host = a.Host // 端口无关:攻击档与信息源清单同为 host 级
+	}
+	e.rulingMu.Lock()
+	env, ok := e.rulingUnits[unitID]
+	e.rulingMu.Unlock()
+	if !ok || env.TaskID != taskID {
+		return ErrUnitFinished
+	}
+	if allowed == nil {
+		env.unsetAttackRuling(host)
+		return nil
+	}
+	env.setAttackRuling(host, *allowed)
+	return nil
+}
+
+// ErrUnitFinished 反向调档的目标单位已终态(档随单位销毁,如实答复)。
+var ErrUnitFinished = errors.New("swarm: 单位已结束,攻击档已随单位销毁")
 
 // RunningUnitSteps 任务当前在飞单位清单:server 侧规则变更时据此算
 // 受影响单位(范围 ∩ 步骤 covers 资产),只对相交单位定向投递舵杆
@@ -501,6 +546,11 @@ func (e *Executor) finishUnit(ctx context.Context, env *unitEnv, pack *TaskPack,
 	e.unitCancels[env.UnitID] = cancel
 	e.stepUnits[steerKey(env.TaskID, env.StepID)] = env.UnitID
 	e.mu.Unlock()
+	// P4-71 ②:在飞单位登记调档通道(反向"撤销允许/转为允许"的落点;
+	// 单位落地即注销——旧攻击记录反向时如实答复单位已结束)。
+	e.rulingMu.Lock()
+	e.rulingUnits[env.UnitID] = env
+	e.rulingMu.Unlock()
 	// 舵杆止损路由自登记(P2-05):该任务的单位起飞即把 kill_work
 	// 路由到本执行器(幂等;演示/重启换执行器时覆盖)。
 	if e.Helm != nil {
@@ -519,6 +569,13 @@ func (e *Executor) finishUnit(ctx context.Context, env *unitEnv, pack *TaskPack,
 			delete(e.stepUnits, steerKey(env.TaskID, env.StepID))
 		}
 		e.mu.Unlock()
+		// 调档登记注销(P4-71 ②):档随单位销毁失效——后续反向键如实
+		// 答复单位已结束(置灰),不复活内存档。
+		e.rulingMu.Lock()
+		if e.rulingUnits[env.UnitID] == env {
+			delete(e.rulingUnits, env.UnitID)
+		}
+		e.rulingMu.Unlock()
 		// 单位落地即清暂停闩(在暂停中落地 = 暂停失效,pause_lapse 留痕)。
 		e.dropUnitLatch(env.TaskID, env.StepID)
 		cancel()
@@ -643,6 +700,8 @@ func (e *Executor) newUnit(pack *TaskPack) *unitEnv {
 		StepID:       pack.StepID,
 		UnitID:       unitID,
 		TranscriptID: "swarm-" + unitID,
+		// P4-67 分诊输入的任务目标摘要(领取时冻结;空目标如实空)。
+		goalSummary: pack.GoalTitle,
 	}
 }
 
@@ -741,7 +800,7 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 		case resumeCheckpoint:
 			input = checkpointResumePrompt(pack)
 		case resumeScope:
-			input = scopeApprovedResumePrompt(pack)
+			input = scopeResumePrompt(e, pack)
 		default:
 			input = adoptionResumePrompt(pack)
 		}
@@ -1221,10 +1280,31 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 				env.park = nil
 				continue
 			}
-			// 面板拒绝:拒绝即熔断该单位会话(单位级终止,第四章 §3 v2)。
-			env.deniedReason = "审批拒绝终止: 面板拒绝" + reasonSuffix(d.Reason)
+			// 动作类拒绝(P4-68 ② 拒绝分族;P4-70 ③ 攻击卡落会话档):
+			// 弹门人工拒/攻击行为卡拒/模糊形态弹门拒＝只杀该动作不杀单位
+			// ——注入拒绝反馈(拒绝原因即换路指引),模型读到后自行换路,
+			// 同会话继续;连拒同类 HardDenyEscalateAfter 次(单位生命周期累
+			// 计不重置,与硬规则升级保险同机制)升级杀单位(防连环硬撞)。
+			// 攻击行为卡拒绝同时落会话档"禁止"——该单位后续对同一信息源
+			// 的攻击动作自动拒不弹卡(P4-70 ③)。
+			if n := env.bumpDenyHits(gateDenyKey(env.park.Req)); n >= HardDenyEscalateAfter {
+				env.deniedReason = fmt.Sprintf(
+					"审批拒绝终止: 面板拒绝%s · 同类拒绝累计 %d 次,升级终止单位",
+					reasonSuffix(d.Reason), n)
+				env.park = nil
+				break
+			}
+			if env.park.Req.AttackTarget != "" {
+				if host, ok := ParseInfoSourceHost(env.park.Req.AttackTarget); ok {
+					env.setAttackRuling(host, false)
+				}
+				input = attackDenyResumePrompt(env.park.Req, d.Reason)
+			} else {
+				input = gateDenyResumePrompt(env.park.Req, d.Reason)
+			}
+			reqID = nextRequestID(env.UnitID, &reqSeq) // 新逻辑注入,新 requestID
 			env.park = nil
-			break
+			continue
 		}
 		// ---- P4-01 ②:预算到线 → 原会话续跑(每段预算逐段重算) ----
 		// 引擎已跑 Settlement 把发现写回(transcript 可查);任务总闸到点
@@ -1239,8 +1319,9 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 		break
 	}
 
-	// 拒绝即熔断:Step 终态"审批拒绝终止"(主宰收割可见原因,被拒单位
-	// 不得换法重试——终态步骤不再派发)。
+	// 升级熔断(denyGuard 拒绝线/动作类拒绝连拒同类到限):Step 终态
+	//"审批拒绝终止"(主宰收割可见原因;P4-68 ② 起普通面板拒不再走到
+	// 这里——只杀动作注入换路反馈)。
 	if env.deniedReason != "" {
 		res.Reason, res.StepStatus = env.deniedReason, StepApprovalDenied
 	}
@@ -1314,12 +1395,63 @@ func approvalResumePrompt(req ApprovalRequest, d GateDecision) string {
 	if r := strings.TrimSpace(d.Reason); r != "" {
 		fmt.Fprintf(&b, "造物主批准附言(请遵照执行):%s。", r)
 	}
-	b.WriteString("该次调用已被单次授权,可直接重新发起;等待期间该单位的运行预算未消耗,请继续完成本步骤意图。")
-	if req.GateGroup == HardGroupProxyBypass {
-		b.WriteString("本单位后续命中代理旁路组的命令已一并获准,可直接执行。")
-	} else if req.GateGroup == "" {
-		b.WriteString("本步骤的后续命令已一并获准,可直接执行。")
+	switch {
+	case req.AttackTarget != "":
+		// P4-70 ③:攻击行为卡批准＝会话档允许——该次动作直接重新发起,
+		// 本单位本会话内对该信息源的后续攻击动作一并放行(仅此单位、仅
+		// 此信息源;其他信息源照常逐次判定)。
+		fmt.Fprintf(&b, "对信息源 %s 的攻击动作已获准,该次动作可直接重新发起;本单位本会话内对该信息源的后续攻击动作也已一并获准,请继续完成本步骤意图。", req.AttackTarget)
+	case req.GateGroup == HardGroupProxyBypass:
+		b.WriteString("该次调用已被单次授权,可直接重新发起;本单位后续命中代理旁路组的命令已一并获准,可直接执行。等待期间该单位的运行预算未消耗,请继续完成本步骤意图。")
+	default:
+		b.WriteString("该次调用已被单次授权,可直接重新发起;本步骤的后续命令已一并获准,可直接执行。等待期间该单位的运行预算未消耗,请继续完成本步骤意图。")
 	}
+	return b.String()
+}
+
+// gateDenyKey 动作类拒绝的同类计数键(P4-68 ②:连拒同类
+// HardDenyEscalateAfter 次升级杀单位,与硬规则升级保险 hr:/ir: 同机制、
+// 单位生命周期累计不重置):攻击行为卡一族(gd:attack)、同拦截规则组
+// 弹门一族(gd:<组>)、审批门槛弹门一族(gd:threshold)。
+func gateDenyKey(req ApprovalRequest) string {
+	switch {
+	case req.AttackTarget != "":
+		return "gd:attack"
+	case req.GateGroup != "":
+		return "gd:" + req.GateGroup
+	default:
+		return "gd:threshold"
+	}
+}
+
+// gateDenyResumePrompt 弹门人工拒绝后的换路反馈(P4-68 ②:只杀该动作
+// 不杀单位,单位同会话继续;拒绝原因即换路指引——§11"报错文案写成
+// 路由教学"通道,与 P4-63 拒动作反馈同构)。
+func gateDenyResumePrompt(req ApprovalRequest, reason string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "【审批结果 · 动作被拒】面板拒绝了请求 %s(意图:%s;工具 %s;参数 %s)。",
+		req.ID, req.Intent, req.ToolName, clipLine(req.ToolArgs, 400))
+	b.WriteString("该动作到此为止,不要换个写法重试。")
+	if r := strings.TrimSpace(reason); r != "" {
+		fmt.Fprintf(&b, "拒绝理由:%s。", r)
+	}
+	b.WriteString("请换一个方向或方法继续完成本步骤意图;确需该动作时由操作者在面板处理。")
+	return b.String()
+}
+
+// attackDenyResumePrompt 攻击行为卡拒绝后的换路反馈(P4-67 起只杀该
+// 动作不杀单位,P4-68 ② 并入动作类拒绝分族——同类连拒升级保险同款;
+// 单位同会话继续;拒绝原因即换路指引——"报错文案写成路由教学"§11
+// 通道,与 P4-63 拒动作反馈同构)。
+func attackDenyResumePrompt(req ApprovalRequest, reason string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "【审批结果 · 动作被拒】面板拒绝了请求 %s:对信息源 %s 的攻击动作不批准(意图:%s;工具 %s)。",
+		req.ID, req.AttackTarget, req.Intent, req.ToolName)
+	b.WriteString("该动作到此为止,不要换个写法重试。")
+	if r := strings.TrimSpace(reason); r != "" {
+		fmt.Fprintf(&b, "拒绝理由:%s。", r)
+	}
+	fmt.Fprintf(&b, "%s 仍可正常访问查资料(获取使用不受影响),但对它的主动攻击动作一律禁止;请基于已获取的信息换授权范围内的方向继续。", req.AttackTarget)
 	return b.String()
 }
 
@@ -1354,6 +1486,57 @@ func checkpointResumePrompt(pack *TaskPack) string {
 	b.WriteString("【断点 · 续跑】执行进程重启,任务从账本续跑,本会话已从转录完整恢复(历史消息与已耗用量俱在)。")
 	fmt.Fprintf(&b, "继续完成本步骤意图:%s。", pack.StepIntent)
 	b.WriteString("断点存档前被暂缓的调用可重新发起;已执行过的动作与已写回的结论勿重复;若意图已近完成,直接收尾写回最终结论。本单位的运行预算已按新领取重置。")
+	return b.String()
+}
+
+// scopeResumePrompt 范围等待唤醒的续跑指令(P4-51 ② 加入资产 / P4-68 ①
+// 允许访问 / P4-69 ① 目标已排除,按步骤 detail 携带的越界目标现值区分
+// 措辞:目标已入范围——转为可测试;已获访问授权——只授访问权,不是
+// 测试目标;已被排除(P4-69:意图不覆盖被排除目标的挂等单位唤醒换路,
+// 注入"目标已排除"反馈)——不再对该目标发起任何命令,继续意图其余
+// 工作)。判定顺序:排除优先(止损语义)→ 信息源 → 默认批准。
+func scopeResumePrompt(e *Executor, pack *TaskPack) string {
+	step, err := e.Store.Node(ledgerCtx, pack.TaskID, pack.StepID)
+	if err == nil {
+		if host, _ := step.Detail["scope_wait_host"].(string); host != "" {
+			port, _ := step.Detail["scope_wait_port"].(string)
+			roe, rerr := e.Store.CurrentRoE(ledgerCtx, pack.TaskID)
+			if rerr == nil {
+				if excluded := roe.ExcludedAssetSet(); excluded != nil {
+					if assets, aerr := e.Store.NodesByType(ledgerCtx, pack.TaskID, rings.NodeAsset, ""); aerr == nil &&
+						rings.ExcludedCoversTarget(assets, excluded, host, port) {
+						return scopeExcludedResumePrompt(pack, host)
+					}
+				}
+				if roe.InfoSourceHit(host) {
+					return scopeAccessResumePrompt(pack, host)
+				}
+			}
+		}
+	}
+	return scopeApprovedResumePrompt(pack)
+}
+
+// scopeExcludedResumePrompt 目标已排除唤醒的续跑指令(P4-69 ①:意图不
+// 覆盖被排除目标的挂等单位按分族唤醒换路——此前等待批准的目标已从
+// 任务范围排除,单位同会话继续意图其余工作;对该目标的后续命令会被
+// 直接拒绝,反馈即换路指引,与命令路顺带触碰拒绝同锚例)。
+func scopeExcludedResumePrompt(pack *TaskPack, host string) string {
+	var b strings.Builder
+	b.WriteString("【目标已排除 · 续跑】此前等待批准的范围外目标已被排除(任务范围外),本会话已从转录完整恢复(历史消息与已耗用量俱在)。")
+	fmt.Fprintf(&b, "继续完成本步骤意图:%s。", pack.StepIntent)
+	fmt.Fprintf(&b, "%s 已被排除,不要再对它发起测试(连通性测距也不行,会被直接拒绝);本步骤其余工作不受影响,换测试对象或跳过该部分继续。已执行过的动作与已写回的结论勿重复。本单位的运行预算已按新领取重置。", host)
+	return b.String()
+}
+
+// scopeAccessResumePrompt 允许访问唤醒的续跑指令(P4-68 ①:目标获访问
+// 授权——只授访问权,不入资产图、不是测试目标;被拦下的访问命令可重新
+// 发起,对它的主动攻击动作仍会被拦下等批准)。
+func scopeAccessResumePrompt(pack *TaskPack, host string) string {
+	var b strings.Builder
+	b.WriteString("【允许访问 · 续跑】此前等待批准的范围外目标已获访问授权(只授访问权,不是测试目标),本会话已从转录完整恢复(历史消息与已耗用量俱在)。")
+	fmt.Fprintf(&b, "继续完成本步骤意图:%s。", pack.StepIntent)
+	fmt.Fprintf(&b, "此前被拦下的对 %s 的访问命令现在可以重新发起(查资料类获取使用不受影响);该地址不是测试目标,对它的主动攻击动作会被拦下等批准;已执行过的动作与已写回的结论勿重复。本单位的运行预算已按新领取重置。", host)
 	return b.String()
 }
 
@@ -1486,16 +1669,18 @@ func isEngineInterrupt(text string) bool {
 //	   决策通路——R9);
 //	⑦ 弹门线·达到审批门槛:意图分级 ≥ RoE 审批门槛(默认宽:仅增删改
 //	   弹门)→ 挂起等面板裁决:登记审批票 → 收拢当前执行段(等待期
-//	   该单位计时暂停)→ 批准后 Resume 续跑/拒绝即熔断该单位会话;
-//	   无门可用 fail-safe 拒绝(没有人在环,就不放行弹门级动作);
+//	   该单位计时暂停)→ 批准后 Resume 续跑/拒绝只杀该动作注入换路反馈
+//	   (P4-68 ②,连拒同类 3 次升级杀);无门可用 fail-safe 拒绝(没有
+//	   人在环,就不放行弹门级动作);
 //	⑧ 其余一律放行留痕:不列举、不预判(留痕=tool_call 执行记录,
 //	   全量记录兜底审计)。
 //
-// 熔断该单位会话的拒绝(①④⑤与升级保险触发):单位级终止,Step 终态
-// "审批拒绝终止"(approval_denied),主宰收割可见原因。面板拒绝(弹门
-// 拒)同样熔断——人否决的是这个单位正在做的事,语义不同(P4-63 B⑥)。
-// 硬规则与意图拦截的确定性拒绝只拒那一条命令,单位存活读到反馈自行换
-// 路。只读工具(引擎侧 ReadOnly,如 port_probe 与受控回流入口)在权限
+// 熔断该单位会话的拒绝(①④⑤与各升级保险触发):单位级终止,Step 终态
+// "审批拒绝终止"(approval_denied),主宰收割可见原因。P4-68 ② 起面板
+// 拒绝(弹门拒)与硬规则/意图拦截的确定性拒绝同款——只拒那一条命令,
+// 单位存活读到反馈(拒绝原因即换路指引)自行换路,同会话继续;连拒同
+// 类到限(硬规则 hr:/意图 ir:/动作类 gd:/排除触碰 et:)升级杀单位。
+// 只读工具(引擎侧 ReadOnly,如 port_probe 与受控回流入口)在权限
 // 管线第 3 阶段自动放行,不进本回调——回流入口只写自家账本、不碰目标,
 // 不设门是防审批疲劳,RoE 工具过滤照常生效。
 func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
@@ -1522,7 +1707,8 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 		// P4-63 A:系统破坏/数据库破坏组按三档判定位收窄——动作位拒、
 		// 非动作位放行不当动作、模糊形态弹门人审(人即兜底)。
 		// P4-63 B:确定性拒绝只拒本次动作不熔断单位(denyHardAction),
-		// 同规则累计 3 次升级杀;面板弹门拒绝照旧熔断(drive 侧)。
+		// 同规则累计 3 次升级杀;P4-68 ② 起面板弹门拒绝同款只杀动作
+		//(drive 侧注入换路反馈,连拒同类 3 次升级杀)。
 		if r, m, tier, hit := matchHardRule(guardLedgerCtx, env.Executor.Store, toolName, input); hit {
 			if r.Action == HardActionGate || tier == hardTierAmbiguous {
 				if a := env.allowance; a != nil && a.toolName == toolName && jsonEquiv(a.args, string(input)) {
@@ -1563,6 +1749,13 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 		// 场让位名额(denyScope 内部完成出卡/分流/置位,drive 收段后落
 		// scope_wait 态);已排除目标(禁止测试/摘除)直接拒留痕熔断。
 		// 只读探测工具在门卫补口同判,bash 经由本回调。
+		// P4-67:批准续跑的单次放行配额查在拦前(与硬规则 ② 分支内配额
+		// 同语义——攻击行为卡批准后的重发目标仍是范围外,不查会被再次
+		// 拦住出新卡)。
+		if a := env.allowance; a != nil && a.toolName == toolName && jsonEquiv(a.args, string(input)) {
+			env.allowance = nil
+			return permission.Allowed()
+		}
 		if reason := env.denyScope(pack, toolName, input); reason != "" {
 			return permission.Denied(reason)
 		}
@@ -1664,13 +1857,21 @@ type gateStepPass struct {
 	originRequestID string // 触发放行的批准请求(逐次留痕回指)
 }
 
-// armGateApproval 批准续跑的执行侧授权(P4-17;P4-27 ⑧):单次放行配额
-// 恒置(同工具同参数恰好一次,重发同调用走配额不另留痕);来源是代理
-// 旁路组弹门时同时武装单位级组放行(后续同组任何命中直接执行);来源
-// 是审批门槛弹门(无 GateGroup)时同时武装同步骤放行(本步骤后续命令
-// 不再逐条弹门)。用户自建 gate 规则不武装步骤级放行(P4-17 语义保持:
-// 批准一次仅放行同参数那一次)。
+// armGateApproval 批准续跑的执行侧授权(P4-17;P4-27 ⑧;P4-70 ③):
+// 攻击行为卡(AttackTarget 非空)批准→落会话档——该单位会话内对该信息
+// 源的后续攻击动作放行免卡(档命中零判定调用,单次配额退役);其余恒
+// 置单次放行配额(同工具同参数恰好一次,重发同调用走配额不另留痕);
+// 来源是代理旁路组弹门时同时武装单位级组放行(后续同组任何命中直接
+// 执行);来源是审批门槛弹门(无 GateGroup)时同时武装同步骤放行(本
+// 步骤后续命令不再逐条弹门)。用户自建 gate 规则不武装步骤级放行
+// (P4-17 语义保持:批准一次仅放行同参数那一次)。
 func (env *unitEnv) armGateApproval(req ApprovalRequest) {
+	if req.AttackTarget != "" {
+		if host, ok := ParseInfoSourceHost(req.AttackTarget); ok {
+			env.setAttackRuling(host, true)
+		}
+		return
+	}
 	env.allowance = &gateAllowance{requestID: req.ID, toolName: req.ToolName, args: req.ToolArgs}
 	switch {
 	case req.GateGroup == HardGroupProxyBypass:

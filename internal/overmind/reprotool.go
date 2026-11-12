@@ -184,7 +184,7 @@ func (c *curlCommand) host() string {
 
 // curlSimpleForbidden 静态解析禁用形态:变量/命令替换/命令拼接/管道/
 // 重定向/循环续行——出现即不可确定性还原。
-const curlSimpleForbidden = "$`;&|><\n\r\\" 
+const curlSimpleForbidden = "$`;&|><\n\r\\"
 
 // curlNoShapeFlags 不改变请求包形状、可直接忽略的无值开关(连接行为/
 // 输出控制/重定向跟随等;-i 除外——它决定输出是否含响应头,见 parse)。

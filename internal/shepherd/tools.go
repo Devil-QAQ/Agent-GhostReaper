@@ -52,6 +52,7 @@ func (s *Service) toolset(taskID, messageID string) []tool.CoreTool {
 		s.setNotesTool(taskID),
 		s.addConstraintTool(taskID),
 		s.setAssetScopeTool(taskID),
+		s.setInfoSourceTool(taskID),
 		s.taskControlTool(taskID),
 		s.unitControlTool(taskID),
 	}
@@ -447,6 +448,78 @@ func (s *Service) addConstraintTool(taskID string) tool.CoreTool {
 	})
 }
 
+// setInfoSourceTool 信息源标记/撤销(P4-67 ⑥ 牧者通道;P4-68 ① 起与
+// RoE 面板标记同源):"xxx 是查资料的不是目标"→标记信息源
+// (swarm.AllowScopeAccess 统一入口——入清单＋同主机资产退役,与分诊
+// 自动授、面板标记行同一账本动作,RoE 面板同步可见);"xxx 别当信息
+// 源了"→撤销(恢复拦截,后续访问重新走分诊)。与 set_asset_scope 的
+// 分工:那个管"测不测"(纳入/摘除),这个管"用不用"(访问权)——
+// 信息源不入资产图、不算覆盖。
+func (s *Service) setInfoSourceTool(taskID string) tool.CoreTool {
+	return tool.Build(tool.Spec{
+		Name:        "set_info_source",
+		Description: "标记或撤销信息源(与 RoE 面板允许访问同源,面板实时可见)。标记=该地址是查资料用的公开信息服务(代码托管/搜索引擎/公共文档等),虫群访问它直接放行、不当作测试目标(不入资产图、不算覆盖);撤销=恢复拦截,再次访问会拦下问一次。造物主说「xxx 是查资料的不是目标」用 mark,「xxx 别当信息源了」用 revoke。地址给域名或 IP(可带端口)。",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"action": map[string]any{"type": "string", "enum": []string{"mark", "revoke"},
+					"description": "mark=标记为信息源(访问放行) / revoke=撤销(恢复拦截)"},
+				"hosts": map[string]any{"type": "array", "items": map[string]any{"type": "string"},
+					"description": "地址清单:域名或 IP(host[:port] 写法)"},
+				"basis": map[string]any{"type": "string",
+					"description": "标记依据一句话(mark 时给;撤销可省)"},
+			},
+			"required": []string{"action", "hosts"},
+		},
+		Permissions: allowAll,
+		Run: func(ctx context.Context, in json.RawMessage, _ *tool.ToolContext) (tool.Result, error) {
+			var args struct {
+				Action string   `json:"action"`
+				Hosts  []string `json:"hosts"`
+				Basis  string   `json:"basis"`
+			}
+			if err := json.Unmarshal(in, &args); err != nil {
+				return tool.Errorf("bad input: " + err.Error()), nil
+			}
+			args.Hosts = trimAll(args.Hosts)
+			if len(args.Hosts) == 0 {
+				return tool.Errorf("hosts 不能为空:给出域名或 IP(host[:port] 写法)"), nil
+			}
+			var b strings.Builder
+			switch args.Action {
+			case "mark":
+				for _, ident := range args.Hosts {
+					a, ok := rings.ScopeAnchorOf(ident)
+					if !ok {
+						fmt.Fprintf(&b, "%s 不是可识别的主机地址,跳过;\n", ident)
+						continue
+					}
+					basis := strings.TrimSpace(args.Basis)
+					if basis == "" {
+						basis = "操作者标记:查资料用的公开信息服务"
+					}
+					if err := swarm.AllowScopeAccess(ctx, s.Store, taskID, a.Host, basis, ActorShepherd); err != nil {
+						return tool.Errorf("标记信息源失败: " + err.Error()), nil
+					}
+					fmt.Fprintf(&b, "已标记 %s 为信息源(访问放行,不当作测试目标);\n", ident)
+				}
+				return tool.Text(strings.TrimRight(b.String(), ";\n") + "。RoE 面板同步可见,可随时撤销。"), nil
+			case "revoke":
+				for _, ident := range args.Hosts {
+					if err := swarm.RevokeInfoSource(ctx, s.Store, taskID, ident, ActorShepherd); err != nil {
+						fmt.Fprintf(&b, "%s: %v;\n", ident, err)
+						continue
+					}
+					fmt.Fprintf(&b, "已撤销 %s 的信息源标记(恢复拦截,再次访问会拦下问一次);\n", ident)
+				}
+				return tool.Text(strings.TrimRight(b.String(), ";\n") + "。RoE 面板同步可见。"), nil
+			default:
+				return tool.Errorf("action 须为 mark 或 revoke"), nil
+			}
+		},
+	})
+}
+
 // setAssetScopeTool 资产范围操作(P4-45 ② + P4-54 通配与标识扩展):
 // 纳入/摘除两向,与 RoE 面板同源——同一 roe.updated 账本状态、同一条
 // 止损链路(swarm 资产范围操作),面板实时可见,无旁路(R7)。纳入=
@@ -520,6 +593,9 @@ func (s *Service) setAssetScopeTool(taskID string) tool.CoreTool {
 				}
 				s.wake(taskID)
 				var b strings.Builder
+				for _, id := range res.Revived {
+					fmt.Fprintf(&b, "已复活 %s(此前转信息源退役,现重新纳入测试范围);\n", title(id))
+				}
 				for _, id := range res.Approved {
 					fmt.Fprintf(&b, "已放行待批资产 %s;\n", title(id))
 				}
@@ -539,6 +615,11 @@ func (s *Service) setAssetScopeTool(taskID string) tool.CoreTool {
 				if err != nil {
 					return tool.Errorf("摘除失败: " + err.Error()), nil
 				}
+				// P4-69 ①(摘除联动收口,三通道一致):挂等这些目标的冻结
+				// 单位与未决卡即时收口——意图覆盖者终止留痕、不覆盖者唤醒
+				// 换路,卡按拒绝语义收口消红点(与 RoE 面板摘除/卡上禁止
+				// 测试同一条对账链)。
+				s.resolveScopeWakes(taskID)
 				s.wake(taskID)
 				var b strings.Builder
 				for _, id := range res.AlreadyOut {

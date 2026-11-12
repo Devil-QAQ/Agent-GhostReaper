@@ -196,6 +196,7 @@ func (s *Server) handleRoEAssetScope(w http.ResponseWriter, r *http.Request) {
 	}
 	note := strings.TrimSpace(req.Note)
 	var removed []string // 本次新摘除(止损对象)
+	var added []string   // 本次纳入(勾回;P4-71 复活判定的输入)
 	{
 		oldSet := map[string]bool{}
 		for _, id := range st.ExcludedAssets {
@@ -210,14 +211,14 @@ func (s *Server) handleRoEAssetScope(w http.ResponseWriter, r *http.Request) {
 				removed = append(removed, id)
 			}
 		}
+		// 本次纳入 = 旧摘除清单 − 新摘除清单(勾回)。
+		for _, id := range st.ExcludedAssets {
+			if !newSet[id] {
+				added = append(added, id)
+			}
+		}
 		if note == "" {
 			// 自动备注:新旧清单差集(资产标识),审计可直读"这次动了什么"。
-			var added []string
-			for _, id := range st.ExcludedAssets {
-				if !newSet[id] {
-					added = append(added, id)
-				}
-			}
 			switch {
 			case len(removed) > 0 && len(added) > 0:
 				note = fmt.Sprintf("摘除 %s;纳入 %s", strings.Join(removed, "、"), strings.Join(added, "、"))
@@ -230,12 +231,44 @@ func (s *Server) handleRoEAssetScope(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// P4-69 ②(状态互斥):排除清单成员一律从批准清单剔除——快照提交
+	// 不再原样透传 scope_approved(排除与批准不并存,实锤 a-72dab0e5
+	// 同列两清单)。
+	newSet := map[string]bool{}
+	for _, id := range req.Excluded {
+		newSet[id] = true
+	}
+	nextApproved := make([]string, 0, len(st.ScopeApproved))
+	for _, id := range st.ScopeApproved {
+		if !newSet[id] {
+			nextApproved = append(nextApproved, id)
+		}
+	}
+	// P4-71 ①(RoE 勾回入口):本次纳入(勾回)的资产中退役(retired)
+	// 的一律复活——NodeStateChanged 留痕"纳入复活"＋并入批准清单
+	//(复活即入范围,不回待批);非退役资产勾回语义维持现状。同 host
+	// 其余退役节点不连带(写法粒度)。
+	revived, rerr := swarm.ReviveRetiredAssets(ctx, s.Store, taskID, added, "creator")
+	if rerr != nil {
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("勾回资产复活落账失败: %w", rerr))
+		return
+	}
+	revivedSet := map[string]bool{}
+	for _, id := range revived {
+		revivedSet[id] = true
+		if !idInList(nextApproved, id) {
+			nextApproved = append(nextApproved, id)
+		}
+	}
+	if len(revived) > 0 {
+		note = fmt.Sprintf("%s;复活 %s(退役转回测试范围)", note, strings.Join(revived, "、"))
+	}
 	if _, err := s.Store.Append(ctx, taskID, rings.Event{
 		Kind: rings.EventRoeUpdated, Actor: "creator",
 		Payload: rings.RoeUpdated{
 			AllowedTools: st.AllowedTools, DeniedTools: st.DeniedTools,
 			ApprovalThreshold: st.ApprovalThreshold, IntentRules: st.IntentRules,
-			ExcludedAssets: req.Excluded, ScopeApproved: st.ScopeApproved, Note: note,
+			ExcludedAssets: req.Excluded, ScopeApproved: nextApproved, Note: note,
 		},
 	}); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -273,6 +306,16 @@ func (s *Server) handleRoEAssetScope(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(raw, &out)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// idInList 清单包含判定(server 包内小助手,P4-71 勾回复活并入用)。
+func idInList(list []string, id string) bool {
+	for _, x := range list {
+		if x == id {
+			return true
+		}
+	}
+	return false
 }
 
 // handleRoEAssetImpact GET /api/tasks/{id}/roe/assets/impact?assets=a,b

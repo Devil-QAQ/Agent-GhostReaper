@@ -56,10 +56,13 @@ type unitEnv struct {
 	// 闭包内,一次判定不再重复(并行工具调用下加锁)。P4-50 ②种子域名
 	// 的解析缓存在闭包内(多单位共享);scopeResolve 为解析器注入点
 	//(nil=DefaultScopeResolver,测试打桩)。
-	scopeMu      sync.Mutex
-	scopeHits    map[string]bool
-	scopeTried   map[string]bool
-	scopeResolve rings.ScopeResolver
+	// P4-66 scopeLocalAddrs 为本机网络地址集注入点(nil=枚举本机接口,
+	// 进程级缓存;测试打桩保确定性)——判定面前的本机设施豁免用。
+	scopeMu         sync.Mutex
+	scopeHits       map[string]bool
+	scopeTried      map[string]bool
+	scopeResolve    rings.ScopeResolver
+	scopeLocalAddrs func() map[string]bool
 	// P4-51 范围等待批准的段状态(denyScope 命中范围外时置位,drive 收段
 	// 后消费):scopeHold=出待决卡＋冻结收场让位名额(步骤落 scope_wait
 	// 态);scopeReclaim=目标已获准但本单位闭包是领取时快照(步骤回可领
@@ -68,6 +71,25 @@ type unitEnv struct {
 	scopeHold    *scopeHoldInfo
 	scopeReclaim bool
 	scopeNow     *scopeNowState
+
+	// P4-67 研判分诊:triage 为分诊调用注入点(nil=按 Executor 的模型链
+	// 构造,测试打桩保确定性);任务级缓存＝信息源清单(RoeState)+tg-
+	// 留痕,单位不另设缓存(撤销信息源后立即恢复拦截,不染单位生命周期)。
+	// goalSummary 为分诊输入的任务目标摘要(领取时从 pack 冻结)。
+	// P4-68 lastTriageBasis 为信息源清单命中的动作复查依据(带给攻击卡
+	// 的卡面说明;逐命令即弃)。
+	triage          TriageFunc
+	goalSummary     string
+	lastTriageBasis string
+
+	// P4-70 ③ 信息源攻击卡的会话档(档键=单位×信息源 host,同一单位对
+	// 不同信息源各自定档):裁决一次后同会话不再重复问——true=允许(该
+	// 单位会话内对该信息源的后续攻击动作放行免卡,零判定调用;不计连
+	// 拒升级计数——已授权动作不是拒绝)、false=禁止(后续同类攻击自动
+	// 拒不弹卡,计入 gd:attack 连拒升级保险)。单位销毁即失效,换单位
+	// 攻击同一信息源重新出卡;并行工具调用下加锁。
+	attackMu      sync.Mutex
+	attackRulings map[string]bool
 
 	// P2-08 单位暂停/任务冬眠的段状态(暂停请求由 guard 在调用边界置位,
 	// drive 消费;审批挂起锚点在进票时记录)。

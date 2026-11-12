@@ -17,6 +17,32 @@
 // XFF 等请求头值、注入载荷参数值里的网址、版本号数字一概不当目标
 // (留痕不拦——与"防漂移不防规避"哲学一致:这些面本拦不住真越界、
 // 只误伤正常测试)。变量拼接照旧跳过(实际去向由镜流量留痕对账)。
+//
+// P4-66(问题清单 #86 A①,RoE 机制重构批次第一层):判定面前的确定性
+// 豁免——本机环回(127.0.0.0/8、::1、localhost)与本机网络地址上的
+// 提取目标不进围栏判定,视同非目标直接放行(镜/代理等系统设施都绑
+// 在这些地址上;测试设施自身不是目标环境,RoE 管的是目标边界不是自
+// 家机器)。命令中的代理位置(-x/--proxy 值、代理环境变量赋值与引
+// 用、--resolve 对照侧)在 P4-50 提取面本就不当目标,类级测试钉住该
+// 口径。豁免只摘设施形态,范围外真实 host 照判照拦(不借道溜过)。
+// 留痕走 tool_call 执行记录既有通道,零新增采集;本阶段只动判定面,
+// 不动处置与卡片机制。
+//
+// P4-68(问题清单 #86 B,RoE 机制重构批次第三阶):拒绝分族处置——
+// 已排除目标的命中按"图上意图-目标覆盖关系"分族(覆盖→止损口径终
+// 止;不覆盖、命令顺带触碰→只拒该条命令＋换路反馈,单位同会话继续);
+// 信息源清单命中的攻击动作复查(访问权与攻击行为正交——只授访问不
+// 授攻击,攻击行为仍出卡);范围卡第三键"允许访问"的卡状态机扩展
+// (access 记录＝已裁,撤销后可重出卡)。
+//
+// P4-70(问题清单 #87 ②③,RoE 复核修正批次):红队命令路不再对信息
+// 源清单命中直接放行——命中的 host 逐命令做动作性质判定(与渗透 ③
+// 间支同一代码路径,判定即弃不落 tg- 归类留痕),清单外范围外地址照
+// 旧红队哲学直接放行留痕照镜(零判定调用);信息源攻击卡＝会话档
+// (档键=单位×信息源 host)——裁决一次后同会话不再重复问,允许档后
+// 续攻击放行免卡(零判定调用、不计连拒升级计数),禁止档后续同类攻
+// 击自动拒不弹卡(计入 gd:attack 连拒升级保险),取代攻击卡批准的单
+// 次配额。
 package swarm
 
 import (
@@ -26,8 +52,10 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 
 	"ghostreaper/internal/rings"
+	"ghostreaper/internal/runlog"
 )
 
 // hostFormRe 合法主机形态(域名/IPv4 字面量;IPv6 由 net.ParseIP 认)。
@@ -253,6 +281,8 @@ var (
 		"--post-file": true, "--ciphers": true, "--pass": true,
 	}
 	// scanFlagValue nmap/masscan/rustscan 的值选项(-p 端口另走专项)。
+	// --top-ports 的数值是端口数不是主机(P4-67 活体实锤:nmap
+	// --top-ports 100 github.com 的 100 被误当位置参数提取成目标)。
 	scanFlagValue = map[string]bool{
 		"--script": true, "--script-args": true, "--script-args-file": true,
 		"-oN": true, "-oG": true, "-oX": true, "-oA": true, "-oM": true, "-oS": true,
@@ -261,6 +291,9 @@ var (
 		"--host-timeout": true, "--scan-delay": true, "--max-retries": true,
 		"--max-rtt-timeout": true, "--min-rtt-timeout": true, "--rate": true,
 		"--max-rate": true, "-g": true, "--source-port": true,
+		"--top-ports": true, "--min-hostgroup": true, "--max-hostgroup": true,
+		"--min-parallelism": true, "--max-parallelism": true,
+		"--initial-rtt-timeout": true, "--max-scan-delay": true,
 	}
 	// ncFlagValue nc/ncat/netcat 的值选项。
 	ncFlagValue = map[string]bool{
@@ -676,24 +709,111 @@ func (env *unitEnv) targetInScope(pack *TaskPack, host, port string) bool {
 	return hit
 }
 
-// denyScope 范围外拦截的统一挂点(P4-51 ① 从"直接拒＋熔断"改为阻塞等
-// 批准):调用目标里首个不在闭包内的主机,按目标现值分流——已排除
-// (禁止测试/摘除)直接拒留痕熔断(防骚扰,不再出卡);已获准但本单位
-// 闭包过期(领取时快照)步骤回可领取重领新包;其余拦下出待决卡(同一
-// 目标一张卡,去重)＋单位冻结收场让位名额(env.scopeHold,drive 收段
-// 后落 scope_wait 态)。返回人话原因(审批门/门卫补口据此回给模型);
-// 无命中/无闭包返回空串放行。display 为主机呈现(host[:port] 原样)。
-func (env *unitEnv) denyScope(pack *TaskPack, toolName string, input json.RawMessage) string {
-	if pack.ScopeClosure == nil || pack.ScopeClosure.Empty() {
-		return ""
+// ---- P4-66:判定面前的确定性豁免(本机设施) ----
+
+// localAddrCache 本机网络接口地址集的进程级缓存(接口地址在进程生命
+// 周期内基本不变,枚举一次足够)。
+var (
+	localAddrOnce sync.Once
+	localAddrSet  map[string]bool
+)
+
+// localMachineAddrs 本机网络接口上的地址集合(IPv4/IPv6 单播,含链路
+// 本地)。镜会话、面板等系统设施绑定在这些地址上——单位排障时对它们
+// 的环回/本机访问不是对目标的测试。枚举失败得空集(方向保守:豁免面
+// 收窄,环回豁免不受影响)。
+func localMachineAddrs() map[string]bool {
+	localAddrOnce.Do(func() {
+		set := map[string]bool{}
+		ifaces, err := net.Interfaces()
+		if err != nil {
+			localAddrSet = set
+			return
+		}
+		for _, ifc := range ifaces {
+			addrs, err := ifc.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, a := range addrs {
+				if ipnet, ok := a.(*net.IPNet); ok && ipnet.IP != nil {
+					set[ipnet.IP.String()] = true
+				}
+			}
+		}
+		localAddrSet = set
+	})
+	return localAddrSet
+}
+
+// scopeExempt 提取目标是否属确定性豁免形态(P4-66):本机环回
+// (127.0.0.0/8、::1、localhost)或本机网络地址——镜/代理监听端口都
+// 在其上,整类豁免。豁免在围栏判定之前:闭包内外的本机地址都不进
+// 判定(操作者种子的环回靶标本就在闭包内放行,轮不到豁免参与;豁免
+// 只影响闭包外的本机地址)。本机地址集经 unitEnv.scopeLocalAddrs 可
+// 注入(测试打桩;nil=枚举本机接口)。
+func (env *unitEnv) scopeExempt(host string) bool {
+	if isLoopbackHost(host) {
+		return true
 	}
+	local := env.scopeLocalAddrs
+	if local == nil {
+		local = localMachineAddrs
+	}
+	return local()[strings.ToLower(strings.TrimSpace(host))]
+}
+
+// denyScope 范围外拦截的统一挂点(P4-51 ① 从"直接拒＋熔断"改为阻塞等
+// 批准;P4-67 在出卡前加研判分诊;P4-68 拒绝分族;P4-70 ② 红队命令路
+// 复查与 ③ 会话档)。渗透任务:调用目标里首个不在闭包内的主机,按目标
+// 现值分流——已排除(禁止测试/摘除)按意图覆盖分族:覆盖(工作线是它)
+// 直接拒留痕终止;不覆盖、命令顺带触碰只拒该条命令＋换路反馈单位继续;
+// 已获准但本单位闭包过期(领取时快照)步骤回可领取重领新包;信息源清
+// 单命中(经分诊判过"方法性访问"的公开信息服务)走 gateListedSource
+// 统一处置(会话档先行——允许档获取与攻击一并放行、禁止档自动拒;无
+// 档获取使用直接放行零出卡、攻击动作出攻击行为卡);其余 P4-67 分诊:
+// 方法性访问/声明命中→自动授访问权(host 入信息源清单)零出卡;信息源
+// 上的攻击行为→会话档先行后出攻击行为卡(弹门挂起,批准=本会话档允
+// 许、拒绝=会话档禁止＋只杀动作单位换路);相关资产候选/拿不准→现行
+// 待决卡(同一目标一张卡,去重)＋单位冻结收场让位名额(env.scopeHold,
+// drive 收段后落 scope_wait 态)。红队/未标任务(无闭包):P4-70 ② 起
+// 命令路只复查信息源清单命中——与渗透 ③ 间支同一代码路径(gateListed-
+// Source);清单外范围外地址照旧直接放行留痕照镜(零判定调用)。
+// 返回人话原因(审批门/门卫补口据此回给模型);无命中/无闭包命中返回
+// 空串放行。display 为主机呈现(host[:port] 原样)。
+func (env *unitEnv) denyScope(pack *TaskPack, toolName string, input json.RawMessage) string {
+	noClosure := pack.ScopeClosure == nil || pack.ScopeClosure.Empty()
 	for _, t := range scopeCallTargets(toolName, input) {
-		if env.targetInScope(pack, t.host, t.port) {
+		if env.scopeExempt(t.host) {
+			// P4-66 确定性豁免:本机环回/本机网络地址(镜/代理等设施所
+			// 在)不进围栏判定,视同非目标放行——执行留痕走 tool_call
+			// 记录既有通道。
 			continue
 		}
 		display := t.host
 		if t.port != "" {
 			display += ":" + t.port
+		}
+		// P4-70 ②:红队/未标(无闭包)命令路只复查信息源清单命中(与渗
+		// 透 ③ 间支同一代码路径);清单外范围外地址直接放行留痕照镜
+		//(零判定调用)。
+		if noClosure {
+			if roe, err := env.Executor.Store.CurrentRoE(guardLedgerCtx, pack.TaskID); err == nil &&
+				roe.InfoSourceHit(t.host) {
+				if ruling, msg := env.gateListedSource(pack, toolName, input, t.host, display); ruling == listedRulingAllow {
+					continue
+				} else if ruling == listedRulingHandled {
+					return msg
+				}
+				// 动作判定失败(拿不准,失败方向钉死——宁可多问不误放):
+				// 红队命令路唯一在办的卡是攻击行为卡,按其提交人审。
+				runlog.Warnf("边界判定失败(红队信息源动作复查,按拿不准出攻击卡): %s %s", pack.TaskID, display)
+				return env.enterAttackCard(pack, toolName, input, display, "")
+			}
+			continue
+		}
+		if env.targetInScope(pack, t.host, t.port) {
+			continue
 		}
 		// 复测单位(P3-06)不进冻结:侧会话不经主宰调度,scope_wait 态
 		// 无人唤醒——照旧直接拒(复测目标由面板复测发起时圈定)。
@@ -704,13 +824,21 @@ func (env *unitEnv) denyScope(pack *TaskPack, toolName string, input json.RawMes
 			return reason
 		}
 		now := env.scopeNowLazy(pack)
-		// ① 已排除目标(禁止测试/RoE 摘除,同一排除机制):直接拒不出卡
-		//(裁决在案,翻案走 RoE 勾回)。
+		// ① 已排除目标(禁止测试/RoE 摘除,同一排除机制)按意图覆盖分族
+		//(P4-68 ②:判定键＝图上意图-目标覆盖关系,禁止按命令字符串判)。
 		if now.excluded != nil && rings.ExcludedCoversTarget(now.assets, now.excluded, t.host, t.port) {
-			reason := fmt.Sprintf(
-				"任务范围外:目标 %s 已被禁止测试(排除在授权范围外,不再出卡),换授权范围内的方向", display)
-			env.denyGuard(pack, toolName, input, rings.DenyLineRoeScope, reason)
-			return reason
+			// 意图覆盖被排除目标(步骤锚定资产落在排除面内——工作线
+			// 就是它):止损口径,单位终止留痕。
+			if env.stepIntentCoversExcluded(pack, now) {
+				reason := fmt.Sprintf(
+					"任务范围外:目标 %s 已被禁止测试(排除在授权范围外,不再出卡),换授权范围内的方向", display)
+				env.denyGuard(pack, toolName, input, rings.DenyLineRoeScope, reason)
+				return reason
+			}
+			// 意图不覆盖、命令顺带触碰(连通性测距形态,v1.2.2 实锤
+			// u727/u743 误杀修复):只拒该条命令＋换路反馈,单位同会话
+			// 继续。
+			return env.denyExcludedTouch(pack, toolName, input, display)
 		}
 		// ② 目标已获准(现值闭包含它),本单位闭包是领取时快照:步骤回
 		// 可领取,重领的新任务包含该目标,原会话 Resume 续跑重发命令。
@@ -724,7 +852,58 @@ func (env *unitEnv) denyScope(pack *TaskPack, toolName string, input json.RawMes
 			return fmt.Sprintf(
 				"目标 %s 已加入任务范围;本单位任务包为领取时快照,即将重新领取后继续执行该命令(已执行过的动作勿重复)", display)
 		}
-		// ③ 出待决卡(同一目标一张卡去重);该卡已裁"禁止测试"的不再
+		// ③ 信息源清单命中(P4-67 任务级缓存;P4-68 ① 收口、P4-70 ③
+		// 会话档先行):获取使用直接放行零出卡;该 host 上的攻击动作走
+		// 会话档(允许档放行免卡、禁止档自动拒不弹卡),无档出攻击行为
+		// 卡(动作复查——单次分诊只判动作性质,不重判 host 归属、零规
+		// 则判攻击)。查现值 RoE(不读单位级 scopeNow 缓存,撤销立即生效)。
+		if roe, err := env.Executor.Store.CurrentRoE(guardLedgerCtx, pack.TaskID); err == nil &&
+			roe.InfoSourceHit(t.host) {
+			if ruling, msg := env.gateListedSource(pack, toolName, input, t.host, display); ruling == listedRulingAllow {
+				continue // 获取使用/允许档:放行(零出卡)
+			} else if ruling == listedRulingHandled {
+				return msg
+			}
+			// 动作分诊失败:按拿不准偏向出卡(失败方向钉死——宁可
+			// 多问不误放),走 ⑤ 范围卡。
+			runlog.Warnf("边界判定失败(信息源动作复查,按拿不准出卡): %s %s", pack.TaskID, display)
+		}
+		// ④ P4-67 研判分诊:出卡前先判性质(拿不准偏向出卡)。任务级
+		// 缓存＝tg-<host> 研判留痕(撤销落 revoked,读到即重新分诊)。
+		verdict, basis := TriageVerdictOf(guardLedgerCtx, env.Executor.Store, pack.TaskID, t.host)
+		if verdict == "" {
+			v, b, err := env.triageCall(pack, toolName, input, display)
+			if err == nil {
+				verdict, basis = v, b
+				env.recordTriage(pack, t.host, t.port, verdict, basis)
+			} else {
+				runlog.Warnf("边界判定失败(按拿不准出卡): %s %s: %v", pack.TaskID, display, err)
+			}
+		}
+		switch {
+		case IsTriageInfoSource(verdict):
+			// 方法性访问/声明命中:自动授访问权,host 入信息源清单,
+			// 零出卡放行(AllowScopeAccess 统一入口——同主机资产退役,
+			// 与面板标记/牧者标记同一机制)。
+			if err := AllowScopeAccess(guardLedgerCtx, env.Executor.Store, pack.TaskID,
+				t.host, basis, "swarm:"+env.UnitID); err != nil {
+				runlog.Warnf("信息源入清单失败(本次仍放行): %s %s: %v", pack.TaskID, display, err)
+			}
+			continue
+		case verdict == TriageAttack:
+			// 信息源上的攻击行为:会话档先行(P4-70 ③——本会话批准过
+			// 免卡放行、禁止过自动拒),未定档出攻击行为卡(弹门挂起,
+			// 统一卡骨架;批准=本会话档允许、拒绝=只杀动作单位换路)。
+			if ruling, msg := env.attackRulingGate(pack, toolName, input, t.host, display); ruling == listedRulingAllow {
+				continue
+			} else if ruling == listedRulingHandled {
+				return msg
+			}
+			return env.enterAttackCard(pack, toolName, input, display, basis)
+		default:
+			// 相关资产候选/拿不准:现行范围卡状态机(偏向出卡)。
+		}
+		// ⑤ 出待决卡(同一目标一张卡去重);该卡已裁"禁止测试"的不再
 		// 重复出卡,直接拒。
 		rid := scopeCardID(t.host, t.port)
 		switch env.scopeCardState(pack, rid) {
@@ -757,6 +936,240 @@ func (env *unitEnv) denyScope(pack *TaskPack, toolName string, input json.RawMes
 			"该命令已拦下等待批准:目标 %s 在任务范围外,已提交面板待决(同一目标一张卡);本单位暂停让位,批准后自动继续执行这条命令", display)
 	}
 	return ""
+}
+
+// listedSourceAction 信息源清单命中 host 的动作复查结论(P4-68 ①:
+// 访问权与攻击行为正交——清单只授访问,攻击动作照走攻击行为卡)。
+type listedSourceAction int
+
+const (
+	listedActionAllow  listedSourceAction = iota // 获取使用:放行
+	listedActionAttack                           // 主动攻击:出攻击行为卡
+	listedActionUnsure                           // 分诊失败:按拿不准出卡
+)
+
+// listedRuling 信息源清单命中处置的结论(P4-70 ③ 会话档统一口径)。
+type listedRuling int
+
+const (
+	listedRulingAllow   listedRuling = iota // 放行(允许档/动作判定获取使用)
+	listedRulingHandled                     // 已处置(攻击卡挂起/禁止档自动拒/无门 fail-safe),文案原样返回
+	listedRulingUnsure                      // 动作判定失败(拿不准),调用方按模式兜底
+)
+
+// attackRuling 该单位对信息源 host 的会话档(P4-70 ③;档键=单位×host,
+// 同一单位对不同信息源各自定档)。set=false=未定档。
+func (env *unitEnv) attackRuling(host string) (set, allowed bool) {
+	env.attackMu.Lock()
+	defer env.attackMu.Unlock()
+	allowed, set = env.attackRulings[strings.ToLower(strings.TrimSpace(host))]
+	return set, allowed
+}
+
+// setAttackRuling 落会话档(裁决通道专用:攻击行为卡批准→true/拒绝→
+// false,drive 在收到面板裁决时调用;单位销毁即失效,换单位重新出卡)。
+func (env *unitEnv) setAttackRuling(host string, allowed bool) {
+	env.attackMu.Lock()
+	defer env.attackMu.Unlock()
+	if env.attackRulings == nil {
+		env.attackRulings = map[string]bool{}
+	}
+	env.attackRulings[strings.ToLower(strings.TrimSpace(host))] = allowed
+}
+
+// unsetAttackRuling 撤销会话档(P4-71 ② 反向"撤销允许"):档移除后该
+// 单位对该信息源的后续攻击回到未定档——重新出攻击行为卡。仅 Executor
+// 反向调档通道调用;单位销毁档自然失效,无需撤销。
+func (env *unitEnv) unsetAttackRuling(host string) {
+	env.attackMu.Lock()
+	defer env.attackMu.Unlock()
+	delete(env.attackRulings, strings.ToLower(strings.TrimSpace(host)))
+}
+
+// attackRulingGate 攻击动作前的会话档检查(P4-70 ③):允许档放行(零
+// 判定调用,该单位会话内对该信息源的攻击已获准免卡;不计连拒升级计数
+// ——已授权动作不是拒绝)、禁止档自动拒不弹卡(计入 gd:attack 连拒升
+// 级保险);未定档返回 unsure 由调用方继续动作判定。
+func (env *unitEnv) attackRulingGate(pack *TaskPack, toolName string, input json.RawMessage, host, display string) (listedRuling, string) {
+	if set, allowed := env.attackRuling(host); set {
+		if allowed {
+			return listedRulingAllow, ""
+		}
+		return listedRulingHandled, env.denyListedAttack(pack, toolName, input, display)
+	}
+	return listedRulingUnsure, ""
+}
+
+// gateListedSource 信息源清单命中 host 的统一处置(P4-70 ②③;渗透 ③
+// 间支与红队命令路同一代码路径):会话档先行(档命中零判定调用);无档
+// 逐命令动作性质判定(listedSourceAction——判定即弃,不落 tg- 归类留
+// 痕)——获取使用放行、攻击出攻击行为卡(裁决由 drive 落会话档)。
+func (env *unitEnv) gateListedSource(pack *TaskPack, toolName string, input json.RawMessage, host, display string) (listedRuling, string) {
+	if ruling, msg := env.attackRulingGate(pack, toolName, input, host, display); ruling != listedRulingUnsure {
+		return ruling, msg
+	}
+	switch env.listedSourceAction(pack, toolName, input, display) {
+	case listedActionAllow:
+		return listedRulingAllow, ""
+	case listedActionAttack:
+		return listedRulingHandled, env.enterAttackCard(pack, toolName, input, display, env.lastTriageBasis)
+	default:
+		return listedRulingUnsure, ""
+	}
+}
+
+// denyListedAttack 会话档"禁止"的自动拒(P4-70 ③:该单位会话内对信息
+// 源 host 的后续同类攻击不弹卡,注入换路反馈——与既有拒绝反馈同构,
+// 拒绝原因即换路指引;计入 gd:attack 连拒升级保险——模型被明确告知停
+// 止后仍硬撞,升级杀兜底)。留痕走 approval.record denied(roe_scope)。
+func (env *unitEnv) denyListedAttack(pack *TaskPack, toolName string, input json.RawMessage, display string) string {
+	reason := fmt.Sprintf(
+		"任务范围外:对信息源 %s 的攻击动作已被面板禁止,本会话内不再询问,不要再发起;仍可正常访问查资料(获取使用不受影响),换授权范围内的方向继续", display)
+	escalated := false
+	if n := env.bumpDenyHits("gd:attack"); n >= HardDenyEscalateAfter {
+		escalated = true
+		reason += fmt.Sprintf(" · 同类拒绝累计 %d 次,升级终止单位", n)
+		env.deniedReason = "审批拒绝终止: " + reason
+		env.fuseUnit()
+	}
+	env.recordApproval(rings.ApprovalRecord{
+		StepID: pack.StepID, UnitID: env.UnitID, Type: rings.ApprovalRecDenied,
+		ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass, DenyLine: rings.DenyLineRoeScope,
+		Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input, Reason: reason,
+	})
+	if escalated {
+		return reason + "(同类拒绝累计已到上限,单位终止)"
+	}
+	return reason
+}
+
+// listedSourceAction 单次动作分诊(同 TriageFor 链,输入带"已在信息源
+// 清单"标记只判动作性质;零规则判攻击)。判定不落 tg- 缓存(host 归属
+// 已由清单缓存,动作结论逐命令即弃);依据经 lastTriageBasis 带给攻击卡。
+func (env *unitEnv) listedSourceAction(pack *TaskPack, toolName string, input json.RawMessage, display string) listedSourceAction {
+	fn := env.triage
+	if fn == nil {
+		fn = TriageFor(env.Executor.Provider)
+		env.Executor.triageCalls++
+	}
+	command := string(input)
+	if toolName == "bash" {
+		command = bashCommandOf(input)
+	}
+	verdict, basis, err := fn(guardLedgerCtx, TriageInput{
+		Host: display, Command: command,
+		Intent: pack.StepIntent, GoalSummary: env.goalSummary,
+		DeclaredServices: pack.ExternalServices,
+		ListedInfoSource: true,
+	})
+	if err != nil {
+		return listedActionUnsure
+	}
+	env.lastTriageBasis = basis
+	if verdict == TriageAttack {
+		return listedActionAttack
+	}
+	return listedActionAllow // 获取使用(含声明命中/候选:归属已定,只管动作)
+}
+
+// enterAttackCard 攻击行为卡挂起(P4-67 ④ 命令路/P4-68 清单命中复查/
+// P4-70 红队命令路共用):弹门挂起等裁决(批准=本会话档允许——该单位
+// 本会话内对该信息源的后续攻击放行免卡,拒绝=本会话档禁止＋只杀动作
+// 单位换路);无门 fail-safe 直接拒留痕。返回给模型的提示文案。
+func (env *unitEnv) enterAttackCard(pack *TaskPack, toolName string, input json.RawMessage, display, basis string) string {
+	if env.Executor.Gate == nil {
+		reason := fmt.Sprintf(
+			"任务范围外:对 %s 的攻击动作需人审,无审批门可用(fail-safe),本次调用拒绝;对信息源只做获取使用", display)
+		env.denyGuard(pack, toolName, input, rings.DenyLineRoeScope, reason)
+		return reason
+	}
+	if basis == "" {
+		basis = "动作性质判定未定,按拿不准提交人审"
+	}
+	ticket, terr := env.Executor.Gate.Enter(ApprovalRequest{
+		TaskID: pack.TaskID, StepID: pack.StepID, UnitID: env.UnitID,
+		Intent: pack.StepIntent, ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
+		ToolName: toolName, ToolArgs: string(input),
+		Note:         "攻击行为卡:" + display + " 是信息源(查资料用的公开服务,不是测试目标),本次动作是主动攻击(分诊依据:" + basis + ");批准=本会话内对该信息源的攻击动作放行,拒绝=该动作终止单位继续",
+		AttackTarget: display,
+	})
+	if terr != nil {
+		return "审批请求登记失败(fail-safe): " + terr.Error()
+	}
+	env.park = ticket
+	env.fuseSegment()
+	return fmt.Sprintf(
+		"%s(请求 %s):%s 是信息源,对它的攻击动作已提交面板待决(批准后继续执行该动作;查资料类访问不受影响)",
+		approvalPendingNote, ticket.Req.ID, display)
+}
+
+// stepIntentCoversExcluded 本单位步骤的意图是否覆盖被排除目标(P4-68 ②
+// 命令路分族判定键):图查询——covers∪verifies→about 锚定资产与排除面
+// 求交(stepsCoveringAssetsOf 单源),零文本匹配。
+func (env *unitEnv) stepIntentCoversExcluded(pack *TaskPack, now *scopeNowState) bool {
+	if len(now.excluded) == 0 {
+		return false
+	}
+	ids := make([]string, 0, len(now.excluded))
+	for id := range now.excluded {
+		ids = append(ids, id)
+	}
+	return stepIntentCoversAssets(guardLedgerCtx, env.Executor.Store, pack.TaskID, pack.StepID, ids, now.assets)
+}
+
+// denyExcludedTouch P4-68 ②:意图不覆盖、命令顺带触碰被排除目标——
+// 只拒该条命令＋换路反馈(拒绝原因即换路指引),单位同会话继续;同目标
+// 累计 HardDenyEscalateAfter 次升级杀单位(与硬规则升级保险同机制,
+// 单位生命周期累计不重置——防对被排除目标的连环硬撞)。留痕走
+// approval.record denied(roe_scope)。
+func (env *unitEnv) denyExcludedTouch(pack *TaskPack, toolName string, input json.RawMessage, display string) string {
+	reason := fmt.Sprintf(
+		"任务范围外:目标 %s 已被排除,换连通性测试对象或跳过;本步骤其余工作不受影响,继续完成意图", display)
+	escalated := false
+	if n := env.bumpDenyHits("et:" + display); n >= HardDenyEscalateAfter {
+		escalated = true
+		reason += fmt.Sprintf(" · 同目标累计命中 %d 次,升级终止单位", n)
+		env.deniedReason = "审批拒绝终止: " + reason
+		env.fuseUnit()
+	}
+	env.recordApproval(rings.ApprovalRecord{
+		StepID: pack.StepID, UnitID: env.UnitID, Type: rings.ApprovalRecDenied,
+		ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass, DenyLine: rings.DenyLineRoeScope,
+		Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input, Reason: reason,
+	})
+	if escalated {
+		return reason + "(同目标累计命中已到上限,单位终止)"
+	}
+	return reason
+}
+
+// triageCall 分诊调用(unitEnv 注入点:测试打桩优先;生产按 Executor
+// 的模型链构造——命令原文带命令工具的参数原文)。
+func (env *unitEnv) triageCall(pack *TaskPack, toolName string, input json.RawMessage, display string) (string, string, error) {
+	fn := env.triage
+	if fn == nil {
+		fn = TriageFor(env.Executor.Provider)
+		env.Executor.triageCalls++
+	}
+	command := string(input)
+	if toolName == "bash" {
+		command = bashCommandOf(input)
+	}
+	in := TriageInput{
+		Host: display, Command: command,
+		Intent: pack.StepIntent, GoalSummary: env.goalSummary,
+		DeclaredServices: pack.ExternalServices,
+	}
+	return fn(guardLedgerCtx, in)
+}
+
+// recordTriage 单位侧分诊留痕(BuildTriageRecord 共用构造)。
+func (env *unitEnv) recordTriage(pack *TaskPack, host, port, verdict, basis string) {
+	env.recordApproval(BuildTriageRecord(host, verdict, basis, rings.ApprovalRecord{
+		StepID: pack.StepID, UnitID: env.UnitID,
+		ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
+		Intent: pack.StepIntent,
+	}))
 }
 
 // scopeHoldInfo 一次范围冻结的目标上下文(P4-51 ①):drive 收段后据此
@@ -821,7 +1234,10 @@ const (
 )
 
 // scopeCardState 该目标待决卡的当前状态(approval_records 投影按
-// RequestID 查;rev 升序留在最后的即最新)。
+// RequestID 查;rev 升序留在最后的即最新)。P4-68:已裁"允许访问"
+// (access 记录)按 open 处理——host 在信息源清单期间访问在 ③ 清单命中
+// 放行、轮不到卡状态机;清单撤销后到达此处即重出卡(由范围卡两键一锤
+// 定音,P4-67 撤销粘性同口径)。
 func (env *unitEnv) scopeCardState(pack *TaskPack, rid string) int {
 	rows, err := env.Executor.Store.ApprovalByRequest(guardLedgerCtx, pack.TaskID, rid)
 	if err != nil {
@@ -836,6 +1252,8 @@ func (env *unitEnv) scopeCardState(pack *TaskPack, rid string) int {
 			state = scopeCardDenied
 		case rings.ApprovalRecApproved:
 			state = scopeCardAllowed
+		case rings.ApprovalRecAccess:
+			state = scopeCardOpen // 允许访问已裁:撤销后可重出卡
 		}
 	}
 	return state

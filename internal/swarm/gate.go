@@ -30,7 +30,13 @@ type ApprovalRequest struct {
 	// GateGroup 弹门来源的拦截规则组(硬规则弹门处置时携带;空 = 审批
 	// 门槛弹门)。P4-17:代理旁路组的批准据此武装该单位的组级放行。
 	GateGroup string
-	CreatedAt time.Time
+	// AttackTarget 攻击行为卡的目标(P4-67,非空 = 攻击行为卡):分诊判定
+	// "信息源上的攻击行为"——host 是信息源(查资料用的公开服务)但这次
+	// 动作是主动攻击。批准 = 放行该次动作(host 仍非目标,不武装步骤级
+	// 放行);拒绝 = 只杀该动作不杀单位(drive 侧注入换路反馈)。值为主
+	// 机显示形态 host[:port],记账 Type=attack_wait。
+	AttackTarget string
+	CreatedAt    time.Time
 }
 
 // GateDecision 面板(或收尾路径)对弹门请求的裁决。
@@ -136,6 +142,8 @@ func (g *LedgerGate) record(taskID string, actor string, rec rings.ApprovalRecor
 // Enter 弹门登记:挂进待决表 → 记账 requested → 返回等待票。
 // 挂表先于记账:P3-08 实时推送在记账提交回调里读待决表组装载荷,
 // 先挂后记使载荷天然含本笔(记账失败回滚摘除,不留未记账的幻影待决)。
+// P4-67:攻击行为卡(AttackTarget 非空)记账 Type=attack_wait(卡面与
+// 统计按类型区分),票 ID 仍随机(每动作一票,批准只放行该次)。
 func (g *LedgerGate) Enter(req ApprovalRequest) (*GateTicket, error) {
 	req.ID = gateRequestID()
 	if req.CreatedAt.IsZero() {
@@ -145,9 +153,13 @@ func (g *LedgerGate) Enter(req ApprovalRequest) (*GateTicket, error) {
 	g.mu.Lock()
 	g.pending[req.ID] = t
 	g.mu.Unlock()
+	typ := rings.ApprovalRecRequested
+	if req.AttackTarget != "" {
+		typ = rings.ApprovalRecAttackWait
+	}
 	if err := g.record(req.TaskID, "swarm:"+req.UnitID, rings.ApprovalRecord{
 		RequestID: req.ID, StepID: req.StepID, UnitID: req.UnitID,
-		Type: rings.ApprovalRecRequested, ActionLevel: req.ActionLevel,
+		Type: typ, ActionLevel: req.ActionLevel,
 		HarmClass: req.HarmClass, Intent: req.Intent,
 		ToolName: req.ToolName, ToolArgs: []byte(req.ToolArgs), Note: req.Note,
 	}); err != nil {

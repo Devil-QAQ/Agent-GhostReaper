@@ -101,6 +101,7 @@ func (m *scriptedModel) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Messages []oaMessage `json:"messages"`
+		Stream   bool        `json:"stream"`
 		Tools    []struct {
 			Function struct {
 				Name string `json:"name"`
@@ -139,7 +140,49 @@ func (m *scriptedModel) handle(w http.ResponseWriter, r *http.Request) {
 	m.mu.Unlock()
 
 	reply := m.script(&rr)
+	if !body.Stream {
+		// 非流式请求(如 TriageFor 的单次 Complete)回普通 JSON 体——
+		// openai 适配器 Complete 按 choices[].message 解析,不吃 SSE。
+		m.writeJSON(w, reply, rr)
+		return
+	}
 	m.writeSSE(w, reply, rr)
+}
+
+// writeJSON 按非流式 Chat Completions 线格式回写(与 writeSSE 同一回复
+// 脚本,两种传输形态)。
+func (m *scriptedModel) writeJSON(w http.ResponseWriter, reply scriptedReply, rr recordedRequest) {
+	content := reply.Text
+	tcs := make([]map[string]any, 0, len(reply.ToolCalls))
+	for i, tc := range reply.ToolCalls {
+		args := tc.Args
+		if args == "" {
+			args = "{}"
+		}
+		tcs = append(tcs, map[string]any{
+			"id": tc.ID, "index": i, "type": "function",
+			"function": map[string]any{"name": tc.Name, "arguments": args},
+		})
+	}
+	finish := reply.Finish
+	if finish == "" {
+		finish = "stop"
+	}
+	completion := len(reply.Text)
+	for _, tc := range reply.ToolCalls {
+		completion += len(tc.Args) + 32
+	}
+	msg := map[string]any{"role": "assistant", "content": content, "tool_calls": tcs}
+	if reply.Reasoning != "" {
+		msg["reasoning_content"] = reply.Reasoning
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"choices": []any{map[string]any{
+			"message": msg, "finish_reason": finish,
+		}},
+		"usage": map[string]any{"prompt_tokens": rr.BodyChars / 4, "completion_tokens": completion/4 + 8},
+	})
 }
 
 // writeSSE 按真实 OpenAI 流式线格式回写。prompt_tokens 按请求体规模

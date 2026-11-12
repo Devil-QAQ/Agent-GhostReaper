@@ -35,13 +35,18 @@ func assetDecisionRequestID(assetID string) string {
 }
 
 // handleScopeDecide 范围卡裁决(POST /api/tasks/{id}/approvals/{sc-*|a-*},
-// 两键"加入资产/禁止测试"共用体):
+// 两键"加入资产/禁止测试";P4-68 第三键的决策端点保留——P4-70 ① 起
+// 卡面与批量入口移除,服务端 action="allow_access" 仍可裁决):
 //   - sc- 拦截卡(渗透命令拦下/红队发现可否决):见 decideScopeCard;
-//   - a- 待批资产卡(P4-52 ⑤):见 decidePendingAsset。
+//   - a- 待批资产卡(P4-52 ⑤):见 decidePendingAsset;
+//   - access=true:"允许访问"(action="allow_access")——host 入信息源
+//     清单＋同主机资产退役＋挂等单位对账唤醒(渗透＝只授访问权;红队
+//     ＝不收编照常可测);操作者日常入口在 RoE 页信息源区标记行,卡上
+//     不再呈现该键。
 //
-// 异步纪律(教训在案):两键点击瞬间返回——只做账本写入与调度唤醒,
+// 异步纪律(教训在案):各键点击瞬间返回——只做账本写入与调度唤醒,
 // 严禁同步执行命令;命令由单位自己异步跑。同卡并点互斥,重复裁决 409。
-func (s *Server) handleScopeDecide(w http.ResponseWriter, r *http.Request, taskID, rid string, approved bool, reason string) {
+func (s *Server) handleScopeDecide(w http.ResponseWriter, r *http.Request, taskID, rid string, approved bool, reason string, access bool) {
 	if !s.taskExists(taskID) {
 		writeErr(w, http.StatusNotFound, fmt.Errorf("任务 %s 不存在", taskID))
 		return
@@ -58,6 +63,8 @@ func (s *Server) handleScopeDecide(w http.ResponseWriter, r *http.Request, taskI
 	var woken, terminated int
 	var err error
 	switch {
+	case access:
+		target, woken, terminated, err = s.decideScopeAccess(ctx, taskID, rid)
 	case strings.HasPrefix(rid, assetCardIDPrefix):
 		target, woken, terminated, err = s.decidePendingAsset(ctx, taskID, rid, approved, reason)
 	default:
@@ -68,13 +75,16 @@ func (s *Server) handleScopeDecide(w http.ResponseWriter, r *http.Request, taskI
 		return
 	}
 	verb := "禁止测试"
-	if approved {
+	switch {
+	case access:
+		verb = "允许访问"
+	case approved:
 		verb = "加入资产"
 	}
 	runlog.Infof("范围待决卡处理: %s %s %s(唤醒 %d 个单位,终止 %d 个)",
 		taskID, verb, target, woken, terminated)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id": rid, "approved": approved, "target": target,
+		"id": rid, "approved": approved, "access": access, "target": target,
 		"woken_units": woken, "stopped_units": terminated,
 	})
 }
@@ -92,9 +102,10 @@ func scopeDecisionStatus(err error) int {
 }
 
 // handleApprovalBatch POST /api/tasks/{id}/approvals/batch
-// {ids:[卡ID...], approved} 范围卡勾选批量两键(P4-52 ⑤):ids 全部须为
-// 范围卡(sc- 拦截卡 / a- 待批资产卡),逐卡走单卡裁决通道、账本逐笔
-// 留痕;单项失败不影响其余,failed 逐条回传人话原因。瞬间返回。
+// {ids:[卡ID...], approved} 范围卡勾选批量两键(P4-52 ⑤;P4-70 ① 批量
+// 第三键 allow_access 入口移除——单卡决策端点保留):ids 全部须为范围卡
+// (sc- 拦截卡 / a- 待批资产卡),逐卡走单卡裁决通道、账本逐笔留痕;单项
+// 失败不影响其余,failed 逐条回传人话原因。瞬间返回。
 func (s *Server) handleApprovalBatch(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 	if !s.taskExists(taskID) {
@@ -172,6 +183,103 @@ func (s *Server) handleApprovalBatch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// decideScopeAccess "允许访问"裁决核心(P4-68 ① 卡第三键引入;P4-70 ①
+// 卡面入口移除后由单卡决策端点保留调用;调用方持 scopeMu):host 入信
+// 息源清单(swarm.AllowScopeAccess 统一入口——与分诊自动授/牧者标记/
+// 面板标记行同一机制)＋图上同主机资产退役(渗透命令卡目标未入图
+// 即零入图;待批资产卡/红队可否决卡的资产随退役从资产图消失)→挂等
+// 单位对账唤醒(原会话续跑,重发访问命令经清单命中放行)。不触发止损
+// (允许访问不是拒绝);该 host 后续访问零出卡,对它的攻击动作仍走
+// 攻击行为卡。返回(目标, 唤醒单位数, 终止单位数)。
+func (s *Server) decideScopeAccess(ctx context.Context, taskID, rid string) (string, int, int, error) {
+	var target string
+	switch {
+	case strings.HasPrefix(rid, rings.ScopeCardIDPrefix):
+		// sc- 拦截卡:卡面定位(该目标的卡须在待决中;已裁过 409)。
+		target = strings.TrimPrefix(rid, rings.ScopeCardIDPrefix)
+		rows, err := s.Store.ApprovalByRequest(ctx, taskID, rid)
+		if err != nil {
+			return "", 0, 0, err
+		}
+		var card *rings.ApprovalRecord
+		for i := range rows {
+			rec := approvalRowToRecord(rows[i])
+			card = &rec
+		}
+		if card == nil {
+			return "", 0, 0, swarm.ErrGateRequestNotFound
+		}
+		if card.Type != rings.ApprovalRecScopeWait {
+			return "", 0, 0, errors.New("该范围卡已处理过(同一目标不再出卡)")
+		}
+	case strings.HasPrefix(rid, assetCardIDPrefix):
+		// a- 待批资产卡:目标＝待批资产标题(锚定主机)。
+		pending, err := s.Store.PendingScopeAssets(ctx, taskID)
+		if err != nil {
+			return "", 0, 0, err
+		}
+		found := false
+		for _, p := range pending {
+			if p.ID == rid {
+				target, found = p.Title, true
+				break
+			}
+		}
+		if !found {
+			return "", 0, 0, fmt.Errorf("资产 %s 不是待批资产(可能已加入或已禁止)", rid)
+		}
+	default:
+		return "", 0, 0, errors.New("不是范围卡(允许访问只处理范围待决卡)")
+	}
+	anchor, ok := rings.ScopeAnchorOf(strings.TrimSpace(target))
+	if !ok {
+		return "", 0, 0, errors.New("该目标无主机标识,不适用允许访问(用加入资产或禁止测试)")
+	}
+	// 授访问权统一入口:入清单＋同主机资产退役(一个机制多种入口,
+	// P4-67 信息源清单同一状态)。
+	basis := "操作者手授(允许访问)"
+	if err := swarm.AllowScopeAccess(ctx, s.Store, taskID, anchor.Host, basis, "creator"); err != nil {
+		return "", 0, 0, fmt.Errorf("允许访问落账失败: %w", err)
+	}
+	// 裁决记录(账本先于副作用,R7;同请求号族收口,卡消)——sc- 卡
+	// 用卡请求号,a- 资产卡用 ac- 请求号(与加入资产/禁止测试同族)。
+	rec := rings.ApprovalRecord{
+		Type: rings.ApprovalRecAccess,
+		Note: "范围待批资产 " + target, DecidedBy: "creator",
+		Reason: "允许访问: " + target + "(只授访问权,不是测试目标)",
+	}
+	if strings.HasPrefix(rid, assetCardIDPrefix) {
+		rec.RequestID = assetDecisionRequestID(rid)
+	} else {
+		rec.RequestID = rid
+	}
+	if card, err := s.latestCardRecord(ctx, taskID, rid); err == nil && card != nil {
+		rec.StepID, rec.UnitID = card.StepID, card.UnitID
+		rec.Intent, rec.ActionLevel, rec.HarmClass = card.Intent, card.ActionLevel, card.HarmClass
+		rec.ToolName, rec.ToolArgs = card.ToolName, card.ToolArgs
+	}
+	if _, err := s.Store.Append(ctx, taskID, rings.Event{
+		Kind: rings.EventApprovalRecord, Actor: "creator", Payload: rec,
+	}); err != nil {
+		return "", 0, 0, err
+	}
+	// 对账唤醒:挂等该目标的冻结单位即时回队(有空位执行中、无空位
+	// 排队中插队队首,原会话续跑);主宰随后读到清单变化。
+	woken, terminated := s.resolveScopeWakes(taskID)
+	return target, woken, terminated, nil
+}
+
+// latestCardRecord 该请求号最新的审批记录(裁决回写带卡面上下文;
+// 读不出返回 nil)。
+func (s *Server) latestCardRecord(ctx context.Context, taskID, rid string) (*rings.ApprovalRecord, error) {
+	rows, err := s.Store.ApprovalByRequest(ctx, taskID, rid)
+	if err != nil || len(rows) == 0 {
+		return nil, err
+	}
+	rec := approvalRowToRecord(rows[len(rows)-1])
+	return &rec, nil
+}
+
 // decideScopeCard sc- 拦截卡裁决核心(P4-51 ②③;调用方持 scopeMu):
 //   - 加入资产:目标入图(未入图的按目标提取 host 入图,来源发现)转
 //     范围内(scope_approved 并入)→ 挂等单位对账唤醒(有空位执行中、
@@ -215,6 +323,12 @@ func (s *Server) decideScopeCard(ctx context.Context, taskID, rid string, approv
 		// 加入资产:scope_approved 并入(渗透/红队同源——红队确认后资产
 		// 出"发现的其他资产"分组转入范围);目标此前被排除过的(卡挂
 		// 期间又经 RoE 摘除的窗口)一并移回,两态不得并存。
+		// P4-71 ①(卡上加入资产入口):目标此前经"允许访问"退役过的
+		// (信息源撤销后重出卡等形态)一并复活——NodeStateChanged
+		// retired→active 留痕"纳入复活",资产图复现(幂等,非退役零落笔)。
+		if _, rerr := swarm.ReviveRetiredAssets(ctx, s.Store, taskID, []string{assetID}, "creator"); rerr != nil {
+			return "", 0, 0, fmt.Errorf("加入资产复活落账失败: %w", rerr)
+		}
 		st, err := s.Store.CurrentRoE(ctx, taskID)
 		if err != nil {
 			return "", 0, 0, err
@@ -300,6 +414,12 @@ func (s *Server) decidePendingAsset(ctx context.Context, taskID, assetID string,
 
 	var woken, stopped int
 	if approved {
+		// P4-71 ①(卡上加入资产入口):待批资产经"允许访问"退役过的同
+		// 形态防御(现行 PendingScopeAssets 过滤 retired,理论上到不了
+		// 这里;单源调用幂等零落笔,语义钉死"加入资产必复活")。
+		if _, rerr := swarm.ReviveRetiredAssets(ctx, s.Store, taskID, []string{assetID}, "creator"); rerr != nil {
+			return "", 0, 0, fmt.Errorf("加入资产复活落账失败: %w", rerr)
+		}
 		st, err := s.Store.CurrentRoE(ctx, taskID)
 		if err != nil {
 			return "", 0, 0, err

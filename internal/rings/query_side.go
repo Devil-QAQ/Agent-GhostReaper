@@ -302,8 +302,10 @@ func (s *Store) StepDenyLatest(ctx context.Context, taskID string) (map[string]A
 }
 
 // ScopePendingCount 范围待决卡数(P4-51:任务行/RoE 红点与 gate 待决
-// 合并计数)——type=scope_wait 且同 request_id 无 approved/denied 收口
-// 记录的目标数(同一目标一张卡,去重即数卡)。
+// 合并计数)——type=scope_wait 且同 request_id 无 approved/denied/access
+// 收口记录的目标数(同一目标一张卡,去重即数卡)。P4-69:access(允许
+// 访问)补入收口集——与待决区显示层(最新记录口径)一致,允许访问裁决
+// 后红点即消(此前仅显示层消卡、计数层不减的口径分裂)。
 func (s *Store) ScopePendingCount(ctx context.Context, taskID string) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
@@ -312,13 +314,49 @@ func (s *Store) ScopePendingCount(ctx context.Context, taskID string) (int, erro
 		    WHERE task_id = ? AND type = ?
 		   EXCEPT
 		   SELECT request_id FROM approval_records
-		    WHERE task_id = ? AND type IN (?, ?)
-		 )`, taskID, ApprovalRecScopeWait, taskID, ApprovalRecApproved, ApprovalRecDenied,
+		    WHERE task_id = ? AND type IN (?, ?, ?)
+		 )`, taskID, ApprovalRecScopeWait, taskID, ApprovalRecApproved, ApprovalRecDenied, ApprovalRecAccess,
 	).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("rings: 统计范围待决卡: %w", err)
 	}
 	return n, nil
+}
+
+// PendingScopeCards 当前待决的全部范围卡(P4-69 ①:摘除联动收口的卡面
+// ——每个 request_id 的最新记录恰为 scope_wait 即待决,与面板待决区
+// scopePendingViews 的"最新记录"口径同源,红队可否决卡/渗透拦截卡/
+// 经其他通道裁决过的卡各归各)。投影表小查询,零事件流扫描。
+func (s *Store) PendingScopeCards(ctx context.Context, taskID string) ([]ApprovalRow, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT a.rev, a.request_id, a.step_id, a.unit_id, a.type, a.action_level, a.harm_class,
+		   a.intent, a.tool_name, a.tool_args, a.note, a.deny_line, a.decided_by, a.reason,
+		   a.wait_millis, a.occurred_at
+		 FROM approval_records a
+		 WHERE a.task_id = ? AND a.type = ?
+		   AND NOT EXISTS (
+		     SELECT 1 FROM approval_records b
+		      WHERE b.task_id = a.task_id AND b.request_id = a.request_id AND b.rev > a.rev
+		   )`,
+		taskID, ApprovalRecScopeWait,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("rings: 查询待决范围卡: %w", err)
+	}
+	defer rows.Close()
+	var out []ApprovalRow
+	for rows.Next() {
+		var r ApprovalRow
+		var occurred string
+		if err := rows.Scan(&r.Rev, &r.RequestID, &r.StepID, &r.UnitID, &r.Type,
+			&r.ActionLevel, &r.HarmClass, &r.Intent, &r.ToolName, &r.ToolArgs,
+			&r.Note, &r.DenyLine, &r.DecidedBy, &r.Reason, &r.WaitMillis, &occurred); err != nil {
+			return nil, fmt.Errorf("rings: 扫描待决范围卡: %w", err)
+		}
+		r.OccurredAt = FmtLocal(occurred)
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // ---- 假设结论(hyp_states) ----

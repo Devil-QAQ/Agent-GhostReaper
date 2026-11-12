@@ -69,6 +69,12 @@ type TaskPack struct {
 	// 拒绝服务类——无论门槛多宽都直接拒绝(非常严重项),面板可研判后
 	// 放行。从 step.detail.harm_class 读入,缺省空=普通。
 	HarmClass rings.HarmClass
+	// ExternalServices 外部服务声明(P4-67 ⑤ 规划前置):意图拆解契约的
+	// 可选字段——语义化描述本步骤将用的公开信息服务类型(不枚举站名),
+	// 如"代码托管平台的公开仓库"。执行中命中声明的服务形态 → 免分诊
+	// 放行(声明与 host 的匹配由分诊层一次性判定后入缓存);清单外新
+	// 地址照走分诊。从 step.detail.external_services 读入,空=无声明。
+	ExternalServices string
 	// ③ 相关可信事实与证据(仅 confirmed 事实;证据引用随 detail)
 	Facts []FactBrief
 	// ④ 必要资产与权限(本步骤 covers 的资产 + RoE 边界)

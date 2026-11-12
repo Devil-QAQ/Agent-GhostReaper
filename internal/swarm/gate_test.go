@@ -6,9 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -527,22 +531,42 @@ func parseSecs(t *testing.T, s string) float64 {
 	return f
 }
 
-// ---- 完成标准 ③:面板拒绝 → 单位熔断、Step 终态"审批拒绝终止" ----
+// ---- 完成标准 ③(P4-68 ② 断言反转,原"面板人工拒杀单位"
+// TestPanelDenyFusesUnit 旧断言作废):面板拒绝 → 只杀该动作不杀单位,
+// 注入换路反馈,单位同会话换路继续、步骤正常完成 ----
 
-func TestPanelDenyFusesUnit(t *testing.T) {
+func TestPanelDenyKillsActionOnly(t *testing.T) {
 	dir := t.TempDir()
 	store := openStore(t, dir)
 	ctx := context.Background()
-	const task = "gate-panel-deny"
+	const task = "gate-panel-deny-action"
 
-	host, port := seedTarget(t, "x\r\n")
-	seedGoalAndAsset(t, store, task, host, port)
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("probe-ok"))
+	}))
+	defer httpSrv.Close()
+	u, _ := url.Parse(httpSrv.URL)
+	port, perr := strconv.Atoi(u.Port())
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	seedGoalAndAsset(t, store, task, u.Hostname(), port)
 	dispatchStepAtLevel(t, store, task, "s1", "修改目标配置验证", "g1", "修改与持久化", "target")
 
 	model := newScriptedModel(func(rr *recordedRequest) scriptedReply {
-		return scriptedReply{ToolCalls: []scriptedToolCall{{
-			ID: "b1", Name: "bash", Args: `{"command":"echo never-deny > x.txt"}`,
-		}}, Finish: "tool_calls"}
+		switch rr.Index {
+		case 0:
+			return scriptedReply{ToolCalls: []scriptedToolCall{{
+				ID: "b1", Name: "bash", Args: `{"command":"echo never-deny > x.txt"}`,
+			}}, Finish: "tool_calls"}
+		case 1:
+			// 读到拒绝反馈后换只读探测(只读工具不经审批门槛,可执行)。
+			return scriptedReply{ToolCalls: []scriptedToolCall{{
+				ID: "h1", Name: "http_probe", Args: fmt.Sprintf(`{"url":"http://%s/"}`, u.Host),
+			}}, Finish: "tool_calls"}
+		}
+		return scriptedReply{Text: "已换只读方向核验,动作被拒不再重试", Finish: "stop"}
 	})
 	defer model.Close()
 	prov, _ := model.provider()
@@ -567,18 +591,107 @@ func TestPanelDenyFusesUnit(t *testing.T) {
 	}
 	done.Wait()
 
-	// 单位级终止:Step 终态 approval_denied,理由可见。
-	if res.StepStatus != StepApprovalDenied {
-		t.Fatalf("面板拒绝后 Step 应为审批拒绝终止: %+v", res)
+	// 只杀该动作:单位存活同会话换路,步骤正常完成(P4-68 ②)。
+	if res.StepStatus != "done" {
+		t.Fatalf("面板拒绝后单位应换路继续直至完成: %+v", res)
 	}
-	if !strings.Contains(res.Reason, "审批拒绝终止") || !strings.Contains(res.Reason, "目标环境不允许修改") {
-		t.Fatalf("终因应含拒绝原因: %q", res.Reason)
+	step, err := store.Node(ctx, task, "s1")
+	if err != nil || step.Status != "done" {
+		t.Fatalf("图上步骤状态应为 done: %+v err=%v", step, err)
+	}
+	// 黑匣子:面板拒绝不再落单位终态事件(P4-68 ② 只杀动作)。
+	for _, bt := range blackboxTypes(t, store, task) {
+		if bt == rings.BlackboxUnitApprovalDeny {
+			t.Fatalf("面板拒绝只杀动作,不应落 unit_approval_deny 事件: %v", blackboxTypes(t, store, task))
+		}
+	}
+	recs := approvalEvents(t, store, task)
+	if len(recs) != 2 || recs[1].Type != rings.ApprovalRecDenied ||
+		recs[1].DenyLine != rings.DenyLinePanel || !strings.Contains(recs[1].Reason, "目标环境不允许修改") {
+		t.Fatalf("审批记录应为 requested+denied(panel,带理由): %+v", recs)
+	}
+	// 被拒调用未执行;换路只读探测同单位执行成功(transcript 连续)。
+	bash := toolCallRecords(t, store, task, "bash")
+	if len(bash) != 1 || !bash[0].IsError || strings.Contains(bash[0].ResultHead, "never-deny") {
+		t.Fatalf("被拒调用不得执行: %+v", bash)
+	}
+	probes := toolCallRecords(t, store, task, "http_probe")
+	if len(probes) != 1 || probes[0].IsError {
+		t.Fatalf("换路只读探测应执行成功: %+v", probes)
+	}
+	if bash[0].UnitID != probes[0].UnitID {
+		t.Fatalf("拒绝与换路应同单位(transcript 连续): %s vs %s", bash[0].UnitID, probes[0].UnitID)
+	}
+}
+
+// TestPanelDenyEscalateAfterThree P4-68 ②:连拒同类 3 次升级杀单位
+// (与硬规则升级保险同机制、单位生命周期累计不重置)——前两次单位存活
+// (模型被再次调用即证),第三笔升级后单位以 approval_denied 终态收场,
+// 终因带"同类拒绝累计"说明。
+func TestPanelDenyEscalateAfterThree(t *testing.T) {
+	dir := t.TempDir()
+	store := openStore(t, dir)
+	ctx := context.Background()
+	const task = "gate-panel-deny-escalate"
+
+	host, port := seedTarget(t, "x\r\n")
+	seedGoalAndAsset(t, store, task, host, port)
+	dispatchStepAtLevel(t, store, task, "s1", "修改目标配置验证", "g1", "修改与持久化", "target")
+
+	model := newScriptedModel(func(rr *recordedRequest) scriptedReply {
+		// 每轮都重发同一被拒动作(硬撞形态)。
+		return scriptedReply{ToolCalls: []scriptedToolCall{{
+			ID: fmt.Sprintf("b%d", rr.Index), Name: "bash", Args: `{"command":"echo never-deny > x.txt"}`,
+		}}, Finish: "tool_calls"}
+	})
+	defer model.Close()
+	prov, _ := model.provider()
+	ex := NewExecutor(store, prov, filepath.Join(dir, "tasks"), Budget{})
+	gate := NewLedgerGate(store)
+	ex.Gate = gate
+
+	var (
+		res  *RunResult
+		done sync.WaitGroup
+	)
+	done.Add(1)
+	go func() {
+		defer done.Done()
+		res, _ = ex.RunStep(ctx, task, "s1")
+	}()
+
+	// 逐票拒绝:前三张票(第三张触发升级保险,单位终态收场)。
+	for i := 0; i < 3; i++ {
+		waitFor(t, 30*time.Second, "弹门请求登记", func() bool { return len(gate.Pending(task)) == 1 })
+		pending := gate.Pending(task)[0]
+		if err := gate.Decide(ctx, task, pending.ID, GateDecision{Approved: false, By: "creator", Reason: "目标环境不允许修改"}); err != nil {
+			t.Fatalf("第 %d 次拒绝失败: %v", i+1, err)
+		}
+	}
+	done.Wait()
+
+	if res.StepStatus != StepApprovalDenied {
+		t.Fatalf("连拒同类 3 次应升级杀单位: %+v", res)
+	}
+	if !strings.Contains(res.Reason, "同类拒绝累计 3 次") ||
+		!strings.Contains(res.Reason, "目标环境不允许修改") {
+		t.Fatalf("升级终因应含同类累计与拒绝原因: %q", res.Reason)
 	}
 	step, err := store.Node(ctx, task, "s1")
 	if err != nil || step.Status != StepApprovalDenied {
 		t.Fatalf("图上步骤状态应为 approval_denied: %+v err=%v", step, err)
 	}
-	// 黑匣子留系统事件;审批留痕 requested+denied(panel)。
+	// 三笔 requested + 三笔 denied(panel) 连续;升级笔黑匣子留痕。
+	recs := approvalEvents(t, store, task)
+	deniedN := 0
+	for _, r := range recs {
+		if r.Type == rings.ApprovalRecDenied && r.DenyLine == rings.DenyLinePanel {
+			deniedN++
+		}
+	}
+	if deniedN != 3 {
+		t.Fatalf("应恰三笔面板拒绝留痕,得 %d: %+v", deniedN, recs)
+	}
 	found := false
 	for _, bt := range blackboxTypes(t, store, task) {
 		if bt == rings.BlackboxUnitApprovalDeny {
@@ -586,18 +699,7 @@ func TestPanelDenyFusesUnit(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("黑匣子应留 unit_approval_deny 事件: %v", blackboxTypes(t, store, task))
-	}
-	recs := approvalEvents(t, store, task)
-	if len(recs) != 2 || recs[1].Type != rings.ApprovalRecDenied ||
-		recs[1].DenyLine != rings.DenyLinePanel || !strings.Contains(recs[1].Reason, "目标环境不允许修改") {
-		t.Fatalf("审批记录应为 requested+denied(panel,带理由): %+v", recs)
-	}
-	// 被拒调用未执行。
-	for _, c := range toolCallRecords(t, store, task, "bash") {
-		if !c.IsError || strings.Contains(c.ResultHead, "never-deny") {
-			t.Fatalf("被拒调用不得执行: %+v", c)
-		}
+		t.Fatalf("升级杀应留 unit_approval_deny 事件: %v", blackboxTypes(t, store, task))
 	}
 }
 
@@ -665,9 +767,13 @@ func TestThresholdTighteningGatesLowerLevels(t *testing.T) {
 	dispatchStepAtLevel(t, store, task, "s1", "主动测试目标响应", "g1", "主动测试", "target")
 
 	model := newScriptedModel(func(rr *recordedRequest) scriptedReply {
-		return scriptedReply{ToolCalls: []scriptedToolCall{{
-			ID: "b1", Name: "bash", Args: `{"command":"echo tighten"}`,
-		}}, Finish: "tool_calls"}
+		if rr.Index == 0 {
+			return scriptedReply{ToolCalls: []scriptedToolCall{{
+				ID: "b1", Name: "bash", Args: `{"command":"echo tighten"}`,
+			}}, Finish: "tool_calls"}
+		}
+		// P4-68 ②:拒绝后读到换路反馈,直接收尾(不再重试该动作)。
+		return scriptedReply{Text: "动作被拒,停止该方向", Finish: "stop"}
 	})
 	defer model.Close()
 	prov, _ := model.provider()
@@ -699,8 +805,10 @@ func TestThresholdTighteningGatesLowerLevels(t *testing.T) {
 		t.Fatalf("拒绝失败: %v", err)
 	}
 	done.Wait()
-	if res.StepStatus != StepApprovalDenied {
-		t.Fatalf("收紧后拒绝同样熔断单位: %+v", res)
+	// P4-68 ②:拒绝只杀该动作,单位读到反馈收尾(步骤正常完成);
+	// 门槛收紧的弹门机制本身由上方 pending 断言证明。
+	if res.StepStatus != "done" {
+		t.Fatalf("收紧后拒绝只杀动作,单位应换路收尾: %+v", res)
 	}
 }
 

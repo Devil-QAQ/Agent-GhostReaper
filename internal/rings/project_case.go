@@ -118,8 +118,8 @@ type claimCaseRow struct {
 	summary              *SummaryDigest
 	// roundHumans 逐轮人话(P4-64 ①)/retestNotes 复测备注校对稿(P4-64 ⑦):
 	// 显示层包装列,按轮 upsert(轮号全局续号),存储 JSON 键为轮号字符串。
-	roundHumans   map[int]ClaimRoundHuman
-	retestNotes   map[int]string
+	roundHumans map[int]ClaimRoundHuman
+	retestNotes map[int]string
 	// changed* 脏列标记(save 只写触碰过的列组)。
 	changedDigest   bool
 	changedTimeline bool

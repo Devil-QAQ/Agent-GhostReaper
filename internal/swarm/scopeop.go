@@ -73,9 +73,45 @@ type scopeHitStep struct {
 	status string
 }
 
-// stepsCoveringAssets 步骤清单里 covers 边命中资产集合的条目(按步骤
-// ID 稳定排序)。
+// stepsCoveringAssets 步骤清单里意图锚定命中资产集合的条目(按步骤 ID
+// 稳定排序)。P4-68 ②(拒绝分族):意图覆盖判定＝图查询——covers 边直接
+// 锚定 ∪ verifies→假设→about 锚定(验证类步骤的假设锚点＝其指向的
+// 目标资产),与被摘除资产求交(直接 ID 命中,或锚定资产的写法粒度落
+// 在摘除面内——ExcludedCoversTarget 同口径);零文本匹配。
 func stepsCoveringAssets(ctx context.Context, store *rings.Store, taskID string, steps []rings.NodeFull, assetIDs []string) ([]scopeHitStep, error) {
+	assets, err := store.NodesByType(ctx, taskID, rings.NodeAsset, "")
+	if err != nil {
+		return nil, fmt.Errorf("swarm: 范围影响查资产: %w", err)
+	}
+	return stepsCoveringAssetsOf(ctx, store, taskID, steps, assetIDs, assets)
+}
+
+// stepIntentCoversAssets 单个步骤的意图锚定资产与资产集合求交(非空＝
+// 覆盖)——P4-68 ② 拒绝分族在命令路的判定键(已排除目标的触碰分族:
+// 覆盖→止损口径、不覆盖→只拒该条命令);图查询零文本匹配。读不出或
+// 步骤不在图上返回 false(防御:不猜)。
+func stepIntentCoversAssets(ctx context.Context, store *rings.Store, taskID, stepID string, assetIDs []string, assets []rings.NodeFull) bool {
+	if stepID == "" || len(assetIDs) == 0 {
+		return false
+	}
+	step, err := store.Node(ctx, taskID, stepID)
+	if err != nil || step.Type != rings.NodeStep {
+		return false
+	}
+	hits, err := stepsCoveringAssetsOf(ctx, store, taskID, []rings.NodeFull{*step}, assetIDs, assets)
+	return err == nil && len(hits) > 0
+}
+
+// StepIntentCoversAssets stepIntentCoversAssets 的导出形态(P4-69 ①:
+// 挂等冻结单位被排除时的收口分族由 overmind 对账复用——同一判定单源,
+// 禁止另写)。assets 由调用方传现值清单(对账已查,免重复)。
+func StepIntentCoversAssets(ctx context.Context, store *rings.Store, taskID, stepID string, assetIDs []string, assets []rings.NodeFull) bool {
+	return stepIntentCoversAssets(ctx, store, taskID, stepID, assetIDs, assets)
+}
+
+// stepsCoveringAssetsOf stepsCoveringAssets 的核心(资产清单由调用方
+// 传入,止损/预览/命令路判定共用一份现值资产,免重复查询)。
+func stepsCoveringAssetsOf(ctx context.Context, store *rings.Store, taskID string, steps []rings.NodeFull, assetIDs []string, assets []rings.NodeFull) ([]scopeHitStep, error) {
 	want := map[string]bool{}
 	for _, id := range assetIDs {
 		if id = strings.TrimSpace(id); id != "" {
@@ -85,19 +121,64 @@ func stepsCoveringAssets(ctx context.Context, store *rings.Store, taskID string,
 	if len(want) == 0 {
 		return nil, nil
 	}
-	edges, err := store.Edges(ctx, taskID, rings.EdgeCovers)
-	if err != nil {
+	// 意图锚定资产集:covers 直接锚定 + verifies→假设→about 锚定。
+	anchored := map[string]map[string]bool{} // stepID -> 锚定资产 ID 集
+	addAnchors := func(from, to string) {
+		if anchored[from] == nil {
+			anchored[from] = map[string]bool{}
+		}
+		anchored[from][to] = true
+	}
+	if edges, err := store.Edges(ctx, taskID, rings.EdgeCovers); err == nil {
+		for _, e := range edges {
+			addAnchors(e.From, e.To)
+		}
+	} else {
 		return nil, fmt.Errorf("swarm: 范围影响查 covers 边: %w", err)
 	}
-	covers := map[string]bool{}
-	for _, e := range edges {
-		if want[e.To] {
-			covers[e.From] = true
+	// 验证类步骤(Step→verifies→Hypothesis→about→Asset):假设的 about
+	// 锚点＝提议时指向的目标资产,同为该步骤的意图锚定。
+	if verifies, verr := store.Edges(ctx, taskID, rings.EdgeVerifies); verr == nil && len(verifies) > 0 {
+		hypAssets := map[string][]string{}
+		if abouts, aerr := store.Edges(ctx, taskID, rings.EdgeAbout); aerr == nil {
+			for _, e := range abouts {
+				hypAssets[e.From] = append(hypAssets[e.From], e.To)
+			}
 		}
+		for _, e := range verifies {
+			for _, a := range hypAssets[e.To] {
+				addAnchors(e.From, a)
+			}
+		}
+	}
+	// 锚定命中:直接 ID ∈ 摘除集,或锚定资产的写法粒度落在摘除面内
+	//(同 host 不同端口的兄弟资产同样命中——与围栏/摘除的写法粒度
+	// 同口径)。
+	covered := func(assetID string) bool {
+		if want[assetID] {
+			return true
+		}
+		for _, a := range assets {
+			if a.ID != assetID {
+				continue
+			}
+			if anchor, ok := rings.ScopeAnchorOf(strings.TrimSpace(a.Title)); ok {
+				return rings.ExcludedCoversTarget(assets, want, anchor.Host, anchor.Port)
+			}
+			return false
+		}
+		return false
 	}
 	var out []scopeHitStep
 	for _, s := range steps {
-		if !covers[s.ID] {
+		hit := false
+		for id := range anchored[s.ID] {
+			if covered(id) {
+				hit = true
+				break
+			}
+		}
+		if !hit {
 			continue
 		}
 		out = append(out, scopeHitStep{hit: ScopeHit{StepID: s.ID, Title: s.Title}, status: s.Status})
@@ -187,6 +268,7 @@ type ScopeChange struct {
 	Excluded     []string   `json:"excluded"`      // 本次实际摘除的资产 ID(止损针对它们)
 	Reincluded   []string   `json:"reincluded"`    // 本次移回范围的资产 ID(原在摘除清单)
 	Approved     []string   `json:"approved"`      // 本次放行的待批资产 ID(渗透任务)
+	Revived      []string   `json:"revived"`       // 本次复活的退役资产 ID(P4-71 ①:纳入遇 retired 一律复活)
 	AlreadyIn    []string   `json:"already_in"`    // 纳入时本就在范围内的资产 ID(零变更)
 	AlreadyOut   []string   `json:"already_out"`   // 摘除时本就范围外的资产 ID(零变更)
 	KilledUnits  []ScopeHit `json:"killed_units"`  // 摘除终止的在途单位
@@ -278,12 +360,21 @@ func ExcludeAssets(ctx context.Context, store *rings.Store, helm *Helm, taskID s
 		for _, id := range res.Excluded {
 			titles = append(titles, assetTitleOf(ctx, store, taskID, id))
 		}
+		// P4-69 ②(状态互斥):摘除同步从批准清单剔除——排除与批准不
+		// 并存(实锤 a-72dab0e5 同列两清单),摘除快照不再原样透传
+		// scope_approved。
+		nextApproved := make([]string, 0, len(st.ScopeApproved))
+		for _, id := range st.ScopeApproved {
+			if !idIn(res.Excluded, id) {
+				nextApproved = append(nextApproved, id)
+			}
+		}
 		if _, err := store.Append(ctx, taskID, rings.Event{
 			Kind: rings.EventRoeUpdated, Actor: actor,
 			Payload: rings.RoeUpdated{
 				AllowedTools: st.AllowedTools, DeniedTools: st.DeniedTools,
 				ApprovalThreshold: st.ApprovalThreshold, IntentRules: st.IntentRules,
-				ExcludedAssets: next, ScopeApproved: st.ScopeApproved,
+				ExcludedAssets: next, ScopeApproved: nextApproved,
 				Note: "摘除 " + strings.Join(titles, "、"),
 			},
 		}); err != nil {
@@ -306,9 +397,11 @@ func ExcludeAssets(ctx context.Context, store *rings.Store, helm *Helm, taskID s
 	return res, nil
 }
 
-// IncludeAssets 纳入资产(牧者 set_asset_scope 纳入向):渗透任务的
-// 待批资产放行(scope_approved)+ 已摘除资产移回范围(摘除清单去除);
-// 红队/未标任务无待批语义(本就可测,如实归 AlreadyIn 零变更)。纳入
+// IncludeAssets 纳入资产(牧者 set_asset_scope 纳入向/反向键"恢复纳入"
+// 共用):渗透任务的待批资产放行(scope_approved)+ 已摘除资产移回范围
+// (摘除清单去除)+ 退役资产复活(P4-71 ①:retired 一律复活——转信息源
+// 退役的资产经纳入路径收回测试范围,不再误答"本就范围内");红队/未标
+// 任务的常规资产无待批语义(本就可测,如实归 AlreadyIn 零变更)。纳入
 // 无在途可终止,零止损;唤醒主宰由调用方执行。
 func IncludeAssets(ctx context.Context, store *rings.Store, taskID string, assetIDs []string, actor string) (*ScopeChange, error) {
 	if err := resolveAssetIDs(ctx, store, taskID, assetIDs); err != nil {
@@ -325,12 +418,30 @@ func IncludeAssets(ctx context.Context, store *rings.Store, taskID string, asset
 		}
 	}
 	excluded := st.ExcludedAssetSet()
+	// P4-71 ①:图上资产的退役态——纳入遇 retired 一律复活(写法粒度,
+	// 同 host 其余退役节点不连带),retired 不再落 AlreadyIn 误答。
+	assets, err := store.NodesByType(ctx, taskID, rings.NodeAsset, "")
+	if err != nil {
+		return nil, fmt.Errorf("swarm: 纳入查图上资产: %w", err)
+	}
+	retiredSet := map[string]bool{}
+	for _, a := range assets {
+		if a.Status == rings.AssetStatusRetired {
+			retiredSet[a.ID] = true
+		}
+	}
 	res := &ScopeChange{}
 	for _, id := range assetIDs {
 		if id = strings.TrimSpace(id); id == "" {
 			continue
 		}
 		switch {
+		case retiredSet[id]:
+			// P4-71 ①:退役识别优先——retired 资产即使因历史脏数据并存于
+			// 摘除清单,也按"复活＋入批准清单＋互斥移回"整体处理(与
+			// AllowScopeAccess 不动排除清单的写侧对称),不落 Reincluded
+			// 分支漏复活。
+			res.Revived = append(res.Revived, id)
 		case pendingSet[id]:
 			res.Approved = append(res.Approved, id)
 		case excluded[id]:
@@ -339,12 +450,19 @@ func IncludeAssets(ctx context.Context, store *rings.Store, taskID string, asset
 			res.AlreadyIn = append(res.AlreadyIn, id)
 		}
 	}
-	if len(res.Approved) == 0 && len(res.Reincluded) == 0 {
+	if len(res.Approved) == 0 && len(res.Reincluded) == 0 && len(res.Revived) == 0 {
 		return res, nil // 全部本就范围内:零变更零落账,如实答复
 	}
-	var nextExcluded []string
+	// P4-71 ①:退役资产复活(节点级留痕,Note"纳入复活")。
+	revived, rerr := ReviveRetiredAssets(ctx, store, taskID, res.Revived, actor)
+	if rerr != nil {
+		return nil, rerr
+	}
+	_ = revived
+	// 复活资产与摘除互斥:仍在摘除清单的(历史脏数据并存)一并移回。
+	nextExcluded := make([]string, 0, len(st.ExcludedAssets))
 	for _, id := range st.ExcludedAssets {
-		if !idIn(res.Reincluded, id) {
+		if !idIn(res.Reincluded, id) && !idIn(res.Revived, id) {
 			nextExcluded = append(nextExcluded, id)
 		}
 	}
@@ -354,7 +472,17 @@ func IncludeAssets(ctx context.Context, store *rings.Store, taskID string, asset
 			nextApproved = append(nextApproved, id)
 		}
 	}
+	// 复活即入批准清单(条目契约:复活＋入批准清单＋互斥检查)——退役
+	// 资产复活后须立即可测,不再回待批。
+	for _, id := range res.Revived {
+		if !idIn(nextApproved, id) {
+			nextApproved = append(nextApproved, id)
+		}
+	}
 	var parts []string
+	for _, id := range res.Revived {
+		parts = append(parts, "复活 "+assetTitleOf(ctx, store, taskID, id))
+	}
 	for _, id := range res.Reincluded {
 		parts = append(parts, "纳入 "+assetTitleOf(ctx, store, taskID, id))
 	}
@@ -375,13 +503,134 @@ func IncludeAssets(ctx context.Context, store *rings.Store, taskID string, asset
 	return res, nil
 }
 
+// ReviveRetiredAssets 退役资产复活(P4-71 ①,问题清单 #87 ⑤):纳入路径
+// 识别 retired 资产→复活(NodeStateChanged retired→active 留痕,Note
+// "纳入复活"),资产图/待批清单/资产树等读面自然复现(status 过滤按
+// 现值走,零读面改动)。复活粒度＝按纳入的资产节点(写法粒度)——同
+// host 其余退役节点不连带复活(要收编逐个纳入、各自复活留痕)。幂等
+// (非 retired 跳过零落笔)。返回本次复活的资产 ID(与输入等价,留作
+// 对账)。批准清单并入与互斥剔除由调用方随 roe.updated 落账(本函数
+// 只管节点状态,清单语义归范围操作单源)。
+func ReviveRetiredAssets(ctx context.Context, store *rings.Store, taskID string, assetIDs []string, actor string) ([]string, error) {
+	if len(assetIDs) == 0 {
+		return nil, nil
+	}
+	var evs []rings.Event
+	revived := make([]string, 0, len(assetIDs))
+	for _, id := range assetIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		a, err := store.Node(ctx, taskID, id)
+		if err != nil || a.Type != rings.NodeAsset {
+			continue // 陈旧引用:如实跳过(resolveAssetIDs 已挡主流)
+		}
+		if a.Status != rings.AssetStatusRetired {
+			continue // 幂等:非退役零落笔
+		}
+		revived = append(revived, id)
+		evs = append(evs, rings.Event{
+			Kind: rings.EventNodeStateChanged, Actor: actor,
+			Payload: rings.NodeStateChanged{
+				NodeID: a.ID, Status: "active", Note: "纳入复活",
+			},
+		})
+	}
+	if len(evs) == 0 {
+		return nil, nil
+	}
+	if _, err := store.Append(ctx, taskID, evs...); err != nil {
+		return nil, fmt.Errorf("swarm: 退役资产复活落账: %w", err)
+	}
+	runlog.Infof("退役资产复活: %s %d 个(纳入复活)", taskID, len(evs))
+	return revived, nil
+}
+
+// ---- 范围卡第三键"允许访问"(P4-68 ①,问题清单 #86 B) ----
+
+// ParseInfoSourceHost 标记入口的地址归一:host[:port] → 裸 host(小写;
+// 访问权与信息源清单同为 host 级);非主机形态返回 false。
+func ParseInfoSourceHost(s string) (string, bool) {
+	if a, ok := rings.ScopeAnchorOf(strings.TrimSpace(s)); ok {
+		return a.Host, true
+	}
+	return "", false
+}
+
+// AllowScopeAccess 授访问权(host 入信息源清单)的统一入口——卡上手授
+// ＝分诊自动授＝牧者标记＝RoE 面板标记,一个机制多种入口(P4-67 信息源
+// 清单同一状态):
+//   - GrantInfoSource:host 入任务信息源清单(后续访问零出卡;撤销恢复
+//     拦截——RevokeInfoSource 既有);
+//   - 图上同主机资产退役(rings.AssetStatusRetired,状态迁移留痕不删
+//     节点):资产图/待批清单/主宰快照/报告等读面一律过滤——不入资产
+//     图、不进范围闭包、不算覆盖、不被规划测试、不进资产树分组;
+//   - 不触发止损、不动排除清单(允许访问不是拒绝:红队照常可测、渗透
+//     访问放行;对它的攻击行为仍走攻击行为卡——denyScope 清单命中
+//     分支按动作复查)。
+//
+// 挂等该目标的冻结单位由调用方对账唤醒(overmind.ResolveScopeWaits
+// 信息源分支:回可领取插队队首,原会话续跑)。
+func AllowScopeAccess(ctx context.Context, store *rings.Store, taskID, host, basis, actor string) error {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if a, ok := rings.ScopeAnchorOf(host); ok {
+		host = a.Host // 端口无关:访问权与信息源清单同为 host 级
+	}
+	if err := GrantInfoSource(ctx, store, taskID, host, basis, actor); err != nil {
+		return err
+	}
+	retireAssetsOfHost(ctx, store, taskID, host, actor)
+	return nil
+}
+
+// retireAssetsOfHost 图上同主机资产的退役(host 级:同 host 不同端口的
+// 资产一并退役——访问权 host 级,资产图呈现同步消失)。幂等(已退役
+// 跳过);退役留痕失败如实记档不回滚(访问权已授,账本只追加)。
+func retireAssetsOfHost(ctx context.Context, store *rings.Store, taskID, host, actor string) {
+	assets, err := store.NodesByType(ctx, taskID, rings.NodeAsset, "")
+	if err != nil {
+		runlog.Warnf("允许访问:查资产失败(退役跳过,如实记档): %s %s: %v", taskID, host, err)
+		return
+	}
+	var evs []rings.Event
+	for _, a := range assets {
+		if a.Status == rings.AssetStatusRetired {
+			continue
+		}
+		anchor, ok := rings.ScopeAnchorOf(strings.TrimSpace(a.Title))
+		if !ok || anchor.Host != host {
+			continue
+		}
+		evs = append(evs, rings.Event{
+			Kind: rings.EventNodeStateChanged, Actor: actor,
+			Payload: rings.NodeStateChanged{
+				NodeID: a.ID, Status: rings.AssetStatusRetired,
+				Note: "允许访问:转信息源,不收编",
+			},
+		})
+	}
+	if len(evs) == 0 {
+		return
+	}
+	if _, err := store.Append(ctx, taskID, evs...); err != nil {
+		runlog.Warnf("允许访问:资产退役落账失败(如实记档): %s %s: %v", taskID, host, err)
+		return
+	}
+	runlog.Infof("允许访问: %s %s 资产退役 %d 个(转信息源,不收编)", taskID, host, len(evs))
+}
+
 // StopLossForAssets 在途止损本体(P4-45 ①b;roe.updated 已落账后调用,
 // 面板与牧者两路共用):
-//   - 覆盖任一已摘除资产的在跑步骤 → 舵杆 kill(与熔断单位同款真中断
-//     口径,单位终止留痕、步骤落 aborted);
-//   - 覆盖任一已摘除资产的排队步骤(dispatched,含等前置)→ 整步
+//   - 意图覆盖任一已摘除资产的在跑步骤 → 舵杆 kill(与熔断单位同款真
+//     中断口径,单位终止留痕、步骤落 aborted);
+//   - 意图覆盖任一已摘除资产的排队步骤(dispatched,含等前置)→ 整步
 //     aborted,事件 Note"范围摘除"留痕,交主宰重排(摘除后派发守卫
 //     已拒新覆盖意图,重排只会换方向)。
+//     P4-68 ②:"覆盖"收紧为意图覆盖(stepsCoveringAssets 单源:图查询
+//     covers∪verifies→about＋写法粒度,零文本匹配)——意图不覆盖、仅命
+//     令顺带触碰被摘除目标的单位不在止损面(命令路只拒该条命令,见
+//     scopeguard denyExcludedTouch)。
 //
 // 竞态防护:排队步骤取消走 AppendAtRevision(领取把步骤推走时整批
 // 重读——重读后它已成在跑,转走 kill 分支);在跑单位 kill 由 KillWork

@@ -15,7 +15,7 @@ import (
 
 func TestP449RoEConstraintNotesLine(t *testing.T) {
 	notes := "用小字典,不要用大字典\n不要修改任何数据"
-	with := RenderRoEConstraint("你的探索手段受此框定。", nil, nil, "", nil, nil, notes)
+	with := RenderRoEConstraint("你的探索手段受此框定。", nil, nil, "", nil, nil, notes, nil)
 	if !strings.Contains(with, "造物主注意事项") {
 		t.Fatalf("约束块应含注意事项行:\n%s", with)
 	}
@@ -25,7 +25,7 @@ func TestP449RoEConstraintNotesLine(t *testing.T) {
 		}
 	}
 	// 留空任务:行不出现(行为与历史一致)。
-	without := RenderRoEConstraint("你的探索手段受此框定。", nil, nil, "", nil, nil, "")
+	without := RenderRoEConstraint("你的探索手段受此框定。", nil, nil, "", nil, nil, "", nil)
 	if strings.Contains(without, "造物主注意事项") {
 		t.Fatalf("无注意事项时行不应出现:\n%s", without)
 	}

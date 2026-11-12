@@ -122,21 +122,21 @@ func (s *Server) claimTimingOf(ctx context.Context, taskID, claimID string) clai
 // 锤炼中声明即有;存量旧定稿的 repro.Rounds 由前端合读,同轮号新
 // 事件优先)。
 type claimDetailView struct {
-	Claim           claimView             `json:"claim"`
-	Alternatives    []report.AltView      `json:"alternatives"`
-	Timeline        []report.CaseEntry    `json:"timeline"`
+	Claim           claimView                 `json:"claim"`
+	Alternatives    []report.AltView          `json:"alternatives"`
+	Timeline        []report.CaseEntry        `json:"timeline"`
 	RoundHumans     []rings.FalsifyRoundHuman `json:"round_humans,omitempty"`
-	Remediation     []string              `json:"remediation"` // 查表修复建议(未命中为空,读侧如实呈现)
-	Repro           *report.ReproFinal    `json:"repro,omitempty"`
-	Evidence        []claimEvidenceView   `json:"evidence"`                // 绑定的流量证据(首绑次序,去重)
-	EvidenceVersion int64                 `json:"evidence_version"`        // 声明证据版本(绑定+定稿累计)
-	Reopenable      bool                  `json:"reopenable"`              // Confirmed/不成立/待确认 可重开(结论可反驳;不成立=P4-55 ②)
-	Retests         []retestView          `json:"retests"`                 // 复测历史(第 1 轮起,最新在尾;P3-06)
-	Replays         []replayView          `json:"replays"`                 // 重放校验历史(第 1 轮起,最新在尾;P3-07)
-	Origin          claimOriginView       `json:"origin"`                  // 成果溯源:发现单位与反证单位(P3-13b ①)
-	Timing          claimTimingView       `json:"timing"`                  // 确认耗时拆解(P4-08 ②:落地→终态 排队/执行/轮次)
-	Followup        claimFollowupView     `json:"followup"`                // 成果追问会话摘要(P4-14:入口按钮"已 N 问"的数据面)
-	DiveDisabled    string                `json:"dive_disabled,omitempty"` // 深入按钮禁用态(P4-48:空 = 可用;终态任务 = 悬停文案"任务已结束")
+	Remediation     []string                  `json:"remediation"` // 查表修复建议(未命中为空,读侧如实呈现)
+	Repro           *report.ReproFinal        `json:"repro,omitempty"`
+	Evidence        []claimEvidenceView       `json:"evidence"`                // 绑定的流量证据(首绑次序,去重)
+	EvidenceVersion int64                     `json:"evidence_version"`        // 声明证据版本(绑定+定稿累计)
+	Reopenable      bool                      `json:"reopenable"`              // Confirmed/不成立/待确认 可重开(结论可反驳;不成立=P4-55 ②)
+	Retests         []retestView              `json:"retests"`                 // 复测历史(第 1 轮起,最新在尾;P3-06)
+	Replays         []replayView              `json:"replays"`                 // 重放校验历史(第 1 轮起,最新在尾;P3-07)
+	Origin          claimOriginView           `json:"origin"`                  // 成果溯源:发现单位与反证单位(P3-13b ①)
+	Timing          claimTimingView           `json:"timing"`                  // 确认耗时拆解(P4-08 ②:落地→终态 排队/执行/轮次)
+	Followup        claimFollowupView         `json:"followup"`                // 成果追问会话摘要(P4-14:入口按钮"已 N 问"的数据面)
+	DiveDisabled    string                    `json:"dive_disabled,omitempty"` // 深入按钮禁用态(P4-48:空 = 可用;终态任务 = 悬停文案"任务已结束")
 }
 
 // claimFollowupView 成果追问摘要(P4-14):当前轮次(0 = 尚未追问)、

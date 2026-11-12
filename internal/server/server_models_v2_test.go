@@ -166,10 +166,10 @@ func TestModelRecoverEndpoint(t *testing.T) {
 func TestModelsGetPresets(t *testing.T) {
 	_, h := newModelsTestServer(t)
 	var res struct {
-		Presets          map[string]map[string]string `json:"presets"`
-		OCModes          map[string]map[string]string `json:"opencode_modes"`
-		PassbackPresets  map[string]map[string]string `json:"passback_presets"`
-		PassbackOptions  []struct {
+		Presets         map[string]map[string]string `json:"presets"`
+		OCModes         map[string]map[string]string `json:"opencode_modes"`
+		PassbackPresets map[string]map[string]string `json:"passback_presets"`
+		PassbackOptions []struct {
 			Value string `json:"value"`
 			Label string `json:"label"`
 		} `json:"passback_options"`

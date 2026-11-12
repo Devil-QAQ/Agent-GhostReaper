@@ -10,6 +10,7 @@ package rings
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/url"
 	"regexp"
@@ -58,6 +59,13 @@ func AssetScopeOf(detail map[string]any) string {
 	return AssetScopeIn
 }
 
+// AssetStatusRetired 资产的"退役"态(P4-68 ①:范围卡第三键"允许访问"
+// ——目标转信息源后不收编不入资产图):host 获访问授权时,图上同主机的
+// 资产退役(状态迁移留痕,不删节点不删边,审计照旧);资产图/待批清单/
+// 主宰快照/报告等读面一律过滤——等同"从资产图消失"(不算覆盖、不被
+// 规划测试、不进资产树分组),与 P4-67 信息源"不入资产图"同一语义。
+const AssetStatusRetired = "retired"
+
 // StepScopeWait 步骤的"等待批准"态(P4-51 ①,问题清单 #73②):渗透
 // 任务的命令命中范围外,单位冻结收场让位名额后步骤挂此态——不可领
 // 取,等"加入资产"裁决回 dispatched(插队队首)或"禁止测试"裁决落
@@ -85,16 +93,36 @@ func ScopeCardID(host, port string) string {
 // ——锚定的是资产不是一次命令,记录校验豁免命令四字段与分级要求)。
 const AssetCardRecPrefix = "ac-"
 
+// TriageCardIDPrefix 研判分诊留痕的请求号前缀(P4-67:tg-<host>,同一
+// host 多笔追加(判定历史),读侧按序列取最新即任务级分诊缓存——
+// 按 host 缓存,同 host 不同端口共享判定,同任务内零重复调用)。
+const TriageCardIDPrefix = "tg-"
+
+// TriageCardID 研判分诊留痕请求号(host 级)。
+func TriageCardID(host string) string {
+	return TriageCardIDPrefix + host
+}
+
+// InfoSourceKey 信息源清单条目的键(host 形态;判定命中按 host 全放行
+// ——查资料的公开服务与端口无关)。
+func InfoSourceKey(host, port string) string {
+	_ = port // 端口不参与键(host 级清单)
+	return host
+}
+
 // IsScopeCardRecord 审批记录是否属范围待决卡生命周期(卡面 scope_wait
 // 或其同号裁决 approved/denied——红队发现卡无步骤/单位/工具上下文,
 // 记录校验据此豁免命令四字段与分级要求;P4-52 ⑤ 待批资产卡裁决
-// (ac- 前缀)同族豁免)。
+// (ac- 前缀)同族豁免;P4-67 研判分诊留痕(tg- 前缀/triage 类型)锚定
+// 的是目标不是一次命令,同族豁免)。
 func IsScopeCardRecord(p ApprovalRecord) bool {
-	return p.Type == ApprovalRecScopeWait ||
+	return p.Type == ApprovalRecScopeWait || p.Type == ApprovalRecTriage ||
 		(p.RequestID != "" && len(p.RequestID) > len(ScopeCardIDPrefix) &&
 			p.RequestID[:len(ScopeCardIDPrefix)] == ScopeCardIDPrefix) ||
 		(p.RequestID != "" && len(p.RequestID) > len(AssetCardRecPrefix) &&
-			p.RequestID[:len(AssetCardRecPrefix)] == AssetCardRecPrefix)
+			p.RequestID[:len(AssetCardRecPrefix)] == AssetCardRecPrefix) ||
+		(p.RequestID != "" && len(p.RequestID) > len(TriageCardIDPrefix) &&
+			p.RequestID[:len(TriageCardIDPrefix)] == TriageCardIDPrefix)
 }
 
 // hostRe 合法主机名字符集(ASCII 字母/数字/点/连字符/下划线;IPv6 字面
@@ -434,6 +462,40 @@ func ScopeSeedsOf(assets []NodeFull) []ScopeSeed {
 	return out
 }
 
+// ExcludedAssetsCovering 已摘除资产中按写法粒度覆盖目标(host+可选
+// 端口)的资产 ID 集(ExcludedCoversTarget 的清单形态,P4-69 ① 对账
+// 分族用——挂等步骤的意图覆盖判定取这批资产求交)。覆盖规则与
+// ExcludedCoversTarget 同源对称,两者须同步改。
+func ExcludedAssetsCovering(assets []NodeFull, excluded map[string]bool, host, port string) []string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return nil
+	}
+	var out []string
+	for _, a := range assets {
+		if !excluded[a.ID] {
+			continue
+		}
+		anchor, ok := ScopeAnchorOf(a.Title)
+		if !ok {
+			continue
+		}
+		if anchor.Wildcard {
+			if host == anchor.Host || strings.HasSuffix(host, "."+anchor.Host) {
+				out = append(out, a.ID)
+			}
+			continue
+		}
+		if anchor.Host != host {
+			continue
+		}
+		if anchor.Port == "" || (anchor.Port == port && port != "") {
+			out = append(out, a.ID)
+		}
+	}
+	return out
+}
+
 // ExcludedCoversTarget 目标(host+可选端口)是否被已摘除资产按写法粒度
 // 覆盖(P4-51 ⑦ 防骚扰:已排除目标的命令直接拒、不再出卡;裁决与摘除
 // 是同一排除机制)。摘除资产的标题锚点覆盖规则与授权粒度对称:摘裸
@@ -495,6 +557,11 @@ func (s *Store) PendingScopeAssets(ctx context.Context, taskID string) ([]Exclud
 	}
 	out := make([]ExcludedAssetView, 0, 4)
 	for _, a := range assets {
+		// P4-68:退役资产(允许访问转信息源)不在待批清单——卡随资产
+		// 退役自然消失。
+		if a.Status == AssetStatusRetired {
+			continue
+		}
 		if ScopeStateOf(TaskTypePentest, AssetSourceOf(a.Detail), AssetScopeOf(a.Detail), approved[a.ID], excluded[a.ID]) == ScopeStatePending {
 			v := ExcludedAssetView{ID: a.ID, Title: a.Title, AddedAt: a.AddedAt}
 			v.StepID, _ = a.Detail["step_id"].(string)
@@ -503,4 +570,42 @@ func (s *Store) PendingScopeAssets(ctx context.Context, taskID string) ([]Exclud
 		}
 	}
 	return out, nil
+}
+
+// ReconcileRoeExclusivity 排除与批准互斥的存量一次清理(P4-69 ②,问题
+// 清单 #86 D 实锤 a-72dab0e5 同列两清单):读当前 RoE,摘除清单成员
+// 一律从批准清单剔除——旧机制下"先批准后摘除"的脏快照经此归位(账本
+// 只追加:修正以新 roe.updated 快照落账,历史如实)。干净任务零落笔
+// (幂等,重启收养重复执行无痕);返回本次剔除的条目数。
+func (s *Store) ReconcileRoeExclusivity(ctx context.Context, taskID, actor string) (int, error) {
+	st, err := s.CurrentRoE(ctx, taskID)
+	if err != nil {
+		return 0, fmt.Errorf("rings: 互斥清理读 RoE: %w", err)
+	}
+	if len(st.ExcludedAssets) == 0 || len(st.ScopeApproved) == 0 {
+		return 0, nil
+	}
+	excluded := st.ExcludedAssetSet()
+	next := make([]string, 0, len(st.ScopeApproved))
+	for _, id := range st.ScopeApproved {
+		if !excluded[id] {
+			next = append(next, id)
+		}
+	}
+	if len(next) == len(st.ScopeApproved) {
+		return 0, nil // 两清单无交集:零落笔
+	}
+	removed := len(st.ScopeApproved) - len(next)
+	if _, err := s.Append(ctx, taskID, Event{
+		Kind: EventRoeUpdated, Actor: actor,
+		Payload: RoeUpdated{
+			AllowedTools: st.AllowedTools, DeniedTools: st.DeniedTools,
+			ApprovalThreshold: st.ApprovalThreshold, IntentRules: st.IntentRules,
+			ExcludedAssets: st.ExcludedAssets, ScopeApproved: next,
+			Note: fmt.Sprintf("状态互斥清理:摘除清单成员 %d 个从批准清单剔除", removed),
+		},
+	}); err != nil {
+		return 0, fmt.Errorf("rings: 互斥清理落账: %w", err)
+	}
+	return removed, nil
 }

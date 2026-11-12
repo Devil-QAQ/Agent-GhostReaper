@@ -867,7 +867,10 @@ func validateApprovalRecord(p ApprovalRecord) error {
 	// 均豁免(仅要求 RequestID;同号裁决记录一并豁免)。denied/forced
 	// 沿既有豁免分级校验:拒绝留痕,被拒对象可能正是"分级缺失/非法"
 	// 的调用,记录必须能如实落账,不受词汇表约束。
-	if IsScopeCardRecord(p) {
+	// P4-71:反向裁决(reversed)锚定的是一条历史记录,不是一次命令——
+	// 不执行命令、无步骤/单位/工具上下文,与范围卡同族豁免(仅要求
+	// RequestID;原记录引用在 Note)。
+	if IsScopeCardRecord(p) || p.Type == ApprovalRecReversed {
 		if p.RequestID == "" {
 			return ErrApprovalRecMissingField
 		}
@@ -1142,6 +1145,33 @@ func applyRoeUpdated(tx *sql.Tx, taskID string, rev int64, p RoeUpdated) error {
 		creatorNotes, taskID,
 	); err != nil {
 		return fmt.Errorf("rings: 投影写入任务 %s 注意事项: %w", taskID, err)
+	}
+	// P4-67 信息源清单列(v16)同款指针语义:nil = 本次不动;非空指针
+	// 整体覆盖(空数组 = 清空)。条目校验:host 非空不重复(分诊自动授/
+	// 牧者标记/面板撤销三写入口都提交完整新快照)。
+	var infoSrcs any
+	if p.InfoSources != nil {
+		seenSrc := map[string]bool{}
+		for _, s := range *p.InfoSources {
+			if strings.TrimSpace(s.Host) == "" {
+				return fmt.Errorf("rings: 信息源清单含空地址")
+			}
+			if seenSrc[s.Host] {
+				return fmt.Errorf("rings: 信息源清单重复地址 %s", s.Host)
+			}
+			seenSrc[s.Host] = true
+		}
+		b, merr := json.Marshal(*p.InfoSources)
+		if merr != nil {
+			return fmt.Errorf("rings: 序列化 info_sources: %w", merr)
+		}
+		infoSrcs = string(b)
+	}
+	if _, err := tx.Exec(
+		`UPDATE roe_state SET info_sources = COALESCE(?, info_sources) WHERE task_id = ?`,
+		infoSrcs, taskID,
+	); err != nil {
+		return fmt.Errorf("rings: 投影写入任务 %s 信息源清单: %w", taskID, err)
 	}
 	return nil
 }

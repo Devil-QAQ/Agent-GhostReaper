@@ -175,8 +175,9 @@ func TestProxyBypassGroupPassE2E(t *testing.T) {
 	}
 }
 
-// TestProxyBypassGroupDenyStillFuses ④拒绝路径照旧熔断:首条旁路弹门被
-// 面板拒绝 → 单位以审批拒绝终止收场,被拒调用未执行。
+// TestProxyBypassGroupDenyStillFuses ④拒绝路径(P4-68 ② 断言反转,原
+// "面板拒绝照旧熔断"):首条旁路弹门被面板拒绝 → 只杀该动作不杀单位
+// ——被拒调用未执行,单位读到换路反馈收尾,同会话正常完成。
 func TestProxyBypassGroupDenyStillFuses(t *testing.T) {
 	dir := t.TempDir()
 	store := openStore(t, dir)
@@ -196,7 +197,7 @@ func TestProxyBypassGroupDenyStillFuses(t *testing.T) {
 				Args: fmt.Sprintf(`{"command":"curl --noproxy '*' http://%s:%d/"}`, host, port),
 			}}, Finish: "tool_calls"}
 		}
-		return scriptedReply{Text: "结束。", Finish: "stop"}
+		return scriptedReply{Text: "动作被拒,停止直连对照。", Finish: "stop"}
 	})
 	defer model.Close()
 	prov, _ := model.provider()
@@ -221,8 +222,8 @@ func TestProxyBypassGroupDenyStillFuses(t *testing.T) {
 	}
 	done.Wait()
 
-	if res.StepStatus != StepApprovalDenied || !strings.Contains(res.Reason, "审批拒绝终止") {
-		t.Fatalf("面板拒绝后应熔断单位: %+v", res)
+	if res.StepStatus != "done" {
+		t.Fatalf("面板拒绝只杀该动作,单位应换路收尾(P4-68 ②): %+v", res)
 	}
 	recs := approvalEvents(t, store, task)
 	if len(recs) != 2 || recs[1].Type != rings.ApprovalRecDenied || recs[1].DenyLine != rings.DenyLinePanel {

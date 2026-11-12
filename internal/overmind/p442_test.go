@@ -80,9 +80,9 @@ func newP442HangModel() *p442HangModel {
 	return m
 }
 
-func (m *p442HangModel) Close()               { m.srv.Close() }
-func (m *p442HangModel) release()             { close(m.free); m.mu.Lock(); m.freed = true; m.mu.Unlock() }
-func (m *p442HangModel) requests() int        { m.mu.Lock(); defer m.mu.Unlock(); return m.reqs }
+func (m *p442HangModel) Close()        { m.srv.Close() }
+func (m *p442HangModel) release()      { close(m.free); m.mu.Lock(); m.freed = true; m.mu.Unlock() }
+func (m *p442HangModel) requests() int { m.mu.Lock(); defer m.mu.Unlock(); return m.reqs }
 func (m *p442HangModel) provider(t *testing.T) llm.Provider {
 	p, err := llm.NewProvider(llm.Config{Format: llm.FormatOpenAI, BaseURL: m.srv.URL, APIKey: "k", Model: "hang"})
 	if err != nil {

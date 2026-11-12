@@ -85,7 +85,9 @@ func TestP451FreezeOpensCardAndWait(t *testing.T) {
 }
 
 // TestP451ExcludedTargetDirectDeny 防骚扰:已排除(禁止测试/摘除)目标的
-// 命令直接拒留痕熔断,不出卡;通配/端口粒度按写法覆盖。
+// 命令不出卡直接拒;P4-68 ② 分族——意图不覆盖被排除目标的顺带触碰
+// (本测试步骤只锚定种子资产)＝只拒该条命令＋换路反馈,单位不熔断;
+// 通配/端口粒度按写法覆盖(意图覆盖者的止损全量见 p468 分族类级测试)。
 func TestP451ExcludedTargetDirectDeny(t *testing.T) {
 	store, ex, env, task := p444PentestEnv(t, nil)
 	ctx := context.Background()
@@ -103,13 +105,14 @@ func TestP451ExcludedTargetDirectDeny(t *testing.T) {
 	pack := p444PentestPack(t, ex, store, task)
 	gate := env.approvalGate(pack)
 
-	d := gate(context.Background(), "bash", json.RawMessage(
+	d := gate(ctx, "bash", json.RawMessage(
 		`{"command":"curl -s http://evil.com:8080/x"}`), permission.Context{})
-	if d.Behavior != permission.Deny || !strings.Contains(d.Message, "禁止测试") {
-		t.Fatalf("已排除目标应直接拒(禁止测试): %+v", d)
+	if d.Behavior != permission.Deny || !strings.Contains(d.Message, "已被排除") {
+		t.Fatalf("已排除目标应只拒该条命令(换连通性对象或跳过): %+v", d)
 	}
-	if env.deniedReason == "" || !strings.Contains(env.deniedReason, "禁止测试") {
-		t.Fatalf("已排除目标拒绝应熔断: %q", env.deniedReason)
+	// P4-68 ②:意图不覆盖(本步骤只锚定种子资产)——只杀该命令,不熔断。
+	if env.deniedReason != "" {
+		t.Fatalf("顺带触碰不得熔断单位: %q", env.deniedReason)
 	}
 	if got := len(p451ScopeWaitCards(t, store, task)); got != 0 {
 		t.Fatalf("已排除目标不得出卡: %d", got)
@@ -130,11 +133,16 @@ func TestP451ExcludedTargetDirectDeny(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	env.scopeMu.Lock()
 	env.scopeNow = nil // 现值缓存重读
-	d = gate(context.Background(), "bash", json.RawMessage(
+	env.scopeMu.Unlock()
+	d = gate(ctx, "bash", json.RawMessage(
 		`{"command":"curl -s http://sub.banned.org/x"}`), permission.Context{})
-	if d.Behavior != permission.Deny || !strings.Contains(d.Message, "禁止测试") {
+	if d.Behavior != permission.Deny || !strings.Contains(d.Message, "已被排除") {
 		t.Fatalf("通配摘除应覆盖子域: %+v", d)
+	}
+	if env.deniedReason != "" {
+		t.Fatalf("通配摘除的顺带触碰同样只拒命令: %q", env.deniedReason)
 	}
 }
 
@@ -183,7 +191,10 @@ func TestP451FreezeApproveResumeE2E(t *testing.T) {
 	ctx := context.Background()
 	const task = "p451-e2e"
 
-	// 范围外靶标:本机短命服务(命中后批准,续跑时真实执行一次)。
+	// 范围外靶标:本机短命服务经 --resolve 对照侧接入(P4-66 起本机环回
+	// 是确定性豁免形态,靶标不能再直接用 127.0.0.1——目标侧用 IP 字面
+	// 量 1.2.3.4 照判,连接经对照侧落到本机服务;命中后批准,续跑时真实
+	// 执行一次)。
 	var hits int32
 	out := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
@@ -194,7 +205,8 @@ func TestP451FreezeApproveResumeE2E(t *testing.T) {
 	if uerr != nil {
 		t.Fatal(uerr)
 	}
-	outHost, outPort := outURL.Hostname(), outURL.Port()
+	const outHost = "1.2.3.4"
+	outPort := outURL.Port()
 
 	// 渗透任务:种子 www.example.com(DNS 打桩——解析恒失败,保判定确定性)。
 	if _, err := store.Append(ctx, task,
@@ -216,7 +228,9 @@ func TestP451FreezeApproveResumeE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := fmt.Sprintf(`{"command":"curl -s --max-time 5 http://%s:%s/frozen"}`, outHost, outPort)
+	cmd := fmt.Sprintf(
+		`{"command":"curl -s --max-time 5 --resolve %s:%s:127.0.0.1 http://%s:%s/frozen"}`,
+		outHost, outPort, outHost, outPort)
 	model := newScriptedModel(func(rr *recordedRequest) scriptedReply {
 		// 会话内未见成功执行结果即(重新)发起——冻结段的拒绝提示不是
 		// 执行结果,续跑段重发同一命令;执行成功后收尾。

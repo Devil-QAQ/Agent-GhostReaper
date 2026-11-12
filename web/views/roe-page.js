@@ -65,6 +65,10 @@ const APPROVAL_TYPE_LABELS = {
   group_pass: "同组放行",
   step_pass: "同步骤放行",
   scope_wait: "等待批准",
+  attack_wait: "攻击动作待决", // P4-67 攻击行为卡(信息源上的主动攻击)
+  triage: "性质判定", // P4-67 分诊留痕(结论与依据)
+  access: "允许访问", // 存量 access 记录的呈现词(P4-70 起卡上入口移除;RoE 标记通道照常)
+  reversed: "反悔", // P4-71 反向裁决留痕(取消加入/恢复纳入/攻击档双向/撤销信息源)
 };
 
 // 处理者 → 操作者语言(机器元数据零裸露;空=未处理的请求/等待记录)。
@@ -72,13 +76,14 @@ function decidedByLabel(v, type) {
   if (v === "creator") return "造物主";
   // !v 兼容字段缺失:后端 decided_by 带 omitempty,机器产生的记录
   // (requested 登记/自动拒绝/scope_wait 挂起)无裁决人时字段整体不出现。
-  if (!v) return type === "requested" || type === "scope_wait" ? "未处理" : "—";
+  if (!v) return type === "requested" || type === "scope_wait" || type === "attack_wait" ? "未处理" : "—";
   if (v.startsWith("swarm:")) return `虫群单位 ${v.slice(6)}`;
   return v;
 }
 
 // 记录主语(行内一眼可辨:拦截卡/待批资产卡按目标与说明,命令类按工具)。
 function recordSubject(r) {
+  if (r.request_id?.startsWith("tg-")) return { mono: true, text: r.request_id?.slice(3) };
   if (r.request_id?.startsWith("sc-")) return { mono: true, text: r.request_id?.slice(3) };
   if (r.request_id?.startsWith("ac-") || (!r.tool_name && r.note)) {
     return { mono: false, text: r.note || "范围" };
@@ -136,6 +141,7 @@ export function RoePage({ currentTask }) {
       <ConstraintSection taskID={tid} />
       <IntentRulesCard taskID={tid} />
       <AssetScopeSection taskID={tid} />
+      <InfoSourceSection taskID={tid} />
       <GoalSection taskID={tid} />
     </div>
   );
@@ -354,9 +360,10 @@ function ApprovalSection({ taskID }) {
   const runBatch = async (approved) => {
     if (batchBusy || checkedIDs.length === 0) return;
     setBatchBusy(true);
+    const payload = { ids: checkedIDs, approved };
     const { ok, body: resp } = await postJSON(
       `/api/tasks/${taskID}/approvals/batch`,
-      { ids: checkedIDs, approved }
+      payload
     );
     setBatchBusy(false);
     if (!ok) {
@@ -387,7 +394,7 @@ function ApprovalSection({ taskID }) {
         </SectionHeader>
         <p className="text-xs text-muted-foreground">
           达到审批门槛的动作逐次等批准;批准前不执行,等待期计时停走。
-          拒绝就终止这个单位,它不换方法重试;主宰会另想办法。
+          拒绝只终止该动作,单位换方向继续;同类连拒 3 次才终止这个单位。
         </p>
         {error && <div className="text-xs text-status-danger">读取失败:{error}</div>}
         {cards.length === 0 ? (
@@ -406,8 +413,8 @@ function ApprovalSection({ taskID }) {
             />
           ))
         )}
-        {/* 勾选批量两键(P4-52 ⑤):发现多时逐张点不过来;批量与单卡同
-            通道,逐笔留痕 */}
+        {/* 勾选批量两键(P4-52 ⑤;P4-70 ① 第三键入口移除):发现多时
+            逐张点不过来;批量与单卡同通道,逐笔留痕 */}
         {checkedIDs.length > 0 && (
           <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border/55 bg-muted/40 px-3 py-2">
             <span className="text-xs text-muted-foreground">已选 {checkedIDs.length} 张范围卡</span>
@@ -422,7 +429,7 @@ function ApprovalSection({ taskID }) {
             </Button>
           </div>
         )}
-        <ApprovalRecords key={taskID} records={records} />
+        <ApprovalRecords key={taskID} taskID={taskID} records={records} />
       </CardContent>
     </Card>
   );
@@ -431,7 +438,8 @@ function ApprovalSection({ taskID }) {
 // ApprovalRecords 审批记录(P4-52 ③④:全量可达——滚动到底自动加载
 // 更多,初始 20 条与现状相当、展示框高度恒定;每条点击看详情,六样
 // 说清:什么时候·什么动作·为什么·什么性质·归属·等待多久谁裁决)。
-function ApprovalRecords({ records }) {
+// P4-71 ②:详情带反向键(反向落点需要任务上下文,taskID 注入)。
+function ApprovalRecords({ taskID, records }) {
   const PAGE = 20;
   const [visible, setVisible] = React.useState(PAGE);
   const [detail, setDetail] = React.useState(null);
@@ -465,7 +473,7 @@ function ApprovalRecords({ records }) {
                 key={`${r.request_id}-${r.type}-${i}`}
                 type="button"
                 className="flex flex-wrap items-center gap-2 rounded-md px-2 py-1 text-left text-xs text-muted-foreground transition-colors duration-150 hover:bg-hover-lift cursor-pointer"
-                onClick={() => setDetail(r)}
+                onClick={() => setDetail({ ...r, task_id: taskID })}
               >
                 <span className="num shrink-0">{r.occurred_at}</span>
                 <span className="shrink-0">{APPROVAL_TYPE_LABELS[r.type] || r.type}</span>
@@ -508,9 +516,31 @@ function RecordField({ label, children }) {
 // 什么动作(命令原文等宽完整)·为什么(意图+拒绝原因或放行理由)·
 // 什么性质(类型按词表翻译)·归属(步骤、单位)·等待多久谁裁决;
 // 机器元数据零裸露(请求号不上面板,审计走账本)。
+// P4-71 ②:按记录类型带反向键(取消加入/恢复纳入/撤销允许/转为允许/
+// 撤销信息源)——已执行的一次性弹门动作无反向键(如实);反向落新账
+// 不改历史,点击后记录区自动跟随(live 推送既有通道)。
 function ApprovalRecordSheet({ record, onClose }) {
   const open = !!record;
   const deniedLike = record && (record.type === "denied" || record.deny_line);
+  const reverse = record?.reverse || null;
+  const [reverseBusy, setReverseBusy] = React.useState(false);
+
+  const runReverse = async () => {
+    if (!record || !reverse || reverseBusy || reverse.unavailable) return;
+    setReverseBusy(true);
+    const { ok, body: resp } = await postJSON(
+      `/api/tasks/${record.task_id}/approvals/${record.request_id}/reverse`,
+      { action: reverse.action }
+    );
+    setReverseBusy(false);
+    if (!ok) {
+      toast.error(`${reverse.label}失败:${resp.error || "原因未说明"}`);
+      return;
+    }
+    toast.success(resp.message || `已${reverse.label}`);
+    onClose();
+  };
+
   return (
     <Sheet open={open} onOpenChange={(v) => !v && onClose()}>
       <SheetContent className="w-[min(560px,94vw)] gap-4 overflow-y-auto p-6 sm:max-w-none">
@@ -596,6 +626,34 @@ function ApprovalRecordSheet({ record, onClose }) {
                 <span>处理者:{decidedByLabel(record.decided_by, record.type)}</span>
               </div>
             </RecordField>
+            {record.type !== "reversed" && (
+              <RecordField label="反向">
+                {reverse ? (
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={reverseBusy || !!reverse.unavailable}
+                        onClick={runReverse}
+                      >
+                        {reverse.label}
+                        {reverse.target && <span className="num ml-1">{reverse.target}</span>}
+                      </Button>
+                      {reverse.unavailable ? (
+                        <span className="text-xs text-muted-foreground">{reverse.unavailable}</span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">反悔落新记录,原记录不改动</span>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <span className="text-xs text-muted-foreground">
+                    这类记录是已执行的一次性动作,无反向操作
+                  </span>
+                )}
+              </RecordField>
+            )}
           </div>
         )}
       </SheetContent>
@@ -605,16 +663,20 @@ function ApprovalRecordSheet({ record, onClose }) {
 
 // ApprovalCard 统一骨架(P4-52 ①):三类待决卡同一结构——类型徽标＋
 // 工具名/目标＋步骤/单位＋时间 → 危害说明三段式(P4-27 ⑼)→ 意图 →
-// 命令/参数原文(等宽、折叠展开)→ 按钮区 → 一行辅助说明;仅徽标与
-// 按钮组随类型不同(弹门=批准＋意见框/拒绝;范围卡=加入资产/禁止测试)。
+// 命令/参数原文(等宽、折叠展开)→ 说明行 → 按钮区 → 一行辅助说明;
+// 仅徽标与按钮组随类型不同(弹门=批准＋意见框/拒绝;范围卡=加入资产/
+// 禁止测试两键,P4-70 ① 第三键移除;攻击卡=批准/拒绝)。
 function ApprovalCard({ taskID, approval, checkable, checked, onCheck }) {
   const scopeCard = approval.kind === "scope";
+  const attackCard = approval.kind === "attack";
   const [opinion, setOpinion] = React.useState("");
   const [busy, setBusy] = React.useState(false);
 
   // P4-51:范围卡两键"加入资产/禁止测试"——瞬间返回,命令由单位自己
-  // 异步跑(按钮不做任何同步执行);P4-52 ②:弹门批准可附意见,留空
-  // 直接继续原会话,非空随放行注入原会话(转录可证)。
+  // 异步跑(按钮不做任何同步执行)。只授访问权走 RoE 页信息源区标记
+  //(P4-70 ① 起卡上不再有第三键入口)。
+  // P4-52 ②:弹门批准可附意见,留空直接继续原会话,非空随放行注入
+  // 原会话(转录可证)。
   const decide = async (approved) => {
     setBusy(true);
     const { ok, body } = await postJSON(
@@ -666,10 +728,12 @@ function ApprovalCard({ taskID, approval, checkable, checked, onCheck }) {
           ) : (
             <Badge variant="warning" title="范围外新资产已直接开始测试,可随时禁止">红队</Badge>
           )
+        ) : attackCard ? (
+          <Badge variant="warning" title="对信息源(查资料用的公开服务)的主动攻击动作,待批准或拒绝">信息源攻击</Badge>
         ) : (
           <Badge variant={levelVariant(approval.action_level)}>{approval.action_level}</Badge>
         )}
-        {scopeCard && approval.target && <span className="num font-medium">{approval.target}</span>}
+        {(scopeCard || attackCard) && approval.target && <span className="num font-medium">{approval.target}</span>}
         {approval.tool_name && <span className="num">{approval.tool_name}</span>}
         {meta && <span className="text-xs text-muted-foreground">{meta}</span>}
       </div>
@@ -699,6 +763,13 @@ function ApprovalCard({ taskID, approval, checkable, checked, onCheck }) {
             label="命令/参数原文"
             className="align-baseline"
           />
+        </div>
+      )}
+      {/* 说明行(P4-70 ①):明示这张卡批的是什么——范围卡批"要不要把它
+          当测试目标",攻击卡批"要不要放行这次攻击动作" */}
+      {(scopeCard || attackCard) && (
+        <div className="text-sm">
+          {scopeCard ? "是否把这个地址纳入测试范围" : "是否允许对这个信息源发起攻击动作"}
         </div>
       )}
       {/* 按钮区:仅按钮组随类型不同 */}
@@ -734,18 +805,22 @@ function ApprovalCard({ taskID, approval, checkable, checked, onCheck }) {
   );
 }
 
-// approvalHint 卡尾一行辅助说明(按类型,平实陈述)。
+// approvalHint 卡尾一行辅助说明(按类型,平实陈述;P4-70 ①:范围卡两
+// 键、攻击卡会话档口径)。
 function approvalHint(approval) {
+  if (approval.kind === "attack") {
+    return "批准=该单位本会话内对这个信息源的攻击动作放行;拒绝=同类攻击本会话内自动拒绝,该动作终止单位继续,查资料不受影响";
+  }
   if (approval.kind !== "scope") {
-    return "附言留空直接放行;填写后随批准发给单位执行";
+    return "附言留空直接放行;拒绝只终止该动作,单位换方向继续";
   }
   if (approval.mode !== "pentest") {
-    return "已直接开始测试;可随时禁止(禁止测试=立即止损)";
+    return "已直接开始测试;加入资产=确认纳入范围;禁止测试=立即止损";
   }
   if (approval.tool_name) {
     return "加入资产:目标转范围内,挂等单位继续;禁止测试:目标排除,挂等单位终止";
   }
-  return "未放行不测;加入资产后可测,禁止测试后不再测";
+  return "加入资产后可测;禁止测试后不再测";
 }
 
 // ---- 操作约束 ----
@@ -1327,6 +1402,108 @@ function ConfirmRuleDeleteDialog({ taskID, rule, onClose }) {
   );
 }
 
+
+// ---- 信息源清单(P4-67:研判分诊第二层) ----
+
+// InfoSourceSection 任务信息源清单:经研判分诊判定"方法性访问"或经
+// 操作者标记的公开信息服务地址——只做获取使用,不是测试目标(不入
+// 资产图、不算覆盖);撤销后恢复拦截,后续访问重新研判。P4-68:标记
+// 行＝"允许访问"的 RoE 面板入口(P4-70 起为卡外唯一手授入口,与牧者
+// 标记同一账本动作)。
+function InfoSourceSection({ taskID }) {
+  const { data: roe, error } = usePolling(`/api/tasks/${taskID}/roe`, 4000);
+  const sources = Array.isArray(roe?.info_sources) ? roe.info_sources : [];
+  const [busy, setBusy] = React.useState("");
+  const [marking, setMarking] = React.useState(false);
+  const [markHost, setMarkHost] = React.useState("");
+
+  const revoke = async (host) => {
+    setBusy(host);
+    const { ok, body } = await postJSON(
+      `/api/tasks/${taskID}/roe/infosources/revoke`,
+      { host }
+    );
+    setBusy("");
+    if (!ok) {
+      toast.error(`撤销失败:${body.error || "原因未说明"}`);
+      return;
+    }
+    toast.success(`已撤销:${host}(后续访问恢复拦截)`);
+  };
+
+  // 允许访问(RoE 面板入口):只授访问权,不是测试目标;挂等单位继续。
+  const mark = async () => {
+    const host = markHost.trim();
+    if (!host || marking) return;
+    setMarking(true);
+    const { ok, body } = await postJSON(
+      `/api/tasks/${taskID}/roe/infosources/mark`,
+      { host }
+    );
+    setMarking(false);
+    if (!ok) {
+      toast.error(`允许访问失败:${body.error || "原因未说明"}`);
+      return;
+    }
+    const parts = [`已允许访问:${host}`];
+    if (body.woken_units > 0) parts.push(`唤醒 ${body.woken_units} 个单位`);
+    toast.success(parts.join(","));
+    setMarkHost("");
+  };
+
+  return (
+    <Card>
+      <CardContent className="flex flex-col gap-3 p-5">
+        <SectionHeader title="信息源">
+          <Badge variant={sources.length > 0 ? "info" : "outline"}>{sources.length}</Badge>
+        </SectionHeader>
+        <p className="text-xs text-muted-foreground">
+          查资料用的公开信息服务,不是测试目标:访问直接放行,观察不算发现;对它的主动攻击动作单独拦下问一次。
+        </p>
+        {error && <div className="text-xs text-status-danger">读取失败:{error}</div>}
+        <div className="flex flex-wrap items-center gap-2">
+          <Input
+            className="w-64"
+            placeholder="允许访问:域名或 IP(可带端口)"
+            value={markHost}
+            onChange={(e) => setMarkHost(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && mark()}
+          />
+          <Button size="sm" variant="outline" disabled={marking || !markHost.trim()} onClick={mark}>
+            允许访问
+          </Button>
+        </div>
+        {sources.length === 0 ? (
+          <div className="text-xs text-muted-foreground">暂无(虫群访问查资料类地址时,系统会自动判定)</div>
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            {sources.map((src) => (
+              <div
+                key={src.host}
+                className="flex flex-wrap items-center gap-2 rounded-lg border border-border/55 px-3 py-2"
+              >
+                <span className="num text-sm">{src.host}</span>
+                {src.at && <span className="num text-xs text-muted-foreground">{src.at}</span>}
+                <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={src.basis}>
+                  {src.basis}
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy === src.host}
+                  title="撤销后恢复拦截,再次访问会拦下问一次"
+                  onClick={() => revoke(src.host)}
+                >
+                  撤销
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 // ---- 目标管理 ----
 

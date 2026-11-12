@@ -17,6 +17,7 @@ type RoE struct {
 	ApprovalThreshold rings.ActionLevel
 	IntentRules       []rings.IntentRule
 	CreatorNotes      string
+	InfoSources       []rings.RoeInfoSource // 任务信息源清单(P4-67;约束块渲染)
 }
 
 // Allows 判定工具是否在边界内。

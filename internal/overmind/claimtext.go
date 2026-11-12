@@ -572,9 +572,9 @@ func parseHypoTexts(text string, known map[string]bool) map[string]rings.HypoTex
 		}
 		p := rings.HypoTextPolish{
 			HypothesisID: h.HypothesisID,
-			Title:    clipRunes(h.Title, 80),
-			Basis:    clipRunes(h.Basis, summaryFactClip),
-			Reason:   clipRunes(h.Reason, summaryFactClip),
+			Title:        clipRunes(h.Title, 80),
+			Basis:        clipRunes(h.Basis, summaryFactClip),
+			Reason:       clipRunes(h.Reason, summaryFactClip),
 		}
 		if p.Title != "" || p.Basis != "" || p.Reason != "" {
 			out[h.HypothesisID] = p

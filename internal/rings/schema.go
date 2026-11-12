@@ -352,6 +352,13 @@ var migrations = [][]string{
 			PRIMARY KEY (task_id, node_id)
 		) WITHOUT ROWID`,
 	},
+	{
+		// v16:P4-67 研判分诊与信息源清单(问题清单 #86 A②,RoE 机制重构
+		// 批次第二层):roe_state 加信息源清单列(info_sources,小 JSON
+		// 数组:host/basis/at)。指针语义(nil=本次不动,见 RoeUpdated),
+		// 旧库默认空 = 无信息源(历史任务行为不变,围栏照旧)。
+		`ALTER TABLE roe_state ADD COLUMN info_sources TEXT NOT NULL DEFAULT ''`,
+	},
 }
 
 // projectionFloor 投影初次落库的 schema 版本(v10,P4-36):升级跨过本版本

@@ -123,7 +123,7 @@ func TestP463MatchIntegration(t *testing.T) {
 	ctx := context.Background()
 
 	denied := []struct{ cmd, ruleID string }{
-		{"shutdown -h now", "hr-shutdown"},                    // 行首直接命令
+		{"shutdown -h now", "hr-shutdown"},                         // 行首直接命令
 		{`mysql -u root -e "TRUNCATE TABLE users"`, "hr-truncate"}, // 引号内真语句
 	}
 	for _, c := range denied {
@@ -133,10 +133,10 @@ func TestP463MatchIntegration(t *testing.T) {
 		}
 	}
 	allowed := []string{
-		"curl -s https://x.example/actuator/shutdown",     // 实锤①:URL 路径探测
-		`python3 -c "print('truncate -2')"`,               // 实锤②:print 标签
-		"curl -s http://t/?svc=shutdown",                  // 参数值
-		"echo done\n# reboot the box now",                 // 注释行
+		"curl -s https://x.example/actuator/shutdown", // 实锤①:URL 路径探测
+		`python3 -c "print('truncate -2')"`,           // 实锤②:print 标签
+		"curl -s http://t/?svc=shutdown",              // 参数值
+		"echo done\n# reboot the box now",             // 注释行
 	}
 	for _, cmd := range allowed {
 		if _, _, _, hit := matchHardRule(ctx, store, "bash", json.RawMessage(`{"command":`+mustJSONString(cmd)+`}`)); hit {

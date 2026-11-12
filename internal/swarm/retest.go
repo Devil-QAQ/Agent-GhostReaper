@@ -615,7 +615,7 @@ const retestWrapupPrompt = `运行预算即将耗尽。立即收尾:已取得可
 //	[6] 启动指令(最后一句)
 func RetestSystemSegments(ctx context.Context, store *rings.Store, roe RoE, rt *retestBinding) []string {
 	segs := []string{RenderRoEConstraint(
-		"你的复测手段受此框定。", roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, nil, nil, roe.CreatorNotes)}
+		"你的复测手段受此框定。", roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, nil, nil, roe.CreatorNotes, roe.InfoSources)}
 	segs = append(segs, RetestPromptSpec.Assemble(ctx, store)...)
 	segs = append(segs, retestIntentBlock(rt), retestStartupInstruction)
 	return segs

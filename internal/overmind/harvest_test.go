@@ -46,7 +46,7 @@ func TestHarvestRules(t *testing.T) {
 		}
 	}
 
-	hv, err := Harvest(ctx, store, task)
+	hv, err := Harvest(ctx, store, task, nil)
 	if err != nil {
 		t.Fatalf("收割失败: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestHarvestRules(t *testing.T) {
 		t.Fatalf("转正事件应记在主宰名下,实际 %d 条", confirmedByOvermind)
 	}
 	// 幂等:再次收割无新转正;无证据候选仍在图上、每轮如实跳过
-	hv2, err := Harvest(ctx, store, task)
+	hv2, err := Harvest(ctx, store, task, nil)
 	if err != nil || len(hv2.Confirmed) != 0 || len(hv2.Skipped) != 1 || hv2.Skipped[0].FactID != "f-bare" {
 		t.Fatalf("二次收割应无新转正且如实跳过: %+v err=%v", hv2, err)
 	}

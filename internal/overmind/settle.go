@@ -359,7 +359,7 @@ func (l *Loop) settle(ctx context.Context) {
 
 	// ② 终局判定:收割(候选事实转正 + 声明裁决 + 假设结论迁移)后
 	// Goal 全量过仲裁者(R16:超时不是失败,达成与否由机器判定)。
-	if _, err := Harvest(ctx, l.Store, l.TaskID); err != nil {
+	if _, err := Harvest(ctx, l.Store, l.TaskID, l.triageFn()); err != nil {
 		l.setErr(err)
 	}
 	if _, err := HarvestClaims(ctx, l.Store, l.TaskID); err != nil {

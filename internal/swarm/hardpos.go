@@ -37,9 +37,9 @@ import (
 type hardTier int
 
 const (
-	hardTierAction hardTier = iota // 动作位:确定性拒绝
-	hardTierAmbiguous              // 模糊形态:弹门人审
-	hardTierNonAction              // 非动作位:放行(不当动作)
+	hardTierAction    hardTier = iota // 动作位:确定性拒绝
+	hardTierAmbiguous                 // 模糊形态:弹门人审
+	hardTierNonAction                 // 非动作位:放行(不当动作)
 )
 
 // narrowedHardGroups 收窄组(判定按三档判定位):系统破坏类只认命令动词

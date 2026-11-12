@@ -39,7 +39,7 @@ func p444Task(t *testing.T, store *rings.Store, task, taskType, seed string) {
 }
 
 // p444FactWithAsset 种一个带 new_asset 声明的候选事实 + 出生血缘
-//(出生步骤节点先落,produces 边端点校验要求在图;步骤 ID 随事实唯一)。
+// (出生步骤节点先落,produces 边端点校验要求在图;步骤 ID 随事实唯一)。
 func p444FactWithAsset(t *testing.T, store *rings.Store, task, factID, newTitle string) {
 	t.Helper()
 	ctx := context.Background()
@@ -54,7 +54,7 @@ func p444FactWithAsset(t *testing.T, store *rings.Store, task, factID, newTitle 
 			NodeID: factID, NodeType: rings.NodeFact, Title: "发现 " + newTitle,
 			Status: "candidate",
 			Detail: map[string]any{
-				"evidence": "http_probe 实测",
+				"evidence":  "http_probe 实测",
 				"new_asset": map[string]any{"class": "host", "title": newTitle},
 			},
 		}},
@@ -73,7 +73,7 @@ func TestP444DiscoveredAssetScopeFrozen(t *testing.T) {
 	p444Task(t, store, "t-pen", rings.TaskTypePentest, "www.example.com")
 	p444FactWithAsset(t, store, "t-pen", "f-1", "api.example.com")
 	p444FactWithAsset(t, store, "t-pen", "f-2", "www.example.com:8080")
-	if _, err := Harvest(ctx, store, "t-pen"); err != nil {
+	if _, err := Harvest(ctx, store, "t-pen", nil); err != nil {
 		t.Fatal(err)
 	}
 	a1 := p444AssetByTitle(t, store, "t-pen", "api.example.com")
@@ -92,7 +92,7 @@ func TestP444DiscoveredAssetScopeFrozen(t *testing.T) {
 	// 红队任务:同样判定照做(分组用),但不构成待批。
 	p444Task(t, store, "t-red", rings.TaskTypeRedteam, "www.example.com")
 	p444FactWithAsset(t, store, "t-red", "f-1", "api.example.com")
-	if _, err := Harvest(ctx, store, "t-red"); err != nil {
+	if _, err := Harvest(ctx, store, "t-red", nil); err != nil {
 		t.Fatal(err)
 	}
 	ra := p444AssetByTitle(t, store, "t-red", "api.example.com")
@@ -125,7 +125,7 @@ func TestP444DispatchGuardPending(t *testing.T) {
 	ctx := context.Background()
 	p444Task(t, store, "t-1", rings.TaskTypePentest, "www.example.com")
 	p444FactWithAsset(t, store, "t-1", "f-1", "api.example.com")
-	if _, err := Harvest(ctx, store, "t-1"); err != nil {
+	if _, err := Harvest(ctx, store, "t-1", nil); err != nil {
 		t.Fatal(err)
 	}
 	pending := p444AssetByTitle(t, store, "t-1", "api.example.com")
@@ -151,7 +151,7 @@ func TestP444DispatchGuardPending(t *testing.T) {
 	// 红队任务:范围外资产直接可派(现状行为)。
 	p444Task(t, store, "t-2", rings.TaskTypeRedteam, "www.example.com")
 	p444FactWithAsset(t, store, "t-2", "f-1", "api.example.com")
-	if _, err := Harvest(ctx, store, "t-2"); err != nil {
+	if _, err := Harvest(ctx, store, "t-2", nil); err != nil {
 		t.Fatal(err)
 	}
 	red := p444AssetByTitle(t, store, "t-2", "api.example.com")

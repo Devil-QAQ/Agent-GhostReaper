@@ -21,6 +21,7 @@ import (
 
 	"ghostreaper/internal/failover"
 	"ghostreaper/internal/hiber"
+	"ghostreaper/internal/overmind"
 	"ghostreaper/internal/rings"
 	"ghostreaper/internal/swarm"
 )
@@ -70,6 +71,10 @@ type Service struct {
 	// 闭包注入执行器的同一 Helm——模型激活运行时装配后生效)。nil =
 	// 无执行器装配(止损只剩排队步骤取消,无在跑单位可停)。
 	HelmOf func() *swarm.Helm
+	// Loops 在跑主宰循环注册表(P4-69 ①:牧者摘除资产后即时对账收口
+	// 挂等冻结单位与未决卡——与 RoE 面板/卡上禁止测试三通道同源;
+	// nil 或无在跑循环时走裸循环对账本体,落账照常、拉起交下一轮)。
+	Loops *overmind.Registry
 	// 任务级运行控制(P4-54 操作面:冬眠/唤醒/终止经牧者对话可达,与
 	// 面板按钮同源同账本)。装配层注入 Manager 路由闭包;nil = 未装配
 	// (工具如实答复不可用)。TaskWake 按任务实际状态路由恢复通道
@@ -157,6 +162,21 @@ func (s *Service) helm() *swarm.Helm {
 		return s.HelmOf()
 	}
 	return nil
+}
+
+// resolveScopeWakes 范围对账收口(P4-69 ①:摘除资产后即时收口挂等
+// 冻结单位与未决卡——与 server 同款语义,三通道同源):在跑主宰循环
+// 直达(唤醒单位即时拉起);循环不在跑(终态/未装配)时用裸循环执行
+// 对账本体(纯账本驱动,落账照常)。
+func (s *Service) resolveScopeWakes(taskID string) (woken, terminated int) {
+	var l *overmind.Loop
+	if s.Loops != nil {
+		l = s.Loops.Get(taskID)
+	}
+	if l == nil {
+		l = &overmind.Loop{TaskID: taskID, Store: s.Store}
+	}
+	return l.ResolveScopeWaits(context.Background())
 }
 
 // ErrNoProvider 未配模型时入队的应答失败原因。

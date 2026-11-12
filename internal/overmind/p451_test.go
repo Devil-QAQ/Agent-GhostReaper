@@ -91,13 +91,16 @@ func TestP451ResolveScopeWaitsWakeAndTerminate(t *testing.T) {
 		t.Fatalf("幂等对账应零变更: %d %d", woken, terminated)
 	}
 
-	// 反向:另一冻结步骤 s2 等待目标 evil9.com,随后该资产被排除(禁止
-	// 测试/RoE 摘除同一机制)→ 对账收口中止。
+	// 反向:另一冻结步骤 s2 等待目标 evil9.com(意图锚定该资产——P4-69
+	// 分族语义下挂等单位按意图覆盖收口,锚定保持"覆盖者终止"口径),
+	// 随后该资产被排除(禁止测试/RoE 摘除同一机制)→ 对账收口中止。
 	p451FreezeStep(t, store, task, "s2", "evil9.com", "8080")
-	if _, err := store.Append(ctx, task, rings.Event{
-		Kind: rings.EventRoeUpdated, Actor: "creator",
-		Payload: rings.RoeUpdated{ExcludedAssets: []string{"a-evil"}, Note: "禁止测试"},
-	}); err != nil {
+	if _, err := store.Append(ctx, task,
+		rings.Event{Kind: rings.EventEdgeAdded, Actor: "overmind", Payload: rings.EdgeAdded{
+			EdgeType: rings.EdgeCovers, FromNode: "s2", ToNode: "a-evil"}},
+		rings.Event{Kind: rings.EventRoeUpdated, Actor: "creator",
+			Payload: rings.RoeUpdated{ExcludedAssets: []string{"a-evil"}, Note: "禁止测试"}},
+	); err != nil {
 		t.Fatal(err)
 	}
 	woken, terminated = l.ResolveScopeWaits(ctx)
@@ -152,7 +155,7 @@ func TestP451RedteamVetoCardOnDiscovery(t *testing.T) {
 	// 红队任务:范围外新资产入图即出卡。
 	p444Task(t, store, "t-red", rings.TaskTypeRedteam, "www.example.com")
 	p444FactWithAsset(t, store, "t-red", "f-1", "sibling.example.com")
-	if _, err := Harvest(ctx, store, "t-red"); err != nil {
+	if _, err := Harvest(ctx, store, "t-red", nil); err != nil {
 		t.Fatal(err)
 	}
 	cards := p451ScopeCards(t, store, "t-red")
@@ -165,7 +168,7 @@ func TestP451RedteamVetoCardOnDiscovery(t *testing.T) {
 
 	// 同目标重复发现(第二事实入图锚定既有资产):不堆叠。
 	p444FactWithAsset(t, store, "t-red", "f-2", "sibling.example.com")
-	if _, err := Harvest(ctx, store, "t-red"); err != nil {
+	if _, err := Harvest(ctx, store, "t-red", nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(p451ScopeCards(t, store, "t-red")); got != 1 {
@@ -175,7 +178,7 @@ func TestP451RedteamVetoCardOnDiscovery(t *testing.T) {
 	// 渗透任务:范围外新资产入图不出发现卡(锁定不测,拦截通道出卡)。
 	p444Task(t, store, "t-pen", rings.TaskTypePentest, "www.example.com")
 	p444FactWithAsset(t, store, "t-pen", "f-1", "sibling.example.com")
-	if _, err := Harvest(ctx, store, "t-pen"); err != nil {
+	if _, err := Harvest(ctx, store, "t-pen", nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(p451ScopeCards(t, store, "t-pen")); got != 0 {

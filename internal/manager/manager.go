@@ -205,6 +205,14 @@ func New(cfg Config) (*Manager, error) {
 		if err != nil {
 			return nil, fmt.Errorf("manager: 幽灵清理 %s: %w", r.ID, err)
 		}
+		// P4-69 ②(存量一次清理):排除与批准互斥——旧机制"先批准后
+		// 摘除"的脏快照(实锤 a-72dab0e5 同列两清单)在升级重启收养时
+		// 归位(摘除清单成员一律从批准清单剔除);干净任务零落笔。
+		if removed, rerr := cfg.Store.ReconcileRoeExclusivity(context.Background(), r.ID, "manager"); rerr != nil {
+			return nil, fmt.Errorf("manager: 范围状态互斥清理 %s: %w", r.ID, rerr)
+		} else if removed > 0 {
+			runlog.Infof("范围状态互斥清理: 任务 %s 摘除清单成员 %d 个从批准清单剔除(存量归位)", r.ID, removed)
+		}
 		action := "keep"
 		switch r.Status {
 		case StatusStarted, StatusSettling, StatusCheckpointed:

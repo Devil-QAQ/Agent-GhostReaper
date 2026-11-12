@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"regexp"
 	"strings"
 	"time"
@@ -329,11 +330,12 @@ type RoeState struct {
 	AllowedTools      []string
 	DeniedTools       []string
 	ApprovalThreshold ActionLevel
-	IntentRules       []IntentRule // 任务级拦截规则(P2-08e)
-	ExcludedAssets    []string     // 授权范围摘除清单(P4-05;空=全部纳入)
-	ScopeApproved     []string     // 范围外资产放行清单(P4-44;渗透任务待批资产放行后转范围内)
-	CreatorNotes      string       // 造物主注意事项(P4-49;空=无)
-	MaxActionLevel    ActionLevel  // 已废止(P1-07 分级上限,读兼容)
+	IntentRules       []IntentRule    // 任务级拦截规则(P2-08e)
+	ExcludedAssets    []string        // 授权范围摘除清单(P4-05;空=全部纳入)
+	ScopeApproved     []string        // 范围外资产放行清单(P4-44;渗透任务待批资产放行后转范围内)
+	CreatorNotes      string          // 造物主注意事项(P4-49;空=无)
+	InfoSources       []RoeInfoSource // 信息源清单(P4-67;空=无)
+	MaxActionLevel    ActionLevel     // 已废止(P1-07 分级上限,读兼容)
 	Note              string
 	UpdatedRev        int64
 }
@@ -360,6 +362,26 @@ func (r RoeState) ScopeApprovedSet() map[string]bool {
 		m[id] = true
 	}
 	return m
+}
+
+// InfoSourceHit 访问目标(host,可带端口)是否命中信息源清单(P4-67):
+// 清单是 host 级访问权——host 相同即命中(查资料的公开服务与端口
+// 无关),端口不参与匹配。
+func (r RoeState) InfoSourceHit(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return false
+	}
+	for _, s := range r.InfoSources {
+		h := s.Host
+		if i := strings.LastIndex(h, ":"); i > 0 && net.ParseIP(h[:i]) == nil {
+			h = h[:i] // host:port 键形态按 host 匹配(IPv6 字面量无冒号后缀形态不进清单)
+		}
+		if strings.ToLower(strings.TrimSpace(h)) == host {
+			return true
+		}
+	}
+	return false
 }
 
 // ExcludedAssetView 摘除资产的呈现形态(ID + 标题,供约束块渲染与面板
@@ -404,11 +426,11 @@ func (s *Store) CurrentRoE(ctx context.Context, taskID string) (RoeState, error)
 		return RoeState{}, ErrEmptyTaskID
 	}
 	var r RoeState
-	var allowed, denied, maxLevel, threshold, rules, exAssets, scApproved string
+	var allowed, denied, maxLevel, threshold, rules, exAssets, scApproved, infoSrcs string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT allowed_tools, denied_tools, max_action_level, approval_threshold, intent_rules, excluded_assets, scope_approved, creator_notes, note, updated_rev
+		SELECT allowed_tools, denied_tools, max_action_level, approval_threshold, intent_rules, excluded_assets, scope_approved, creator_notes, info_sources, note, updated_rev
 		FROM roe_state WHERE task_id = ?`, taskID,
-	).Scan(&allowed, &denied, &maxLevel, &threshold, &rules, &exAssets, &scApproved, &r.CreatorNotes, &r.Note, &r.UpdatedRev)
+	).Scan(&allowed, &denied, &maxLevel, &threshold, &rules, &exAssets, &scApproved, &r.CreatorNotes, &infoSrcs, &r.Note, &r.UpdatedRev)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RoeState{}, nil
 	}
@@ -429,6 +451,11 @@ func (s *Store) CurrentRoE(ctx context.Context, taskID string) (RoeState, error)
 	}
 	if err := json.Unmarshal([]byte(scApproved), &r.ScopeApproved); err != nil {
 		return RoeState{}, fmt.Errorf("rings: 解码任务 %s scope_approved: %w", taskID, err)
+	}
+	if infoSrcs != "" {
+		if err := json.Unmarshal([]byte(infoSrcs), &r.InfoSources); err != nil {
+			return RoeState{}, fmt.Errorf("rings: 解码任务 %s info_sources: %w", taskID, err)
+		}
 	}
 	r.MaxActionLevel = ActionLevel(maxLevel)
 	r.ApprovalThreshold = ActionLevel(threshold)
@@ -507,7 +534,7 @@ func (s *Store) AssetGraph(ctx context.Context, taskID string) (*AssetGraphView,
 		           AND src.node_type = 'hypothesis'
 		       )
 		FROM nodes n
-		WHERE n.task_id = ? AND n.node_type = 'asset'
+		WHERE n.task_id = ? AND n.node_type = 'asset' AND n.status != 'retired'
 		ORDER BY n.node_id`, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("rings: 查询任务 %s 资产: %w", taskID, err)

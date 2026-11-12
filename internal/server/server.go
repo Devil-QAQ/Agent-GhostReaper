@@ -324,8 +324,10 @@ func (s *Server) Handler() *http.ServeMux {
 	mux.HandleFunc("POST /api/tasks/{id}/recover", s.handleTaskRecover)
 	mux.HandleFunc("GET /api/tasks/{id}/roe", s.handleRoEGet)
 	mux.HandleFunc("POST /api/tasks/{id}/roe", s.handleRoEUpdate)
-	mux.HandleFunc("POST /api/tasks/{id}/roe/assets", s.handleRoEAssetScope)        // P4-05 授权资产范围(纳入/摘除;P4-45 摘除即止损)
-	mux.HandleFunc("GET /api/tasks/{id}/roe/assets/impact", s.handleRoEAssetImpact) // P4-45 摘除影响预览(确认弹窗)
+	mux.HandleFunc("POST /api/tasks/{id}/roe/assets", s.handleRoEAssetScope)                // P4-05 授权资产范围(纳入/摘除;P4-45 摘除即止损)
+	mux.HandleFunc("GET /api/tasks/{id}/roe/assets/impact", s.handleRoEAssetImpact)         // P4-45 摘除影响预览(确认弹窗)
+	mux.HandleFunc("POST /api/tasks/{id}/roe/infosources/revoke", s.handleInfoSourceRevoke) // P4-67 信息源撤销(恢复拦截)
+	mux.HandleFunc("POST /api/tasks/{id}/roe/infosources/mark", s.handleInfoSourceMark)     // P4-68 允许访问(RoE 面板标记,与牧者/分诊自动授同源;P4-70 起为卡外唯一手授入口)
 	// P4-52 ⑤:待批资产放行/忽略端点随资产页按钮一并退役(审批集中
 	// RoE,走 /approvals/{rid} 与 /approvals/batch 的范围卡通道)。
 	mux.HandleFunc("GET /api/tasks/{id}/goals", s.handleGoalsList)
@@ -355,7 +357,8 @@ func (s *Server) Handler() *http.ServeMux {
 	mux.HandleFunc("GET /api/tasks/{id}/report/archives/{rev}", s.handleReportArchiveDownload)
 	mux.HandleFunc("GET /api/tasks/{id}/approvals", s.handleApprovalsList)
 	mux.HandleFunc("POST /api/tasks/{id}/approvals/{rid}", s.handleApprovalDecide)
-	mux.HandleFunc("POST /api/tasks/{id}/approvals/batch", s.handleApprovalBatch) // P4-52 ⑤ 范围卡勾选批量两键
+	mux.HandleFunc("POST /api/tasks/{id}/approvals/batch", s.handleApprovalBatch)           // P4-52 ⑤ 范围卡勾选批量两键(P4-70 ① 批量第三键入口移除)
+	mux.HandleFunc("POST /api/tasks/{id}/approvals/{rid}/reverse", s.handleApprovalReverse) // P4-71 ② 审批记录反向操作(详情 Sheet 反向键)
 	mux.HandleFunc("POST /api/tasks/{id}/wake", s.handleWake)
 
 	// ---- 舵杆(P2-05,第八章第 8 节:操作者侧 kill_work 与指令审计流;
@@ -1538,14 +1541,15 @@ func (s *Server) handleSearchUpdate(w http.ResponseWriter, r *http.Request) {
 // 授权范围摘除清单(P4-05):随快照整体提交;面板专用端点 /roe/assets
 // 改它,其余快照提交须透传当前值(否则清空)。
 type roeBody struct {
-	AllowedTools      []string       `json:"allowed_tools"`
-	DeniedTools       []string       `json:"denied_tools"`
-	ApprovalThreshold string         `json:"approval_threshold"` // 空 = 默认宽(仅增删改弹门)
-	IntentRules       []intentRuleIn `json:"intent_rules"`
-	ExcludedAssets    []string       `json:"excluded_assets"` // 授权范围摘除清单(P4-05;省略 = 保持现值)
-	ScopeApproved     []string       `json:"scope_approved"`  // 范围外资产放行清单(P4-44;省略 = 保持现值)
-	CreatorNotes      *string        `json:"creator_notes"`   // 造物主注意事项(P4-49;省略 = 保持现值,空串 = 清空)
-	Note              string         `json:"note"`
+	AllowedTools      []string               `json:"allowed_tools"`
+	DeniedTools       []string               `json:"denied_tools"`
+	ApprovalThreshold string                 `json:"approval_threshold"` // 空 = 默认宽(仅增删改弹门)
+	IntentRules       []intentRuleIn         `json:"intent_rules"`
+	ExcludedAssets    []string               `json:"excluded_assets"` // 授权范围摘除清单(P4-05;省略 = 保持现值)
+	ScopeApproved     []string               `json:"scope_approved"`  // 范围外资产放行清单(P4-44;省略 = 保持现值)
+	CreatorNotes      *string                `json:"creator_notes"`   // 造物主注意事项(P4-49;省略 = 保持现值,空串 = 清空)
+	InfoSources       *[]rings.RoeInfoSource `json:"info_sources"`    // 信息源清单(P4-67;省略 = 保持现值;专用端点管理)
+	Note              string                 `json:"note"`
 }
 
 func (b *roeBody) toRings() rings.RoeUpdated {
@@ -1561,6 +1565,7 @@ func (b *roeBody) toRings() rings.RoeUpdated {
 		ExcludedAssets:    b.ExcludedAssets,
 		ScopeApproved:     b.ScopeApproved,
 		CreatorNotes:      b.CreatorNotes,
+		InfoSources:       b.InfoSources,
 		Note:              b.Note,
 	}
 }
@@ -1581,14 +1586,15 @@ func normalizeCreatorNotesIn(p *string) (*string, error) {
 
 // roeView RoE 当前值(显式给出生效的审批门槛,面板不必懂默认值)。
 type roeView struct {
-	AllowedTools      []string        `json:"allowed_tools"`
-	DeniedTools       []string        `json:"denied_tools"`
-	ApprovalThreshold string          `json:"approval_threshold"` // 已归一的生效审批门槛
-	IntentRules       []intentRuleOut `json:"intent_rules"`       // 任务级拦截规则(带资产标题与已用次数)
-	ExcludedAssets    []string        `json:"excluded_assets"`    // 授权范围摘除清单(P4-05)
-	CreatorNotes      string          `json:"creator_notes"`      // 造物主注意事项(P4-49;空 = 无)
-	Note              string          `json:"note,omitempty"`
-	UpdatedRev        int64           `json:"updated_rev"`
+	AllowedTools      []string              `json:"allowed_tools"`
+	DeniedTools       []string              `json:"denied_tools"`
+	ApprovalThreshold string                `json:"approval_threshold"` // 已归一的生效审批门槛
+	IntentRules       []intentRuleOut       `json:"intent_rules"`       // 任务级拦截规则(带资产标题与已用次数)
+	ExcludedAssets    []string              `json:"excluded_assets"`    // 授权范围摘除清单(P4-05)
+	CreatorNotes      string                `json:"creator_notes"`      // 造物主注意事项(P4-49;空 = 无)
+	InfoSources       []rings.RoeInfoSource `json:"info_sources"`       // 信息源清单(P4-67;空 = 无)
+	Note              string                `json:"note,omitempty"`
+	UpdatedRev        int64                 `json:"updated_rev"`
 }
 
 func (s *Server) currentRoE(taskID string) (roeView, error) {
@@ -1603,6 +1609,7 @@ func (s *Server) currentRoE(taskID string) (roeView, error) {
 		IntentRules:       s.intentRuleViews(taskID, st.IntentRules),
 		ExcludedAssets:    st.ExcludedAssets,
 		CreatorNotes:      st.CreatorNotes,
+		InfoSources:       st.InfoSources,
 		Note:              st.Note,
 		UpdatedRev:        st.UpdatedRev,
 	}, nil
@@ -1658,6 +1665,13 @@ func (s *Server) handleRoEUpdate(w http.ResponseWriter, r *http.Request) {
 	if body.ScopeApproved == nil {
 		if st, err := s.Store.CurrentRoE(r.Context(), taskID); err == nil {
 			roe.ScopeApproved = st.ScopeApproved
+		}
+	}
+	// P4-67:信息源清单同款指针语义——其余快照提交不携带时保持现值
+	//(分诊自动授/面板撤销/牧者标记三处显式写)。
+	if body.InfoSources == nil {
+		if st, err := s.Store.CurrentRoE(r.Context(), taskID); err == nil && st.InfoSources != nil {
+			roe.InfoSources = &st.InfoSources
 		}
 	}
 	if err := s.validateAssetIDs(taskID, roe.ExcludedAssets); err != nil {
@@ -2124,12 +2138,17 @@ type approvalRecordView struct {
 	Reason      string `json:"reason,omitempty"`
 	WaitMillis  int64  `json:"wait_millis,omitempty"`
 	OccurredAt  string `json:"occurred_at"`
+	// Reverse 反向操作元数据(P4-71 ②:详情 Sheet 反向键的呈现面——
+	// null=该记录无反向〔弹门批准等已执行的一次性动作,如实〕)。
+	Reverse *reverseMeta `json:"reverse,omitempty"`
 }
 
 // approvalView 待决审批请求(审批弹门的面板核对物)。端点视图与实时
 // 推送载荷(P3-08)同源共用——展示与操作同源,推送不另立装配。
 // P4-51:Kind="scope" 为范围待决卡(渗透拦截/红队可否决),按钮组
 // "加入资产/禁止测试";缺省为弹门待决票(批准/拒绝)。
+// P4-67:Kind="attack" 为攻击行为卡(对信息源的主动攻击动作),按钮组
+// 批准/拒绝＋附言(批准=放行该次动作、host 仍非目标;拒绝=只杀动作)。
 // P4-52 ①:三类卡统一骨架呈现,Mode 标范围卡的任务形态(pentest=
 // 范围阻塞/待批资产;redteam=红队可否决),危害说明三段式对带命令的
 // 范围卡同样拼装。
@@ -2173,8 +2192,13 @@ func (s *Server) handleApprovalsList(w http.ResponseWriter, r *http.Request) {
 	pending := s.Gate.Pending(taskID)
 	out := make([]approvalView, 0, len(pending))
 	for _, p := range pending {
+		kind, target := "", ""
+		if p.AttackTarget != "" {
+			kind, target = "attack", p.AttackTarget // P4-67 攻击行为卡
+		}
 		out = append(out, approvalView{
-			ID: p.ID, StepID: p.StepID, UnitID: p.UnitID, Intent: p.Intent,
+			ID: p.ID, Kind: kind, Target: target,
+			StepID: p.StepID, UnitID: p.UnitID, Intent: p.Intent,
 			ActionLevel: string(p.ActionLevel), ToolName: p.ToolName,
 			ToolArgs:  p.ToolArgs,
 			Note:      p.Note,
@@ -2265,13 +2289,32 @@ func (s *Server) approvalRecords(ctx context.Context, taskID string) ([]approval
 		return nil, err
 	}
 	var recs []approvalRecordView
+	// P4-71 ②:反向键可用性——攻击档在 unitEnv 内存态,单位在飞才可调
+	//(旧攻击记录如实置灰);执行器未装配视为全部不可用。
+	exec := s.swarmExec()
+	unitActive := func(unitID string) bool { return exec != nil && exec.UnitActive(taskID, unitID) }
+	frozen := s.taskHibernated(taskID)
 	for _, r := range rows {
+		note := r.Note
+		// P4-67 研判分诊留痕的依据摘要人话化(账本原文 verdict=/basis=
+		// 是解析契约,不上界面)。
+		if r.Type == rings.ApprovalRecTriage {
+			note = triageNoteText(r.Note)
+		}
+		var rev *reverseMeta
+		if m := reverseOpOf(r, unitActive); m != nil {
+			// 冬眠中反向键一并冻结(审批只读既有口径)。
+			if frozen {
+				m.Unavailable = "任务冬眠中,审批记录只读"
+			}
+			rev = m
+		}
 		recs = append(recs, approvalRecordView{
 			RequestID: r.RequestID, StepID: r.StepID, UnitID: r.UnitID,
 			Type: r.Type, ActionLevel: r.ActionLevel, HarmClass: r.HarmClass,
 			Intent: r.Intent, ToolName: r.ToolName, ToolArgs: r.ToolArgs,
-			Note: r.Note, DenyLine: r.DenyLine, DecidedBy: r.DecidedBy, Reason: r.Reason,
-			WaitMillis: r.WaitMillis, OccurredAt: r.OccurredAt,
+			Note: note, DenyLine: r.DenyLine, DecidedBy: r.DecidedBy, Reason: r.Reason,
+			WaitMillis: r.WaitMillis, OccurredAt: r.OccurredAt, Reverse: rev,
 		})
 	}
 	// 倒序:最新在先。
@@ -2283,18 +2326,34 @@ func (s *Server) approvalRecords(ctx context.Context, taskID string) ([]approval
 
 // handleApprovalDecide 面板裁决(批准/拒绝):先记账后送达(审批门
 // LedgerGate 保证),此处只做参数透传。裁决者恒为造物主(creator)。
-// 拒绝即熔断该单位会话(单位级终止,Step 终态"审批拒绝终止")。
+// P4-68 ②:面板拒绝只杀该动作不杀单位(drive 侧注入换路反馈,连拒
+// 同类 3 次升级杀)。
 // P4-51:范围待决卡(sc- 前缀)走两键裁决"加入资产/禁止测试"——
 // 瞬间返回,命令由单位自己异步跑(严禁同步执行命令)。
 // P4-52 ⑤:待批资产卡(资产 ID,a- 前缀)走资产裁决通道(同一两键)。
+// P4-68 ①:范围卡第三键"允许访问"(action="allow_access",approved
+// 不参与)——host 入信息源清单＋资产退役＋挂等单位唤醒续跑,瞬间返回。
+// P4-70 ①:卡面与批量的第三键入口已移除(批量端点不再收 allow_access),
+// 本单卡决策端点保留——只授访问权的日常入口在 RoE 页信息源区标记行
+// (与牧者标记、分诊自动授同走 AllowScopeAccess 统一入口)。
 func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 	rid := r.PathValue("rid")
 	var req struct {
 		Approved *bool  `json:"approved"` // 显式布尔,缺省视为坏请求
 		Reason   string `json:"reason"`
+		Action   string `json:"action"` // P4-68:"allow_access"=范围卡第三键
 	}
 	if !readJSON(w, r, &req) {
+		return
+	}
+	action := strings.TrimSpace(req.Action)
+	if action == "allow_access" {
+		if strings.HasPrefix(rid, rings.ScopeCardIDPrefix) || strings.HasPrefix(rid, assetCardIDPrefix) {
+			s.handleScopeDecide(w, r, taskID, rid, false, strings.TrimSpace(req.Reason), true)
+			return
+		}
+		writeErr(w, http.StatusBadRequest, errors.New("允许访问只适用于范围卡"))
 		return
 	}
 	if req.Approved == nil {
@@ -2302,7 +2361,7 @@ func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasPrefix(rid, rings.ScopeCardIDPrefix) || strings.HasPrefix(rid, assetCardIDPrefix) {
-		s.handleScopeDecide(w, r, taskID, rid, *req.Approved, strings.TrimSpace(req.Reason))
+		s.handleScopeDecide(w, r, taskID, rid, *req.Approved, strings.TrimSpace(req.Reason), false)
 		return
 	}
 	err := s.Gate.Decide(r.Context(), taskID, rid, swarm.GateDecision{

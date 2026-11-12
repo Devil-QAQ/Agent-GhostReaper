@@ -13,6 +13,7 @@ import (
 
 	"ghostreaper/internal/arbiter"
 	"ghostreaper/internal/rings"
+	"ghostreaper/internal/runlog"
 	"ghostreaper/internal/swarm"
 )
 
@@ -65,7 +66,11 @@ type DispatchOptions struct {
 	// DependsOn 前置步骤(P2-06 派发策略):落 depends_on 边(Step→Step),
 	// 调度侧依赖闸——前置全部完成(done)才领取执行。
 	DependsOn []string
-	Detail    map[string]any
+	// ExternalServices 外部服务声明(P4-67 ⑤,可选):落
+	// step.detail.external_services,Claim 读进任务包供分诊判
+	// declared_source(命中声明的服务形态免分诊放行)。
+	ExternalServices string
+	Detail           map[string]any
 }
 
 // DispatchStep 派发意图:Step 节点(status=dispatched,等待虫群领取)
@@ -202,6 +207,9 @@ func stepEvents(ctx context.Context, store *rings.Store, taskID, stepID, intent 
 	if p := strings.TrimSpace(opt.Priority); p != "" && p != PriorityNormal {
 		detail["priority"] = p
 	}
+	if es := strings.TrimSpace(opt.ExternalServices); es != "" {
+		detail["external_services"] = es
+	}
 	events := []rings.Event{{
 		Kind: rings.EventNodeAdded, Actor: ActorOvermind,
 		Payload: rings.NodeAdded{NodeID: stepID, NodeType: rings.NodeStep, Title: intent, Status: "dispatched", Detail: detail},
@@ -277,7 +285,7 @@ type HarvestResult struct {
 // 事实 about→资产)与发现单位/步骤/事实冻结进 detail,链路从成果一路
 // 走通到"谁发现的它"。同标识资产查重:重复发现不重复入图,发现事实
 // 锚定到既有对象(不编造第二次出生)。
-func Harvest(ctx context.Context, store *rings.Store, taskID string) (*HarvestResult, error) {
+func Harvest(ctx context.Context, store *rings.Store, taskID string, triage swarm.TriageFunc) (*HarvestResult, error) {
 	candidates, err := store.NodesByType(ctx, taskID, rings.NodeFact, "candidate")
 	if err != nil {
 		return nil, fmt.Errorf("overmind: 检查归纳扫描待确认事实: %w", err)
@@ -309,7 +317,15 @@ func Harvest(ctx context.Context, store *rings.Store, taskID string) (*HarvestRe
 			if len(assetEvents) > 0 && assetEvents[0].Kind == rings.EventNodeAdded {
 				newAsset = true
 			}
-			events = append(events, assetEvents...)
+			// P4-67 发现路分诊(两模式同款):范围外新资产入图前归类——
+			// 信息源不入资产图、只记清单(渗透不出待批卡、红队不出
+			// 可否决卡);候选/拿不准照走现行入图(渗透待批锁定、红队
+			// 直接测＋可否决卡)。
+			if newAsset && triageDiscoveredIsInfoSource(ctx, store, taskID, triage, c) {
+				newAsset = false // 资产事件批弃用(清单与留痕已先落账)
+			} else {
+				events = append(events, assetEvents...)
+			}
 		}
 		// P4-51 ④(红队先测＋可否决卡):红队/未标任务的范围外新资产
 		// 直接可测(现状),同时出待办卡(加入资产=确认消卡;禁止测试
@@ -327,6 +343,96 @@ func Harvest(ctx context.Context, store *rings.Store, taskID string) (*HarvestRe
 		res.Confirmed = append(res.Confirmed, c.ID)
 	}
 	return res, nil
+}
+
+// triageFn 分诊调用的惰性解析:注入优先(Triage 字段),nil 且有
+// Provider 时按任务 LLM 链构造;两者皆无返回 nil(发现路按候选入图,
+// 拿不准方向)。
+func (l *Loop) triageFn() swarm.TriageFunc {
+	if l.Triage != nil {
+		return l.Triage
+	}
+	if l.Provider == nil {
+		return nil
+	}
+	return swarm.TriageFor(l.Provider)
+}
+
+// triageDiscoveredIsInfoSource 发现路分诊(P4-67 ③b):新资产范围外且
+// 有主机锚点时判性质。信息源(方法性访问/声明命中/清单已命中)→入
+// 信息源清单并留研判痕迹,返回 true(调用方弃用资产入图事件批——
+// 不入资产图、不进范围闭包、不算覆盖、不出任何卡);候选/攻击/拿不
+// 准/无分诊链 → 返回 false 走现行入图。拿不准偏向入图(渗透待批/
+// 红队可否决,与命令路"偏向出卡"同方向)。
+func triageDiscoveredIsInfoSource(ctx context.Context, store *rings.Store, taskID string,
+	triage swarm.TriageFunc, fact rings.NodeFull) bool {
+	anchor, ok := rings.ScopeAnchorOf(strings.TrimSpace(factNewAssetTitle(fact)))
+	if !ok {
+		return false // 无主机锚点:不构成范围问题,现行入图
+	}
+	host := anchor.Host
+	// 信息源清单命中(任务级缓存):零分诊调用,不入图。
+	if roe, err := store.CurrentRoE(ctx, taskID); err == nil && roe.InfoSourceHit(host) {
+		return true
+	}
+	verdict, basis := swarm.TriageVerdictOf(ctx, store, taskID, host)
+	if verdict == "" {
+		if triage == nil {
+			return false // 无分诊链(测试/异常装配):按拿不准走现行入图
+		}
+		v, b, err := triage(ctx, swarm.TriageInput{
+			Host: host, Discovered: fact.Title,
+			GoalSummary: latestGoalTitle(ctx, store, taskID),
+		})
+		if err != nil {
+			runlog.Warnf("边界判定失败(发现路,按相关资产入图): %s %s: %v", taskID, host, err)
+			return false
+		}
+		verdict, basis = v, b
+		if _, err := store.Append(ctx, taskID, rings.Event{
+			Kind: rings.EventApprovalRecord, Actor: ActorOvermind,
+			Payload: swarm.BuildTriageRecord(host, verdict, basis, rings.ApprovalRecord{
+				UnitID: factUnitOf(fact), Intent: fact.Title,
+			}),
+		}); err != nil {
+			runlog.Warnf("边界判定留痕失败(如实继续): %s %s: %v", taskID, host, err)
+		}
+	}
+	if !swarm.IsTriageInfoSource(verdict) {
+		return false // 候选/攻击行为/拿不准:入图(渗透待批/红队可否决)
+	}
+	// AllowScopeAccess 统一入口(P4-68 ①:与卡上手授/牧者标记同一机制)
+	//——host 入清单＋图上同主机资产退役;发现路的新资产事件由调用方
+	// 弃用(本批不入图),退役兜住历史同锚点资产。
+	if err := swarm.AllowScopeAccess(ctx, store, taskID, host, basis, ActorOvermind); err != nil {
+		runlog.Warnf("信息源入清单失败(按相关资产入图兜底): %s %s: %v", taskID, host, err)
+		return false
+	}
+	return true
+}
+
+// factNewAssetTitle 发现事实携带的新资产标识(分诊锚点;无声明返回
+// 空串——ScopeAnchorOf 对空串返回 false)。
+func factNewAssetTitle(fact rings.NodeFull) string {
+	if decl := factNewAsset(fact.Detail); decl != nil {
+		return decl.Title
+	}
+	return ""
+}
+
+// factUnitOf 发现事实的发现单位(detail 血缘,可能缺)。
+func factUnitOf(fact rings.NodeFull) string {
+	u, _ := fact.Detail["unit_id"].(string)
+	return u
+}
+
+// latestGoalTitle 任务目标摘要(分诊输入;无目标如实空)。
+func latestGoalTitle(ctx context.Context, store *rings.Store, taskID string) string {
+	goals, err := store.NodesByType(ctx, taskID, rings.NodeGoal, "")
+	if err != nil || len(goals) == 0 {
+		return ""
+	}
+	return goals[len(goals)-1].Title
 }
 
 // redteamScopeCardEvent 红队任务新入图资产的可否决卡事件(P4-51 ④):

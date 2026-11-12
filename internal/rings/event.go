@@ -483,6 +483,22 @@ type TaskMeta struct {
 // ScopeApproved 是范围外资产放行清单(P4-44,问题清单 #61):渗透任务
 // 的待批资产经面板/牧者放行后转范围内可测;随快照整体提交,语义与
 // ExcludedAssets 同款(增删 = 提交新快照,条目须图上存在)。
+// InfoSources 是任务信息源清单(P4-67,问题清单 #86 A②:研判分诊与
+// 信息源清单):经分诊判定为"方法性访问"的公开信息服务地址(代码托管/
+// 搜索引擎/公共文档等)——只做获取使用、不是测试目标。**指针语义**:
+// nil = 本次变更不动它(透传当前值的各写入口不误清空;分诊自动授/
+// 牧者标记/面板撤销三处显式写);非空指针整体覆盖(空数组 = 清空——
+// 清空必须是非 nil 空切片,指向 nil 切片的指针经 JSON 往返变 null,
+// 等价"本次不动")。
+// 清单上的地址不入资产图、不进范围闭包、不算覆盖;撤销 = 移出清单,
+// 该地址后续访问恢复拦截(重新走分诊)。条目 Host 为 host[:port] 键
+// 形态,判定命中按 host 全放行(查资料的服务与端口无关)。
+type RoeInfoSource struct {
+	Host  string `json:"host"`            // host[:port] 键形态(显示原样)
+	Basis string `json:"basis,omitempty"` // 研判依据摘要(一句话)
+	At    string `json:"at,omitempty"`    // 标记时间(面板呈现)
+}
+
 // CreatorNotes 是造物主注意事项(P4-49,问题清单 #70):对做法的软要求
 // (如"用小字典,不要用大字典""不要修改任何数据")——与拦截规则分工:
 // 方法偏好写这里,绝对红线配拦截规则。**指针语义**:nil = 本次变更不
@@ -491,15 +507,16 @@ type TaskMeta struct {
 // 非空指针整体覆盖(空串 = 清空注意事项)。投影按逐笔叠加(COALESCE),
 // 事件流重放仍确定。
 type RoeUpdated struct {
-	AllowedTools      []string     `json:"allowed_tools,omitempty"`      // 白名单(空=不设白名单)
-	DeniedTools       []string     `json:"denied_tools,omitempty"`       // 黑名单(优先于白名单)
-	ApprovalThreshold ActionLevel  `json:"approval_threshold,omitempty"` // 审批门槛(空=默认宽:仅增删改弹门)
-	IntentRules       []IntentRule `json:"intent_rules,omitempty"`       // 任务级拦截规则(P2-08e)
-	ExcludedAssets    []string     `json:"excluded_assets,omitempty"`    // 授权范围摘除清单(P4-05;空=全部纳入)
-	ScopeApproved     []string     `json:"scope_approved,omitempty"`     // 范围外资产放行清单(P4-44;随快照整体提交)
-	CreatorNotes      *string      `json:"creator_notes,omitempty"`      // 造物主注意事项(P4-49;nil=本次不动)
-	MaxActionLevel    ActionLevel  `json:"max_action_level,omitempty"`   // 已废止(P1-07 分级上限,读兼容)
-	Note              string       `json:"note,omitempty"`               // 变更说明(谁、为何)
+	AllowedTools      []string         `json:"allowed_tools,omitempty"`      // 白名单(空=不设白名单)
+	DeniedTools       []string         `json:"denied_tools,omitempty"`       // 黑名单(优先于白名单)
+	ApprovalThreshold ActionLevel      `json:"approval_threshold,omitempty"` // 审批门槛(空=默认宽:仅增删改弹门)
+	IntentRules       []IntentRule     `json:"intent_rules,omitempty"`       // 任务级拦截规则(P2-08e)
+	ExcludedAssets    []string         `json:"excluded_assets,omitempty"`    // 授权范围摘除清单(P4-05;空=全部纳入)
+	ScopeApproved     []string         `json:"scope_approved,omitempty"`     // 范围外资产放行清单(P4-44;随快照整体提交)
+	CreatorNotes      *string          `json:"creator_notes,omitempty"`      // 造物主注意事项(P4-49;nil=本次不动)
+	InfoSources       *[]RoeInfoSource `json:"info_sources,omitempty"`       // 信息源清单(P4-67;nil=本次不动)
+	MaxActionLevel    ActionLevel      `json:"max_action_level,omitempty"`   // 已废止(P1-07 分级上限,读兼容)
+	Note              string           `json:"note,omitempty"`               // 变更说明(谁、为何)
 }
 
 // 虫群原始执行记录类型白名单(受控入口)。
@@ -565,23 +582,31 @@ type ArbiterConditionResult struct {
 
 // 审批记录类型白名单(受控入口)。
 const (
-	ApprovalRecRequested = "requested"  // 弹门:审批请求已登记,等待面板裁决
-	ApprovalRecApproved  = "approved"   // 面板批准
-	ApprovalRecDenied    = "denied"     // 拒绝(面板拒绝/拒绝线自动拒绝/等待期间熔断,原因见 Reason 与 DenyLine)
-	ApprovalRecForced    = "forced"     // P2-06b:研判后放行(P4-51 起写路径废除,历史记录留档;批准/拒绝同 RequestID 收口新卡)
-	ApprovalRecGroupPass = "group_pass" // P4-17:同组放行(代理旁路组批准一次后,该单位同组命令直接执行的逐次留痕)
-	ApprovalRecStepPass  = "step_pass"  // P4-27 ⑧:同步骤放行(审批门槛批准一次后,该单位本步骤后续命令直接执行的逐次留痕)
-	ApprovalRecScopeWait = "scope_wait" // P4-51:范围待决卡(渗透拦截/红队可否决;同一目标一张卡,RequestID=sc-<目标>)
+	ApprovalRecRequested  = "requested"   // 弹门:审批请求已登记,等待面板裁决
+	ApprovalRecApproved   = "approved"    // 面板批准
+	ApprovalRecDenied     = "denied"      // 拒绝(面板拒绝/拒绝线自动拒绝/等待期间熔断,原因见 Reason 与 DenyLine)
+	ApprovalRecForced     = "forced"      // P2-06b:研判后放行(P4-51 起写路径废除,历史记录留档;批准/拒绝同 RequestID 收口新卡)
+	ApprovalRecGroupPass  = "group_pass"  // P4-17:同组放行(代理旁路组批准一次后,该单位同组命令直接执行的逐次留痕)
+	ApprovalRecStepPass   = "step_pass"   // P4-27 ⑧:同步骤放行(审批门槛批准一次后,该单位本步骤后续命令直接执行的逐次留痕)
+	ApprovalRecScopeWait  = "scope_wait"  // P4-51:范围待决卡(渗透拦截/红队可否决;同一目标一张卡,RequestID=sc-<目标>)
+	ApprovalRecAttackWait = "attack_wait" // P4-67:攻击行为待决卡(对信息源的主动攻击动作;批准=放行该次动作、host 仍非目标,拒绝=只杀动作单位换路)
+	ApprovalRecTriage     = "triage"      // P4-67:研判分诊留痕(结论与依据入账,RequestID=tg-<host>,可审计)
+	ApprovalRecAccess     = "access"      // P4-68:范围卡第三键"允许访问"已裁(host 入信息源清单,只授访问权不收编;撤销后可重出卡)
+	ApprovalRecReversed   = "reversed"    // P4-71:审批记录反向裁决(反加入/反禁止/攻击档双向/撤销信息源;落新事件含原记录引用,不改历史)
 )
 
 var approvalRecordTypes = map[string]bool{
-	ApprovalRecRequested: true,
-	ApprovalRecApproved:  true,
-	ApprovalRecDenied:    true,
-	ApprovalRecForced:    true,
-	ApprovalRecGroupPass: true,
-	ApprovalRecStepPass:  true,
-	ApprovalRecScopeWait: true,
+	ApprovalRecRequested:  true,
+	ApprovalRecApproved:   true,
+	ApprovalRecDenied:     true,
+	ApprovalRecForced:     true,
+	ApprovalRecGroupPass:  true,
+	ApprovalRecStepPass:   true,
+	ApprovalRecScopeWait:  true,
+	ApprovalRecAttackWait: true,
+	ApprovalRecTriage:     true,
+	ApprovalRecAccess:     true,
+	ApprovalRecReversed:   true,
 }
 
 // 拒绝线类别(DenyLine 词表,P2-06b):拒绝的来源分类,面板据此呈现

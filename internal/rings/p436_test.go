@@ -522,6 +522,10 @@ func downgradeForP436Test(path string) error {
 	if _, err := s.db.Exec(`DROP TABLE node_polish`); err != nil {
 		return err
 	}
+	// v16(P4-67)信息源清单列同款剥除;升级重放路径随新增迁移同步。
+	if _, err := s.db.Exec(`ALTER TABLE roe_state DROP COLUMN info_sources`); err != nil {
+		return err
+	}
 	_, err = s.db.Exec(`PRAGMA user_version = 9`)
 	return err
 }

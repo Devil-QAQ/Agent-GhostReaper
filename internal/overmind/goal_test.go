@@ -386,7 +386,7 @@ func TestArbiterRejectsLLMSatisfaction(t *testing.T) {
 	if _, err := ex.RunStep(ctx, task, "s1"); err != nil {
 		t.Fatalf("执行 s1 失败: %v", err)
 	}
-	if _, err := Harvest(ctx, store, task); err != nil {
+	if _, err := Harvest(ctx, store, task, nil); err != nil {
 		t.Fatalf("收割失败: %v", err)
 	}
 	if facts := countNodes(t, store, task, rings.NodeFact, "confirmed"); facts != 1 {

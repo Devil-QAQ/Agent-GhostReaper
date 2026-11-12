@@ -42,7 +42,8 @@ const workerSafetyRules = `铁律(代码固定,配置不可移除):
 3. 穷尽本意图的手段再下结论;但不因总目标未达成而继续,也不为凑步数在已探尽的方向空转。
 4. 必须本次真实触发过、拿到可复现证据,才能提交候选事实;「版本匹配到 CVE」「看起来可注入」这类只许记为待验证的猜测(submit_hypothesis)。真实触发并取得可复现证据的漏洞发现,用 submit_test_claim 提交为待反证的判断(存在性与影响面分开申报,并尽力列出竞争性替代解释);确认由独立反证与机器判定完成,你不许自评"已确认"、不得自报严重级别。立判门槛:` + ClaimHarmGate + `。
 5. 被 RoE 或审批拒绝的操作不得重试。
-6. 本机回环(127.0.0.1 / localhost / ::1)与镜等测试环境自身设施属测试环境,不是目标攻击面:对它们的观察不提交为事实、判断或猜测(入口会拒收并记为环境观察);排查环境问题时的相关现象在总结里说明即可。任务资产清单内的目标(含操作者声明的本机测试靶标)不受此限。`
+6. 本机回环(127.0.0.1 / localhost / ::1)与镜等测试环境自身设施属测试环境,不是目标攻击面:对它们的观察不提交为事实、判断或猜测(入口会拒收并记为环境观察);排查环境问题时的相关现象在总结里说明即可。任务资产清单内的目标(含操作者声明的本机测试靶标)不受此限。
+7. 信息源(RoE 约束块"信息源"行列出的地址)是查资料用的公开信息服务,不是测试目标:正常访问使用(搜索、下载、查文档)不受限;对其内容的观察不提交为判断或猜测;对它的写入、扫描、利用尝试等主动攻击动作会被拦,不要发起。`
 
 // workerArtifactRules 虫群基线 C 段(代码固定,中间产物规约):
 // §11 语义细则——写回粒度(同线索观察汇总成一条,防图谱无限膨胀;
@@ -149,7 +150,10 @@ const roeConstraintHeader = "【授权约束 · RoE】本块为授权硬边界,�
 // 出现——留空任务行为与历史一致),非空时逐行追加"造物主注意事项"行:
 // 对做法的软要求,与工具边界/审批门槛同处凌驾区;管边界不管打法——
 // 注意事项之外的侦察顺序/路径/工具选择/攻击链组合仍是读者自由。
-func RenderRoEConstraint(lead string, allowed, denied []string, threshold rings.ActionLevel, excluded []rings.ExcludedAssetView, pending []rings.ExcludedAssetView, notes string) string {
+// infoSources 为任务信息源清单(P4-67;空 = 无,行不出现),非空时
+// 追加"信息源"行——查资料的公开信息服务:获取使用正常进行、观察
+// 不立判断、主动攻击动作会被拦。
+func RenderRoEConstraint(lead string, allowed, denied []string, threshold rings.ActionLevel, excluded []rings.ExcludedAssetView, pending []rings.ExcludedAssetView, notes string, infoSources []rings.RoeInfoSource) string {
 	var b strings.Builder
 	b.WriteString(roeConstraintHeader)
 	if lead != "" {
@@ -191,6 +195,13 @@ func RenderRoEConstraint(lead string, allowed, denied []string, threshold rings.
 		}
 		fmt.Fprintf(&b, "- 待批资产(渗透任务范围外,锁定不测;面板放行后才可测): %s\n", strings.Join(parts, "、"))
 	}
+	if len(infoSources) > 0 {
+		parts := make([]string, 0, len(infoSources))
+		for _, src := range infoSources {
+			parts = append(parts, src.Host)
+		}
+		fmt.Fprintf(&b, "- 信息源(查资料的公开信息服务,不是测试目标): %s——正常访问使用;对其观察不提交判断与猜测;对它的主动攻击动作会被拦\n", strings.Join(parts, "、"))
+	}
 	return b.String()
 }
 
@@ -199,9 +210,9 @@ func RenderRoEConstraint(lead string, allowed, denied []string, threshold rings.
 // 意图,单位领到的任务包不会锚定它们,虫群侧不重复渲染;待批清单
 // (P4-44)从任务包冻结副本渲染——单位自发越界测待批资产前读到锁定
 // 声明,硬拦在权限管线兜底;注意事项(P4-49)同样从领取时授权渲染)。
-func roeConstraintBlock(roe RoE, pending []rings.ExcludedAssetView) string {
+func roeConstraintBlock(roe RoE, pending []rings.ExcludedAssetView, infoSources []rings.RoeInfoSource) string {
 	return RenderRoEConstraint(
-		"你的探索手段受此框定。", roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, nil, pending, roe.CreatorNotes)
+		"你的探索手段受此框定。", roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, nil, pending, roe.CreatorNotes, infoSources)
 }
 
 // 意图块/锚定资产/启动指令(§11 不可变块,追加顺序固定:意图块 →
@@ -255,7 +266,7 @@ const startupInstruction = "【启动指令】现在开始执行上述意图:先
 // 任务包七要素全文仍是首条 user turn;system 尾只锚定意图核心——被
 // 压缩的是 user turn 的细节,压不掉的是"这条单位该干什么"。
 func WorkerSystemSegments(ctx context.Context, store *rings.Store, roe RoE, pack *TaskPack) []string {
-	segs := []string{roeConstraintBlock(roe, pack.PendingScope)}
+	segs := []string{roeConstraintBlock(roe, pack.PendingScope, roe.InfoSources)}
 	segs = append(segs, WorkerPromptSpec.Assemble(ctx, store)...)
 	segs = append(segs, intentBlock(pack), anchorAssetsBlock(pack), startupInstruction)
 	return segs

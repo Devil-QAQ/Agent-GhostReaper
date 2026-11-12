@@ -152,6 +152,9 @@ func main() {
 	shep := &shepherd.Service{
 		Store: store, Provider: provider, RootDir: *tasksDir,
 		Model: chain.ActiveModel(), Hiber: hiberGate,
+		// Loops 在跑主宰循环注册表(P4-69 ①:牧者摘除资产后即时对账
+		// 收口挂等单位与未决卡,与面板三通道同源)。
+		Loops:    loops,
 		WindowOf: func() int { return failover.ContextWindowFor(context.Background(), store, chain.ActiveModel()) },
 		Wake: func(taskID string) {
 			if t := mgr.Task(taskID); t != nil {

@@ -38,10 +38,18 @@ func p451ServerEnv(t *testing.T) (*Server, *httptest.Server, *rings.Store, http.
 			Detail: map[string]any{"source": rings.AssetSourceSeed}}},
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
 			NodeID: "g1", NodeType: rings.NodeGoal, Title: "g", Status: "active"}},
-		// 步骤冻结在 scope_wait(带目标标记)。
+		// 范围外目标资产(裁决时按标题复用,免随机入图)。
+		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
+			NodeID: "a-evilette", NodeType: rings.NodeAsset, Title: "evilette.com:8080",
+			Status: "active", AssetClass: rings.AssetDomain,
+			Detail: map[string]any{"source": rings.AssetSourceDiscovered, "scope": rings.AssetScopeOut}}},
+		// 步骤冻结在 scope_wait(带目标标记;意图锚定该目标——P4-69
+		// 分族语义下挂等单位按意图覆盖收口,锚定保持"覆盖者终止"口径)。
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
 			NodeID: "s1", NodeType: rings.NodeStep, Title: "探测 evilette",
 			Status: "dispatched", Detail: map[string]any{"goal_id": "g1"}}},
+		rings.Event{Kind: rings.EventEdgeAdded, Actor: "overmind", Payload: rings.EdgeAdded{
+			EdgeType: rings.EdgeCovers, FromNode: "s1", ToNode: "a-evilette"}},
 		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "swarm:u1",
 			Payload: rings.NodeStateChanged{NodeID: "s1", Status: "running"}},
 		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "swarm:u1",

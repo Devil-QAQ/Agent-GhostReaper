@@ -113,6 +113,11 @@ func (e *Executor) Claim(ctx context.Context, taskID, stepID string) (*TaskPack,
 	if hc, ok := step.Detail["harm_class"].(string); ok {
 		pack.HarmClass = rings.HarmClass(hc)
 	}
+	// P4-67 ⑤ 外部服务声明(可选;意图拆解契约 → step.detail → 任务包,
+	// 分诊输入据此判 declared_source)。
+	if es, ok := step.Detail["external_services"].(string); ok {
+		pack.ExternalServices = es
+	}
 
 	// ④ 资产:本步骤 covers 的资产。
 	covers, err := e.Store.Edges(ctx, taskID, rings.EdgeCovers)
@@ -207,6 +212,7 @@ func (e *Executor) Claim(ctx context.Context, taskID, stepID string) (*TaskPack,
 		ApprovalThreshold: roe.ApprovalThreshold,
 		IntentRules:       roe.IntentRules,
 		CreatorNotes:      roe.CreatorNotes,
+		InfoSources:       roe.InfoSources,
 	}
 
 	// ⑦ 图版本。

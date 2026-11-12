@@ -190,7 +190,7 @@ func p458SeedLarge(t *testing.T, srv *Server, task string) {
 			push(rings.Event{Kind: rings.EventSwarmRecord, Actor: "swarm:u1", Payload: rings.SwarmRecord{
 				StepID: id, UnitID: fmt.Sprintf("u%d", i%7), TranscriptID: fmt.Sprintf("tr-%s", id),
 				Type: rings.SwarmRecToolCall, ToolName: "http_probe",
-				ToolArgs: json.RawMessage(`{"url":"http://target.local/path?i=` + fmt.Sprint(i) + `"}`),
+				ToolArgs:   json.RawMessage(`{"url":"http://target.local/path?i=` + fmt.Sprint(i) + `"}`),
 				ResultHead: strings.Repeat("r", 96)}})
 		}
 		// 每步 6 条流量留痕(第一步第一条留已知名供详情直查)。
@@ -233,7 +233,7 @@ func p458SeedLarge(t *testing.T, srv *Server, task string) {
 			push(rings.Event{Kind: rings.EventApprovalRecord, Actor: "swarm:u1", Payload: rings.ApprovalRecord{
 				RequestID: fmt.Sprintf("ap-%d", i), StepID: id, UnitID: "u1",
 				Type: rings.ApprovalRecRequested, ActionLevel: rings.ActionActiveTest,
-				Intent: fmt.Sprintf("意图 %d", i),
+				Intent:   fmt.Sprintf("意图 %d", i),
 				ToolName: "http_probe", ToolArgs: json.RawMessage(`{"url":"http://t/x"}`)}})
 			push(rings.Event{Kind: rings.EventApprovalRecord, Actor: "creator", Payload: rings.ApprovalRecord{
 				RequestID: fmt.Sprintf("ap-%d", i), StepID: id, UnitID: "u1",

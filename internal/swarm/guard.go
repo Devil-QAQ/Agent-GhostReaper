@@ -247,7 +247,12 @@ func (g *toolGuard) guardReadOnlyCall(toolName string, in json.RawMessage) strin
 	}
 	// P4-51 ① 范围外拦截(渗透任务):只读探测的目标不在种子闭包内
 	// ——denyScope 内部分流(出待决卡＋单位冻结收场让位/已排除直接拒;
-	// 与审批门 ②b 同一挂点纪律)。
+	// 与审批门 ②b 同一挂点纪律)。P4-67:批准续跑的单次放行配额查在拦
+	// 前(攻击行为卡批准后的重发目标仍是范围外,同审批门 ②b)。
+	if a := g.env.allowance; a != nil && a.toolName == toolName && jsonEquiv(a.args, string(in)) {
+		g.env.allowance = nil
+		return ""
+	}
 	if reason := g.env.denyScope(g.pack, toolName, in); reason != "" {
 		return reason
 	}

@@ -194,8 +194,8 @@ func TestP464NodeDetailSupplements(t *testing.T) {
 			Type: rings.SwarmRecSessionStarted, StepID: "s-sup", UnitID: "u7", TranscriptID: "tr-sup"}},
 	)
 	var sv struct {
-		UnitID       string `json:"unit_id"`
-		TranscriptID string `json:"transcript_id"`
+		UnitID       string         `json:"unit_id"`
+		TranscriptID string         `json:"transcript_id"`
 		Detail       map[string]any `json:"detail"`
 	}
 	get(t, h, "/api/tasks/"+task+"/nodes/s-sup", http.StatusOK, &sv)
@@ -207,9 +207,9 @@ func TestP464NodeDetailSupplements(t *testing.T) {
 	}
 	// 事实:关联资产 + 文本包装。
 	var fv struct {
-		Assets             []map[string]string `json:"assets"`
-		PolishedTitle      string              `json:"polished_title"`
-		PolishedStatement  string              `json:"polished_statement"`
+		Assets            []map[string]string `json:"assets"`
+		PolishedTitle     string              `json:"polished_title"`
+		PolishedStatement string              `json:"polished_statement"`
 	}
 	get(t, h, "/api/tasks/"+task+"/nodes/f-cred", http.StatusOK, &fv)
 	if len(fv.Assets) != 1 || fv.Assets[0]["id"] != hostID || fv.Assets[0]["title"] != "backup-01" {

@@ -102,10 +102,12 @@ func reverseOpOf(row rings.ApprovalRow, unitActive func(unitID string) bool) *re
 			Target: reverseScopeTarget(row.RequestID)}
 	case row.Type == rings.ApprovalRecTriage:
 		// 分诊留痕:结论为信息源(自动授访问权的形态)可反=撤销信息源;
-		// 候选/攻击/已撤销结论不设反向(撤销后重出卡由范围卡两键定音)。
+		// 候选/攻击/已撤销/非目标结论不设反向(撤销后重出卡由范围卡两
+		// 键定音)。P4-72:合一五值 info_access 与存量旧词表值都认
+		//(swarm.IsTriageInfoSource 归一)。
 		verdict, _, _ := strings.Cut(row.Note, " basis=")
 		verdict = strings.TrimPrefix(verdict, "verdict=")
-		if verdict == swarm.TriageMethodical || verdict == swarm.TriageDeclared {
+		if swarm.IsTriageInfoSource(verdict) {
 			return &reverseMeta{Action: reverseRevokeSrc, Label: reverseLabelOf(reverseRevokeSrc),
 				Target: strings.TrimPrefix(row.RequestID, rings.TriageCardIDPrefix)}
 		}

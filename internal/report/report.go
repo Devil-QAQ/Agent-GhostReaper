@@ -631,6 +631,9 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 			} else {
 				b.WriteString("  - (反证轮未产生可复现的流量记录)\n")
 			}
+		} else if cs.Repro.StepsIncomplete != "" {
+			// P4-73 ④:包内有证明交换、流程步骤补全失败的如实标注。
+			fmt.Fprintf(b, "  - %s\n", cs.Repro.StepsIncomplete)
 		}
 		for i, st := range cs.Repro.Steps {
 			fmt.Fprintf(b, "  - %s\n", reproStepHead(i+1, st))

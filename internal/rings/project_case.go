@@ -51,6 +51,7 @@ type ReproDigest struct {
 	Rounds              []FalsifyRoundHuman `json:"rounds,omitempty"`
 	Steps               []ReproStep         `json:"steps,omitempty"`
 	NoReproReason       string              `json:"no_repro_reason,omitempty"`
+	StepsIncomplete     string              `json:"steps_incomplete,omitempty"`
 	ProcessCount        int                 `json:"process_count,omitempty"`
 	VariantsCount       int                 `json:"variants_count,omitempty"`
 }
@@ -599,8 +600,8 @@ func applyClaimRecord(tx *sql.Tx, taskID string, rev int64, p TestClaimRecord, p
 		row.repro = &ReproDigest{
 			Rev: rev, Severity: p.Severity, Narrative: p.Narrative,
 			NarrativeUnpolished: p.NarrativeUnpolished, Rounds: p.Rounds, Steps: steps,
-			NoReproReason: p.NoReproReason,
-			ProcessCount:  len(p.Process), VariantsCount: len(p.Variants),
+			NoReproReason: p.NoReproReason, StepsIncomplete: p.StepsIncomplete,
+			ProcessCount: len(p.Process), VariantsCount: len(p.Variants),
 		}
 		row.changedRepro = true
 		// 声明摘要(P4-59 ①):字段全空 = 本次定稿未生成校对摘要,摘要列

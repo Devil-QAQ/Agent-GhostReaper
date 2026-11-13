@@ -192,7 +192,7 @@ func TestAssembleReproDedupShapes(t *testing.T) {
 		}
 	}
 
-	got, _, err := AssembleRepro(ctx, store, nil, nil, task, "tc-x", "high")
+	got, _, _, err := AssembleRepro(ctx, store, nil, nil, task, "tc-x", "high", nil)
 	if err != nil {
 		t.Fatalf("定稿组装失败: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestGenReproDescs(t *testing.T) {
 		}
 		l := &Loop{TaskID: task, Store: store, Provider: prov}
 		rec := mkRec("")
-		l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{})
+		l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{}, nil)
 		if len(rec.Steps) != 2 {
 			t.Fatalf("最小集应恰选 2 步(seq 2/3;候选 1 是对比交换不选): %+v", rec.Steps)
 		}
@@ -313,7 +313,7 @@ func TestGenReproDescs(t *testing.T) {
 		}
 		l := &Loop{TaskID: task, Store: store, Provider: prov}
 		rec := mkRec("")
-		l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{})
+		l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{}, nil)
 		// P4-62 A:兜底直出废除——挑选失败重试一次,再失败复现区如实
 		// 标注未生成,候选池不再倒出。
 		if len(rec.Steps) != 0 || rec.NoReproReason != reproNoReproFailed {
@@ -335,7 +335,7 @@ func TestGenReproDescs(t *testing.T) {
 		}
 		l := &Loop{TaskID: task, Store: store, Provider: prov}
 		rec := mkRec("")
-		l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{})
+		l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{}, nil)
 		if len(rec.Steps) != 1 || rec.Steps[0].Seq != 1 || rec.Steps[0].ExchangeID != "m1" {
 			t.Fatalf("未命中 seq 99 应丢弃,有效选择 seq 1 生效: %+v", rec.Steps)
 		}
@@ -347,7 +347,7 @@ func TestGenReproDescs(t *testing.T) {
 	t.Run("无Provider零外呼如实标注", func(t *testing.T) {
 		l := &Loop{TaskID: task, Store: store}
 		rec := mkRec("")
-		l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{}) // 不应 panic/外呼
+		l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{}, nil) // 不应 panic/外呼
 		// P4-62 A:未配挑选模型时零外呼,复现区如实标注,不倒池。
 		if len(rec.Steps) != 0 || rec.NoReproReason == "" {
 			t.Fatalf("无 Provider 应标注未生成而非倒池: steps=%d reason=%q", len(rec.Steps), rec.NoReproReason)

@@ -51,6 +51,9 @@ build-all: web
 # 前置闸(P4-61):发现区四页签排序类级测试——时间倒序口径(立账时刻,
 # 同刻版本号)/三区归类(过程置顶/正常/废弃沉底)/区优先于时间/重开再
 # 确认位置不变/乱序落位确定/筛选与排序交换;比较器改动过不了构建。
+# 前置闸(P4-74 ④):审批记录折叠类级测试——机器放行留痕连续段折叠
+# 一行计数(明细可达零丢失)、操作者裁决与待决恒可见、空参数判定;
+# 折叠逻辑改动过不了构建。
 web:
 	node $(WEB_DIR)/scripts/check-jsx-refs.mjs
 	node $(WEB_DIR)/scripts/check-ui-words.mjs
@@ -61,6 +64,7 @@ web:
 	node $(WEB_DIR)/scripts/check-unprotected-methods.mjs
 	node $(WEB_DIR)/scripts/test-task-status-matrix.mjs
 	node $(WEB_DIR)/scripts/test-finding-sort.mjs
+	node $(WEB_DIR)/scripts/test-approval-fold.mjs
 	cd $(WEB_DIR) && { [ -f package-lock.json ] && npm ci || npm install; } && NEXT_TELEMETRY_DISABLED=1 npm run build
 	rm -rf $(WEB_DIST) && cp -R $(WEB_DIR)/out $(WEB_DIST)
 
@@ -73,6 +77,7 @@ test:
 	node $(WEB_DIR)/scripts/test-fusion-rules.mjs
 	node $(WEB_DIR)/scripts/test-task-status-matrix.mjs
 	node $(WEB_DIR)/scripts/test-finding-sort.mjs
+	node $(WEB_DIR)/scripts/test-approval-fold.mjs
 	go test ./...
 
 run: build

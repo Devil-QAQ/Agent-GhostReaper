@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -270,6 +271,31 @@ func BuildScopeClosure(seeds []ScopeSeed, approved, excluded map[string]bool) *S
 func (c *ScopeClosure) Empty() bool {
 	return c == nil || (len(c.domains) == 0 && len(c.wildcards) == 0 &&
 		len(c.ips) == 0 && len(c.hostPorts) == 0)
+}
+
+// Summary 授权范围写法清单(P4-72:合一判定 in_scope 的对照输入——
+// 域名/通配/IP/端口限定条目逐一列出,排序稳定供前缀缓存;空闭包返
+// 回空串)。模型按写法粒度对照判定;代码侧最终以 CoversTarget 复核,
+// 模型判定不作放行依据。
+func (c *ScopeClosure) Summary() string {
+	if c == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(c.domains)+len(c.wildcards)+len(c.ips)+len(c.hostPorts))
+	for d := range c.domains {
+		parts = append(parts, d)
+	}
+	for w := range c.wildcards {
+		parts = append(parts, "*."+w)
+	}
+	for ip := range c.ips {
+		parts = append(parts, ip)
+	}
+	for hp := range c.hostPorts {
+		parts = append(parts, hp)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "、")
 }
 
 // ScopeResolver 域名 → 解析到的 IP 清单(DNS 前向解析;nil/空 = 解析

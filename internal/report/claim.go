@@ -130,11 +130,14 @@ type ReproFinal struct {
 	Steps               []ReproStepView           `json:"steps"`
 	// NoReproReason 无复现包的原因(P4-62 A:模型空选/挑选失败如实呈现,
 	// 面板与报告同句;旧记录为空——旧口径空步骤退既有空态文案)。
-	NoReproReason string               `json:"no_repro_reason,omitempty"`
-	Variants      []rings.ReproStep    `json:"variants,omitempty"` // 旧口径过程流量(存量;证据包导出补全,常规装配为空)
-	Process       []rings.ReproProcessRef `json:"process,omitempty"` // 过程流量引用清单(P4-35;证据包导出补全,常规装配为空)
-	ProcessCount  int                  `json:"process_count"`      // 过程流量条数(计数行口径;新记录 = Process 长度)
-	VariantsCount int                  `json:"variants_count"`     // 旧口径变体条数(存量)
+	NoReproReason string `json:"no_repro_reason,omitempty"`
+	// StepsIncomplete 流程步骤未生成的如实标注(P4-73 ④:复现包只含
+	// 证明交换种子、模型补全挑选失败;面板与报告同句)。
+	StepsIncomplete string                  `json:"steps_incomplete,omitempty"`
+	Variants        []rings.ReproStep       `json:"variants,omitempty"` // 旧口径过程流量(存量;证据包导出补全,常规装配为空)
+	Process         []rings.ReproProcessRef `json:"process,omitempty"`  // 过程流量引用清单(P4-35;证据包导出补全,常规装配为空)
+	ProcessCount    int                     `json:"process_count"`      // 过程流量条数(计数行口径;新记录 = Process 长度)
+	VariantsCount   int                     `json:"variants_count"`     // 旧口径变体条数(存量)
 }
 
 // ProcessUnlisted 未进最小集的过程交换条数(面板与报告同口径计数行:
@@ -270,7 +273,8 @@ func applyProjection(cs *ClaimCase, proj *rings.ClaimCaseProjection, discovererI
 			Rev: proj.Repro.Rev, Severity: proj.Repro.Severity,
 			Narrative: proj.Repro.Narrative, NarrativeUnpolished: proj.Repro.NarrativeUnpolished,
 			Rounds: proj.Repro.Rounds, NoReproReason: proj.Repro.NoReproReason,
-			ProcessCount: proj.Repro.ProcessCount, VariantsCount: proj.Repro.VariantsCount,
+			StepsIncomplete: proj.Repro.StepsIncomplete,
+			ProcessCount:    proj.Repro.ProcessCount, VariantsCount: proj.Repro.VariantsCount,
 		}
 		steps := make([]ReproStepView, 0, len(proj.Repro.Steps))
 		for _, st := range proj.Repro.Steps {

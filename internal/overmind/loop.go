@@ -988,51 +988,86 @@ func (l *Loop) judgeClaims(ctx context.Context) (int, error) {
 			continue
 		}
 		// 落账次序:裁决 → (确认时)收割定稿 → 状态迁移,同一批事务。
-		events := []rings.Event{
-			{Kind: rings.EventTestClaimRecord, Actor: arbiter.ActorArbiter, Payload: j.Verdict},
+		// P4-73 ⑤:确认门槛先于裁决落账执行(可能把 confirm 改判待确认,
+		// 裁决事件须携带改判后的负载——事件构造放在门槛之后)。
+		var reproEvents []rings.Event
+		var closeBlocked *rings.Event
+		if j.Status == rings.TestClaimConfirmed {
+			// P4-73 ⑤(问题清单 #89)确认门槛校验(最后封口):证据可
+			// 追溯(交换引用命中或回查命中)才可确认——追溯不到的证据
+			// 不得作为确认依据,判断落"证据不足,理由:证据不可追溯"、
+			// 不确认(确认收严:证据成立且可交付)。种子解析与装配同一
+			// 函数(ResolveEvidenceSeeds),确认 ⟹ 包内至少含证明交换
+			// 是构造性保证;挂在仲裁确认路径(确认裁决落账前),不挂
+			// 反证提交侧(提交侧只收引用不拦)。
+			var blobs *swarm.BlobStore
+			if l.Swarm != nil {
+				blobs = l.Swarm.Blobs
+			}
+			seeds, serr := ResolveEvidenceSeeds(ctx, l.Store, blobs, l.TaskID, c.ID)
+			if serr != nil {
+				// 解析失败如实暴露留待下轮,不误判不可追溯。
+				l.setErr(fmt.Errorf("overmind: 确认门槛解析判断 %s 证据: %w", c.ID, serr))
+				continue
+			}
+			if len(seeds) == 0 {
+				j.Status = rings.TestClaimPending
+				j.Verdict.Decision = rings.VerdictPending
+				j.Verdict.Satisfied = false
+				j.Verdict.PendingReason = arbiter.UntraceablePendingReason
+				j.Verdict.Conditions = append(j.Verdict.Conditions, rings.ArbiterConditionResult{
+					Kind: arbiter.CondEvidenceTraceable, Required: 1, Actual: 0, Satisfied: false})
+				runlog.Infof("确认门槛:判断 %s 证据不可追溯,不确认(证据不足)", c.ID)
+			} else {
+				j.Verdict.Conditions = append(j.Verdict.Conditions, rings.ArbiterConditionResult{
+					Kind: arbiter.CondEvidenceTraceable, Required: 1, Actual: len(seeds), Satisfied: true})
+				// 收割定稿(P2-02):复现步骤(候选池+操作方法)与
+				// 严重级别(末轮影响面定级)随确认同批落库,报告与面板
+				// 只读这份定稿(R17:智能发生在写回时)。P4-62 A:落账前由
+				// 模型从候选池挑最小复现集并写三层(短名/做什么/作用)冻结
+				// ——挑选失败/空选不再倒池,如实标注未生成/无可用包;
+				// 重开再确认随新定稿重新生成。C(b):直连旁路流量从工具
+				// 调用记录确定性组包入池。P4-73 ②:证明交换种子直进包
+				// (不经池、不受去同型/池裁剪/挑选影响),模型在种子之上
+				// 补全流程步骤,挑选失败仍出种子包。
+				repro, diag, seedSeqs, rerr := AssembleRepro(ctx, l.Store, blobs, rings.DefaultScopeResolver, l.TaskID, c.ID, j.Severity, seeds)
+				if rerr != nil {
+					l.setErr(fmt.Errorf("overmind: 定稿判断 %s: %w", c.ID, rerr))
+				} else {
+					l.pickReproSteps(ctx, c.ID, repro, diag, seedSeqs)
+					// P4-13:来龙去脉叙述同批生成冻结(链上事实包 → 模型人话,
+					// 失败回退拼句不阻塞裁决;重开再确认随新定稿重新生成)。
+					l.genClaimNarrative(ctx, c.ID, j, repro)
+					// P4-64 ①:反证时间线人话已逐轮随 falsify 记录入账同链
+					// 生成(见 swarm 钩子 RoundHumanGen),定稿批次不再重复
+					// 生成;存量旧定稿的 Rounds 字段读侧照读(退机器层)。
+					// P4-59 ①/P4-64 ②:声明摘要(存在性描述/影响面/链上事实
+					// 描述)报告级校对同批冻结——节点原文不动,读侧优先校对稿
+					// (立账批次已生成的摘要由本定稿覆盖,取代语义既有)。
+					l.genClaimSummary(ctx, c.ID, repro)
+					reproEvents = append(reproEvents, rings.Event{
+						Kind: rings.EventTestClaimRecord, Actor: ActorOvermind, Payload: *repro})
+				}
+			}
 		}
 		// 重派用尽落待确认时,blocked 终结的中断步骤一并收场(已判多轮
 		// 无结论,不再等模型恢复重开旧步骤;P4-55 ③)。
 		if j.Status == rings.TestClaimPending && j.Verdict.StepID != "" {
 			if st, serr := l.Store.Node(ctx, l.TaskID, j.Verdict.StepID); serr == nil && st.Status == "blocked" {
-				events = append(events, rings.Event{
+				closeBlocked = &rings.Event{
 					Kind: rings.EventNodeStateChanged, Actor: ActorOvermind,
 					Payload: rings.NodeStateChanged{NodeID: st.ID, Status: "cancelled",
 						Note: "反证多轮未取得结论,不再等待该步骤"},
-				})
+				}
 			}
 		}
-		if j.Status == rings.TestClaimConfirmed {
-			// 收割定稿(P2-02):复现步骤(候选池+操作方法)与
-			// 严重级别(末轮影响面定级)随确认同批落库,报告与面板
-			// 只读这份定稿(R17:智能发生在写回时)。P4-62 A:落账前由
-			// 模型从候选池挑最小复现集并写三层(短名/做什么/作用)冻结
-			// ——挑选失败/空选不再倒池,如实标注未生成/无可用包;
-			// 重开再确认随新定稿重新生成。C(b):直连旁路流量从工具
-			// 调用记录确定性组包入池。
-			var blobs *swarm.BlobStore
-			if l.Swarm != nil {
-				blobs = l.Swarm.Blobs
-			}
-			repro, diag, rerr := AssembleRepro(ctx, l.Store, blobs, rings.DefaultScopeResolver, l.TaskID, c.ID, j.Severity)
-			if rerr != nil {
-				l.setErr(fmt.Errorf("overmind: 定稿判断 %s: %w", c.ID, rerr))
-			} else {
-				l.pickReproSteps(ctx, c.ID, repro, diag)
-				// P4-13:来龙去脉叙述同批生成冻结(链上事实包 → 模型人话,
-				// 失败回退拼句不阻塞裁决;重开再确认随新定稿重新生成)。
-				l.genClaimNarrative(ctx, c.ID, j, repro)
-				// P4-64 ①:反证时间线人话已逐轮随 falsify 记录入账同链
-				// 生成(见 swarm 钩子 RoundHumanGen),定稿批次不再重复
-				// 生成;存量旧定稿的 Rounds 字段读侧照读(退机器层)。
-				// P4-59 ①/P4-64 ②:声明摘要(存在性描述/影响面/链上事实
-				// 描述)报告级校对同批冻结——节点原文不动,读侧优先校对稿
-				// (立账批次已生成的摘要由本定稿覆盖,取代语义既有)。
-				l.genClaimSummary(ctx, c.ID, repro)
-				events = append(events, rings.Event{
-					Kind: rings.EventTestClaimRecord, Actor: ActorOvermind, Payload: *repro})
-			}
+		events := []rings.Event{
+			{Kind: rings.EventTestClaimRecord, Actor: arbiter.ActorArbiter, Payload: j.Verdict},
 		}
+		if closeBlocked != nil {
+			events = append(events, *closeBlocked)
+		}
+		events = append(events, reproEvents...)
 		events = append(events, rings.Event{
 			Kind: rings.EventNodeStateChanged, Actor: arbiter.ActorArbiter,
 			Payload: rings.NodeStateChanged{NodeID: c.ID, Status: j.Status}})

@@ -343,6 +343,7 @@ func (p *TaskPack) Render() string {
 		}
 		b.WriteString(" + 本轮证据);\n")
 		fmt.Fprintf(&b, "  影响面成立时须给 impact_level(critical|high|medium|low,报告级别只跟影响面证据走;%s);\n", SeverityAnchor)
+		b.WriteString("  结论所依据的交换必须附引用:evidence_exchanges 填工具结果里 exchange= 行给出的交换编号(http_probe 验证可直接取,通常恰 1 条——直接证明结论的那条;可达性确认、对照请求、重复重放与无关探测不引用);bash 通道取不到编号时留空,系统按证据文本中的地址回查;\n")
 		b.WriteString("  只输出文本结论不算完成,确认判定由仲裁者机器完成(你的 note 陈述不构成证据)。\n")
 	}
 

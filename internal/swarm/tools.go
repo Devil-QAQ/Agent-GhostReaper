@@ -542,11 +542,30 @@ func (env *unitEnv) httpProbeTool() tool.CoreTool {
 				return tool.Errorf("构造请求失败: " + err.Error()), nil
 			}
 			req.Header.Set("User-Agent", env.userAgent(ctx))
+			// P4-73 ①:镜会话的受理序号快照(请求后按最终 URL 在新增交换里
+			// 找到本次交换编号,结果里标注 exchange= 行——反证结论据此引用
+			// 证明交换;重定向链取末跳)。
+			var mirrorSeq int
+			if env.mirror != nil {
+				mirrorSeq = env.mirror.ExchangeCount()
+			}
 			resp, err := env.httpClient().Do(req)
 			if err != nil {
 				return tool.Errorf("请求失败: " + err.Error()), nil
 			}
 			defer resp.Body.Close()
+			exchangeID := ""
+			if env.mirror != nil {
+				finalURL := u.String()
+				if resp.Request != nil && resp.Request.URL != nil {
+					finalURL = resp.Request.URL.String()
+				}
+				for _, ex := range env.mirror.ExchangesSince(mirrorSeq) {
+					if ex.URL == finalURL {
+						exchangeID = ex.ID // 末条命中 = 本次交换(受理次序)
+					}
+				}
+			}
 			var body string
 			if method == http.MethodGet {
 				b, _ := io.ReadAll(io.LimitReader(resp.Body, httpProbeBodyClip))
@@ -556,6 +575,9 @@ func (env *unitEnv) httpProbeTool() tool.CoreTool {
 			fmt.Fprintf(&b, "url=%s method=%s status=%d\n", u.String(), method, resp.StatusCode)
 			fmt.Fprintf(&b, "server=%s content-type=%s content-length=%s\n",
 				resp.Header.Get("Server"), resp.Header.Get("Content-Type"), resp.Header.Get("Content-Length"))
+			if exchangeID != "" {
+				fmt.Fprintf(&b, "exchange=%s\n", exchangeID)
+			}
 			if body != "" {
 				fmt.Fprintf(&b, "--- body(前 %d 字节) ---\n%s", httpProbeBodyClip, body)
 			}
@@ -603,7 +625,7 @@ const (
 	toolDescSubmitHypothesis       = "提交一条待验证的猜测(直觉/线索/疑似问题,尚未取得直接证据)。必须指向具体资产并写明依据;每个任务包最多附带 3 条。不指向本机回环上的发现型资产(测试环境自身,入口拒收)。"
 	toolDescSubmitHypothesisResult = "假设验证任务专用:写回你独立验证的结构化结论。verdict=supported(成立)|refuted(被推翻)|inconclusive(未能定论);须附本轮真实取得的证据;note 文本不构成结论。验证中取得的可保留观察仍走 submit_candidate_fact / submit_test_claim 正常回传。"
 	toolDescSubmitTestClaim        = "提交一条待反证的漏洞判断(你本次真实触发并取得可复现证据的发现)。提交前先用 list_claims 查已报清单:同一资产上已报过的漏洞不得重复报(入口会拒收)。存在性与影响面必须分开申报;须尽力列出其他可能原因(否则系统兜底四条基线:缓存污染/不可复现/影响高估/归属错误)。判断将交由独立单位多轮反证、仲裁者机器判定,不得自评已确认、不得自报严重级别。立判门槛:" + ClaimHarmGate + "。本机回环(127.0.0.1/localhost/::1)与镜等测试环境自身设施不是目标攻击面——锚点或证据流量指向它们的判断会被拒收并记为环境观察;任务资产清单内的目标不受此限。"
-	toolDescSubmitFalsifyResult    = "反证任务专用:写回你本轮独立反证的结构化结论。existence_refuted=你能否推翻存在性判断;impact_supported=影响面证据是否足以支撑所申报的影响(成立时必须给 impact_level:critical|high|medium|low);" + SeverityAnchor + "。alternatives=任务包列出的每条其他可能原因按 ID 写回 refuted(本轮是否排除)。须附本轮真实取得的证据;note 文本不参与机器判定。"
+	toolDescSubmitFalsifyResult    = "反证任务专用:写回你本轮独立反证的结构化结论。existence_refuted=你能否推翻存在性判断;impact_supported=影响面证据是否足以支撑所申报的影响(成立时必须给 impact_level:critical|high|medium|low);" + SeverityAnchor + "。alternatives=任务包列出的每条其他可能原因按 ID 写回 refuted(本轮是否排除)。须附本轮真实取得的证据;note 文本不参与机器判定。evidence_exchanges=结论所依据的交换编号(工具结果里 exchange= 行给出的;结论所依据的交换必须附引用,通常恰 1 条——直接证明结论的那条;可达性确认、对照请求、重复重放与无关探测不引用;bash 通道取不到编号时留空,系统按证据文本中的地址回查)。"
 	toolDescListClaims             = "只读查询:列出本任务已报的漏洞判断清单(ID、状态、锚定资产、判断摘要)。提交 submit_test_claim 之前先查一遍——同一资产上已报过的漏洞不要重复报(重复提交会被入口直接拒收);确有新证据或不同影响面的,改写判断另立。"
 )
 
@@ -1294,7 +1316,11 @@ func (env *unitEnv) submitFalsifyResultTool() tool.CoreTool {
 					},
 				},
 				"evidence": map[string]any{"type": "string", "description": "本轮反证取得的证据:须含可独立复核的关键原文(请求/响应片段、命令与其输出),只写结论不参与机器判定"},
-				"note":     map[string]any{"type": "string", "description": "备注(可选;不参与机器判定)"},
+				"evidence_exchanges": map[string]any{
+					"type": "array", "description": "结论所依据的交换编号(工具结果里 exchange= 行给出的;结论所依据的交换必须附引用;经 bash 通道取得、没有编号的证据可留空,系统按证据文本中的地址回查)",
+					"items": map[string]any{"type": "string", "description": "交换编号(如 ms-ab12cd.3)"},
+				},
+				"note": map[string]any{"type": "string", "description": "备注(可选;不参与机器判定)"},
 			},
 			"required": []string{"claim_id", "existence_refuted", "impact_supported", "evidence"},
 		},
@@ -1302,19 +1328,20 @@ func (env *unitEnv) submitFalsifyResultTool() tool.CoreTool {
 		Permissions: allowReadOnly,
 		Run: func(ctx context.Context, in json.RawMessage, _ *tool.ToolContext) (tool.Result, error) {
 			var args struct {
-				ClaimID          string            `json:"claim_id"`
-				ExistenceRefuted bool              `json:"existence_refuted"`
-				ImpactSupported  bool              `json:"impact_supported"`
-				ImpactLevel      string            `json:"impact_level"`
-				Alternatives     []rings.AltResult `json:"alternatives"`
-				Evidence         string            `json:"evidence"`
-				Note             string            `json:"note"`
+				ClaimID           string            `json:"claim_id"`
+				ExistenceRefuted  bool              `json:"existence_refuted"`
+				ImpactSupported   bool              `json:"impact_supported"`
+				ImpactLevel       string            `json:"impact_level"`
+				Alternatives      []rings.AltResult `json:"alternatives"`
+				Evidence          string            `json:"evidence"`
+				EvidenceExchanges []string          `json:"evidence_exchanges"`
+				Note              string            `json:"note"`
 			}
 			if err := json.Unmarshal(in, &args); err != nil {
 				return tool.Errorf("bad input: " + err.Error()), nil
 			}
 			if err := env.SubmitFalsifyResult(ctx, args.ClaimID, args.ExistenceRefuted, args.ImpactSupported,
-				args.ImpactLevel, args.Alternatives, args.Evidence, args.Note); err != nil {
+				args.ImpactLevel, args.Alternatives, args.Evidence, args.EvidenceExchanges, args.Note); err != nil {
 				return tool.Errorf("写回反证结论失败: " + err.Error()), nil
 			}
 			return tool.Text("反证结论已记录(testclaim.record),待仲裁者机器判定"), nil
@@ -1329,8 +1356,11 @@ func (env *unitEnv) submitFalsifyResultTool() tool.CoreTool {
 // 不成立不得携带)。轮次号从 step.detail.round 机器填写(模型无通道)。
 // 证据经内容寻址落 blob(R18),账本只存引用与截头;仲裁者求值只吃
 // 布尔、逐条解释结论与定级词汇,Note 文本不进裁决(契约④)。
+// P4-73 ①:证据交换引用(evidenceExchanges)只收不拦——修剪去空去重后
+// 随结论入账,命中与否由确认门槛校验(仲裁确认路径)解析;提交侧不
+// 因引用缺失或未命中拒绝(回查兜底在收割侧)。
 func (env *unitEnv) SubmitFalsifyResult(ctx context.Context, claimID string, existenceRefuted, impactSupported bool,
-	impactLevel string, alts []rings.AltResult, evidence, note string) error {
+	impactLevel string, alts []rings.AltResult, evidence string, evidenceExchanges []string, note string) error {
 	if strings.TrimSpace(claimID) == "" {
 		return fmt.Errorf("swarm: 反证结论必须指明 claim_id")
 	}
@@ -1396,6 +1426,16 @@ func (env *unitEnv) SubmitFalsifyResult(ctx context.Context, claimID string, exi
 		Round: int(round), ExistenceRefuted: existenceRefuted, ImpactSupported: impactSupported,
 		ImpactLevel: impactLevel, Alternatives: alts,
 		Note: strings.TrimSpace(note),
+	}
+	// P4-73 ①:交换引用只收不拦(修剪去空去重,保序)。
+	seenEx := map[string]bool{}
+	for _, id := range evidenceExchanges {
+		id = strings.TrimSpace(id)
+		if id == "" || seenEx[id] {
+			continue
+		}
+		seenEx[id] = true
+		rec.EvidenceExchanges = append(rec.EvidenceExchanges, id)
 	}
 	evs, err := env.Executor.Store.Events(ctx, env.TaskID, 0, 0)
 	if err != nil {

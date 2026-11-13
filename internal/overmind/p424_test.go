@@ -61,7 +61,7 @@ func TestP424ReproProofreadSameSession(t *testing.T) {
 	})
 	defer model.Close()
 	rec := mkP424Rec()
-	l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{})
+	l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{}, nil)
 	if !strings.HasPrefix(rec.Steps[0].Desc, "向 k3.local 发 GET /admin") {
 		t.Fatalf("校对稿应冻结: %+v", rec.Steps[0])
 	}
@@ -73,8 +73,8 @@ func TestP424ReproProofreadSameSession(t *testing.T) {
 		t.Fatalf("成本有界:恰 2 次请求(生成+校对),得到 %d", len(reqs))
 	}
 	// 同会话铁证:校对请求携带第一轮的助手回复(机器语原稿)与校对续问
-	//(P4-35 起系统段为最小集选择+三层说明契约)。
-	if !strings.Contains(reqs[1].System, "复现最小集") ||
+	//(P4-35 起系统段为复现包选择+三层说明契约,P4-73 措辞随种子机制更新)。
+	if !strings.Contains(reqs[1].System, "组装复现数据包") ||
 		!assistantCarries(reqs[1], "tc-8f2a1b3c") ||
 		!strings.Contains(reqs[1].LastUser, "校对改写") {
 		t.Fatalf("校对应为同会话续问(system/助手原稿/续问): %+v", reqs[1])
@@ -94,7 +94,7 @@ func TestP424ReproGateRewrite(t *testing.T) {
 	})
 	defer model.Close()
 	rec := mkP424Rec()
-	l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{})
+	l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{}, nil)
 	if !strings.HasPrefix(rec.Steps[0].Desc, "向 k3.local 发 GET /admin") || rec.Steps[0].Unpolished {
 		t.Fatalf("重写成功应过闸无标注: %+v", rec.Steps[0])
 	}
@@ -117,7 +117,7 @@ func TestP424ReproGateAnnotate(t *testing.T) {
 	})
 	defer model.Close()
 	rec := mkP424Rec()
-	l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{})
+	l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{}, nil)
 	if n := len(model.requests()); n != 3 {
 		t.Fatalf("恰 3 次请求后停(重写一次封顶),得到 %d", n)
 	}
@@ -142,7 +142,7 @@ func TestP424ReproProofreadFallback(t *testing.T) {
 	})
 	defer model.Close()
 	rec := mkP424Rec()
-	l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{})
+	l.pickReproSteps(ctx, "tc-x", rec, ReproPoolDiag{}, nil)
 	if !strings.HasPrefix(rec.Steps[0].Desc, "向 k3.local 发 GET /admin") || rec.Steps[0].Unpolished {
 		t.Fatalf("校对失败应保留生成稿: %+v", rec.Steps[0])
 	}

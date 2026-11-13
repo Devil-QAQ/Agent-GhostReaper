@@ -371,6 +371,13 @@ func triageDiscoveredIsInfoSource(ctx context.Context, store *rings.Store, taskI
 		return false // 无主机锚点:不构成范围问题,现行入图
 	}
 	host := anchor.Host
+	// P4-72 语法守门(第三挂点:资产入图前):非地址形态主机(无点内网
+	// 名、垃圾 token)不进分诊,照走现行入图——无点主机名本就匹配不上
+	// 闭包写法,是图上资产但不是可判定越界的地址目标(实际去向由镜流
+	// 量留痕对账)。
+	if !swarm.AddressLikeHost(host) {
+		return false
+	}
 	// 信息源清单命中(任务级缓存):零分诊调用,不入图。
 	if roe, err := store.CurrentRoE(ctx, taskID); err == nil && roe.InfoSourceHit(host) {
 		return true
@@ -380,15 +387,21 @@ func triageDiscoveredIsInfoSource(ctx context.Context, store *rings.Store, taskI
 		if triage == nil {
 			return false // 无分诊链(测试/异常装配):按拿不准走现行入图
 		}
-		v, b, err := triage(ctx, swarm.TriageInput{
+		reply, terr := triage(ctx, swarm.TriageInput{
 			Host: host, Discovered: fact.Title,
 			GoalSummary: latestGoalTitle(ctx, store, taskID),
 		})
-		if err != nil {
-			runlog.Warnf("边界判定失败(发现路,按相关资产入图): %s %s: %v", taskID, host, err)
+		if terr != nil {
+			runlog.Warnf("边界判定失败(发现路,按相关资产入图): %s %s: %v", taskID, host, terr)
 			return false
 		}
-		verdict, basis = v, b
+		// 模型未列出该 host(判定缺失)按拿不准:走现行入图。
+		tt, listed := reply.Single(host)
+		if !listed {
+			runlog.Warnf("边界判定未覆盖目标(发现路,按相关资产入图): %s %s", taskID, host)
+			return false
+		}
+		verdict, basis = tt.Verdict, tt.Basis
 		if _, err := store.Append(ctx, taskID, rings.Event{
 			Kind: rings.EventApprovalRecord, Actor: ActorOvermind,
 			Payload: swarm.BuildTriageRecord(host, verdict, basis, rings.ApprovalRecord{
@@ -1032,15 +1045,14 @@ func maxFalsifyRound(steps []rings.NodeFull, claimID string) int {
 	return max
 }
 
-// ClaimFalsifySteps 声明当前战役内的反证步骤(收割定稿组装复现步骤的
-// 归因范围):绑定声明且创建于最近 reopen 之后的 Step,按轮次排序。
-// P4-08 ② 起服务端发现详情的耗时拆解共用本口径(排队/执行/轮次只算
-// 当前战役,重开前的旧战役不混计)。
-func ClaimFalsifySteps(ctx context.Context, store *rings.Store, taskID, claimID string) ([]rings.NodeFull, error) {
+// claimCampaignRev 声明当前战役起点(最近一次 reopen 的 revision;0=从未
+// 重开)——定稿组装(复现步骤归因范围)与证据种子解析(P4-73)共用,
+// 单源防漂移。
+func claimCampaignRev(ctx context.Context, store *rings.Store, taskID, claimID string) (int64, error) {
 	campaignRev := int64(0)
 	evs, err := store.Events(ctx, taskID, 0, 0)
 	if err != nil {
-		return nil, fmt.Errorf("overmind: 定稿查事件流: %w", err)
+		return 0, fmt.Errorf("overmind: 定稿查事件流: %w", err)
 	}
 	for _, ev := range evs {
 		if ev.Kind != rings.EventTestClaimRecord {
@@ -1048,11 +1060,23 @@ func ClaimFalsifySteps(ctx context.Context, store *rings.Store, taskID, claimID 
 		}
 		var r rings.TestClaimRecord
 		if err := json.Unmarshal(ev.Payload, &r); err != nil {
-			return nil, fmt.Errorf("overmind: 定稿解码 testclaim.record: %w", err)
+			return 0, fmt.Errorf("overmind: 定稿解码 testclaim.record: %w", err)
 		}
 		if r.ClaimID == claimID && r.Type == rings.TestClaimRecReopen {
 			campaignRev = ev.Revision
 		}
+	}
+	return campaignRev, nil
+}
+
+// ClaimFalsifySteps 声明当前战役内的反证步骤(收割定稿组装复现步骤的
+// 归因范围):绑定声明且创建于最近 reopen 之后的 Step,按轮次排序。
+// P4-08 ② 起服务端发现详情的耗时拆解共用本口径(排队/执行/轮次只算
+// 当前战役,重开前的旧战役不混计)。P4-73 起证据种子解析同用战役口径。
+func ClaimFalsifySteps(ctx context.Context, store *rings.Store, taskID, claimID string) ([]rings.NodeFull, error) {
+	campaignRev, err := claimCampaignRev(ctx, store, taskID, claimID)
+	if err != nil {
+		return nil, err
 	}
 	steps, err := store.NodesByType(ctx, taskID, rings.NodeStep, "")
 	if err != nil {
@@ -1096,16 +1120,22 @@ func ClaimFalsifySteps(ctx context.Context, store *rings.Store, taskID, claimID 
 //   - P4-62 C(b):直连旁路流量从工具调用记录确定性组包入池(http_probe
 //     参数结构化直接组;bash curl 仅可静态解析的简单形态,复杂的跳过
 //     并如实计入缺料——不编造),组包文档与镜留痕同构入仓库;
+//   - P4-73 ②(问题清单 #89)种子化:seeds(确认依据解析出的证明物,
+//     见 ResolveEvidenceSeeds)直进复现区——不经候选池、不受去同型/
+//     池裁剪/模型挑选任何影响;与池候选(含模型补选)按账本次序合并,
+//     种子对应的池内重复条目让位;返回 seedSeqs(候选 Seq 中属种子的
+//     编号,模型挑选契约的"已固定步骤"输入);
 //   - P4-35 ①:无步骤数上限、无异常报警(最小集天然几步)。
 //
-// 返回候选池记录与入池诊断(过滤/缺料计数,组原因句用,不落账)。
-// 只读账本;由主宰循环与确认裁决同批落账。
+// 返回候选池记录、入池诊断(过滤/缺料计数,组原因句用,不落账)与
+// 种子步骤的候选 Seq 集。只读账本(种子为工具记录时组包文档入仓库);
+// 由主宰循环与确认裁决同批落账。
 func AssembleRepro(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore,
-	resolve rings.ScopeResolver, taskID, claimID, severity string) (*rings.TestClaimRecord, ReproPoolDiag, error) {
+	resolve rings.ScopeResolver, taskID, claimID, severity string, seeds []EvidenceSeed) (*rings.TestClaimRecord, ReproPoolDiag, []int, error) {
 	diag := ReproPoolDiag{}
 	falsifySteps, err := ClaimFalsifySteps(ctx, store, taskID, claimID)
 	if err != nil {
-		return nil, diag, err
+		return nil, diag, nil, err
 	}
 	byID := map[string]rings.NodeFull{}
 	for _, s := range falsifySteps {
@@ -1116,14 +1146,14 @@ func AssembleRepro(ctx context.Context, store *rings.Store, blobs *swarm.BlobSto
 	// 意图拦截均锚定同一批资产节点,口径同源。
 	scope, err := loadTargetScope(ctx, store, taskID)
 	if err != nil {
-		return nil, diag, err
+		return nil, diag, nil, err
 	}
 	// 声明锚定资产闭包(P4-62 B ②):声明 about 资产(组合声明含链上
 	// 事实的资产),P4-50 ② 写法粒度与种子解析 IP 口径;锚点全无主机
 	// 形态时退 nil(仅按任务范围过滤,不过度收窄)。
 	anchors, err := claimAnchorScope(ctx, store, taskID, claimID)
 	if err != nil {
-		return nil, diag, err
+		return nil, diag, nil, err
 	}
 	// 每 Step 的操作方法:工具调用记录(工具名+参数截取;submit_* 回流
 	// 入口不是对目标的操作,不计)。
@@ -1131,18 +1161,21 @@ func AssembleRepro(ctx context.Context, store *rings.Store, blobs *swarm.BlobSto
 	// 账次序收全部范围内交换(候选池与过程清单共用一次收集;P4-35 ①:
 	// 全量交换先进 Process 引用清单留档,再由去同型收出候选步骤)。
 	var all []rings.ReproStep
+	allOrigin := []int{} // 与 all 平行:账本次序(镜=事件序,工具=事件序+事件总数)
+	allToolKey := []string{}
 	process := []rings.ReproProcessRef{}
 	evs, err := store.Events(ctx, taskID, 0, 0)
 	if err != nil {
-		return nil, diag, fmt.Errorf("overmind: 定稿读事件流: %w", err)
+		return nil, diag, nil, fmt.Errorf("overmind: 定稿读事件流: %w", err)
 	}
+	toolOriginOffset := len(evs) // 工具组包排在全部镜交换之后(与池构造次序一致)
 	for _, ev := range evs {
 		if ev.Kind != rings.EventSwarmRecord {
 			continue
 		}
 		var r rings.SwarmRecord
 		if err := json.Unmarshal(ev.Payload, &r); err != nil {
-			return nil, diag, fmt.Errorf("overmind: 定稿解码 swarm.record: %w", err)
+			return nil, diag, nil, fmt.Errorf("overmind: 定稿解码 swarm.record: %w", err)
 		}
 		if r.Type != rings.SwarmRecToolCall || r.IsError {
 			continue
@@ -1156,13 +1189,13 @@ func AssembleRepro(ctx context.Context, store *rings.Store, blobs *swarm.BlobSto
 		op := r.ToolName + " " + clipArgs(string(r.ToolArgs), 200)
 		ops[r.StepID] = append(ops[r.StepID], op)
 	}
-	for _, ev := range evs {
+	for i, ev := range evs {
 		if ev.Kind != rings.EventMirrorRecord {
 			continue
 		}
 		var m rings.MirrorRecord
 		if err := json.Unmarshal(ev.Payload, &m); err != nil {
-			return nil, diag, fmt.Errorf("overmind: 定稿解码 mirror.record: %w", err)
+			return nil, diag, nil, fmt.Errorf("overmind: 定稿解码 mirror.record: %w", err)
 		}
 		s, ok := byID[m.StepID]
 		if !ok || (m.Type != rings.MirrorRecHTTP && m.Type != rings.MirrorRecHTTPS) {
@@ -1193,11 +1226,13 @@ func AssembleRepro(ctx context.Context, store *rings.Store, blobs *swarm.BlobSto
 			Method: m.Method, URL: m.URL, Status: m.Status, BlobRef: m.BlobRef,
 			ExchangeID: m.ExchangeID,
 		})
+		allOrigin = append(allOrigin, i)
+		allToolKey = append(allToolKey, "")
 	}
 	// C(b):直连旁路流量从工具调用记录确定性组包入候选池(镜交换优先:
 	// 同型既有镜留痕时组包条目让位——镜是逐字节的捕获,组包是重构)。
 	if blobs != nil {
-		for _, ev := range evs {
+		for i, ev := range evs {
 			if ev.Kind != rings.EventSwarmRecord {
 				continue
 			}
@@ -1235,6 +1270,8 @@ func AssembleRepro(ctx context.Context, store *rings.Store, blobs *swarm.BlobSto
 			}
 			diag.ToolBuilt++
 			all = append(all, st)
+			allOrigin = append(allOrigin, toolOriginOffset+i)
+			allToolKey = append(allToolKey, r.StepID+"|"+r.ToolName+"|"+string(r.ToolArgs))
 		}
 	}
 	// 去同型(P4-08 ③):型 = 方法+host+路径(不含查询串)+状态,
@@ -1250,12 +1287,16 @@ func AssembleRepro(ctx context.Context, store *rings.Store, blobs *swarm.BlobSto
 		ClaimID: claimID, Type: rings.TestClaimRecRepro, Severity: severity,
 		Process: process,
 	}
-	for _, st := range all {
+	poolOrigin := []int{}
+	poolToolKey := []string{}
+	for idx, st := range all {
 		key := reproShapeKey(st.Method, st.URL, st.Status)
-		if idx, dup := seen[key]; dup {
+		if pos, dup := seen[key]; dup {
 			if toolOnly[key] && st.Source == "" {
 				// 镜留痕到位:顶替同型的组包条目(位次保持账次序)。
-				rec.Steps[idx] = st
+				rec.Steps[pos] = st
+				poolOrigin[pos] = allOrigin[idx]
+				poolToolKey[pos] = ""
 				delete(toolOnly, key)
 			}
 			continue // 同型候选只留首条;后续交换在 Process 清单留档
@@ -1265,9 +1306,50 @@ func AssembleRepro(ctx context.Context, store *rings.Store, blobs *swarm.BlobSto
 			toolOnly[key] = true
 		}
 		rec.Steps = append(rec.Steps, st)
+		poolOrigin = append(poolOrigin, allOrigin[idx])
+		poolToolKey = append(poolToolKey, allToolKey[idx])
 	}
-	for i := range rec.Steps {
-		rec.Steps[i].Seq = i + 1
+	// P4-73 ②:种子直进——证明物不经候选池(池入口过滤与去同型都不
+	// 适用),种子对应的池内同源条目让位(镜按交换 ID、组包按工具记录
+	// 键),种子与池候选按账本次序合并。
+	seedSteps, seedOrigin, serr := seedStepsOf(seeds, byID, blobs, taskID)
+	if serr != nil {
+		return nil, diag, nil, serr
+	}
+	seedExIDs := map[string]bool{}
+	seedToolKeys := map[string]bool{}
+	for _, sd := range seeds {
+		if sd.Mirror != nil {
+			seedExIDs[sd.Mirror.ExchangeID] = true
+		}
+		if sd.ToolRec != nil {
+			seedToolKeys[sd.ToolRec.StepID+"|"+sd.ToolRec.ToolName+"|"+string(sd.ToolRec.ToolArgs)] = true
+		}
+	}
+	type mergedStep struct {
+		step   rings.ReproStep
+		origin int
+		isSeed bool
+	}
+	merged := make([]mergedStep, 0, len(rec.Steps)+len(seedSteps))
+	for i, st := range rec.Steps {
+		if seedExIDs[st.ExchangeID] || (st.Source != "" && seedToolKeys[poolToolKey[i]]) {
+			continue // 种子已覆盖同源池内条目,不重复进包
+		}
+		merged = append(merged, mergedStep{step: st, origin: poolOrigin[i]})
+	}
+	for i, st := range seedSteps {
+		merged = append(merged, mergedStep{step: st, origin: seedOrigin[i], isSeed: true})
+	}
+	sort.SliceStable(merged, func(i, j int) bool { return merged[i].origin < merged[j].origin })
+	rec.Steps = nil
+	seedSeqs := []int{}
+	for _, m := range merged {
+		m.step.Seq = len(rec.Steps) + 1
+		if m.isSeed {
+			seedSeqs = append(seedSeqs, m.step.Seq)
+		}
+		rec.Steps = append(rec.Steps, m.step)
 	}
 	// 操作方法按步骤归并(P4-08 ⑤:证据包收,面板/报告正文不显)。
 	for i := range rec.Steps {
@@ -1275,7 +1357,58 @@ func AssembleRepro(ctx context.Context, store *rings.Store, blobs *swarm.BlobSto
 			rec.Steps[i].Op = joinOps(list)
 		}
 	}
-	return rec, diag, nil
+	return rec, diag, seedSeqs, nil
+}
+
+// seedStepsOf 种子 → 复现步骤(镜留痕按池构造同款字段;直连工具记录
+// 经 P4-62 C(b) 通道组包入仓库)。返回步骤与账本次序。
+func seedStepsOf(seeds []EvidenceSeed, byID map[string]rings.NodeFull, blobs *swarm.BlobStore,
+	taskID string) ([]rings.ReproStep, []int, error) {
+	var steps []rings.ReproStep
+	var origins []int
+	for _, sd := range seeds {
+		round := 0
+		if sd.Mirror != nil {
+			if s, ok := byID[sd.Mirror.StepID]; ok {
+				r, _ := s.Detail["round"].(float64)
+				round = int(r)
+			}
+			m := *sd.Mirror
+			steps = append(steps, rings.ReproStep{
+				Round: round, StepID: m.StepID, UnitID: m.UnitID,
+				Short: reproStepShort(m), Desc: reproStepDesc(m),
+				Method: m.Method, URL: m.URL, Status: m.Status, BlobRef: m.BlobRef,
+				ExchangeID: m.ExchangeID,
+			})
+			origins = append(origins, sd.Origin)
+			continue
+		}
+		if sd.ToolRec == nil || blobs == nil {
+			continue
+		}
+		r := *sd.ToolRec
+		if s, ok := byID[r.StepID]; ok {
+			rr, _ := s.Detail["round"].(float64)
+			round = int(rr)
+		}
+		result := toolCallResult(blobs, r)
+		var pkt *toolPacket
+		if r.ToolName == "http_probe" {
+			pkt = assembleProbePacket(taskID, r.StepID, r.UnitID, r.ToolArgs, result)
+		} else {
+			pkt = assembleBashPacket(taskID, r.StepID, r.UnitID, r.ToolArgs, result)
+		}
+		if pkt.Skipped || pkt.Ex == nil {
+			continue // 防御:种子解析已验证可组包,组不出如实让位(不编造)
+		}
+		st, ok := writeToolPacket(blobs, taskID, pkt.Ex, round, r.StepID, r.UnitID)
+		if !ok {
+			continue
+		}
+		steps = append(steps, st)
+		origins = append(origins, sd.Origin)
+	}
+	return steps, origins, nil
 }
 
 // ReproPoolDiag 候选池入池诊断(P4-62:过滤与缺料计数,组"无可用复现

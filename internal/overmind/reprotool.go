@@ -188,8 +188,10 @@ const curlSimpleForbidden = "$`;&|><\n\r\\"
 
 // curlNoShapeFlags 不改变请求包形状、可直接忽略的无值开关(连接行为/
 // 输出控制/重定向跟随等;-i 除外——它决定输出是否含响应头,见 parse)。
+// -sS 为 -s 与 -S 的惯用合写(静默+出错才报),P4-73 活体单位高频写法,
+// 形状语义同 -s。
 var curlNoShapeFlags = map[string]bool{
-	"-s": true, "--silent": true, "-S": true, "--show-error": true,
+	"-s": true, "--silent": true, "-S": true, "--show-error": true, "-sS": true,
 	"-k": true, "--insecure": true, "-L": true, "--location": true,
 	"-v": true, "--verbose": true,
 	"-4": true, "-6": true, "--compressed": true,

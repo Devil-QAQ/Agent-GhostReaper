@@ -177,7 +177,8 @@ func TestClaimLifecycleE2E(t *testing.T) {
 					case !seenToolResult(rr, "submit_falsify_result", "已记录"):
 						return scriptedReply{ToolCalls: []scriptedToolCall{{
 							ID: "fr2", Name: "submit_falsify_result",
-							Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":true}],"evidence":"带随机穿透参数重放 /old-backup/?nocache=880011 仍返回同一备份列举,内容来自源站而非缓存;匿名可读成立,影响面为敏感备份可被未授权下载","note":"缓存污染已排除"}`, claimID),
+							// P4-73:证据带完整 URL(证明交换经回查兜底锚定)。
+							Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":true}],"evidence":"带随机穿透参数重放 %s/old-backup/?nocache=880011 仍返回同一备份列举,内容来自源站而非缓存;匿名可读成立,影响面为敏感备份可被未授权下载","note":"缓存污染已排除"}`, claimID, base),
 						}}, Finish: "tool_calls"}
 					default:
 						return scriptedReply{Text: "第 2 轮反证完成:全部解释已排除,结论已写回。", Finish: "stop"}
@@ -191,7 +192,8 @@ func TestClaimLifecycleE2E(t *testing.T) {
 					case !seenToolResult(rr, "submit_falsify_result", "已记录"):
 						return scriptedReply{ToolCalls: []scriptedToolCall{{
 							ID: "fr3", Name: "submit_falsify_result",
-							Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":true},{"id":"alt2","refuted":true}],"evidence":"重开复核:穿透参数重放与直连重放均返回同一备份列举,归属与缓存两项解释均排除;匿名可读仍成立","note":"重开轮复核一致"}`, claimID),
+							// P4-73:重开轮同带完整 URL。
+							Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":true},{"id":"alt2","refuted":true}],"evidence":"重开复核:%s/old-backup/?recheck=1 穿透参数重放与直连重放均返回同一备份列举,归属与缓存两项解释均排除;匿名可读仍成立","note":"重开轮复核一致"}`, claimID, base),
 						}}, Finish: "tool_calls"}
 					default:
 						return scriptedReply{Text: "重开轮反证完成:全部解释重新排除,结论已写回。", Finish: "stop"}

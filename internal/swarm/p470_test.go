@@ -51,12 +51,13 @@ func TestP470RedTeamListedAcquisitionAllows(t *testing.T) {
 		t.Fatal(err)
 	}
 	called := 0
-	env.triage = func(_ context.Context, in TriageInput) (string, string, error) {
+	env.triage = func(_ context.Context, in TriageInput) (TriageReply, error) {
 		called++
+		v, basis := TriageCandidate, "归类"
 		if in.ListedInfoSource {
-			return TriageMethodical, "获取使用", nil
+			v, basis = TriageMethodical, "获取使用"
 		}
-		return TriageCandidate, "归类", nil
+		return TriageReply{Targets: []TriageTarget{{Host: in.Host, Verdict: v, Basis: basis}}}, nil
 	}
 	if reason := env.denyScope(rpack, "bash", p467Target(t, "gitee.com")); reason != "" {
 		t.Fatalf("红队清单 host 获取使用应放行,得: %q", reason)
@@ -84,12 +85,13 @@ func TestP470RedTeamListedAttackCards(t *testing.T) {
 		t.Fatal(err)
 	}
 	called := 0
-	env.triage = func(_ context.Context, in TriageInput) (string, string, error) {
+	env.triage = func(_ context.Context, in TriageInput) (TriageReply, error) {
 		called++
+		v, basis := TriageCandidate, "归类"
 		if in.ListedInfoSource {
-			return TriageAttack, "对信息源主动攻击", nil
+			v, basis = TriageAttack, "对信息源主动攻击"
 		}
-		return TriageCandidate, "归类", nil
+		return TriageReply{Targets: []TriageTarget{{Host: in.Host, Verdict: v, Basis: basis}}}, nil
 	}
 	d := env.denyScope(rpack, "bash", p470ScanCmd(t, "nmap -p 443 gitee.com"))
 	if d == "" || !strings.Contains(d, "信息源") || !strings.Contains(d, "已提交面板待决") {
@@ -122,9 +124,9 @@ func TestP470RedTeamUnlistedZeroTriage(t *testing.T) {
 		t.Fatal(err)
 	}
 	called := 0
-	env.triage = func(_ context.Context, in TriageInput) (string, string, error) {
+	env.triage = func(_ context.Context, in TriageInput) (TriageReply, error) {
 		called++
-		return TriageCandidate, "不该走到", nil
+		return TriageReply{Targets: []TriageTarget{{Host: in.Host, Verdict: TriageCandidate, Basis: "不该走到"}}}, nil
 	}
 	for _, host := range []string{"unknown-out.net", "9.9.9.9", "evil.example.org"} {
 		if reason := env.denyScope(rpack, "bash", p467Target(t, host)); reason != "" {
@@ -149,9 +151,9 @@ func TestP470AllowedRulingSkipsCardAndTriage(t *testing.T) {
 	}
 	env.setAttackRuling("gitee.com", true)
 	called := 0
-	env.triage = func(_ context.Context, in TriageInput) (string, string, error) {
+	env.triage = func(_ context.Context, in TriageInput) (TriageReply, error) {
 		called++
-		return TriageAttack, "不该判定", nil
+		return TriageReply{Targets: []TriageTarget{{Host: in.Host, Verdict: TriageAttack, Basis: "不该判定"}}}, nil
 	}
 	for i := 0; i < 3; i++ {
 		if reason := env.denyScope(pack, "bash", p470ScanCmd(t, "nmap -p 80 gitee.com")); reason != "" {
@@ -179,9 +181,9 @@ func TestP470DeniedRulingAutoDenies(t *testing.T) {
 	}
 	env.setAttackRuling("gitee.com", false)
 	called := 0
-	env.triage = func(_ context.Context, in TriageInput) (string, string, error) {
+	env.triage = func(_ context.Context, in TriageInput) (TriageReply, error) {
 		called++
-		return TriageAttack, "不该判定", nil
+		return TriageReply{Targets: []TriageTarget{{Host: in.Host, Verdict: TriageAttack, Basis: "不该判定"}}}, nil
 	}
 	d := env.denyScope(pack, "bash", p470ScanCmd(t, "nmap -p 80 gitee.com"))
 	if d == "" || !strings.Contains(d, "已被面板禁止") || !strings.Contains(d, "不要再发起") {
@@ -220,8 +222,8 @@ func TestP470AutoDenyEscalatesAfterThree(t *testing.T) {
 		t.Fatal(err)
 	}
 	env.setAttackRuling("gitee.com", false)
-	env.triage = func(_ context.Context, in TriageInput) (string, string, error) {
-		return TriageAttack, "不该判定", nil
+	env.triage = func(_ context.Context, in TriageInput) (TriageReply, error) {
+		return TriageReply{Targets: []TriageTarget{{Host: in.Host, Verdict: TriageAttack, Basis: "不该判定"}}}, nil
 	}
 	for i := 1; i <= 3; i++ {
 		env.deniedReason = ""
@@ -255,11 +257,12 @@ func TestP470RulingPerHostPerUnit(t *testing.T) {
 	}
 	// gitee.com 定允许档;pypi.org 未定档——对 pypi.org 的攻击仍出卡。
 	env.setAttackRuling("gitee.com", true)
-	env.triage = func(_ context.Context, in TriageInput) (string, string, error) {
+	env.triage = func(_ context.Context, in TriageInput) (TriageReply, error) {
+		v, basis := TriageCandidate, "归类"
 		if in.ListedInfoSource {
-			return TriageAttack, "对信息源主动攻击", nil
+			v, basis = TriageAttack, "对信息源主动攻击"
 		}
-		return TriageCandidate, "归类", nil
+		return TriageReply{Targets: []TriageTarget{{Host: in.Host, Verdict: v, Basis: basis}}}, nil
 	}
 	if reason := env.denyScope(pack, "bash", p470ScanCmd(t, "nmap -p 80 gitee.com")); reason != "" {
 		t.Fatalf("gitee.com 允许档应放行,得: %q", reason)

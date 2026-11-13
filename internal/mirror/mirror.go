@@ -133,6 +133,42 @@ type Session struct {
 
 	tunMu   sync.Mutex
 	tunnels map[net.Conn]struct{} // 劫持中的隧道连接(Close 时强制收拢)
+
+	// 已受理交换登记(P4-73 ①):请求侧受理即记(ID 在转发前分配)——
+	// 工具(http_probe)在结果里标注 exchange= 行,反证结论据此引用证明
+	// 交换。只记 ID 与 URL 摘要,不含原文(原文在留痕 blob)。
+	exMu   sync.Mutex
+	exSeen []ExchangeSeen
+}
+
+// ExchangeSeen 已受理交换的摘要(ID + 请求 URL),工具结果标注用。
+type ExchangeSeen struct {
+	ID  string
+	URL string
+}
+
+// noteExchange 登记一条已受理交换(请求侧,转发前)。
+func (s *Session) noteExchange(id, url string) {
+	s.exMu.Lock()
+	s.exSeen = append(s.exSeen, ExchangeSeen{ID: id, URL: url})
+	s.exMu.Unlock()
+}
+
+// ExchangeCount 当前已受理交换条数(工具调用前的序号快照)。
+func (s *Session) ExchangeCount() int {
+	s.exMu.Lock()
+	defer s.exMu.Unlock()
+	return len(s.exSeen)
+}
+
+// ExchangesSince 取序号 n 之后受理的交换(快照;并发请求下按受理次序)。
+func (s *Session) ExchangesSince(n int) []ExchangeSeen {
+	s.exMu.Lock()
+	defer s.exMu.Unlock()
+	if n < 0 || n >= len(s.exSeen) {
+		return nil
+	}
+	return append([]ExchangeSeen(nil), s.exSeen[n:]...)
 }
 
 // Addr 会话监听地址(127.0.0.1:port)。
@@ -228,6 +264,7 @@ func (s *Session) serveExchange(w http.ResponseWriter, r *http.Request) {
 			Headers: flatHeaders(r.Header),
 		},
 	}
+	s.noteExchange(ex.ID, ex.Request.URL) // P4-73 ①:受理即记,工具结果可标注引用
 	reqBody, trunc, err := readCapped(r.Body)
 	if err != nil {
 		http.Error(w, "bad request body", http.StatusBadRequest)

@@ -1103,41 +1103,43 @@ func TestSubmitFalsifyResultGuards(t *testing.T) {
 
 	// 非绑定步骤(发现步骤 s1)写回拒绝。
 	s1Env := &unitEnv{Executor: ex, TaskID: task, StepID: "s1", UnitID: "u2", TranscriptID: "swarm-u2"}
-	if err := s1Env.SubmitFalsifyResult(ctx, tcID, false, true, "high", nil, "证据", ""); err == nil {
+	if err := s1Env.SubmitFalsifyResult(ctx, tcID, false, true, "high", nil, "证据", nil, ""); err == nil {
 		t.Fatalf("非反证绑定步骤(s1)写回应被拒")
 	}
 
 	// R12:发现单位(u1)即使在绑定步骤上也必须被拒。
 	u1Env := &unitEnv{Executor: ex, TaskID: task, StepID: "s2", UnitID: "u1", TranscriptID: "swarm-u1"}
-	if err := u1Env.SubmitFalsifyResult(ctx, tcID, false, true, "high", nil, "证据", ""); err == nil {
+	if err := u1Env.SubmitFalsifyResult(ctx, tcID, false, true, "high", nil, "证据", nil, ""); err == nil {
 		t.Fatalf("R12:发现者自证应被拒")
 	}
 
 	// 空证据拒绝。
 	s2Env := &unitEnv{Executor: ex, TaskID: task, StepID: "s2", UnitID: "u9", TranscriptID: "swarm-u9"}
-	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, true, "high", nil, "  ", ""); err == nil {
+	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, true, "high", nil, "  ", nil, ""); err == nil {
 		t.Fatalf("空证据应被拒")
 	}
 
 	// P2-02:影响面成立缺定级拒绝;不成立携带定级拒绝;定级超词汇拒绝。
-	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, true, "", nil, "证据", ""); err == nil {
+	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, true, "", nil, "证据", nil, ""); err == nil {
 		t.Fatalf("impact_supported=true 缺定级应被拒")
 	}
-	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, true, "致命", nil, "证据", ""); err == nil {
+	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, true, "致命", nil, "证据", nil, ""); err == nil {
 		t.Fatalf("定级超四级词汇应被拒")
 	}
-	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, false, "high", nil, "证据", ""); err == nil {
+	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, false, "high", nil, "证据", nil, ""); err == nil {
 		t.Fatalf("impact_supported=false 携带定级应被拒")
 	}
 	// P2-02:解释 ID 不在冻结清单内拒绝。
 	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, true, "high",
-		[]rings.AltResult{{ID: "alt9", Refuted: true}}, "证据", ""); err == nil {
+		[]rings.AltResult{{ID: "alt9", Refuted: true}}, "证据", nil, ""); err == nil {
 		t.Fatalf("冻结清单外的解释 ID 应被拒")
 	}
 
-	// 正常写回:独立单位 + 绑定步骤 + testing 状态 + 逐条解释结论。
+	// 正常写回:独立单位 + 绑定步骤 + testing 状态 + 逐条解释结论 +
+	// 交换引用(P4-73 ①:只收不拦,修剪去空去重随结论入账)。
 	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, true, "high",
-		[]rings.AltResult{{ID: "alt1", Refuted: true}}, "curl 重放仍返回列举", "复核一致"); err != nil {
+		[]rings.AltResult{{ID: "alt1", Refuted: true}}, "curl 重放仍返回列举 http://t9.local/x",
+		[]string{" ms-a1.1 ", "", "ms-a1.1", "ms-a2.3 "}, "复核一致"); err != nil {
 		t.Fatalf("合法写回失败: %v", err)
 	}
 	recs := claimRecords(t, store, task, rings.TestClaimRecFalsify)
@@ -1151,8 +1153,11 @@ func TestSubmitFalsifyResultGuards(t *testing.T) {
 	if r.Round != 1 || r.ImpactLevel != "high" || len(r.Alternatives) != 1 || r.Alternatives[0].ID != "alt1" {
 		t.Fatalf("P2-02 字段(轮次/定级/解释结论)应随写回落账: %+v", r)
 	}
+	if len(r.EvidenceExchanges) != 2 || r.EvidenceExchanges[0] != "ms-a1.1" || r.EvidenceExchanges[1] != "ms-a2.3" {
+		t.Fatalf("交换引用应修剪去空去重随写回落账: %+v", r.EvidenceExchanges)
+	}
 	// P2-02:同轮二次写回拒绝(每轮一次,R1)。
-	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, true, "high", nil, "再写一次", ""); err == nil {
+	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, true, "high", nil, "再写一次", nil, ""); err == nil {
 		t.Fatalf("同轮重复写回应被拒")
 	}
 	if r.EvidenceHead == "" {
@@ -1160,7 +1165,7 @@ func TestSubmitFalsifyResultGuards(t *testing.T) {
 	}
 
 	// 幽灵声明拒绝。
-	if err := s2Env.SubmitFalsifyResult(ctx, "tc-ghost", false, true, "high", nil, "证据", ""); err == nil {
+	if err := s2Env.SubmitFalsifyResult(ctx, "tc-ghost", false, true, "high", nil, "证据", nil, ""); err == nil {
 		t.Fatalf("幽灵声明应被拒")
 	}
 }

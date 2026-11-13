@@ -119,7 +119,8 @@ func TestLoopCompletesTaskAfterClaimsSettle(t *testing.T) {
 				case !seenToolResult(rr, "submit_falsify_result", "已记录"):
 					return scriptedReply{ToolCalls: []scriptedToolCall{{
 						ID: "fr1", Name: "submit_falsify_result",
-						Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":true},{"id":"alt2","refuted":true},{"id":"alt3","refuted":true},{"id":"alt4","refuted":true}],"evidence":"独立重放 /old-backup/ 仍返回备份文件列举,匿名可读,影响面成立","note":"复核一致"}`, claimID),
+						// P4-73:证据带完整 URL(证明交换经回查兜底锚定)。
+						Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":true},{"id":"alt2","refuted":true},{"id":"alt3","refuted":true},{"id":"alt4","refuted":true}],"evidence":"独立重放 %s/old-backup/ 仍返回备份文件列举,匿名可读,影响面成立","note":"复核一致"}`, claimID, base),
 					}}, Finish: "tool_calls"}
 				default:
 					return scriptedReply{Text: "反证完成:存在性未推翻,影响面证据充分。", Finish: "stop"}

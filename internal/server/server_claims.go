@@ -664,15 +664,17 @@ const reproPageSize = 8
 
 // reproStepsPage 分段页视图:步骤(含 blob 原文回放,与报告同源同一
 // 装配)+ 分段游标。NoReproReason 为无复现包的原因(P4-62 A:空选/挑选
-// 失败如实呈现,前端空态渲染)。
+// 失败如实呈现,前端空态渲染);StepsIncomplete 为流程步骤未生成的
+// 标注(P4-73 ④:包内只有证明交换种子时的如实说明)。
 type reproStepsPage struct {
-	Rev           int64                  `json:"rev"`
-	Severity      string                 `json:"severity,omitempty"`
-	NoReproReason string                 `json:"no_repro_reason,omitempty"`
-	Steps         []report.ReproStepView `json:"steps"`
-	Offset        int                    `json:"offset"`
-	Total         int                    `json:"total"`
-	HasMore       bool                   `json:"has_more"`
+	Rev             int64                  `json:"rev"`
+	Severity        string                 `json:"severity,omitempty"`
+	NoReproReason   string                 `json:"no_repro_reason,omitempty"`
+	StepsIncomplete string                 `json:"steps_incomplete,omitempty"`
+	Steps           []report.ReproStepView `json:"steps"`
+	Offset          int                    `json:"offset"`
+	Total           int                    `json:"total"`
+	HasMore         bool                   `json:"has_more"`
 }
 
 // handleClaimRepro 复现步骤分段 API(GET /api/tasks/{id}/claims/{cid}/repro
@@ -708,7 +710,8 @@ func (s *Server) handleClaimRepro(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, page)
 		return
 	}
-	page.Rev, page.Severity, page.NoReproReason = proj.Repro.Rev, proj.Repro.Severity, proj.Repro.NoReproReason
+	page.Rev, page.Severity, page.NoReproReason, page.StepsIncomplete =
+		proj.Repro.Rev, proj.Repro.Severity, proj.Repro.NoReproReason, proj.Repro.StepsIncomplete
 	steps := proj.Repro.Steps
 	page.Total = len(steps)
 	if offset < len(steps) {

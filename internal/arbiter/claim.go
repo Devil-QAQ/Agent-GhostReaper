@@ -158,7 +158,16 @@ const (
 	// CondVerifierIndependent 各轮反证单位 ≠ 发现单位(R12 发现者不得
 	// 自证,机器终审 + 独立派发双重保障的裁决侧核验)。
 	CondVerifierIndependent = "verifier_independent"
+	// CondEvidenceTraceable 确认依据的证据可追溯(P4-73 ⑤,问题清单 #89):
+	// 结论携带的交换引用命中反证步骤流量,或证据文本 URL 回查命中——
+	// 追溯不到的证据不得作为确认依据(确认收严:证据成立且可交付)。
+	// 条件行由确认路径在仲裁求值后追加(种子解析在收割侧,见 overmind)。
+	CondEvidenceTraceable = "evidence_traceable"
 )
+
+// UntraceablePendingReason 证据不可追溯的搁置理由(P4-73 ⑤ 定稿文案,
+// 逐字入账):确认门槛校验未过时不确认,落待确认。
+const UntraceablePendingReason = "证据不足,理由:证据不可追溯"
 
 // Step 终态清单(与 swarm 执行器终因迁移一致:done|exhausted|failed|
 // aborted|approval_denied)。反证 Step 到终态后当前轮才可裁决。P4-55 ①:

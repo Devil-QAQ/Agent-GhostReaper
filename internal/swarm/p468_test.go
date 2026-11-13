@@ -298,11 +298,12 @@ func TestP468ListedSourceAttackStillCards(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 动作复查打桩:该 host 上判攻击。
-	env.triage = func(_ context.Context, in TriageInput) (string, string, error) {
+	env.triage = func(_ context.Context, in TriageInput) (TriageReply, error) {
+		v, basis := TriageCandidate, "归类"
 		if in.ListedInfoSource {
-			return TriageAttack, "对信息源主动攻击", nil
+			v, basis = TriageAttack, "对信息源主动攻击"
 		}
-		return TriageCandidate, "归类", nil
+		return TriageReply{Targets: []TriageTarget{{Host: in.Host, Verdict: v, Basis: basis}}}, nil
 	}
 	scan := json.RawMessage(mustJSON(t, "nmap -p 1-1000 gitee.com"))
 	d := env.denyScope(pack, "bash", scan)
@@ -317,11 +318,12 @@ func TestP468ListedSourceAttackStillCards(t *testing.T) {
 	}
 	// 获取使用照常放行(动作复查非攻击)。
 	env.park = nil
-	env.triage = func(_ context.Context, in TriageInput) (string, string, error) {
+	env.triage = func(_ context.Context, in TriageInput) (TriageReply, error) {
+		v, basis := TriageCandidate, "归类"
 		if in.ListedInfoSource {
-			return TriageMethodical, "获取使用", nil
+			v, basis = TriageMethodical, "获取使用"
 		}
-		return TriageCandidate, "归类", nil
+		return TriageReply{Targets: []TriageTarget{{Host: in.Host, Verdict: v, Basis: basis}}}, nil
 	}
 	if d := env.denyScope(pack, "bash", p467Target(t, "gitee.com")); d != "" {
 		t.Fatalf("清单命中的获取使用应放行: %q", d)

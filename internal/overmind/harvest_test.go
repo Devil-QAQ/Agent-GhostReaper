@@ -189,7 +189,7 @@ func TestAssembleReproIncludesHTTPS(t *testing.T) {
 		}
 	}
 
-	got, _, err := AssembleRepro(ctx, store, nil, nil, task, "tc-x", "high")
+	got, _, _, err := AssembleRepro(ctx, store, nil, nil, task, "tc-x", "high", nil)
 	if err != nil {
 		t.Fatalf("定稿组装失败: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestAssembleReproTargetScopeFilter(t *testing.T) {
 		}
 	}
 
-	got, _, err := AssembleRepro(ctx, store, nil, nil, task, "tc-s", "medium")
+	got, _, _, err := AssembleRepro(ctx, store, nil, nil, task, "tc-s", "medium", nil)
 	if err != nil {
 		t.Fatalf("定稿组装失败: %v", err)
 	}

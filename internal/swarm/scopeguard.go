@@ -43,6 +43,42 @@
 // 续攻击放行免卡(零判定调用、不计连拒升级计数),禁止档后续同类攻
 // 击自动拒不弹卡(计入 gd:attack 连拒升级保险),取代攻击卡批准的单
 // 次配额。
+//
+// P4-72(问题清单 #88 B 方案,实测修正批次第一阶)第零层·目标识别
+// 三条道:①语法守门(addrcheck.go 同源单函数挂提取出口/卡创建/资产
+// 入图三处——裸数字、超 255 数字段、无点无字母串不是目标);②快路
+// 径——仅当命令的全部地址形态 token 被已知高频位置完整解释才直判,
+// 任何 token 未解释不猜测、整条命令交模型(bashAddrScan.covered 与
+// addrSubtokensOf 差集=未解释集);③模型提取＋定性合一(triage.go,
+// 一次调用出"目标清单＋逐目标判定"五值)。静默漏拦根除:未知工具/
+// 未知旗标/变量拼接藏的范围外真目标由模型读到、出卡拦截;"不认识的
+// 旗标"概念从机制中消失。
+//
+// ===== 快路径位置知识清单(P4-72 ⑤ 明示清单,随仓维护;枚举旗标表
+// 已封存不再扩——补旗标是被淘汰路线,新旗标形态由第三条道兜住) =====
+// 目标位(提取为目标并计入覆盖集):
+//   - curl/wget 位置参数里的 http(s) URL(host 含 $ 变量跳过)
+//   - curl/wget -H/--header 的 Host: 头值(其余头是元数据不是目标)
+//   - curl/wget --resolve HOST:PORT:ADDR 的 HOST 目标侧(ADDR 对照侧
+//     只入覆盖集不判)
+//   - openssl s_client -connect 与 -servername 值
+//   - /dev/(tcp|udp)/HOST/PORT 重定向形态(任意命令的 token)
+//   - nmap/masscan/rustscan 位置参数主机形态(IPv4/范围取首段/CIDR
+//     取网络地址/域名;-p 端口列表逐端口绑定)
+//   - nc/ncat/netcat 位置参数首个主机形态＋其后首个纯数字端口
+//   - http_probe 的 url 参数、port_probe 的 host/port 参数(工具边界)
+//
+// 值位(不是目标,整体计入覆盖集——UA 版本号/请求头值/载荷参数值/
+// 对照侧 IP/代理地址在此放行,零模型调用):
+//   - curl/wget 值选项的值(httpFlagValue 表,封存)
+//   - 扫描工具值选项的值(scanFlagValue 表,封存)、openssl 值选项
+//     (opensslFlagValue 表,封存)、nc 值选项(ncFlagValue 表,封存)
+//   - 命令内代理环境变量赋值的值(http_proxy/https_proxy/all_proxy/
+//     ftp_proxy/no_proxy 大小写形态)
+//
+// 环回豁免(不进判定直接放行,P4-66):127.0.0.0/8、::1、localhost、
+// 本机网络地址。表外未知旗标的值:数字被语法守门滤除,地址形态值落
+// 入未解释集交模型。
 package swarm
 
 import (
@@ -57,19 +93,6 @@ import (
 	"ghostreaper/internal/rings"
 	"ghostreaper/internal/runlog"
 )
-
-// hostFormRe 合法主机形态(域名/IPv4 字面量;IPv6 由 net.ParseIP 认)。
-// bash 命令文本里经 shell 变量拼接的目标会提取出 "$hp" 这类非主机
-// 形态——无法判定主机归属,跳过。
-var hostFormRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$`)
-
-// plausibleHost 提取出的目标是否为可判定的主机形态。
-func plausibleHost(h string) bool {
-	if h == "" || len(h) > 253 {
-		return false
-	}
-	return net.ParseIP(h) != nil || hostFormRe.MatchString(h)
-}
 
 // reservedTLDR 保留 TLD(RFC 2606:invalid/example/test/localhost)——
 // 永不可能真实解析,是测试对照名(如缓存对比的假 Host),不是实际
@@ -89,17 +112,19 @@ func reservedTLDR(host string) bool {
 // scopeCallTargets 一次调用指向的目标主机(http_probe/port_probe 参数、
 // bash 命令实际发起连接的目标位置)。web_fetch/read/web_search 无目标
 // 提取(外网查资料不构成对目标的测试,不在硬拦面;流量留痕照旧)。
+// P4-72:出口过滤＝语法守门(addressLikeHost,addrcheck.go 同源单函数
+// 第一挂点)——裸数字、超 255 数字段、无点串不是目标。
 func scopeCallTargets(toolName string, input json.RawMessage) []hostPort {
 	var raw []hostPort
 	switch toolName {
 	case "http_probe", "port_probe":
 		raw = callTargets(toolName, input)
 	case "bash":
-		raw = bashScopeTargets(bashCommandOf(input))
+		raw = bashAddrScanOf(bashCommandOf(input)).targets
 	}
 	out := make([]hostPort, 0, len(raw))
 	for _, t := range raw {
-		if plausibleHost(t.host) && !reservedTLDR(t.host) {
+		if addressLikeHost(t.host) && !reservedTLDR(t.host) {
 			out = append(out, t)
 		}
 	}
@@ -260,8 +285,17 @@ var devTcpRe = regexp.MustCompile(`/dev/(tcp|udp)/([^/\s'"|;&]+|\$\{?[A-Za-z_][A
 
 // 提取位的值选项表按工具分家(同短选项跨工具语义相反的教训在案:curl
 // 的 -s 是静默布尔、nc 的 -s 是源地址值选项——合并表会把 curl -s 后
-// 的目标 URL 当值吞掉)。表外未知值选项的值可能被误当位置参数——只
-// 影响多提取,过滤面(plausibleHost/保留 TLD)兜底。
+// 的目标 URL 当值吞掉)。
+//
+// P4-72 封存声明:本三表为枚举旗标引擎的全部遗留,**封存不再扩**——
+// 补旗标是被淘汰路线(#88:--top-ports 系 P4-67 补表后 --min-rate 仍
+// 漏,枚举永远追不完),新旗标形态由第三条道(模型提取＋定性合一)
+// 兜住:未知旗标的地址形态值 token 不进 covered → 快路径未全解 →
+// 整条命令交模型。三表此后只作快路径"已知位置"的存量知识(见文件
+// 头快路径位置知识清单),语义不变、条目冻结。
+//
+// 表外未知值选项的值不再被误当位置参数:数字值被语法守门滤除(裸数
+// 字不是地址),地址形态值落入 unexplained 交模型判定。
 var (
 	// httpFlagValue curl/wget 的值选项(后随词是值;-H/--header 与
 	// --resolve 另走专项提取)。
@@ -282,7 +316,8 @@ var (
 	}
 	// scanFlagValue nmap/masscan/rustscan 的值选项(-p 端口另走专项)。
 	// --top-ports 的数值是端口数不是主机(P4-67 活体实锤:nmap
-	// --top-ports 100 github.com 的 100 被误当位置参数提取成目标)。
+	// --top-ports 100 github.com 的 100 被误当位置参数提取成目标;
+	// P4-72 起该形态由语法守门根除——裸数字不再是目标)。
 	scanFlagValue = map[string]bool{
 		"--script": true, "--script-args": true, "--script-args-file": true,
 		"-oN": true, "-oG": true, "-oX": true, "-oA": true, "-oM": true, "-oS": true,
@@ -311,6 +346,17 @@ var (
 	}
 )
 
+// proxyEnvVarName token 是否代理环境变量名(http_proxy 族大小写形态)
+// ——命令内对代理变量的赋值,值是代理地址不是命令目标(P4-66 既有
+// 口径;快路径覆盖集按此识别代理位置)。
+func proxyEnvVarName(name string) bool {
+	switch strings.ToLower(name) {
+	case "http_proxy", "https_proxy", "all_proxy", "ftp_proxy", "no_proxy":
+		return true
+	}
+	return false
+}
+
 // urlTokenTarget http(s) URL 词 → 目标(scheme 默认端口补全 http 80 /
 // https 443;host 含 $ 变量不可知则跳过)。
 func urlTokenTarget(s string) (hostPort, bool) {
@@ -322,7 +368,7 @@ func urlTokenTarget(s string) (hostPort, bool) {
 		return hostPort{}, false
 	}
 	host := strings.ToLower(u.Hostname())
-	if !plausibleHost(host) {
+	if !addressLikeHost(host) {
 		return hostPort{}, false
 	}
 	port := u.Port()
@@ -353,7 +399,7 @@ func hostHeaderTarget(val string) (hostPort, bool) {
 	} else {
 		host = strings.ToLower(rest)
 	}
-	if !plausibleHost(host) {
+	if !addressLikeHost(host) {
 		return hostPort{}, false
 	}
 	return hostPort{host: host, port: port}, true
@@ -368,7 +414,7 @@ func resolveFlagTarget(val string) (hostPort, bool) {
 		return hostPort{}, false // 含 IPv6 的多段形态,不强行解析
 	}
 	host := strings.ToLower(parts[0])
-	if !plausibleHost(host) {
+	if !addressLikeHost(host) {
 		return hostPort{}, false
 	}
 	port := parts[1]
@@ -393,7 +439,7 @@ func isAllDigits(s string) bool {
 // connectFlagTarget openssl -connect host[:port] / nc 位置参数 host[:port]
 // 形态 → 目标。含变量跳过。
 func connectFlagTarget(val string) (hostPort, bool) {
-	if !plausibleHost(strings.Split(val, ":")[0]) {
+	if !addressLikeHost(strings.Split(val, ":")[0]) {
 		return hostPort{}, false
 	}
 	host, port := val, ""
@@ -402,15 +448,52 @@ func connectFlagTarget(val string) (hostPort, bool) {
 	} else {
 		host = strings.ToLower(val)
 	}
-	if !plausibleHost(host) {
+	if !addressLikeHost(host) {
 		return hostPort{}, false
 	}
 	return hostPort{host: host, port: port}, true
 }
 
+// ---- P4-72 第二条道·快路径:已知位置覆盖集 ----
+
+// bashAddrScan bash 命令的目标识别扫描结果(P4-72 三条道的输入):
+// targets＝已知位置提取的目标(目标位);covered＝已知位置覆盖的地址
+// 形态子串集(目标位＋值选项值位＋头值位＋--resolve 对照侧＋代理变
+// 量赋值位,小写 host)。covered 与 addrSubtokensOf 全集求差得
+// unexplained——快路径"全解才直判"的判定依据:任何地址形态 token 不
+// 在 covered,即存在未知写法,不猜测、整条命令交模型。
+type bashAddrScan struct {
+	targets []hostPort
+	covered map[string]bool
+}
+
+func newBashAddrScan() *bashAddrScan {
+	return &bashAddrScan{covered: map[string]bool{}}
+}
+
+func (s *bashAddrScan) addTarget(hp hostPort) {
+	s.targets = append(s.targets, hp)
+	s.cover(hp.host)
+}
+
+func (s *bashAddrScan) cover(host string) {
+	s.covered[strings.ToLower(strings.TrimSpace(host))] = true
+}
+
+// coverValue 值位 token 整体覆盖:其中全部地址形态子串视为已知位置
+// ——UA 版本号、请求头值、载荷参数值、对照侧 IP 等按 P4-50 口径不是
+// 连接目标,快路径据此放它们过全解检查(零模型调用)。
+func (s *bashAddrScan) coverValue(val string) {
+	for _, h := range addrSubtokensOf(val) {
+		s.cover(h)
+	}
+}
+
 // httpToolTargets curl/wget 参数扫描:目标 URL 位置参数(http(s) 词)、
-// Host 头值(-H/--header 专项)、--resolve 目标侧;其余值选项的值跳过。
-func httpToolTargets(toks []shToken) []hostPort {
+// Host 头值(-H/--header 专项)、--resolve 目标侧;其余值选项的值跳过
+// 并整体入 covered。非 URL 的裸地址位置参数不提取不覆盖——curl 的
+// 位置参数还可能是文件名等形态,快路径不猜测,交第三条道。
+func httpToolTargets(toks []shToken, scan *bashAddrScan) []hostPort {
 	var out []hostPort
 	for i := 0; i < len(toks); i++ {
 		t := toks[i]
@@ -418,6 +501,7 @@ func httpToolTargets(toks []shToken) []hostPort {
 			if !t.vari {
 				if hp, ok := urlTokenTarget(t.text); ok {
 					out = append(out, hp)
+					scan.cover(hp.host)
 				}
 			}
 			continue
@@ -433,6 +517,7 @@ func httpToolTargets(toks []shToken) []hostPort {
 				val = toks[i+1].text
 				i++
 			}
+			scan.coverValue(val) // 头值/对照侧整体覆盖(Host: 目标侧另提取)
 			var hp hostPort
 			var ok bool
 			if flag == "--resolve" {
@@ -442,10 +527,17 @@ func httpToolTargets(toks []shToken) []hostPort {
 			}
 			if ok {
 				out = append(out, hp)
+				scan.cover(hp.host)
 			}
 		default:
-			if httpFlagValue[flag] && val == "" {
-				i++ // 值选项:吞掉后随值
+			if httpFlagValue[flag] {
+				if val == "" && i+1 < len(toks) {
+					val = toks[i+1].text
+					i++
+				}
+				if val != "" {
+					scan.coverValue(val)
+				}
 			}
 		}
 	}
@@ -453,8 +545,9 @@ func httpToolTargets(toks []shToken) []hostPort {
 }
 
 // opensslTargets openssl s_client 的 -connect(实际连接处)与
-// -servername(SNI 目标侧)。非 s_client 子命令不联网,不提取。
-func opensslTargets(toks []shToken) []hostPort {
+// -servername(SNI 目标侧)。非 s_client 子命令不联网,不提取;已知值
+// 选项的值跳过并整体入 covered。
+func opensslTargets(toks []shToken, scan *bashAddrScan) []hostPort {
 	sclient := false
 	for _, t := range toks {
 		if t.text == "s_client" {
@@ -477,8 +570,14 @@ func opensslTargets(toks []shToken) []hostPort {
 				flag, inline = flag[:j], flag[j+1:]
 			}
 			if flag != "-connect" && flag != "-servername" {
-				if opensslFlagValue[flag] && inline == "" {
-					i++
+				if opensslFlagValue[flag] {
+					if inline == "" && i+1 < len(toks) {
+						inline = toks[i+1].text
+						i++
+					}
+					if inline != "" {
+						scan.coverValue(inline)
+					}
 				}
 				continue
 			}
@@ -489,6 +588,7 @@ func opensslTargets(toks []shToken) []hostPort {
 			}
 			if hp, ok := connectFlagTarget(val); ok {
 				out = append(out, hp)
+				scan.cover(hp.host)
 			}
 		}
 	}
@@ -506,7 +606,7 @@ func scanHostToken(s string) string {
 	} else if m := cidrRe.FindStringSubmatch(low); m != nil {
 		low = m[1] // CIDR:取网络地址判定(同理,段授权必然不匹配)
 	}
-	if plausibleHost(low) && !strings.ContainsAny(low, "*[]") {
+	if addressLikeHost(low) && !strings.ContainsAny(low, "*[]") {
 		return low
 	}
 	return ""
@@ -519,8 +619,9 @@ var (
 
 // scanTargets nmap/masscan/rustscan 参数扫描(参数从命令词之后起):
 // 跳过值选项的值,位置参数里的主机形态即目标;-p 端口列表(80,443 或
-// 1-100)解析后逐端口绑定目标(无 -p 的裸目标 = 全端口意图)。
-func scanTargets(toks []shToken) []hostPort {
+// 1-100)解析后逐端口绑定目标(无 -p 的裸目标 = 全端口意图)。已知值
+// 选项的值整体入 covered;未知旗标的地址形态值不覆盖——交模型。
+func scanTargets(toks []shToken, scan *bashAddrScan) []hostPort {
 	var out []hostPort
 	var ports []string
 	for i := 0; i < len(toks); i++ {
@@ -542,17 +643,25 @@ func scanTargets(toks []shToken) []hostPort {
 				ports = scanPortList(val)
 				continue
 			}
-			if scanFlagValue[flag] && inline == "" && i+1 < len(toks) {
-				i++ // 值选项:吞掉后随值
+			if scanFlagValue[flag] {
+				if inline == "" && i+1 < len(toks) {
+					inline = toks[i+1].text
+					i++
+				}
+				if inline != "" {
+					scan.coverValue(inline)
+				}
 			}
 			continue
 		}
 		if host := scanHostToken(t.text); host != "" {
 			if len(ports) == 0 {
 				out = append(out, hostPort{host: host})
+				scan.cover(host)
 			}
 			for _, p := range ports {
 				out = append(out, hostPort{host: host, port: p})
+				scan.cover(host)
 			}
 		}
 	}
@@ -606,8 +715,8 @@ func atoiClamp(s string) int {
 
 // ncTargets nc/ncat/netcat 参数扫描(参数从命令词之后起):-l 监听模式
 // 不外连不提取;位置参数第一个主机形态是目标 host,其后首个纯数字位
-// 置参数是端口。
-func ncTargets(toks []shToken) []hostPort {
+// 置参数是端口。已知值选项的值整体入 covered。
+func ncTargets(toks []shToken, scan *bashAddrScan) []hostPort {
 	for _, t := range toks {
 		if !t.vari && t.text == "-l" {
 			return nil
@@ -625,8 +734,14 @@ func ncTargets(toks []shToken) []hostPort {
 			if j := strings.Index(flag, "="); j > 0 {
 				flag, inline = flag[:j], flag[j+1:]
 			}
-			if ncFlagValue[flag] && inline == "" && i+1 < len(toks) {
-				i++ // 值选项:吞掉后随值
+			if ncFlagValue[flag] {
+				if inline == "" && i+1 < len(toks) {
+					inline = toks[i+1].text
+					i++
+				}
+				if inline != "" {
+					scan.coverValue(inline)
+				}
 			}
 			continue
 		}
@@ -639,40 +754,51 @@ func ncTargets(toks []shToken) []hostPort {
 		}
 		if hp, ok := connectFlagTarget(t.text); ok {
 			out = append(out, hp)
+			scan.cover(hp.host)
 		}
 	}
 	return out
 }
 
-// bashScopeTargets bash 命令文本 → 实际发起连接的目标位置(P4-50 ①
-// 收窄面):剥 heredoc 与注释 → 分段分词 → /dev/(tcp|udp) 形态正则 +
-// 工具分派(参数取命令词之后;curl/wget 目标 URL 与 Host 头与
-// --resolve 侧、openssl s_client、nmap 族扫描目标、nc 族)。其余工具
-// (dig/ping/python 等)与命令替换/$() 不提取——留痕兜底,与"防漂移
-// 不防规避"一致。
-func bashScopeTargets(cmd string) []hostPort {
-	var out []hostPort
+// bashAddrScanOf bash 命令文本 → 目标识别扫描(P4-72 三条道的输入):
+// 剥 heredoc 与注释 → 分段分词 → /dev/(tcp|udp) 形态正则 + 工具分派
+// (curl/wget 目标 URL 与 Host 头与 --resolve 侧、openssl s_client、
+// nmap 族扫描目标、nc 族);代理变量赋值的值整体入 covered。其余工
+// 具(dig/ping/python 等)与命令替换/$() 不进目标位——地址形态 token
+// 留给快路径全解检查(未覆盖即交模型,静默漏拦根除;P4-50 时代这些
+// 位置静默跳过)。
+func bashAddrScanOf(cmd string) *bashAddrScan {
+	scan := newBashAddrScan()
 	for _, seg := range shellSegments(stripHeredocs(cmd)) {
 		for _, tok := range seg {
 			if m := devTcpRe.FindStringSubmatch(tok.text); m != nil &&
-				plausibleHost(m[2]) && !strings.HasPrefix(m[2], "$") && isAllDigits(m[3]) {
-				out = append(out, hostPort{host: strings.ToLower(m[2]), port: m[3]})
+				addressLikeHost(m[2]) && !strings.HasPrefix(m[2], "$") && isAllDigits(m[3]) {
+				hp := hostPort{host: strings.ToLower(m[2]), port: m[3]}
+				scan.targets = append(scan.targets, hp)
+				scan.cover(hp.host)
+			}
+		}
+		// 代理变量赋值(VAR=值,任意段内 token):值是代理地址不是命令
+		// 目标(P4-66 既有口径,快路径覆盖集按位置识别)。
+		for _, tok := range seg {
+			if j := strings.Index(tok.text, "="); j > 0 && proxyEnvVarName(tok.text[:j]) {
+				scan.coverValue(tok.text[j+1:])
 			}
 		}
 		lead, argsAt := segmentLead(seg)
 		args := seg[argsAt:]
 		switch lead {
 		case "curl", "wget":
-			out = append(out, httpToolTargets(args)...)
+			scan.targets = append(scan.targets, httpToolTargets(args, scan)...)
 		case "openssl":
-			out = append(out, opensslTargets(seg)...)
+			scan.targets = append(scan.targets, opensslTargets(seg, scan)...)
 		case "nmap", "masscan", "rustscan":
-			out = append(out, scanTargets(args)...)
+			scan.targets = append(scan.targets, scanTargets(args, scan)...)
 		case "nc", "ncat", "netcat":
-			out = append(out, ncTargets(args)...)
+			scan.targets = append(scan.targets, ncTargets(args, scan)...)
 		}
 	}
-	return out
+	return scan
 }
 
 // targetInScope 目标(host+可选端口)是否在任务包闭包内(带单位级
@@ -763,41 +889,78 @@ func (env *unitEnv) scopeExempt(host string) bool {
 	return local()[strings.ToLower(strings.TrimSpace(host))]
 }
 
+// scopeExtraction 一次调用的三条道输入(P4-72):targets＝已知位置
+// 提取的目标(过语法守门);unexplained＝快路径未解释的地址形态
+// token(全文地址子串 − 已知位置覆盖集 − 环回/本机豁免;bash 命令路
+// 才有,http_probe/port_probe 参数即目标、无隐藏位置)。
+type scopeExtraction struct {
+	targets     []hostPort
+	unexplained []string
+}
+
+// scopeExtractFor 提取并求快路径未解释集(全解性检查):任何地址形态
+// token 不被已知位置解释,即存在未知写法——不猜测,整条命令交模型
+// (第三条道)。
+func (env *unitEnv) scopeExtractFor(toolName string, input json.RawMessage) scopeExtraction {
+	ex := scopeExtraction{}
+	var raw []hostPort
+	switch toolName {
+	case "http_probe", "port_probe":
+		raw = callTargets(toolName, input)
+	case "bash":
+		cmd := bashCommandOf(input)
+		scan := bashAddrScanOf(cmd)
+		raw = scan.targets
+		for _, h := range addrSubtokensOf(stripHeredocs(cmd)) {
+			if scan.covered[h] || isLoopbackHost(h) || env.scopeExempt(h) {
+				continue
+			}
+			ex.unexplained = append(ex.unexplained, h)
+		}
+	}
+	for _, t := range raw {
+		if addressLikeHost(t.host) && !reservedTLDR(t.host) {
+			ex.targets = append(ex.targets, t)
+		}
+	}
+	return ex
+}
+
+// scopeDisplay 目标的呈现形态(host[:port] 原样)。
+func scopeDisplay(t hostPort) string {
+	if t.port != "" {
+		return t.host + ":" + t.port
+	}
+	return t.host
+}
+
 // denyScope 范围外拦截的统一挂点(P4-51 ① 从"直接拒＋熔断"改为阻塞等
 // 批准;P4-67 在出卡前加研判分诊;P4-68 拒绝分族;P4-70 ② 红队命令路
-// 复查与 ③ 会话档)。渗透任务:调用目标里首个不在闭包内的主机,按目标
-// 现值分流——已排除(禁止测试/摘除)按意图覆盖分族:覆盖(工作线是它)
-// 直接拒留痕终止;不覆盖、命令顺带触碰只拒该条命令＋换路反馈单位继续;
-// 已获准但本单位闭包过期(领取时快照)步骤回可领取重领新包;信息源清
-// 单命中(经分诊判过"方法性访问"的公开信息服务)走 gateListedSource
-// 统一处置(会话档先行——允许档获取与攻击一并放行、禁止档自动拒;无
-// 档获取使用直接放行零出卡、攻击动作出攻击行为卡);其余 P4-67 分诊:
-// 方法性访问/声明命中→自动授访问权(host 入信息源清单)零出卡;信息源
-// 上的攻击行为→会话档先行后出攻击行为卡(弹门挂起,批准=本会话档允
-// 许、拒绝=会话档禁止＋只杀动作单位换路);相关资产候选/拿不准→现行
-// 待决卡(同一目标一张卡,去重)＋单位冻结收场让位名额(env.scopeHold,
-// drive 收段后落 scope_wait 态)。红队/未标任务(无闭包):P4-70 ② 起
-// 命令路只复查信息源清单命中——与渗透 ③ 间支同一代码路径(gateListed-
-// Source);清单外范围外地址照旧直接放行留痕照镜(零判定调用)。
-// 返回人话原因(审批门/门卫补口据此回给模型);无命中/无闭包命中返回
-// 空串放行。display 为主机呈现(host[:port] 原样)。
+// 复查与 ③ 会话档;P4-72 三条道:语法守门已在提取出口,本函数为第二
+// 条道快路径与第三条道合一调用的主流程)。渗透任务两阶段:
+// 阶段一确定性分流(豁免/闭包内/复测/排除分族/现值闭包/信息源清单/
+// 分诊缓存——能确定性处置的即时处置),收集待定性目标;阶段二合一
+// 调用(每条命令至多一次):快路径全解且全范围内＝零模型调用直判,
+// 存在待定目标或未解释地址 token 时一次调用出"目标清单＋逐目标判
+// 定"。红队/未标任务(无闭包):命令路只复查信息源清单命中(与渗透
+// ③ 间支同一代码路径);清单外范围外地址直接放行留痕照镜(零判定调
+// 用,未解释地址 token 同样照镜——红队无静默漏拦问题)。返回人话原
+// 因(审批门/门卫补口据此回给模型);无命中返回空串放行。
 func (env *unitEnv) denyScope(pack *TaskPack, toolName string, input json.RawMessage) string {
 	noClosure := pack.ScopeClosure == nil || pack.ScopeClosure.Empty()
-	for _, t := range scopeCallTargets(toolName, input) {
-		if env.scopeExempt(t.host) {
-			// P4-66 确定性豁免:本机环回/本机网络地址(镜/代理等设施所
-			// 在)不进围栏判定,视同非目标放行——执行留痕走 tool_call
-			// 记录既有通道。
-			continue
-		}
-		display := t.host
-		if t.port != "" {
-			display += ":" + t.port
-		}
-		// P4-70 ②:红队/未标(无闭包)命令路只复查信息源清单命中(与渗
-		// 透 ③ 间支同一代码路径);清单外范围外地址直接放行留痕照镜
-		//(零判定调用)。
-		if noClosure {
+	ext := env.scopeExtractFor(toolName, input)
+	if noClosure {
+		for _, t := range ext.targets {
+			if env.scopeExempt(t.host) {
+				// P4-66 确定性豁免:本机环回/本机网络地址(镜/代理等设施所
+				// 在)不进围栏判定,视同非目标放行——执行留痕走 tool_call
+				// 记录既有通道。
+				continue
+			}
+			display := scopeDisplay(t)
+			// P4-70 ②:红队/未标(无闭包)命令路只复查信息源清单命中(与渗
+			// 透 ③ 间支同一代码路径);清单外范围外地址直接放行留痕照镜
+			//(零判定调用)。
 			if roe, err := env.Executor.Store.CurrentRoE(guardLedgerCtx, pack.TaskID); err == nil &&
 				roe.InfoSourceHit(t.host) {
 				if ruling, msg := env.gateListedSource(pack, toolName, input, t.host, display); ruling == listedRulingAllow {
@@ -810,11 +973,19 @@ func (env *unitEnv) denyScope(pack *TaskPack, toolName string, input json.RawMes
 				runlog.Warnf("边界判定失败(红队信息源动作复查,按拿不准出攻击卡): %s %s", pack.TaskID, display)
 				return env.enterAttackCard(pack, toolName, input, display, "")
 			}
-			continue
+		}
+		return ""
+	}
+	// ---- 渗透:阶段一确定性分流 ----
+	var pending []hostPort // 范围外、无缓存、清单未命中的待定性目标
+	for _, t := range ext.targets {
+		if env.scopeExempt(t.host) {
+			continue // P4-66 确定性豁免(同红队分支注释)
 		}
 		if env.targetInScope(pack, t.host, t.port) {
 			continue
 		}
+		display := scopeDisplay(t)
 		// 复测单位(P3-06)不进冻结:侧会话不经主宰调度,scope_wait 态
 		// 无人唤醒——照旧直接拒(复测目标由面板复测发起时圈定)。
 		if env.retest != nil {
@@ -855,8 +1026,7 @@ func (env *unitEnv) denyScope(pack *TaskPack, toolName string, input json.RawMes
 		// ③ 信息源清单命中(P4-67 任务级缓存;P4-68 ① 收口、P4-70 ③
 		// 会话档先行):获取使用直接放行零出卡;该 host 上的攻击动作走
 		// 会话档(允许档放行免卡、禁止档自动拒不弹卡),无档出攻击行为
-		// 卡(动作复查——单次分诊只判动作性质,不重判 host 归属、零规
-		// 则判攻击)。查现值 RoE(不读单位级 scopeNow 缓存,撤销立即生效)。
+		// 卡。查现值 RoE(不读单位级 scopeNow 缓存,撤销立即生效)。
 		if roe, err := env.Executor.Store.CurrentRoE(guardLedgerCtx, pack.TaskID); err == nil &&
 			roe.InfoSourceHit(t.host) {
 			if ruling, msg := env.gateListedSource(pack, toolName, input, t.host, display); ruling == listedRulingAllow {
@@ -865,77 +1035,230 @@ func (env *unitEnv) denyScope(pack *TaskPack, toolName string, input json.RawMes
 				return msg
 			}
 			// 动作分诊失败:按拿不准偏向出卡(失败方向钉死——宁可
-			// 多问不误放),走 ⑤ 范围卡。
+			// 多问不误放),走候选出卡兜底。
 			runlog.Warnf("边界判定失败(信息源动作复查,按拿不准出卡): %s %s", pack.TaskID, display)
+			return env.scopeWaitCard(pack, toolName, input, t)
 		}
-		// ④ P4-67 研判分诊:出卡前先判性质(拿不准偏向出卡)。任务级
-		// 缓存＝tg-<host> 研判留痕(撤销落 revoked,读到即重新分诊)。
+		// ④ 分诊缓存(tg-<host> 研判留痕,撤销落 revoked 重新判定):
+		// 按缓存结论处置——信息源获取自动授访问权、信息源攻击走会话
+		// 档/攻击卡、非目标静默过滤(零调用)、候选与范围内(模型判定
+		// 与闭包现值矛盾,保守)出范围卡。
 		verdict, basis := TriageVerdictOf(guardLedgerCtx, env.Executor.Store, pack.TaskID, t.host)
-		if verdict == "" {
-			v, b, err := env.triageCall(pack, toolName, input, display)
-			if err == nil {
-				verdict, basis = v, b
-				env.recordTriage(pack, t.host, t.port, verdict, basis)
-			} else {
-				runlog.Warnf("边界判定失败(按拿不准出卡): %s %s: %v", pack.TaskID, display, err)
-			}
-		}
-		switch {
-		case IsTriageInfoSource(verdict):
-			// 方法性访问/声明命中:自动授访问权,host 入信息源清单,
-			// 零出卡放行(AllowScopeAccess 统一入口——同主机资产退役,
-			// 与面板标记/牧者标记同一机制)。
+		switch triageSemantic(verdict) {
+		case TriageInfoAccess:
 			if err := AllowScopeAccess(guardLedgerCtx, env.Executor.Store, pack.TaskID,
 				t.host, basis, "swarm:"+env.UnitID); err != nil {
 				runlog.Warnf("信息源入清单失败(本次仍放行): %s %s: %v", pack.TaskID, display, err)
 			}
 			continue
-		case verdict == TriageAttack:
-			// 信息源上的攻击行为:会话档先行(P4-70 ③——本会话批准过
-			// 免卡放行、禁止过自动拒),未定档出攻击行为卡(弹门挂起,
-			// 统一卡骨架;批准=本会话档允许、拒绝=只杀动作单位换路)。
+		case TriageInfoAttack:
 			if ruling, msg := env.attackRulingGate(pack, toolName, input, t.host, display); ruling == listedRulingAllow {
 				continue
 			} else if ruling == listedRulingHandled {
 				return msg
 			}
+			// 缓存结论是已判定(info_attack):依据为空的存量记录如实
+			// 标"判定依据未记录",与"未判定"的拿不准路径分开(P4-74 ③)。
+			if basis == "" {
+				basis = "判定依据未记录"
+			}
 			return env.enterAttackCard(pack, toolName, input, display, basis)
+		case TriageNotTarget:
+			continue // 非目标:静默过滤(留痕在缓存记录,不算拦截)
+		case "":
+			pending = append(pending, t) // 无缓存:交阶段二合一判定
 		default:
-			// 相关资产候选/拿不准:现行范围卡状态机(偏向出卡)。
+			// 候选/范围内缓存(现值闭包 ② 已查不命中):出范围卡。
+			return env.scopeWaitCard(pack, toolName, input, t)
 		}
-		// ⑤ 出待决卡(同一目标一张卡去重);该卡已裁"禁止测试"的不再
-		// 重复出卡,直接拒。
-		rid := scopeCardID(t.host, t.port)
-		switch env.scopeCardState(pack, rid) {
-		case scopeCardDenied:
-			reason := fmt.Sprintf(
-				"任务范围外:目标 %s 已被禁止测试(不再出卡),换授权范围内的方向", display)
-			env.denyGuard(pack, toolName, input, rings.DenyLineRoeScope, reason)
-			return reason
-		case scopeCardPending:
-			// 已有待决卡:并入等待,不重复出卡。
-		case scopeCardAllowed:
-			// 卡已裁"加入资产"(②闭包现值判定的兜底路径):按闭包过期处理,
-			// 步骤回可领取重领新包。
-			env.scopeReclaim = true
-			env.fuseSegment()
-			return fmt.Sprintf(
-				"目标 %s 已加入任务范围;本单位任务包为领取时快照,即将重新领取后继续执行该命令(已执行过的动作勿重复)", display)
-		default:
-			env.recordApproval(rings.ApprovalRecord{
-				RequestID: rid, StepID: pack.StepID, UnitID: env.UnitID,
-				Type: rings.ApprovalRecScopeWait, ActionLevel: pack.ActionLevel,
-				HarmClass: pack.HarmClass, Intent: pack.StepIntent,
-				ToolName: toolName, ToolArgs: input,
-				Note: "渗透任务:命令目标 " + display + " 在范围外,拦下等待批准(加入资产/禁止测试)",
-			})
-		}
-		env.scopeHold = &scopeHoldInfo{host: t.host, port: t.port, disp: display}
+	}
+	if len(pending) == 0 && len(ext.unexplained) == 0 {
+		return "" // 快路径全解直判(零模型调用)
+	}
+	// ---- 渗透:阶段二·模型提取＋定性合一(P4-72,每条命令至多一次) ----
+	return env.unifiedScopeDecision(pack, toolName, input, pending, ext.unexplained)
+}
+
+// scopeWaitCard 出渗透范围待决卡(同一目标一张卡去重;该卡已裁"禁止
+// 测试"的不再重复出卡,直接拒;已裁"加入资产"按闭包过期重领)。P4-72
+// 卡创建挂语法守门第二处:目标不是地址形态不出卡(垃圾目标绝迹)。
+func (env *unitEnv) scopeWaitCard(pack *TaskPack, toolName string, input json.RawMessage, t hostPort) string {
+	if !addressLikeHost(t.host) {
+		// 语法守门(同源单函数第二挂点):非地址形态不出卡,视同非目标
+		// 放行(留痕走 tool_call 执行记录)。
+		runlog.Warnf("目标非地址形态,不出卡放行: %s %q", pack.TaskID, t.host)
+		return ""
+	}
+	display := scopeDisplay(t)
+	rid := scopeCardID(t.host, t.port)
+	switch env.scopeCardState(pack, rid) {
+	case scopeCardDenied:
+		reason := fmt.Sprintf(
+			"任务范围外:目标 %s 已被禁止测试(不再出卡),换授权范围内的方向", display)
+		env.denyGuard(pack, toolName, input, rings.DenyLineRoeScope, reason)
+		return reason
+	case scopeCardPending:
+		// 已有待决卡:并入等待,不重复出卡。
+	case scopeCardAllowed:
+		// 卡已裁"加入资产"(②闭包现值判定的兜底路径):按闭包过期处理,
+		// 步骤回可领取重领新包。
+		env.scopeReclaim = true
 		env.fuseSegment()
 		return fmt.Sprintf(
-			"该命令已拦下等待批准:目标 %s 在任务范围外,已提交面板待决(同一目标一张卡);本单位暂停让位,批准后自动继续执行这条命令", display)
+			"目标 %s 已加入任务范围;本单位任务包为领取时快照,即将重新领取后继续执行该命令(已执行过的动作勿重复)", display)
+	default:
+		env.recordApproval(rings.ApprovalRecord{
+			RequestID: rid, StepID: pack.StepID, UnitID: env.UnitID,
+			Type: rings.ApprovalRecScopeWait, ActionLevel: pack.ActionLevel,
+			HarmClass: pack.HarmClass, Intent: pack.StepIntent,
+			ToolName: toolName, ToolArgs: input,
+			Note: "渗透任务:命令目标 " + display + " 在范围外,拦下等待批准(加入资产/禁止测试)",
+		})
+	}
+	env.scopeHold = &scopeHoldInfo{host: t.host, port: t.port, disp: display}
+	env.fuseSegment()
+	return fmt.Sprintf(
+		"该命令已拦下等待批准:目标 %s 在任务范围外,已提交面板待决(同一目标一张卡);本单位暂停让位,批准后自动继续执行这条命令", display)
+}
+
+// unifiedScopeDecision 阶段二:模型提取＋定性合一(P4-72 一次调用两问
+// 合一)。确定性待判目标(pending)由模型逐个定性;未解释地址 token
+// 由模型从命令原文自行提取判定(模型清单权威——它读了整条命令,未
+// 列出的地址即判定为非连接目标)。调用失败按拿不准偏向出卡。
+func (env *unitEnv) unifiedScopeDecision(pack *TaskPack, toolName string, input json.RawMessage,
+	pending []hostPort, unexplained []string) string {
+	// 装配异常(无分诊链可用):确定性待判目标按候选出卡(实锤越界证
+	// 据在前);仅未解释地址 token 而无确定性目标的,退 P4-50 既有口
+	// 径留痕放行(未知写法本就不是连接位置的实锤,模型不可用时单位
+	// 整体不可运转,不作卡面噪音)。
+	if env.triage == nil && env.Executor.Provider == nil {
+		if len(pending) > 0 {
+			return env.scopeWaitCard(pack, toolName, input, pending[0])
+		}
+		runlog.Warnf("无分诊链可用,未知写法按旧口径留痕放行: %s", pack.TaskID)
+		return ""
+	}
+	fn := env.triage
+	if fn == nil {
+		fn = TriageFor(env.Executor.Provider)
+		env.Executor.triageCalls++
+	}
+	command := string(input)
+	if toolName == "bash" {
+		command = bashCommandOf(input)
+	}
+	cands := make([]string, 0, len(pending))
+	for _, p := range pending {
+		cands = append(cands, scopeDisplay(p))
+	}
+	reply, err := fn(guardLedgerCtx, TriageInput{
+		Command: command, Intent: pack.StepIntent, GoalSummary: env.goalSummary,
+		DeclaredServices: pack.ExternalServices,
+		ScopeSummary:     pack.ScopeClosure.Summary(),
+		Candidates:       cands,
+	})
+	if err != nil {
+		// 拿不准(偏向出卡,失败方向钉死):确定性待判目标按候选出卡;
+		// 无确定性目标而有未解释地址 token 的,首个按候选出卡(整条命
+		// 令存在模型未读通的未知写法,保守处置)。
+		runlog.Warnf("边界判定失败(按拿不准出卡): %s: %v", pack.TaskID, err)
+		if len(pending) > 0 {
+			return env.scopeWaitCard(pack, toolName, input, pending[0])
+		}
+		if len(unexplained) > 0 {
+			return env.scopeWaitCard(pack, toolName, input, hostPort{host: unexplained[0]})
+		}
+		return ""
+	}
+	// 留痕清单摘要(本命令合一判定的全部目标,逐笔 tg- 记录携带)。
+	all := make([]string, 0, len(reply.Targets))
+	for _, tt := range reply.Targets {
+		all = append(all, tt.Host)
+	}
+	// 确定性待判目标优先处置(闭包外的实锤目标);模型未列出(漏提)的
+	// 保守按候选出卡。
+	handled := map[string]bool{}
+	for _, p := range pending {
+		tt, ok := reply.Single(p.host)
+		if !ok {
+			return env.scopeWaitCard(pack, toolName, input, p)
+		}
+		handled[strings.ToLower(p.host)] = true
+		if msg := env.applyUnifiedVerdict(pack, toolName, input, p, tt, all); msg != "" {
+			return msg // 出卡/攻击卡挂起类即返回
+		}
+	}
+	// 模型自行补提的目标(未解释地址 token 中被判定为实际连接的):
+	// 范围内的代码复核后跳过(模型对范围内目标的重标注不作依据——防
+	// 其误标 info_access 时经 AllowScopeAccess 把范围内资产退役),其余
+	// 按判定处置——静默漏拦由"模型必然读到"根除。
+	for _, tt := range reply.Targets {
+		hp, ok := hostPortOfDisplay(tt.Host)
+		if !ok || handled[hp.host] || env.scopeExempt(hp.host) {
+			continue
+		}
+		if env.targetInScope(pack, hp.host, hp.port) {
+			continue // 范围内目标:单位正常工作面,零变更
+		}
+		if msg := env.applyUnifiedVerdict(pack, toolName, input, hp, tt, all); msg != "" {
+			return msg
+		}
 	}
 	return ""
+}
+
+// hostPortOfDisplay 模型输出的目标形态(host[:port]/URL)→ hostPort
+// (过语法守门——垃圾清单项不处置)。
+func hostPortOfDisplay(s string) (hostPort, bool) {
+	if anchor, ok := rings.ScopeAnchorOf(strings.TrimSpace(s)); ok && addressLikeHost(anchor.Host) {
+		return hostPort{host: anchor.Host, port: anchor.Port}, true
+	}
+	return hostPort{}, false
+}
+
+// applyUnifiedVerdict 合一判定处置(逐目标;五值语义):范围内→代码按
+// 闭包复核(真在范围放行,模型误判按候选出卡);信息源获取→自动授
+// 访问权入清单零出卡;信息源攻击→会话档先行后出攻击行为卡;相关资
+// 产候选→渗透范围卡(冻结收场);非目标→静默过滤(留痕不算拦截)。
+// 逐目标判定与依据入 tg- 缓存(同任务同 host 零重复调用)。返回非空
+// ＝挂起类处置文案(出卡/拒绝),空串＝该目标放行继续。
+func (env *unitEnv) applyUnifiedVerdict(pack *TaskPack, toolName string, input json.RawMessage,
+	t hostPort, tt TriageTarget, all []string) string {
+	display := scopeDisplay(t)
+	env.recordApproval(BuildUnifiedTriageRecord(t.host, tt.Verdict, tt.Basis, all, rings.ApprovalRecord{
+		StepID: pack.StepID, UnitID: env.UnitID,
+		ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
+		Intent: pack.StepIntent,
+	}))
+	switch triageSemantic(tt.Verdict) {
+	case TriageInScope:
+		if env.targetInScope(pack, t.host, t.port) {
+			return "" // 代码复核真在范围:放行(模型判定不作放行依据)
+		}
+		// 模型判范围内但闭包不含(误判/已被摘除):保守按候选出卡。
+		return env.scopeWaitCard(pack, toolName, input, t)
+	case TriageInfoAccess:
+		// 方法性访问/声明命中:自动授访问权,host 入信息源清单,零出
+		// 卡放行(AllowScopeAccess 统一入口——同主机资产退役,与面板
+		// 标记/牧者标记同一机制)。
+		if err := AllowScopeAccess(guardLedgerCtx, env.Executor.Store, pack.TaskID,
+			t.host, tt.Basis, "swarm:"+env.UnitID); err != nil {
+			runlog.Warnf("信息源入清单失败(本次仍放行): %s %s: %v", pack.TaskID, display, err)
+		}
+		return ""
+	case TriageInfoAttack:
+		if ruling, msg := env.attackRulingGate(pack, toolName, input, t.host, display); ruling == listedRulingAllow {
+			return ""
+		} else if ruling == listedRulingHandled {
+			return msg
+		}
+		return env.enterAttackCard(pack, toolName, input, display, tt.Basis)
+	case TriageNotTarget:
+		return "" // 非目标:静默过滤(留痕已入账,不算拦截)
+	default:
+		// 相关资产候选:渗透范围卡状态机。
+		return env.scopeWaitCard(pack, toolName, input, t)
+	}
 }
 
 // listedSourceAction 信息源清单命中 host 的动作复查结论(P4-68 ①:
@@ -1043,9 +1366,10 @@ func (env *unitEnv) denyListedAttack(pack *TaskPack, toolName string, input json
 	return reason
 }
 
-// listedSourceAction 单次动作分诊(同 TriageFor 链,输入带"已在信息源
-// 清单"标记只判动作性质;零规则判攻击)。判定不落 tg- 缓存(host 归属
-// 已由清单缓存,动作结论逐命令即弃);依据经 lastTriageBasis 带给攻击卡。
+// listedSourceAction 单次动作分诊(合一契约:输入带"已在信息源清单"
+// 标记与候选锚点,模型只判本次动作性质;零规则判攻击)。判定不落
+// tg- 缓存(host 归属已由清单缓存,动作结论逐命令即弃);依据经
+// lastTriageBasis 带给攻击卡。
 func (env *unitEnv) listedSourceAction(pack *TaskPack, toolName string, input json.RawMessage, display string) listedSourceAction {
 	fn := env.triage
 	if fn == nil {
@@ -1056,41 +1380,63 @@ func (env *unitEnv) listedSourceAction(pack *TaskPack, toolName string, input js
 	if toolName == "bash" {
 		command = bashCommandOf(input)
 	}
-	verdict, basis, err := fn(guardLedgerCtx, TriageInput{
+	reply, err := fn(guardLedgerCtx, TriageInput{
 		Host: display, Command: command,
 		Intent: pack.StepIntent, GoalSummary: env.goalSummary,
 		DeclaredServices: pack.ExternalServices,
-		ListedInfoSource: true,
+		ListedInfoSource: true, Candidates: []string{display},
 	})
 	if err != nil {
 		return listedActionUnsure
 	}
-	env.lastTriageBasis = basis
-	if verdict == TriageAttack {
+	tt, ok := reply.Single(display)
+	if !ok {
+		return listedActionUnsure // 模型未列出该 host:按拿不准
+	}
+	env.lastTriageBasis = tt.Basis
+	if triageSemantic(tt.Verdict) == TriageInfoAttack {
 		return listedActionAttack
 	}
-	return listedActionAllow // 获取使用(含声明命中/候选:归属已定,只管动作)
+	return listedActionAllow // 获取使用(含范围内/候选:归属已定,只管动作)
 }
 
 // enterAttackCard 攻击行为卡挂起(P4-67 ④ 命令路/P4-68 清单命中复查/
 // P4-70 红队命令路共用):弹门挂起等裁决(批准=本会话档允许——该单位
 // 本会话内对该信息源的后续攻击放行免卡,拒绝=本会话档禁止＋只杀动作
-// 单位换路);无门 fail-safe 直接拒留痕。返回给模型的提示文案。
+// 单位换路);无门 fail-safe 直接拒留痕。P4-72 卡创建挂语法守门第二
+// 处(与 scopeWaitCard 同源):目标不是地址形态不出卡。返回给模型的
+// 提示文案。
+// P4-74 ③ 文案铁则:卡文案只陈述事实——basis 非空＝模型已判定该动作
+// 为主动攻击(依据随行);basis 空＝动作复查未出结论(拿不准提交人审),
+// 不写"本次动作是主动攻击"(未判定不宣称)。攻击卡只在信息源判定成
+// 立时进入(清单命中或 info_attack 结论),故"是信息源"句式恒有判定
+// 支撑;"判定失败按拿不准"的红队路径目标已在清单(判定在先)。
 func (env *unitEnv) enterAttackCard(pack *TaskPack, toolName string, input json.RawMessage, display, basis string) string {
+	if host, _, err := net.SplitHostPort(display); err == nil && !addressLikeHost(host) {
+		display = host
+	}
+	if !addressLikeHost(strings.Split(display, ":")[0]) {
+		// 语法守门:非地址形态不出卡,视同非目标放行。
+		runlog.Warnf("攻击卡目标非地址形态,不出卡放行: %s %q", pack.TaskID, display)
+		return ""
+	}
 	if env.Executor.Gate == nil {
 		reason := fmt.Sprintf(
 			"任务范围外:对 %s 的攻击动作需人审,无审批门可用(fail-safe),本次调用拒绝;对信息源只做获取使用", display)
 		env.denyGuard(pack, toolName, input, rings.DenyLineRoeScope, reason)
 		return reason
 	}
+	// 动作性质句:判定在说判定(依据随行),未判定说未判定(不宣称攻击)。
+	actionNote, actionWord := "本次动作是主动攻击(分诊依据:"+basis+")", "对它的攻击动作"
 	if basis == "" {
-		basis = "动作性质判定未定,按拿不准提交人审"
+		actionNote, actionWord = "本次动作的性质未判定(判定失败,按拿不准提交人审)", "本次动作"
 	}
 	ticket, terr := env.Executor.Gate.Enter(ApprovalRequest{
 		TaskID: pack.TaskID, StepID: pack.StepID, UnitID: env.UnitID,
 		Intent: pack.StepIntent, ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
 		ToolName: toolName, ToolArgs: string(input),
-		Note:         "攻击行为卡:" + display + " 是信息源(查资料用的公开服务,不是测试目标),本次动作是主动攻击(分诊依据:" + basis + ");批准=本会话内对该信息源的攻击动作放行,拒绝=该动作终止单位继续",
+		Note: "攻击行为卡:" + display + " 是信息源(查资料用的公开服务,不是测试目标)," + actionNote +
+			";批准=本会话内对该信息源的攻击动作放行,拒绝=该动作终止单位继续",
 		AttackTarget: display,
 	})
 	if terr != nil {
@@ -1099,8 +1445,8 @@ func (env *unitEnv) enterAttackCard(pack *TaskPack, toolName string, input json.
 	env.park = ticket
 	env.fuseSegment()
 	return fmt.Sprintf(
-		"%s(请求 %s):%s 是信息源,对它的攻击动作已提交面板待决(批准后继续执行该动作;查资料类访问不受影响)",
-		approvalPendingNote, ticket.Req.ID, display)
+		"%s(请求 %s):%s 是信息源,%s已提交面板待决(批准后继续执行该动作;查资料类访问不受影响)",
+		approvalPendingNote, ticket.Req.ID, display, actionWord)
 }
 
 // stepIntentCoversExcluded 本单位步骤的意图是否覆盖被排除目标(P4-68 ②
@@ -1141,35 +1487,6 @@ func (env *unitEnv) denyExcludedTouch(pack *TaskPack, toolName string, input jso
 		return reason + "(同目标累计命中已到上限,单位终止)"
 	}
 	return reason
-}
-
-// triageCall 分诊调用(unitEnv 注入点:测试打桩优先;生产按 Executor
-// 的模型链构造——命令原文带命令工具的参数原文)。
-func (env *unitEnv) triageCall(pack *TaskPack, toolName string, input json.RawMessage, display string) (string, string, error) {
-	fn := env.triage
-	if fn == nil {
-		fn = TriageFor(env.Executor.Provider)
-		env.Executor.triageCalls++
-	}
-	command := string(input)
-	if toolName == "bash" {
-		command = bashCommandOf(input)
-	}
-	in := TriageInput{
-		Host: display, Command: command,
-		Intent: pack.StepIntent, GoalSummary: env.goalSummary,
-		DeclaredServices: pack.ExternalServices,
-	}
-	return fn(guardLedgerCtx, in)
-}
-
-// recordTriage 单位侧分诊留痕(BuildTriageRecord 共用构造)。
-func (env *unitEnv) recordTriage(pack *TaskPack, host, port, verdict, basis string) {
-	env.recordApproval(BuildTriageRecord(host, verdict, basis, rings.ApprovalRecord{
-		StepID: pack.StepID, UnitID: env.UnitID,
-		ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
-		Intent: pack.StepIntent,
-	}))
 }
 
 // scopeHoldInfo 一次范围冻结的目标上下文(P4-51 ①):drive 收段后据此

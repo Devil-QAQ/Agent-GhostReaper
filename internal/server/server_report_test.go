@@ -120,6 +120,11 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 	claimIDRe := regexp.MustCompile(`判断 (tc-[0-9a-f]+)`)
 	stmtBackupRe := regexp.MustCompile(`(?m)^\s*存在性判断: .*备份目录`)
 	model := newSModel(func(rr *srecorded) sreply {
+		// P4-62/P4-73 复现挑选会话(零工具,系统段带"组装复现数据包"):
+		// 回种子步骤的选择 JSON(种子固定,无前置可补)。
+		if len(rr.ToolsOffered) == 0 && strings.Contains(rr.System, "组装复现数据包") {
+			return sreply{Text: `{"steps":[{"seq":1,"short":"拿备份列举","desc":"向主站发 GET /old-backup/,无需凭据;返回 200 且响应含备份文件列举即复现","purpose":"直接复现该问题"}]}`}
+		}
 		// P4-13 来龙去脉叙述会话(零工具,系统段带"来龙去脉"):
 		// 回一段叙述 JSON(坏回复路径由 overmind 单测覆盖)。
 		if len(rr.ToolsOffered) == 0 && strings.Contains(rr.System, "来龙去脉") {
@@ -189,7 +194,8 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 				case !sSeenToolResult(rr, "submit_falsify_result", "已记录"):
 					return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
 						ID: "fr1", Name: "submit_falsify_result",
-						Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":true},{"id":"alt2","refuted":true},{"id":"alt3","refuted":true},{"id":"alt4","refuted":true}],"evidence":"独立重放 /old-backup/ 仍返回备份文件列举,影响面成立"}`, claimID)}}}
+						// P4-73:证据带完整 URL(证明交换经回查兜底锚定)。
+						Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":true},{"id":"alt2","refuted":true},{"id":"alt3","refuted":true},{"id":"alt4","refuted":true}],"evidence":"独立重放 %s/old-backup/ 仍返回备份文件列举,影响面成立"}`, claimID, mainURL)}}}
 				default:
 					return sreply{Text: "反证完成:存在性未推翻,影响面证据充分。"}
 				}

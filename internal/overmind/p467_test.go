@@ -16,13 +16,20 @@ import (
 // 任务级缓存:信息源清单/tg- 留痕命中零分诊调用。环境复用 p444 种子
 // 助手(渗透/红队任务 + 带 new_asset 声明的候选事实)。
 
-// p467TriageStub 打桩分诊(发现路注入)。
+// p467TriageStub 打桩分诊(发现路注入;P4-72 合一契约形态:按锚点
+// host 具名单目标)。
 func p467TriageStub(verdict string, calls *int) swarm.TriageFunc {
-	return func(_ context.Context, in swarm.TriageInput) (string, string, error) {
+	return func(_ context.Context, in swarm.TriageInput) (swarm.TriageReply, error) {
 		if calls != nil {
 			*calls++
 		}
-		return verdict, "打桩依据:" + in.Host, nil
+		host := in.Host
+		if a, ok := rings.ScopeAnchorOf(strings.TrimSpace(host)); ok {
+			host = a.Host
+		}
+		return swarm.TriageReply{Targets: []swarm.TriageTarget{
+			{Host: host, Verdict: verdict, Basis: "打桩依据:" + host},
+		}}, nil
 	}
 }
 
@@ -117,12 +124,16 @@ func TestP467DiscoveryRedteam(t *testing.T) {
 	// 候选发现:入图＋可否决卡。
 	p444FactWithAsset(t, store, task, "f-cand", "mail.example.com")
 	called := 0
-	triage := func(_ context.Context, in swarm.TriageInput) (string, string, error) {
+	triage := func(_ context.Context, in swarm.TriageInput) (swarm.TriageReply, error) {
 		called++
 		if in.Host == "gitee.com" {
-			return swarm.TriageMethodical, "公开代码托管服务", nil
+			return swarm.TriageReply{Targets: []swarm.TriageTarget{
+				{Host: "gitee.com", Verdict: swarm.TriageMethodical, Basis: "公开代码托管服务"},
+			}}, nil
 		}
-		return swarm.TriageCandidate, "同根域子域,归属线索存在", nil
+		return swarm.TriageReply{Targets: []swarm.TriageTarget{
+			{Host: in.Host, Verdict: swarm.TriageCandidate, Basis: "同根域子域,归属线索存在"},
+		}}, nil
 	}
 	if _, err := Harvest(ctx, store, task, triage); err != nil {
 		t.Fatalf("收割失败: %v", err)

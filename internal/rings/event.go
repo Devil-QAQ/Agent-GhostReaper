@@ -968,6 +968,12 @@ type TestClaimRecord struct {
 	EvidenceRef      string      `json:"evidence_ref,omitempty"`
 	EvidenceHead     string      `json:"evidence_head,omitempty"`
 	Note             string      `json:"note,omitempty"`
+	// EvidenceExchanges 结论所依据的交换 ID 引用(P4-73 ①,问题清单
+	// #89):反证单位写回时携带确认依据的镜交换编号(工具结果 exchange=
+	// 行取得)。提交侧只收不拦;确认门槛校验(仲裁确认路径)按它解析
+	// 证明物种子——引用未命中时按证据文本 URL 回查兜底,仍追溯不到的
+	// 证据不得作为确认依据。旧记录无本字段(走回查兜底)。
+	EvidenceExchanges []string `json:"evidence_exchanges,omitempty"`
 
 	// verdict 侧。
 	Decision      string                   `json:"decision,omitempty"` // confirm|refuted|pending|advance_round(P1-08 旧数据缺省,按 Satisfied 推导;refuted=P4-55 ② 不成立)
@@ -1018,6 +1024,13 @@ type TestClaimRecord struct {
 	// 失败(重试一次后仍失败)。旧记录无本字段(旧口径候选池直出)。空 =
 	// 正常定稿(Steps 为模型挑选结果)。
 	NoReproReason string `json:"no_repro_reason,omitempty"`
+	// StepsIncomplete 流程步骤未生成的如实标注(P4-73 ④,问题清单 #89):
+	// 非空 = 本次定稿的复现包只含证明交换种子(确认依据,必在包内),
+	// 模型补全复现流程的挑选失败(调用/解析失败重试一次仍失败,或模型
+	// 不可用)——固定句"流程步骤未生成（挑选失败）"冻结入账,面板与
+	// 报告如实呈现;与 NoReproReason 互斥语义不同(那是"整包没有")。
+	// 只在 Steps 非空时允许携带(账本入口物理校验)。旧记录无本字段。
+	StepsIncomplete string `json:"steps_incomplete,omitempty"`
 	// Variants 去同型时被收起的变体交换(P4-08 ③):同方法+同路径+同
 	// 状态的重复交换不构成复现流程,不进 Steps;账本记录保留(证据包
 	// zip 全量收,审计不丢)。账次序与原交换次序一致,不编 Seq。

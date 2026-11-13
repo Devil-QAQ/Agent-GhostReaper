@@ -3,6 +3,7 @@
 import * as React from "react";
 import { toast } from "sonner";
 
+import { argsKnownOnCard, foldApprovalRecords } from "@/lib/approval-fold";
 import { EmptyState } from "@/components/empty-state";
 import { Field, Fold, INPUT } from "@/components/form-bits";
 import { LongText } from "@/components/long-text";
@@ -436,20 +437,58 @@ function ApprovalSection({ taskID }) {
 }
 
 // ApprovalRecords 审批记录(P4-52 ③④:全量可达——滚动到底自动加载
-// 更多,初始 20 条与现状相当、展示框高度恒定;每条点击看详情,六样
-// 说清:什么时候·什么动作·为什么·什么性质·归属·等待多久谁裁决)。
+// 更多,展示框高度恒定;每条点击看详情,六样说清)。P4-74 ④:机器
+// 放行留痕(同步骤放行/同组放行/性质判定)连续段折叠成一行计数,点
+// 开看明细——账本与服务端全量不变,折叠只在展示层;列表默认呈现
+// 操作者裁决与待决记录(折叠行是计数摘要,点开即明细)。
 // P4-71 ②:详情带反向键(反向落点需要任务上下文,taskID 注入)。
 function ApprovalRecords({ taskID, records }) {
   const PAGE = 20;
   const [visible, setVisible] = React.useState(PAGE);
   const [detail, setDetail] = React.useState(null);
+  const [expanded, setExpanded] = React.useState(() => new Set());
   const listRef = React.useRef(null);
+  const items = React.useMemo(() => foldApprovalRecords(records), [records]);
   const onScroll = () => {
     const el = listRef.current;
-    if (!el || visible >= records.length) return;
+    if (!el || visible >= items.length) return;
     if (el.scrollTop + el.clientHeight >= el.scrollHeight - 24) {
-      setVisible((v) => Math.min(v + PAGE, records.length));
+      setVisible((v) => Math.min(v + PAGE, items.length));
     }
+  };
+  const toggleFold = (idx) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      return next;
+    });
+  };
+
+  // 折叠行的行内渲染(明细展开:逐条记录行,与单条记录行同款)。
+  const recordRow = (r, key) => {
+    const subject = recordSubject(r);
+    return (
+      <button
+        key={key}
+        type="button"
+        className="flex flex-wrap items-center gap-2 rounded-md px-2 py-1 text-left text-xs text-muted-foreground transition-colors duration-150 hover:bg-hover-lift cursor-pointer"
+        onClick={() => setDetail({ ...r, task_id: taskID })}
+      >
+        <span className="num shrink-0">{r.occurred_at}</span>
+        <span className="shrink-0">{APPROVAL_TYPE_LABELS[r.type] || r.type}</span>
+        <span className={`min-w-0 max-w-64 truncate ${subject.mono ? "num" : ""}`} title={subject.text}>
+          {subject.text}
+        </span>
+        {r.deny_line && <span className="shrink-0">({DENY_LINE_LABELS[r.deny_line] || r.deny_line})</span>}
+        {r.wait_millis > 0 && <span className="num shrink-0">等待 {(r.wait_millis / 1000).toFixed(1)} 秒</span>}
+        {r.reason && (
+          <span className="min-w-0 max-w-80 truncate" title={r.reason}>
+            {r.reason}
+          </span>
+        )}
+      </button>
+    );
   };
 
   return (
@@ -466,33 +505,35 @@ function ApprovalRecords({ taskID, records }) {
           onScroll={onScroll}
           className="flex max-h-72 flex-col gap-0.5 overflow-y-auto pr-1"
         >
-          {records.slice(0, visible).map((r, i) => {
-            const subject = recordSubject(r);
+          {items.slice(0, visible).map((item, idx) => {
+            if (item.kind === "record") {
+              return recordRow(item.record, `${item.record.request_id}-${item.record.type}-${idx}`);
+            }
+            // 折叠行:一行计数(点开看明细),悬停带归属(步骤/单位)。
+            const head = item.records[0];
+            const belong = [head.step_id ? `步骤 ${head.step_id}` : "", head.unit_id ? `单位 ${head.unit_id}` : ""]
+              .filter(Boolean)
+              .join(" · ");
             return (
-              <button
-                key={`${r.request_id}-${r.type}-${i}`}
-                type="button"
-                className="flex flex-wrap items-center gap-2 rounded-md px-2 py-1 text-left text-xs text-muted-foreground transition-colors duration-150 hover:bg-hover-lift cursor-pointer"
-                onClick={() => setDetail({ ...r, task_id: taskID })}
-              >
-                <span className="num shrink-0">{r.occurred_at}</span>
-                <span className="shrink-0">{APPROVAL_TYPE_LABELS[r.type] || r.type}</span>
-                <span className={`min-w-0 max-w-64 truncate ${subject.mono ? "num" : ""}`} title={subject.text}>
-                  {subject.text}
-                </span>
-                {r.deny_line && <span className="shrink-0">({DENY_LINE_LABELS[r.deny_line] || r.deny_line})</span>}
-                {r.wait_millis > 0 && <span className="num shrink-0">等待 {(r.wait_millis / 1000).toFixed(1)} 秒</span>}
-                {r.reason && (
-                  <span className="min-w-0 max-w-80 truncate" title={r.reason}>
-                    {r.reason}
-                  </span>
-                )}
-              </button>
+              <React.Fragment key={`fold-${idx}-${item.type}-${head.step_id ?? ""}`}>
+                <button
+                  type="button"
+                  className="flex flex-wrap items-center gap-2 rounded-md px-2 py-1 text-left text-xs text-muted-foreground transition-colors duration-150 hover:bg-hover-lift cursor-pointer"
+                  onClick={() => toggleFold(idx)}
+                  title={belong ? `${belong};点击看明细` : "点击看明细"}
+                >
+                  <span className="shrink-0">{expanded.has(idx) ? "▾" : "▸"}</span>
+                  <span className="shrink-0">{item.label}</span>
+                  <span className="num shrink-0">×{item.count}</span>
+                  {belong && <span className="num shrink-0 text-muted-foreground/70">{belong}</span>}
+                </button>
+                {expanded.has(idx) && item.records?.map((r, j) => recordRow(r, `fold-${idx}-r-${j}`))}
+              </React.Fragment>
             );
           })}
-          {visible < records.length && (
+          {visible < items.length && (
             <span className="px-2 py-1 text-xs text-muted-foreground">
-              还有 {records.length - visible} 条,滚动到底加载
+              还有 {items.length - visible} 条,滚动到底加载
             </span>
           )}
         </div>
@@ -559,12 +600,17 @@ function ApprovalRecordSheet({ record, onClose }) {
               <div className="flex flex-wrap items-center gap-2">
                 {record.tool_name && <span className="num">{record.tool_name}</span>}
                 {record.tool_name ? (
-                  <span className="text-xs text-muted-foreground">命令/参数原文完整如下</span>
+                  argsKnownOnCard(record.tool_name, record.tool_args) ? (
+                    <span className="text-xs text-muted-foreground">命令/参数原文完整如下</span>
+                  ) : (
+                    // P4-74 ②:取不到参数如实标注,禁止空白。
+                    <span className="text-xs text-status-warning">参数未记录</span>
+                  )
                 ) : (
                   <span className="text-xs text-muted-foreground">{record.note || "无命令上下文(资产类审批)"}</span>
                 )}
               </div>
-              {record.tool_args && (
+              {record.tool_name && argsKnownOnCard(record.tool_name, record.tool_args) && (
                 <div className="max-h-64 overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md border border-border/55 bg-input-surface px-3 py-2 num text-xs">
                   {record.tool_args}
                 </div>
@@ -731,15 +777,28 @@ function ApprovalCard({ taskID, approval, checkable, checked, onCheck }) {
         ) : attackCard ? (
           <Badge variant="warning" title="对信息源(查资料用的公开服务)的主动攻击动作,待批准或拒绝">信息源攻击</Badge>
         ) : (
-          <Badge variant={levelVariant(approval.action_level)}>{approval.action_level}</Badge>
+          // P4-74 ①:徽标按命令实际内容分级(cmd_level,服务端确定性
+          // 判级);认不出回退步骤分级(既有审计字段)。
+          <Badge
+            variant={levelVariant(approval.cmd_level || approval.action_level)}
+            title="这条命令实际动作的分级"
+          >
+            {approval.cmd_level || approval.action_level}
+          </Badge>
         )}
         {(scopeCard || attackCard) && approval.target && <span className="num font-medium">{approval.target}</span>}
         {approval.tool_name && <span className="num">{approval.tool_name}</span>}
         {meta && <span className="text-xs text-muted-foreground">{meta}</span>}
       </div>
-      {/* 危害说明三段式(P4-27 ⑼):批准后果先说清,不用猜 */}
+      {/* 危害说明三段式(P4-27 ⑼,P4-74 ① 按命令实际内容拼装):
+          批准后果先说清,不用猜 */}
       {approval.harm_note && (
         <div className="text-sm leading-relaxed">{approval.harm_note}</div>
+      )}
+      {/* 步骤分级背景行(P4-74 ①):命令实际分级低于所属步骤分级时,
+          说明这张卡为什么弹——步骤含更高危动作、按步骤门槛过门 */}
+      {approval.step_ground && (
+        <div className="text-xs text-muted-foreground">{approval.step_ground}</div>
       )}
       {/* 弹门上下文(拦截说明):为什么这条会弹门 */}
       {!scopeCard && approval.note && (
@@ -752,7 +811,15 @@ function ApprovalCard({ taskID, approval, checkable, checked, onCheck }) {
           意图:<LongText text={approval.intent} max={120} label="意图原文" className="align-baseline" />
         </div>
       )}
-      {approval.tool_args && (
+      {/* 命令/参数(P4-74 ②):原文必须上卡;取不到(无参数调用)如实
+          标注"参数未记录",禁止空白 */}
+      {approval.tool_name && !argsKnownOnCard(approval.tool_name, approval.tool_args) && (
+        <div className="text-xs">
+          <span className="text-muted-foreground">命令/参数 </span>
+          <span className="text-status-warning">参数未记录</span>
+        </div>
+      )}
+      {approval.tool_name && argsKnownOnCard(approval.tool_name, approval.tool_args) && (
         <div className="text-xs">
           <span className="text-muted-foreground">命令/参数 </span>
           <LongText

@@ -13,8 +13,8 @@ import (
 // ---- P4-27 ⑨ 审批卡危害说明三段式(问题清单 #54 ②) ----
 //
 // 待决审批卡加一行危害说明:要做什么(动作)+ 做了会怎么样(目标
-// 变化)+ 导致什么(最坏后果与不可逆性)。确定性模板按意图分级 +
-// 命令特征拼装——零 LLM、平实书面白话、禁口语禁机器语言禁命令原文
+// 变化)+ 导致什么(最坏后果与不可逆性)。确定性模板按命令特征
+// 拼装——零 LLM、平实书面白话、禁口语禁机器语言禁命令原文
 // 直贴;现组装现服务(不落库,与审批卡同一数据源)。
 //
 // 锚例(造物主逐字定稿,2026-10-24;目标以完整标识 host:port 呈现,
@@ -24,10 +24,17 @@ import (
 //	  登录账号。账号会留存于目标系统，管理员可能察觉异常注册。
 //	查看类(L1):将执行 pwd 与 ls 查看目录和文件列表。目标不会发生
 //	  任何变化。
+//
+// P4-74 ①(问题清单 #90):卡面以命令为准——模板按命令实际内容
+// 分级拼装(ClassifyCommandAction),不再拿步骤分级当脸;步骤分级
+// 降为背景行(StepGroundNote:"所属步骤含修改类动作,按步骤门槛过门")。
+// 命令认不出(动词全不在已知族)时回退步骤分级——分级是既有审计
+// 字段,是拿得到的最好陈述。
 
-// HarmNote 危害说明三段式:按意图分级 + 命令特征确定性拼装。level
-// 缺失(0 级)按只读呈现——分级缺失的请求会被拒绝线拦下,到不了卡上,
-// 此处只是兜底。返回空串 = 无可拼装(调用方不渲染该行)。
+// HarmNote 危害说明三段式:按命令实际内容分级 + 命令特征确定性拼装
+// (P4-74 ①)。命令认不出时回退意图分级——分级缺失(0 级)按只读呈现
+// (分级缺失的请求会被拒绝线拦下,到不了卡上,此处只是兜底)。返回
+// 空串 = 无可拼装(调用方不渲染该行)。
 func HarmNote(level rings.ActionLevel, toolName string, toolArgs json.RawMessage) string {
 	var args struct {
 		Command string `json:"command"`
@@ -36,6 +43,9 @@ func HarmNote(level rings.ActionLevel, toolName string, toolArgs json.RawMessage
 	_ = json.Unmarshal(toolArgs, &args)
 
 	cmd := strings.TrimSpace(args.Command)
+	if cmdLevel, ok := ClassifyCommandAction(toolName, toolArgs); ok {
+		level = cmdLevel
+	}
 	verbs := commandVerbs(cmd)
 	switch ActionLevelRank(level) {
 	case 4:
@@ -47,6 +57,139 @@ func HarmNote(level rings.ActionLevel, toolName string, toolArgs json.RawMessage
 	default:
 		return harmNoteReadOnly(toolName, cmd, verbs)
 	}
+}
+
+// StepGroundNote 步骤分级背景行(P4-74 ①):命令实际分级低于所属步骤
+// 分级时,说明这张卡为什么弹——步骤含更高危动作、按步骤门槛过门。
+// 无落差(命令认不出或分级不低于步骤)返回空串,不渲染。
+func StepGroundNote(stepLevel rings.ActionLevel, toolName string, toolArgs json.RawMessage) string {
+	cmdLevel, ok := ClassifyCommandAction(toolName, toolArgs)
+	if !ok || ActionLevelRank(cmdLevel) >= ActionLevelRank(stepLevel) {
+		return ""
+	}
+	switch stepLevel {
+	case rings.ActionModifyPersist:
+		return "所属步骤含修改类动作，按步骤门槛过门"
+	case rings.ActionExploit:
+		return "所属步骤含利用类动作，按步骤门槛过门"
+	case rings.ActionActiveTest:
+		return "所属步骤含测试类动作，按步骤门槛过门"
+	}
+	return ""
+}
+
+// ---- 命令实际内容分级(P4-74 ①,确定性零 LLM) ----
+
+// 命令动词族:按动词判定这条命令实际做什么(与意图分级解耦——
+// 步骤分级是意图拆解的预期,命令才是真要执行的内容)。
+var (
+	// writeVerbs 写入/删除/改配置类(L4):目标会留痕或数据会变。
+	writeVerbs = []string{
+		"rm", "rmdir", "shred", "unlink", "truncate", "mkdir", "touch",
+		"mv", "cp", "tee", "dd", "chmod", "chown", "chattr", "ln",
+		"useradd", "adduser", "userdel", "usermod", "groupadd", "groupdel",
+		"passwd", "chpasswd", "crontab", "mount", "umount", "swapoff",
+		"insmod", "rmmod", "modprobe", "sysctl", "systemctl", "service",
+		"iptables", "ufw", "firewall-cmd", "setcap", "chage",
+	}
+	// exploitVerbs 数据接入类(L3):以既得条件接触目标数据或功能。
+	exploitVerbs = []string{
+		"mysql", "mysqldump", "psql", "pg_dump", "redis-cli", "mongo",
+		"mongosh", "ssh", "scp", "sftp", "telnet", "ftp", "smbclient",
+		"rpcclient", "ldapsearch", "vncviewer",
+	}
+	// testVerbs 主动测试类(L2):向目标发测试载荷(扫描/爆破/注入)。
+	testVerbs = []string{
+		"nmap", "masscan", "naabu", "rustscan", "nuclei", "sqlmap",
+		"hydra", "medusa", "john", "hashcat", "gobuster", "ffuf",
+		"dirb", "dirsearch", "wfuzz", "nikto", "whatweb", "wpscan",
+		"skipfish", "commix", "arachni", "onesixtyone", "snmpcheck",
+		"enum4linux", "crackmapexec", "netexec", "dotdotpwn",
+	}
+	// netReadVerbs 网络读取类(L1):拉取响应/连通测距,不发载荷。
+	netReadVerbs = []string{
+		"curl", "wget", "ping", "ping6", "dig", "nslookup", "host",
+		"traceroute", "traceroute6", "tracepath", "fping", "arping",
+		"nc", "ncat", "socat", "openssl",
+	}
+	// sedInPlaceRe sed 原地改写特征(-i);不带 -i 的 sed 是文本流变换。
+	sedInPlaceRe = regexp.MustCompile(`(^|\s)-i\b`)
+	// writeRedirectRe 输出重定向特征(> 与 >>;先剥 2>/dev/null 与
+	// >/dev/null 这类无害丢弃,再查余下重定向——echo x > file 是写)。
+	devNullRedirectRe = regexp.MustCompile(`[0-9]?>{1,2}\s*/dev/null`)
+	writeRedirectRe   = regexp.MustCompile(`>{1,2}[^&]`)
+	// readOnlyToolNames 引擎侧只读工具(工具名即判 L1:探测/拉取/本地
+	// 读/查账,不写目标)。
+	readOnlyToolNames = map[string]bool{
+		"port_probe": true, "http_probe": true,
+		"web_fetch": true, "web_search": true, "read": true,
+	}
+)
+
+// ClassifyCommandAction 按命令实际内容判分级(P4-74 ①):bash 按动词
+// 族与提交/重定向特征判,只读工具按工具名判 L1。多段命令(;;&&|||)
+// 按最高危段判——命令里含哪个族的动作就按哪个族说。认不出(动词
+// 全不在已知族/无命令)返回 ok=false,调用方回退步骤分级。
+func ClassifyCommandAction(toolName string, toolArgs json.RawMessage) (rings.ActionLevel, bool) {
+	if readOnlyToolNames[toolName] {
+		return rings.ActionReadOnly, true
+	}
+	if toolName != "bash" {
+		return "", false
+	}
+	var args struct {
+		Command string `json:"command"`
+	}
+	_ = json.Unmarshal(toolArgs, &args)
+	cmd := strings.TrimSpace(args.Command)
+	if cmd == "" {
+		return "", false
+	}
+	verbs := commandVerbs(cmd)
+	if len(verbs) == 0 {
+		return "", false
+	}
+	// 带载荷提交(curl/wget/nc 加 POST/数据/上传旗标)＝写入。
+	postish := hasAnyVerb(verbs, "curl", "wget", "nc", "ncat") && postFlagRe.MatchString(cmd)
+	// 输出重定向到真实文件＝写入(剥掉 >/dev/null 丢弃后仍有 >)。
+	redir := writeRedirectRe.MatchString(devNullRedirectRe.ReplaceAllString(cmd, ""))
+	switch {
+	case postish || redir || hasAnyVerb(verbs, writeVerbs...) ||
+		(hasAnyVerb(verbs, "sed") && sedInPlaceRe.MatchString(cmd)):
+		return rings.ActionModifyPersist, true
+	case hasAnyVerb(verbs, exploitVerbs...):
+		return rings.ActionExploit, true
+	case hasAnyVerb(verbs, testVerbs...):
+		return rings.ActionActiveTest, true
+	}
+	// 只读成立要全部动词都在只读族(本地查看族 + 网络读取族)——夹一
+	// 个未知动词就回退步骤分级,不猜。
+	if ro := readOnlyVerbs(verbs); len(ro) == len(verbs) {
+		return rings.ActionReadOnly, true
+	}
+	return "", false
+}
+
+// readOnlyVerbs verbs 里属只读族的动词子集(readOnlyEffect 已知族 +
+// 网络读取族)。
+func readOnlyVerbs(verbs []string) []string {
+	var out []string
+	for _, v := range verbs {
+		switch v {
+		case "pwd", "ls", "cat", "head", "tail", "less", "more",
+			"find", "stat", "file", "wc", "whoami", "id", "uname",
+			"hostname", "env", "printenv", "ps", "grep", "awk", "sed",
+			"which", "whereis", "type", "du", "df", "free", "date",
+			"uptime", "who", "last", "w", "netstat", "ss", "lsof",
+			"ifconfig", "ip", "arp", "getent":
+			out = append(out, v)
+		default:
+			if hasAnyVerb(netReadVerbs, v) {
+				out = append(out, v)
+			}
+		}
+	}
+	return out
 }
 
 // ---- L4 修改与持久化:写入/创建/删除及其留存与察觉风险 ----
@@ -111,6 +254,20 @@ func readOnlyEffect(verbs []string) string {
 		return strings.Join(verbs, " 与 ") + " 查看当前环境信息"
 	case only("grep", "awk", "sed"):
 		return strings.Join(verbs, " 与 ") + " 检索文本"
+	}
+	// 网络读取族(curl/wget/ping/dig/nc…):拉取响应与连通测距——全部
+	// 动词都是网络读取才用族短语,混本地查看动词走通用句。
+	if len(verbs) > 0 {
+		allNet := true
+		for _, v := range verbs {
+			if !hasAnyVerb(netReadVerbs, v) {
+				allNet = false
+				break
+			}
+		}
+		if allNet {
+			return strings.Join(verbs, " 与 ") + " 探测目标连通性与响应，仅获取信息"
+		}
 	}
 	if len(verbs) > 0 {
 		return strings.Join(verbs, " 与 ") + " 查看目标信息"
@@ -179,8 +336,9 @@ func verbPhrase(verbs []string, fallback string) string {
 // registerWordRe 注册类端点特征(路径或参数含注册词)。
 var registerWordRe = regexp.MustCompile(`(?i)regist|signup|sign-up|sign_up|create[-_]?user|new[-_]?user|注册|创建账号`)
 
-// postFlagRe 带载荷提交特征(POST/表单/数据体)。
-var postFlagRe = regexp.MustCompile(`(?i)(-X\s*POST|--data|-d\s|--form|-F\s|-T\s|--upload)`)
+// postFlagRe 带载荷提交特征(POST/表单/数据体;--post 覆盖 wget 的
+// --post-data/--post-file 两种形态)。
+var postFlagRe = regexp.MustCompile(`(?i)(-X\s*POST|--data|--post|-d[\s'"]|--form|-F[\s'"]|-T[\s'"]|--upload)`)
 
 // harmURLRe 命令串里的 URL 特征(http/https)。
 var harmURLRe = regexp.MustCompile(`https?://[^\s'"；;]+`)

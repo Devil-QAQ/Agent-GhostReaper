@@ -36,6 +36,7 @@ func TestHarmNoteAnchors(t *testing.T) {
 
 // TestHarmNoteClasses 各分级三段式齐全:动作/目标变化/最坏后果三句;
 // 只读类按锚例句式为两段(动作 + "目标不会发生任何变化"合并后两段)。
+// P4-74 ①:分级由命令实际内容定——样本命令与期望分级同族。
 func TestHarmNoteClasses(t *testing.T) {
 	cases := []struct {
 		level     rings.ActionLevel
@@ -44,7 +45,7 @@ func TestHarmNoteClasses(t *testing.T) {
 	}{
 		{rings.ActionModifyPersist, `{"command":"echo x > /var/www/html/shell.php"}`, 3},
 		{rings.ActionModifyPersist, `{"command":"rm -rf /tmp/xx"}`, 3},
-		{rings.ActionExploit, `{"command":"cat /etc/shadow"}`, 3},
+		{rings.ActionExploit, `{"command":"mysql -h t.local -u root -e 'select 1'"}`, 3},
 		{rings.ActionActiveTest, `{"command":"sqlmap -u http://t.local:8080/?id=1 --batch"}`, 3},
 		{rings.ActionReadOnly, `{"command":"cat /etc/hosts"}`, 2},
 	}

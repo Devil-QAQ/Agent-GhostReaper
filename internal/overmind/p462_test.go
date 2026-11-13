@@ -169,7 +169,7 @@ func TestP462PoolEntranceFilters(t *testing.T) {
 		Method: "GET", URL: "http://10.9.8.7:7777/x", Status: 200, BlobRef: "b-okd"})
 
 	// URL 锚声明(实锤形态):5 条 error + 3 条游离只进过程清单,恰留 1 条候选。
-	rec, diag, err := AssembleRepro(ctx, store, nil, p462Resolver, task, "tc-url", "high")
+	rec, diag, _, err := AssembleRepro(ctx, store, nil, p462Resolver, task, "tc-url", "high", nil)
 	if err != nil {
 		t.Fatalf("定稿组装失败: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestP462PoolEntranceFilters(t *testing.T) {
 	}
 
 	// host:port 锚声明:同 host 跨端口游离只进过程清单。
-	recP, diagP, err := AssembleRepro(ctx, store, nil, p462Resolver, task, "tc-port", "high")
+	recP, diagP, _, err := AssembleRepro(ctx, store, nil, p462Resolver, task, "tc-port", "high", nil)
 	if err != nil {
 		t.Fatalf("定稿组装失败: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestP462PoolEntranceFilters(t *testing.T) {
 	}
 
 	// 种子解析 IP(P4-50 ② 口径):锚定域名的当前解析 IP 直连在锚内。
-	recD, _, err := AssembleRepro(ctx, store, nil, p462Resolver, task, "tc-dns", "low")
+	recD, _, _, err := AssembleRepro(ctx, store, nil, p462Resolver, task, "tc-dns", "low", nil)
 	if err != nil {
 		t.Fatalf("定稿组装失败: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestP462CombinedChainAnchorAnchors(t *testing.T) {
 		ExchangeID: "off-c", Type: rings.MirrorRecHTTP, StepID: "s-c", UnitID: "u1",
 		Method: "GET", URL: "http://other.example:9000/x", Status: 200, BlobRef: "b-oc"})
 
-	rec, diag, err := AssembleRepro(ctx, store, nil, p462Resolver, task, "tc-c", "high")
+	rec, diag, _, err := AssembleRepro(ctx, store, nil, p462Resolver, task, "tc-c", "high", nil)
 	if err != nil {
 		t.Fatalf("定稿组装失败: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestP462ToolPacketAssembly(t *testing.T) {
 	// 非锚定目标的简单 curl:直连流量同按锚定口径过滤。
 	seedCall("bash", `{"command":"curl -s http://other.example:8080/"}`, "x")
 
-	rec, diag, err := AssembleRepro(ctx, store, blobs, nil, task, "tc-t", "high")
+	rec, diag, _, err := AssembleRepro(ctx, store, blobs, nil, task, "tc-t", "high", nil)
 	if err != nil {
 		t.Fatalf("定稿组装失败: %v", err)
 	}
@@ -396,7 +396,7 @@ func TestP462EmptySelectionNoDump(t *testing.T) {
 		}
 		l := &Loop{TaskID: task, Store: store, Provider: prov}
 		rec := mkRec()
-		l.pickReproSteps(ctx, "tc-e", rec, ReproPoolDiag{})
+		l.pickReproSteps(ctx, "tc-e", rec, ReproPoolDiag{}, nil)
 		if len(rec.Steps) != 0 {
 			t.Fatalf("空选不得倒池: %+v", rec.Steps)
 		}
@@ -416,7 +416,7 @@ func TestP462EmptySelectionNoDump(t *testing.T) {
 		}
 		l := &Loop{TaskID: task, Store: store, Provider: prov}
 		rec := mkRec()
-		l.pickReproSteps(ctx, "tc-e", rec, ReproPoolDiag{ErrExchanges: 3})
+		l.pickReproSteps(ctx, "tc-e", rec, ReproPoolDiag{ErrExchanges: 3}, nil)
 		if len(rec.Steps) != 0 || rec.NoReproReason == "" ||
 			strings.Contains(rec.NoReproReason, "tc-8f2a1b3c") ||
 			!strings.Contains(rec.NoReproReason, "3 条交换未获响应") {
@@ -435,7 +435,7 @@ func TestP462EmptySelectionNoDump(t *testing.T) {
 		}
 		l := &Loop{TaskID: task, Store: store, Provider: prov}
 		rec := &rings.TestClaimRecord{ClaimID: "tc-e", Type: rings.TestClaimRecRepro}
-		l.pickReproSteps(ctx, "tc-e", rec, ReproPoolDiag{ErrExchanges: 12, OffAnchor: 1})
+		l.pickReproSteps(ctx, "tc-e", rec, ReproPoolDiag{ErrExchanges: 12, OffAnchor: 1}, nil)
 		if len(model.requests()) != 0 {
 			t.Fatalf("池空应零外呼: %d", len(model.requests()))
 		}

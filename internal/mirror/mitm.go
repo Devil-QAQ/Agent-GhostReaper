@@ -123,6 +123,7 @@ func (s *Session) serveTLSExchange(w http.ResponseWriter, r *http.Request, up *m
 			Headers: flatHeaders(r.Header),
 		},
 	}
+	s.noteExchange(ex.ID, url) // P4-73 ①:受理即记,工具结果可标注引用
 	reqBody, trunc, err := readCapped(r.Body)
 	if err != nil {
 		http.Error(w, "bad request body", http.StatusBadRequest)

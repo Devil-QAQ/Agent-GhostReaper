@@ -55,7 +55,7 @@ func TestAssembleReproPayloadSlim(t *testing.T) {
 		t.Fatalf("铺镜留痕失败: %v", err)
 	}
 
-	got, _, err := AssembleRepro(ctx, store, nil, nil, task, "tc-e", "high")
+	got, _, _, err := AssembleRepro(ctx, store, nil, nil, task, "tc-e", "high", nil)
 	if err != nil {
 		t.Fatalf("定稿组装失败: %v", err)
 	}

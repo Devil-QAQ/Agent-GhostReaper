@@ -583,6 +583,7 @@ const COND_LABELS = {
   alternatives_killed: "其他可能原因全排除",
   impact_supported: "影响面有证据",
   verifier_independent: "验证者独立",
+  evidence_traceable: "证据可追溯",
   fact_confirmed: "事实已确认",
   tool_observed: "工具已观测",
 };

@@ -739,6 +739,11 @@ func validateTestClaimRecord(tx *sql.Tx, taskID string, p TestClaimRecord) error
 		if p.NoReproReason != "" && len(p.Steps) > 0 {
 			return fmt.Errorf("%w: repro 记录不得同时携带步骤与无复现包原因", ErrTestClaimRecMissingField)
 		}
+		// P4-73 ④:流程步骤未生成标注只伴随存在的包(证明交换种子在内、
+		// 挑选失败如实标注);无步骤的定稿走 NoReproReason,不带本标注。
+		if p.StepsIncomplete != "" && len(p.Steps) == 0 {
+			return fmt.Errorf("%w: 流程步骤未生成标注不得脱离复现步骤单独携带", ErrTestClaimRecMissingField)
+		}
 		return nil
 	}
 }

@@ -12,18 +12,29 @@ import (
 	"ghostreaper/internal/swarm"
 )
 
-// triageVerdictWords 分诊结论的人话词表(研判留痕与信息源区共用)。
+// triageVerdictWords 分诊结论的人话词表(研判留痕与信息源区共用;
+// P4-72 合一五值＋存量旧词表兼容读)。
 var triageVerdictWords = map[string]string{
+	swarm.TriageInfoAccess: "信息源获取",
+	swarm.TriageInfoAttack: "信息源攻击",
+	swarm.TriageInScope:    "范围内",
+	swarm.TriageNotTarget:  "非目标",
+	swarm.TriageCandidate:  "疑似目标相关资产",
+	// P4-67 旧词表(存量 tg- 记录如实翻译)。
 	swarm.TriageMethodical: "方法性访问",
 	swarm.TriageDeclared:   "命中任务写明的外部服务",
 	swarm.TriageAttack:     "信息源上的攻击行为",
-	swarm.TriageCandidate:  "疑似目标相关资产",
 	"revoked":              "已撤销",
 }
 
-// triageNoteText 研判留痕 Note 的人话化("verdict=X basis=Y" →
-// "研判分诊:结论;依据:Y");解析不出原样返回(防御)。
+// triageNoteText 研判留痕 Note 的人话化("verdict=X basis=Y[ targets=…]"
+// → "性质判定:结论;依据:Y;目标清单:…");解析不出原样返回(防御)。
 func triageNoteText(note string) string {
+	targets := ""
+	if i := strings.Index(note, " targets="); i >= 0 {
+		targets = note[i+len(" targets="):]
+		note = note[:i]
+	}
 	verdict, basis, ok := strings.Cut(note, " basis=")
 	if !ok {
 		return note
@@ -32,6 +43,9 @@ func triageNoteText(note string) string {
 	word, known := triageVerdictWords[verdict]
 	if !known {
 		return note
+	}
+	if targets != "" {
+		return fmt.Sprintf("性质判定:%s;依据:%s;本次判定目标:%s", word, basis, targets)
 	}
 	return fmt.Sprintf("性质判定:%s;依据:%s", word, basis)
 }

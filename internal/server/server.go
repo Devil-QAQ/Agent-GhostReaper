@@ -2152,6 +2152,10 @@ type approvalRecordView struct {
 // P4-52 ①:三类卡统一骨架呈现,Mode 标范围卡的任务形态(pentest=
 // 范围阻塞/待批资产;redteam=红队可否决),危害说明三段式对带命令的
 // 范围卡同样拼装。
+// P4-74 ①:卡面以命令为准——CmdLevel 为命令实际内容分级(徽标按它,
+// 认不出时空、前端回退步骤分级),StepGround 为步骤分级背景行(命令
+// 分级低于步骤分级时说明过门原因,如只读命令在含修改类动作的步骤里
+// 弹门)。
 type approvalView struct {
 	ID          string `json:"id"`
 	Kind        string `json:"kind,omitempty"`   // 空=弹门待决;"scope"=范围待决卡
@@ -2164,10 +2168,15 @@ type approvalView struct {
 	ToolName    string `json:"tool_name"`      // 实际工具
 	ToolArgs    string `json:"tool_args"`      // 实际参数(人即兜底的核对物)
 	Note        string `json:"note,omitempty"` // 弹门上下文/范围卡说明
-	// HarmNote 危害说明三段式(P4-27 ⑨):按分级+命令特征确定性拼装,
-	// 现组装现服务(不落库);说清做什么/目标会怎样/最坏后果。
-	HarmNote  string `json:"harm_note,omitempty"`
-	CreatedAt string `json:"created_at"`
+	// HarmNote 危害说明三段式(P4-27 ⑨):按命令实际内容分级(P4-74 ①)
+	// ＋命令特征确定性拼装,现组装现服务(不落库);说清做什么/目标会
+	// 怎样/最坏后果。
+	HarmNote string `json:"harm_note,omitempty"`
+	// CmdLevel 命令实际内容分级(P4-74 ①;空=认不出,前端回退 ActionLevel)。
+	CmdLevel string `json:"cmd_level,omitempty"`
+	// StepGround 步骤分级背景行(P4-74 ①;空=无落差不渲染)。
+	StepGround string `json:"step_ground,omitempty"`
+	CreatedAt  string `json:"created_at"`
 }
 
 // scopeAssetView 待批资产合成的范围卡(P4-52 ⑤:审批集中 RoE——渗透
@@ -2196,7 +2205,7 @@ func (s *Server) handleApprovalsList(w http.ResponseWriter, r *http.Request) {
 		if p.AttackTarget != "" {
 			kind, target = "attack", p.AttackTarget // P4-67 攻击行为卡
 		}
-		out = append(out, approvalView{
+		view := approvalView{
 			ID: p.ID, Kind: kind, Target: target,
 			StepID: p.StepID, UnitID: p.UnitID, Intent: p.Intent,
 			ActionLevel: string(p.ActionLevel), ToolName: p.ToolName,
@@ -2204,7 +2213,16 @@ func (s *Server) handleApprovalsList(w http.ResponseWriter, r *http.Request) {
 			Note:      p.Note,
 			HarmNote:  swarm.HarmNote(p.ActionLevel, p.ToolName, json.RawMessage(p.ToolArgs)),
 			CreatedAt: p.CreatedAt.Local().Format("2006-01-02 15:04:05"),
-		})
+		}
+		// P4-74 ①:卡面以命令为准——命令分级(徽标)与步骤分级背景行
+		// 仅弹门票装配(范围卡/攻击卡的徽标是卡型,Note 已说明缘由)。
+		if kind == "" {
+			if lvl, ok := swarm.ClassifyCommandAction(p.ToolName, json.RawMessage(p.ToolArgs)); ok {
+				view.CmdLevel = string(lvl)
+			}
+			view.StepGround = swarm.StepGroundNote(p.ActionLevel, p.ToolName, json.RawMessage(p.ToolArgs))
+		}
+		out = append(out, view)
 	}
 	records, err := s.approvalRecords(context.Background(), taskID)
 	if err != nil {

@@ -48,7 +48,7 @@ function emptyReproText(repro) {
   return repro?.no_repro_reason || "(反证轮未产生可复现的流量记录)";
 }
 
-export function ReproStepsList({ tid, steps, process = 0 }) {
+export function ReproStepsList({ tid, steps, process = 0, incomplete = "" }) {
   if (!steps || steps.length === 0) {
     return (
       <span className="text-xs text-muted-foreground">
@@ -58,6 +58,9 @@ export function ReproStepsList({ tid, steps, process = 0 }) {
   }
   return (
     <ol className="flex flex-col gap-3">
+      {incomplete && (
+        <li className="text-xs text-muted-foreground">{incomplete}</li>
+      )}
       {steps.map((st, i) => (
         <ReproStepItem key={st.seq || i} pos={i + 1} st={st} tid={tid} />
       ))}
@@ -118,6 +121,7 @@ export function ReproStepsPaged({ tid, claimID, repro, stepsTotal = 0 }) {
   const [steps, setSteps] = React.useState([]);
   const [done, setDone] = React.useState(false);
   const [failed, setFailed] = React.useState(null);
+  const [incomplete, setIncomplete] = React.useState("");
   const targetRev = repro ? repro.rev : null;
 
   React.useEffect(() => {
@@ -126,6 +130,7 @@ export function ReproStepsPaged({ tid, claimID, repro, stepsTotal = 0 }) {
     setSteps([]);
     setDone(false);
     setFailed(null);
+    setIncomplete("");
     (async () => {
       const collected = [];
       let offset = 0;
@@ -143,6 +148,7 @@ export function ReproStepsPaged({ tid, claimID, repro, stepsTotal = 0 }) {
           }
           collected.push(...(b.steps || []));
           setSteps([...collected]);
+          setIncomplete(b?.steps_incomplete || "");
           hasMore = Boolean(b.has_more);
           offset = (b.offset || 0) + (b.steps || []).length;
         }
@@ -174,6 +180,11 @@ export function ReproStepsPaged({ tid, claimID, repro, stepsTotal = 0 }) {
     )
   }
   return (
-    <ReproStepsList tid={tid} steps={steps} process={processUnlisted(repro, stepsTotal || steps.length)} />
+    <ReproStepsList
+      tid={tid}
+      steps={steps}
+      process={processUnlisted(repro, stepsTotal || steps.length)}
+      incomplete={incomplete}
+    />
   );
 }

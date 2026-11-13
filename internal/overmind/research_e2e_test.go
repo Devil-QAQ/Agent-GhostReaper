@@ -184,7 +184,10 @@ func (m *researchScriptedModel) handle(w http.ResponseWriter, r *http.Request) {
 			if cm != nil {
 				claimID = cm[1]
 			}
-			tool("rf1", "submit_falsify_result", fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":true},{"id":"alt2","refuted":true},{"id":"alt3","refuted":true}],"evidence":"独立重放:GET /old-backup/config.bak 200 得 admin:s3cret;同后台无凭据 401、带 admin:s3cret 200 logged in as admin——组合效果真实存在且凭据有效","note":"逐环节独立重放,非采信发现者陈述"}`, claimID))
+			// P4-73:证据带完整 URL(证明交换经回查兜底锚定——新契约下
+			// 结论所依据的交换必须可追溯)。
+			tool("rf1", "submit_falsify_result", fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":true},{"id":"alt2","refuted":true},{"id":"alt3","refuted":true}],"evidence":"独立重放:GET %s/old-backup/config.bak 200 得 admin:s3cret;同后台无凭据 401、带 admin:s3cret 200 logged in as admin——组合效果真实存在且凭据有效","note":"逐环节独立重放,非采信发现者陈述"}`,
+				claimID, m.main))
 		}
 	case strings.Contains(lastUser, "运行预算即将耗尽"):
 		text = "收尾:无可保留发现未提交。"

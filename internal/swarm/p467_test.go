@@ -25,19 +25,38 @@ import (
 // (tg- 研判留痕+信息源清单)同任务内零重复调用;撤销恢复拦截。
 // 环境复用 p450Env(渗透任务,种子 ef854.iujw.cn,DNS 打桩)。
 
-// p467Triage 打桩分诊:verdicts 按 host 前缀匹配(无匹配返回候选——
-// 拿不准方向),calls 计数供缓存断言。
+// p467Triage 打桩分诊(P4-72 合一契约形态):verdicts 按 host 前缀匹配
+// (合一调用不带 Host 时按 Candidates 逐个对;无匹配返回候选——拿不
+// 准方向),calls 计数供缓存断言;回复按锚点 host 具名单目标。
 func p467Triage(verdicts map[string]string, calls *int) TriageFunc {
-	return func(_ context.Context, in TriageInput) (string, string, error) {
+	match := func(s string) (string, string, bool) {
+		for prefix, v := range verdicts {
+			if strings.HasPrefix(s, prefix) {
+				return v, "打桩依据:" + prefix + " 属" + v, true
+			}
+		}
+		return "", "", false
+	}
+	return func(_ context.Context, in TriageInput) (TriageReply, error) {
 		if calls != nil {
 			*calls++
 		}
-		for prefix, v := range verdicts {
-			if strings.HasPrefix(in.Host, prefix) {
-				return v, "打桩依据:" + prefix + " 属" + v, nil
+		if v, basis, ok := match(in.Host); ok {
+			return TriageReply{Targets: []TriageTarget{{Host: in.Host, Verdict: v, Basis: basis}}}, nil
+		}
+		// 合一调用(命令路):候选逐个对,首个命中即回该判定。
+		for _, c := range in.Candidates {
+			if v, basis, ok := match(c); ok {
+				return TriageReply{Targets: []TriageTarget{{Host: c, Verdict: v, Basis: basis}}}, nil
 			}
 		}
-		return TriageCandidate, "打桩依据:归属不明确,偏向出卡", nil
+		host := in.Host
+		if len(in.Candidates) > 0 {
+			host = in.Candidates[0]
+		}
+		return TriageReply{Targets: []TriageTarget{
+			{Host: host, Verdict: TriageCandidate, Basis: "打桩依据:归属不明确,偏向出卡"},
+		}}, nil
 	}
 }
 
@@ -312,8 +331,9 @@ func TestP467RedTeamCommandPathNoTriage(t *testing.T) {
 	}
 }
 
-// TestP467TriagParse 分诊输出解析:词表值/围栏包裹/词表外拒绝/空依据
-// 兜底(解析失败按拿不准由调用方处理——错误路径断言)。
+// TestP467TriagParse 分诊输出解析(P4-72 合一契约):targets 清单逐项
+// 词表校验、围栏包裹、词表外拒绝、空依据兜底;旧单值形态兼容读(解
+// 析失败按拿不准由调用方处理——错误路径断言)。
 func TestP467TriagParse(t *testing.T) {
 	cases := []struct {
 		in    string
@@ -321,22 +341,29 @@ func TestP467TriagParse(t *testing.T) {
 		b     string
 		fails bool
 	}{
-		{`{"verdict":"methodical_access","basis":"公开文档站,与目标无归属"}`, TriageMethodical, "公开文档站,与目标无归属", false},
-		{"```json\n{\"verdict\":\"attack_action\",\"basis\":\"扫描动作\"}\n```", TriageAttack, "扫描动作", false},
-		{`{"verdict":"related_candidate","basis":""}`, TriageCandidate, "未给出依据", false},
-		{`{"verdict":"nope","basis":"x"}`, "", "", true},
+		{`{"targets":[{"host":"docs.python.org","verdict":"info_access","basis":"公共文档站,与目标无归属"},{"host":"400","verdict":"not_target","basis":"速率参数值"}]}`,
+			TriageInfoAccess, "公共文档站,与目标无归属", false},
+		{"```json\n{\"targets\":[{\"host\":\"gitee.com\",\"verdict\":\"info_attack\",\"basis\":\"扫描动作\"}]}\n```",
+			TriageInfoAttack, "扫描动作", false},
+		{`{"targets":[{"host":"mail.x.com","verdict":"related_candidate","basis":""}]}`,
+			TriageCandidate, "未给出依据", false},
+		// 旧单值形态兼容(过渡期打桩/罐头)。
+		{`{"verdict":"methodical_access","basis":"公开文档站,与目标无归属"}`,
+			TriageMethodical, "公开文档站,与目标无归属", false},
+		{`{"targets":[{"host":"x.com","verdict":"nope","basis":"x"}]}`, "", "", true},
 		{`不是 JSON`, "", "", true},
 	}
 	for _, c := range cases {
-		v, b, err := parseTriageReply(c.in)
+		reply, err := parseTriageReply(c.in)
 		if c.fails {
 			if err == nil {
-				t.Errorf("%q: 应解析失败,得 %q/%q", c.in, v, b)
+				t.Errorf("%q: 应解析失败,得 %+v", c.in, reply)
 			}
 			continue
 		}
-		if err != nil || v != c.v || b != c.b {
-			t.Errorf("%q: 得 %q/%q err=%v", c.in, v, b, err)
+		if err != nil || len(reply.Targets) == 0 ||
+			reply.Targets[0].Verdict != c.v || reply.Targets[0].Basis != c.b {
+			t.Errorf("%q: 得 %+v err=%v", c.in, reply, err)
 		}
 	}
 }

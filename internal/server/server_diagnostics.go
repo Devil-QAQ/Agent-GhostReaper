@@ -437,7 +437,7 @@ func (s *Server) diagnosticsTaskSummary(ctx context.Context, taskID string, row 
 		return len(nodes), byStatus
 	}
 	fmt.Fprintf(&b, "\n== 节点计数 ==\n")
-	for _, nt := range []rings.NodeType{rings.NodeGoal, rings.NodeStep, rings.NodeFact, rings.NodeTestClaim, rings.NodeHypothesis, rings.NodeAsset} {
+	for _, nt := range []rings.NodeType{rings.NodeGoal, rings.NodeStep, rings.NodeFact, rings.NodeTestClaim, rings.NodeAsset} {
 		n, byStatus := countByType(nt)
 		fmt.Fprintf(&b, "%s: %d", nt, n)
 		if len(byStatus) > 0 {
@@ -467,13 +467,19 @@ func (s *Server) diagnosticsTaskSummary(ctx context.Context, taskID string, row 
 	}
 
 	if rows, err := s.Store.TokenUsageRows(ctx, taskID); err == nil {
-		var in, out, cache int
+		var in, out, cache, missing int
 		for _, x := range rows {
 			in += x.InputTokens
 			out += x.OutputTokens
 			cache += x.CacheReadTokens + x.CacheWriteTokens
+			if x.UsageMissing {
+				missing++
+			}
 		}
 		fmt.Fprintf(&b, "\n== Token ==\n输入: %d\n输出: %d\n缓存: %d\n调用: %d 次\n", in, out, cache, len(rows))
+		if missing > 0 {
+			fmt.Fprintf(&b, "未返回用量: %d 次(合计仅含已返回部分)\n", missing)
+		}
 	}
 
 	// 近期系统事件(尾部 30 条:黑匣子 + 生命周期;只记类型与摘要行)。

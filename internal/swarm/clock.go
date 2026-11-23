@@ -22,7 +22,15 @@ import (
 type runClock struct {
 	acc   time.Duration
 	since time.Time // 零值 = 等待中
+	wait  string    // 挂等种类(P5-05:approval|model;空=活动/无挂等——面板状态词数据源)
 }
+
+// 挂等种类的机器值(P5-05;面板按词表翻译:等待审批/等待模型,已暂停
+// 走既有 Paused 闩标记)。
+const (
+	clockWaitApproval = "approval" // 等待审批(弹门卡/攻击卡/范围卡挂等宽限期)
+	clockWaitModel    = "model"    // 等待模型(故障退避挂等宽限期)
+)
 
 // clockKey 时钟登记键(转录锚,与单位列表行同键)。
 func clockKey(taskID, transcriptID string) string {
@@ -30,8 +38,8 @@ func clockKey(taskID, transcriptID string) string {
 }
 
 // clockSet 登记/刷新一只单位的活动时钟:acc 为当前累计 billable,
-// active=true 标记进入活动段(since=now),false 标记进入等待(读数
-// 冻结在 acc)。
+// active=true 标记进入活动段(since=now,挂等种类清零),false 标记进入
+// 等待(读数冻结在 acc,挂等种类保持)。
 func (e *Executor) clockSet(taskID, transcriptID string, acc time.Duration, active bool) {
 	e.clockMu.Lock()
 	defer e.clockMu.Unlock()
@@ -43,9 +51,37 @@ func (e *Executor) clockSet(taskID, transcriptID string, acc time.Duration, acti
 	c.acc = acc
 	if active {
 		c.since = time.Now()
+		c.wait = clockWaitNone
 	} else {
 		c.since = time.Time{}
 	}
+}
+
+// clockSetWait 标记挂等种类并冻结读数(P5-05:等待审批/等待模型的面板
+// 状态词数据源;活动恢复经 clockSet(active)清零)。
+func (e *Executor) clockSetWait(taskID, transcriptID string, wait string) {
+	e.clockMu.Lock()
+	defer e.clockMu.Unlock()
+	c := e.clocks[clockKey(taskID, transcriptID)]
+	if c == nil {
+		c = &runClock{}
+		e.clocks[clockKey(taskID, transcriptID)] = c
+	}
+	c.since = time.Time{}
+	c.wait = wait
+}
+
+// clockWaitNone 无挂等(常量独立于空串语义,读侧判空即可)。
+const clockWaitNone = ""
+
+// ClockWait 在飞单位当前的挂等种类(空=活动;面板按词表翻译)。
+func (e *Executor) ClockWait(taskID, transcriptID string) string {
+	e.clockMu.Lock()
+	defer e.clockMu.Unlock()
+	if c, ok := e.clocks[clockKey(taskID, transcriptID)]; ok {
+		return c.wait
+	}
+	return clockWaitNone
 }
 
 // clockDrop 注销一只单位的活动时钟(单位落地)。

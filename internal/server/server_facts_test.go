@@ -38,7 +38,7 @@ func factsSetup(t *testing.T) (http.Handler, *rings.Store, string, string) {
 	var created map[string]string
 	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],
 		"title":"事实页签验证",
-		"assets":[{"class":"host","title":"backup-01"}]}`,
+		"assets":[{"class":"host","title":"192.0.2.2"}]}`,
 		http.StatusOK, &created)
 	task := created["id"]
 
@@ -51,12 +51,12 @@ func factsSetup(t *testing.T) (http.Handler, *rings.Store, string, string) {
 	get(t, h, "/api/tasks/"+task+"/assets", http.StatusOK, &tree)
 	hostID := ""
 	for _, a := range tree.Assets {
-		if a.Title == "backup-01" {
+		if a.Title == "192.0.2.2" {
 			hostID = a.ID
 		}
 	}
 	if hostID == "" {
-		t.Fatalf("种子资产 backup-01 未取回")
+		t.Fatalf("种子资产 192.0.2.2 未取回")
 	}
 
 	// 候选 → 收割转正(candidate 不入事实页签,confirmed 才入);
@@ -64,14 +64,14 @@ func factsSetup(t *testing.T) (http.Handler, *rings.Store, string, string) {
 	appendEvents(t, store, task,
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u1", Payload: rings.NodeAdded{
 			NodeID: "f-cred", NodeType: rings.NodeFact, Title: "备份文件含后台账号与明文密码", Status: "candidate",
-			Detail: map[string]any{"unit_id": "u1", "evidence": "GET /old/config.bak → admin:Passw0rd!"}}},
+			Detail: map[string]any{"unit_id": "u1", "result_types": []string{"credential"}, "evidence": "GET /old/config.bak → admin:Passw0rd!"}}},
 		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "overmind", Payload: rings.NodeStateChanged{
 			NodeID: "f-cred", Status: "confirmed"}},
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u1", Payload: rings.NodeAdded{
 			NodeID: "f-data", NodeType: rings.NodeFact, Title: "用户表可整表导出,共 812 条记录", Status: "confirmed",
-			Detail: map[string]any{"unit_id": "u1"}}},
+			Detail: map[string]any{"unit_id": "u1", "result_types": []string{"data"}}}},
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u2", Payload: rings.NodeAdded{
-			NodeID: "f-plain", NodeType: rings.NodeFact, Title: "8080 端口运行 nginx 1.18.0", Status: "confirmed"}},
+			NodeID: "f-plain", NodeType: rings.NodeFact, Title: "8080 端口运行 nginx 1.18.0", Status: "confirmed", Detail: map[string]any{"result_types": []string{"plain"}}}},
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u2", Payload: rings.NodeAdded{
 			NodeID: "f-cand", NodeType: rings.NodeFact, Title: "疑似测试环境凭据泄露", Status: "candidate"}},
 		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
@@ -86,18 +86,18 @@ func factsSetup(t *testing.T) (http.Handler, *rings.Store, string, string) {
 	return h, store, task, hostID
 }
 
-// TestServerFactsList 事实页签端点:已确认 + 新进候选(P4-56 标"新")、
-// 成果类分类、资产锚点、时刻口径、任务隔离、404。
+// TestServerFactsList 事实页签端点(P5-07① 收口:只回已确认的真结论
+// ——候选未确认、被推翻的不返回,账本留痕)、成果类分类、资产锚点、
+// 时刻口径、任务隔离、404。
 func TestServerFactsList(t *testing.T) {
 	h, _, task, hostID := factsSetup(t)
 
 	var body struct {
 		Facts []struct {
-			ID        string `json:"id"`
-			Status    string `json:"status"`
-			Statement string `json:"statement"`
-			Loot      string `json:"loot"`
-			Assets    []struct {
+			ID          string   `json:"id"`
+			Statement   string   `json:"statement"`
+			ResultTypes []string `json:"result_types"`
+			Assets      []struct {
 				ID    string `json:"id"`
 				Title string `json:"title"`
 			} `json:"assets"`
@@ -105,34 +105,27 @@ func TestServerFactsList(t *testing.T) {
 			CreatedAt    string `json:"created_at"`
 			ConfirmedAt  string `json:"confirmed_at"`
 			ConfirmedRev int64  `json:"confirmed_rev"`
-			Kind         string `json:"kind"`
-			IsNew        bool   `json:"is_new"`
 		} `json:"facts"`
 	}
 	get(t, h, "/api/tasks/"+task+"/facts", http.StatusOK, &body)
 
-	// P4-56:已确认 3 条 + 新进候选 f-cand(标"新")一并返回。
-	if len(body.Facts) != 4 {
-		t.Fatalf("事实应 4 条(已确认 3 + 新进 1),得 %d", len(body.Facts))
+	// 已确认 3 条;新进候选 f-cand 未确认不返回(落页=确认时刻)。
+	if len(body.Facts) != 3 {
+		t.Fatalf("事实应 3 条(已确认;候选不入),得 %d", len(body.Facts))
 	}
 	byID := map[string]int{}
 	for i, f := range body.Facts {
 		byID[f.ID] = i
-	}
-	if f := body.Facts[byID["f-cand"]]; !f.IsNew || f.Kind != "fact" {
-		t.Errorf("f-cand 应为新进事实(is_new, kind=fact),得 is_new=%v kind=%q", f.IsNew, f.Kind)
-	} else if f.Status != "candidate" {
-		t.Errorf("f-cand status 应 candidate(P4-61 三区归类键),得 %q", f.Status)
+		if f.ID == "f-cand" {
+			t.Errorf("f-cand 未确认不应入事实页(账本留痕)")
+		}
 	}
 	if i, ok := byID["f-cred"]; ok {
 		f := body.Facts[i]
-		if f.Loot != "credential" {
-			t.Errorf("f-cred 成果类应 credential,得 %q", f.Loot)
+		if len(f.ResultTypes) != 1 || f.ResultTypes[0] != "credential" {
+			t.Errorf("f-cred 成果类应 credential,得 %q", f.ResultTypes)
 		}
-		if f.Status != "confirmed" {
-			t.Errorf("f-cred status 应 confirmed(P4-61 三区归类键),得 %q", f.Status)
-		}
-		if len(f.Assets) != 1 || f.Assets[0].ID != hostID || f.Assets[0].Title != "backup-01" {
+		if len(f.Assets) != 1 || f.Assets[0].ID != hostID || f.Assets[0].Title != "192.0.2.2" {
 			t.Errorf("f-cred 资产锚点不符: %+v", f.Assets)
 		}
 		if f.UnitID != "u1" {
@@ -145,11 +138,11 @@ func TestServerFactsList(t *testing.T) {
 	} else {
 		t.Fatal("f-cred 缺失")
 	}
-	if f := body.Facts[byID["f-data"]]; f.Loot != "data" {
-		t.Errorf("f-data 成果类应 data,得 %q", f.Loot)
+	if f := body.Facts[byID["f-data"]]; len(f.ResultTypes) != 1 || f.ResultTypes[0] != "data" {
+		t.Errorf("f-data 成果类应 data,得 %q", f.ResultTypes)
 	}
-	if f := body.Facts[byID["f-plain"]]; f.Loot != "" {
-		t.Errorf("f-plain 普通观察应无成果类,得 %q", f.Loot)
+	if f := body.Facts[byID["f-plain"]]; len(f.ResultTypes) != 1 || f.ResultTypes[0] != "plain" {
+		t.Errorf("f-plain 普通观察应无成果类,得 %q", f.ResultTypes)
 	}
 
 	// 404:任务不存在。

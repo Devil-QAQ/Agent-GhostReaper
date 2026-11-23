@@ -1,8 +1,12 @@
+"use client";
+
 import * as React from "react";
 
 import { cn } from "@/lib/utils";
+import { compositionInputHandlers } from "@/lib/composition-input";
 
 function Textarea({ className, ...props }) {
+  const composing = React.useRef(false);
   return (
     <textarea
       data-slot="textarea"
@@ -11,6 +15,7 @@ function Textarea({ className, ...props }) {
         className
       )}
       {...props}
+      {...compositionInputHandlers(composing, props)}
     />
   );
 }

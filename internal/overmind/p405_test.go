@@ -120,12 +120,15 @@ func TestSnapshotMarksManualAndExcluded(t *testing.T) {
 	for _, want := range []string{
 		"a-seed [host] 10.10.0.5 (未覆盖)",
 		"a-manual [host] 10.10.0.9 (未覆盖,手动补入)",
-		"a-out [host] 10.10.0.10 (范围外,不派发)",
 	} {
 		if !strings.Contains(snap, want) {
 			t.Fatalf("快照缺资产行 %q:\n%s", want, snap)
 		}
 	}
+	if strings.Contains(snap, "a-out [host] 10.10.0.10 (范围外,不派发)") {
+		t.Fatal("excluded object remains in current asset section")
+	}
+
 }
 
 // TestDeltaManualAssetLine 变化集:手动补入资产行走"人手动补入资产"
@@ -139,7 +142,7 @@ func TestDeltaManualAssetLine(t *testing.T) {
 		map[string]any{"source": rings.AssetSourceManual})
 
 	l := &Loop{Store: store, TaskID: task}
-	lines := l.deltaSinceLastAssessment(context.Background())
+	lines := l.deltaSinceLastAssessment(context.Background(), map[string]bool{"a-seed": true, "a-manual": true})
 	var seedLine, manualLine string
 	for _, ln := range lines {
 		if strings.Contains(ln, "a-seed") {

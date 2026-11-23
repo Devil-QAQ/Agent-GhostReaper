@@ -33,10 +33,19 @@ func TestP454EnsureScopeAsset(t *testing.T) {
 	if err != nil || created || id != "a-x" {
 		t.Fatalf("标题应复用既有资产: %s %v %v", id, created, err)
 	}
-	// 同锚点不同写法复用(URL 形态 → 同 host)。
-	id, created, err = EnsureScopeAsset(ctx, store, task, "http://x.example.com/login", rings.AssetSourceManual, "shepherd")
-	if err != nil || created || id != "a-x" {
-		t.Fatalf("同锚点写法应复用: %s %v %v", id, created, err)
+	// A domain and its HTTP entry are different objects; paths on the same
+	// protocol/host/port reuse one service identity.
+	service, created, err := EnsureScopeAsset(ctx, store, task, "http://x.example.com/login", rings.AssetSourceManual, "shepherd")
+	if err != nil || !created || service == "a-x" {
+		t.Fatal("domain was merged with service", service, created, err)
+	}
+	id, created, err = EnsureScopeAsset(ctx, store, task, "http://X.example.com:80/other", rings.AssetSourceManual, "shepherd")
+	if err != nil || created || id != service {
+		t.Fatal("same service duplicated by path", id, created, err)
+	}
+	other, created, err := EnsureScopeAsset(ctx, store, task, "https://x.example.com/login", rings.AssetSourceManual, "shepherd")
+	if err != nil || !created || other == service {
+		t.Fatal("distinct protocol merged", other, created, err)
 	}
 	// 新标识·手动来源:入图且范围内(手动资产天然可测)。
 	id, created, err = EnsureScopeAsset(ctx, store, task, "new.example.org", rings.AssetSourceManual, "shepherd")

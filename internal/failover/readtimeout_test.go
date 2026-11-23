@@ -246,7 +246,7 @@ func TestReadTimeoutSlowStreamNotKilled(t *testing.T) {
 	stub := newSSEStub(func(int64) []streamChunk {
 		return []streamChunk{
 			{wait: 150 * time.Millisecond, text: "长思考"}, // 首包延迟 < 400ms 宽限
-			{wait: 50 * time.Millisecond, text: "慢"},       // 出字间隔 50ms << 250ms 阈值
+			{wait: 50 * time.Millisecond, text: "慢"},    // 出字间隔 50ms << 250ms 阈值
 			{wait: 50 * time.Millisecond, text: "速"},
 			{wait: 50 * time.Millisecond, text: "流"},
 		}

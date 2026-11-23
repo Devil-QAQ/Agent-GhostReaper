@@ -231,24 +231,24 @@ func TestModelListRequest(t *testing.T) {
 // TestOpenCodeModePresets 接入方式双形态:go 与平台预设主表现同(API
 // 预设即 go 形态),api 为 zen 按量;快照下发与查询一致。
 func TestOpenCodeModePresets(t *testing.T) {
-	if got := OpenCodeModeURL(OpenCodeModeGo, "openai"); got != "https://opencode.ai/inference/go/openai/v1" {
+	if got := OpenCodeModePresetURLs()[OpenCodeModeGo]["openai"]; got != "https://opencode.ai/inference/go/openai/v1" {
 		t.Fatalf("go+openai: %q", got)
 	}
-	if got := OpenCodeModeURL(OpenCodeModeGo, "anthropic"); got != "https://opencode.ai/inference/go/anthropic" {
+	if got := OpenCodeModePresetURLs()[OpenCodeModeGo]["anthropic"]; got != "https://opencode.ai/inference/go/anthropic" {
 		t.Fatalf("go+anthropic: %q", got)
 	}
-	if got := OpenCodeModeURL(OpenCodeModeAPI, "openai"); got != "https://opencode.ai/zen/v1" {
+	if got := OpenCodeModePresetURLs()[OpenCodeModeAPI]["openai"]; got != "https://opencode.ai/zen/v1" {
 		t.Fatalf("api+openai: %q", got)
 	}
-	if got := OpenCodeModeURL(OpenCodeModeAPI, "anthropic"); got != "https://opencode.ai/zen" {
+	if got := OpenCodeModePresetURLs()[OpenCodeModeAPI]["anthropic"]; got != "https://opencode.ai/zen" {
 		t.Fatalf("api+anthropic: %q", got)
 	}
-	if got := OpenCodeModeURL("bogus", "openai"); got != "" {
+	if got := OpenCodeModePresetURLs()["bogus"]["openai"]; got != "" {
 		t.Fatalf("非法方式应空串: %q", got)
 	}
 	// 平台预设主表现 = 默认形态(Go 订阅),两口径不漂移。
 	for _, format := range []string{"openai", "anthropic"} {
-		if a, b := PlatformDefaultURL(PlatformOpenCode, format), OpenCodeModeURL(OpenCodeModeGo, format); a != b {
+		if a, b := PlatformPresetURLs()[PlatformOpenCode][format], OpenCodeModePresetURLs()[OpenCodeModeGo][format]; a != b {
 			t.Fatalf("平台预设与 go 形态漂移: %q vs %q", a, b)
 		}
 	}

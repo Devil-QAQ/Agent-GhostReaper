@@ -129,10 +129,10 @@ func TestGuardRejectBackflowE2E(t *testing.T) {
 	loop := &Loop{TaskID: task, Store: store, Swarm: ex, Provider: prov}
 
 	// 第一次唤醒:幽灵意图被守卫拒,零派发回静默(不崩溃、不热循环)。
-	if loop.cycle(ctx) {
+	if loop.cycle(ctx, true) {
 		t.Fatalf("整批被拒后不应判定完成")
 	}
-	if loop.LastErr() == nil {
+	if loopErr(loop) == nil {
 		t.Fatalf("派发失败应如实留在 LastErr")
 	}
 	if steps, _ := store.NodesByType(ctx, task, rings.NodeStep, ""); len(steps) != 0 {
@@ -142,10 +142,10 @@ func TestGuardRejectBackflowE2E(t *testing.T) {
 	if _, err := store.Append(ctx, task, rings.Event{Kind: rings.EventRoeUpdated, Actor: "creator", Payload: rings.RoeUpdated{}}); err != nil {
 		t.Fatal(err)
 	}
-	loop.cycle(ctx)
+	loop.cycle(ctx, true)
 	loop.unitsWG.Wait() // 调度启动即返；收拢真实单位，再消费落地结果。
-	if !loop.cycle(ctx) {
-		t.Fatalf("拒收—回流—纠偏后任务应经机器判定完成(lastErr=%v)", loop.LastErr())
+	if !loop.cycle(ctx, true) {
+		t.Fatalf("拒收—回流—纠偏后任务应经机器判定完成(lastErr=%v)", loopErr(loop))
 	}
 	// 幽灵意图确实被守卫拒(图上无 ghost 覆盖边,重派成功后 s1 done)。
 	steps, err := store.NodesByType(ctx, task, rings.NodeStep, "")

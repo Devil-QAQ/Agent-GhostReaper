@@ -78,14 +78,6 @@ func NormalizeApprovalThreshold(l rings.ActionLevel) rings.ActionLevel {
 	return l
 }
 
-// ActionLevels 四级分类的有序清单(面板下拉与文档用)。
-func ActionLevels() []rings.ActionLevel {
-	return []rings.ActionLevel{
-		rings.ActionReadOnly, rings.ActionActiveTest,
-		rings.ActionExploit, rings.ActionModifyPersist,
-	}
-}
-
 // errActionLevelMissing 分级缺失/非法时审批门的 fail-safe 拒绝理由。
 func errActionLevelMissing(l rings.ActionLevel) error {
 	return fmt.Errorf("意图分级缺失或非法(%q),安全闸门拒绝执行", string(l))

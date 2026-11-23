@@ -230,19 +230,23 @@ func searchDDGS(ctx context.Context, client *http.Client, query string) ([]Resul
 	req.Header.Set("User-Agent", ddgsUA)
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("DuckDuckGo 请求失败: %w(网络不通时可在系统设置·搜索配置配独立出口代理)", err)
+		return nil, unavailable("DuckDuckGo 请求失败(网络或搜索出口不可用)", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return nil, fmt.Errorf("DuckDuckGo 响应读取失败: %w", err)
+		return nil, unavailable("DuckDuckGo 响应读取失败", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("DuckDuckGo 返回 %d(可能被限流,稍后重试或切后端)", resp.StatusCode)
+		return nil, searchStatusError("DuckDuckGo", resp.StatusCode)
 	}
 	results := parseDDGS(body)
 	if len(results) == 0 {
-		return nil, errors.New("DuckDuckGo 返回 0 条结果(换关键词重试;持续为空可能被限流或网络受阻,可在系统设置·搜索配置切后端或配独立出口代理)")
+		page := strings.ToLower(string(body))
+		if strings.Contains(page, `class="no-results`) || strings.Contains(page, "class='no-results") {
+			return []Result{}, nil
+		}
+		return nil, unavailable("DuckDuckGo 页面没有可解析结果，尚不能判断为空结果(可能被拦截或页面格式变化)", nil)
 	}
 	return results, nil
 }
@@ -365,8 +369,8 @@ func searchBrave(ctx context.Context, client *http.Client, key, query string) ([
 		return nil, err
 	}
 	var out struct {
-		Web struct {
-			Results []struct {
+		Web *struct {
+			Results *[]struct {
 				Title       string `json:"title"`
 				URL         string `json:"url"`
 				Description string `json:"description"`
@@ -374,13 +378,16 @@ func searchBrave(ctx context.Context, client *http.Client, key, query string) ([
 		} `json:"web"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("Brave 响应解码失败: %w", err)
+		return nil, unavailable("Brave 响应解码失败", err)
 	}
-	rs := make([]Result, 0, len(out.Web.Results))
-	for _, r := range out.Web.Results {
+	if out.Web == nil || out.Web.Results == nil {
+		return nil, unavailable("Brave 响应缺少搜索结果字段，不能判断为空结果", nil)
+	}
+	rs := make([]Result, 0, len(*out.Web.Results))
+	for _, r := range *out.Web.Results {
 		rs = append(rs, Result{Title: r.Title, URL: r.URL, Snippet: r.Description})
 	}
-	return nonEmpty(rs, "Brave")
+	return rs, nil
 }
 
 // searchTavily Tavily API(付费 key):POST JSON + Bearer。
@@ -397,20 +404,23 @@ func searchTavily(ctx context.Context, client *http.Client, key, query string) (
 		return nil, err
 	}
 	var out struct {
-		Results []struct {
+		Results *[]struct {
 			Title   string `json:"title"`
 			URL     string `json:"url"`
 			Content string `json:"content"`
 		} `json:"results"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("Tavily 响应解码失败: %w", err)
+		return nil, unavailable("Tavily 响应解码失败", err)
 	}
-	rs := make([]Result, 0, len(out.Results))
-	for _, r := range out.Results {
+	if out.Results == nil {
+		return nil, unavailable("Tavily 响应缺少搜索结果字段，不能判断为空结果", nil)
+	}
+	rs := make([]Result, 0, len(*out.Results))
+	for _, r := range *out.Results {
 		rs = append(rs, Result{Title: r.Title, URL: r.URL, Snippet: r.Content})
 	}
-	return nonEmpty(rs, "Tavily")
+	return rs, nil
 }
 
 // doSearchRequest JSON 后端公共骨架:发请求、限长读体、状态码分级报错
@@ -418,28 +428,29 @@ func searchTavily(ctx context.Context, client *http.Client, key, query string) (
 func doSearchRequest(ctx context.Context, client *http.Client, req *http.Request, backend string) ([]byte, error) {
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%s 请求失败: %w(网络不通时可在系统设置·搜索配置配独立出口代理)", backend, err)
+		return nil, unavailable(backend+" 请求失败(网络或搜索出口不可用)", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("%s 响应读取失败: %w", backend, err)
-	}
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, fmt.Errorf("%s 拒绝访问(%d):key 无效或过期,核对系统设置·搜索配置里的 key", backend, resp.StatusCode)
+		return nil, unavailable(backend+" 响应读取失败", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s 返回 %d:%s", backend, resp.StatusCode, clipStr(string(body), 200))
+		return nil, searchStatusError(backend, resp.StatusCode)
 	}
 	return body, nil
 }
 
-// nonEmpty 空结果如实报(区别于解析失败;换词或切后端是出路)。
-func nonEmpty(rs []Result, backend string) ([]Result, error) {
-	if len(rs) == 0 {
-		return nil, fmt.Errorf("%s 返回 0 条结果(换关键词重试或切后端)", backend)
+// Only service/configuration failures share a short unavailability period.
+func searchStatusError(backend string, status int) error {
+	message := fmt.Sprintf("%s 返回 %d", backend, status)
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		message += ":key 无效或过期，或服务拒绝访问；核对系统设置·搜索配置"
 	}
-	return rs, nil
+	if status == http.StatusTooManyRequests || status >= 500 || status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return unavailable(message, nil)
+	}
+	return errors.New(message + ":核对当前查询参数")
 }
 
 // ---- 小件 ----

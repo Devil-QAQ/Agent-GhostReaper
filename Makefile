@@ -65,6 +65,13 @@ web:
 	node $(WEB_DIR)/scripts/test-task-status-matrix.mjs
 	node $(WEB_DIR)/scripts/test-finding-sort.mjs
 	node $(WEB_DIR)/scripts/test-approval-fold.mjs
+	node $(WEB_DIR)/scripts/test-swarm-segments.mjs
+	node $(WEB_DIR)/scripts/test-readable-text.mjs
+	node $(WEB_DIR)/scripts/test-composition-input.mjs
+	node $(WEB_DIR)/scripts/test-panorama-focus.mjs
+	node $(WEB_DIR)/scripts/test-asset-net-layout.mjs
+	node $(WEB_DIR)/scripts/test-claim-chain.mjs
+	node $(WEB_DIR)/scripts/test-graph-retirement.mjs
 	cd $(WEB_DIR) && { [ -f package-lock.json ] && npm ci || npm install; } && NEXT_TELEMETRY_DISABLED=1 npm run build
 	rm -rf $(WEB_DIST) && cp -R $(WEB_DIR)/out $(WEB_DIST)
 
@@ -78,6 +85,13 @@ test:
 	node $(WEB_DIR)/scripts/test-task-status-matrix.mjs
 	node $(WEB_DIR)/scripts/test-finding-sort.mjs
 	node $(WEB_DIR)/scripts/test-approval-fold.mjs
+	node $(WEB_DIR)/scripts/test-swarm-segments.mjs
+	node $(WEB_DIR)/scripts/test-readable-text.mjs
+	node $(WEB_DIR)/scripts/test-composition-input.mjs
+	node $(WEB_DIR)/scripts/test-panorama-focus.mjs
+	node $(WEB_DIR)/scripts/test-asset-net-layout.mjs
+	node $(WEB_DIR)/scripts/test-claim-chain.mjs
+	node $(WEB_DIR)/scripts/test-graph-retirement.mjs
 	go test ./...
 
 run: build

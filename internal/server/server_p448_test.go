@@ -103,16 +103,17 @@ func TestOperatorDiveAPI(t *testing.T) {
 	post(t, h, http.MethodPost, "/api/tasks/"+task+"/dive", `{"node_id":"s1"}`, http.StatusBadRequest, nil)
 	post(t, h, http.MethodPost, "/api/tasks/"+task+"/dive", `{}`, http.StatusBadRequest, nil)
 
-	// 详情禁用态:未终态任务两处详情均为空(可用)。
+	// 深入按钮退役(P5-07②:功能并入追问窗一句话触发)——两处详情
+	// 不再携带 dive_disabled 字段;深入 API 与记账链保留(账本通道)。
 	var claimDetail map[string]any
 	get(t, h, "/api/tasks/"+task+"/claims/tc-1", http.StatusOK, &claimDetail)
-	if v, ok := claimDetail["dive_disabled"]; ok && v != "" {
-		t.Fatalf("未终态任务发现详情不应禁用深入: %v", v)
+	if v, ok := claimDetail["dive_disabled"]; ok {
+		t.Fatalf("发现详情不应再携带深入禁用态字段(按钮已退役,P5-07②): %v", v)
 	}
 	var nodeDetail map[string]any
 	get(t, h, "/api/tasks/"+task+"/nodes/f-1", http.StatusOK, &nodeDetail)
-	if v, ok := nodeDetail["dive_disabled"]; ok && v != "" {
-		t.Fatalf("未终态任务事实详情不应禁用深入: %v", v)
+	if v, ok := nodeDetail["dive_disabled"]; ok {
+		t.Fatalf("事实详情不应再携带深入禁用态字段(按钮已退役,P5-07②): %v", v)
 	}
 
 	// 研判卡触发行:落一条引用深入指令 revision 的研判记录,触发行
@@ -148,20 +149,13 @@ func TestOperatorDiveAPI(t *testing.T) {
 		t.Fatalf("研判卡触发行缺失: %+v", omStatus["rounds"])
 	}
 
-	// 终态:停止任务后 409"任务已结束"、两处详情禁用态逐字。
+	// 终态:停止任务后 409"任务已结束"(API 通道保留;详情禁用态字段
+	// 已随按钮退役删除,P5-07②)。
 	post(t, h, http.MethodPost, "/api/tasks/"+task+"/stop", `{}`, http.StatusOK, nil)
 	var errBody map[string]any
 	post(t, h, http.MethodPost, "/api/tasks/"+task+"/dive", `{"node_id":"f-1"}`, http.StatusConflict, &errBody)
 	if errBody["error"] != "任务已结束" {
 		t.Fatalf("终态拒收文案应为 任务已结束: %v", errBody)
-	}
-	get(t, h, "/api/tasks/"+task+"/claims/tc-1", http.StatusOK, &claimDetail)
-	if claimDetail["dive_disabled"] != "任务已结束" {
-		t.Fatalf("终态发现详情禁用态错误: %v", claimDetail["dive_disabled"])
-	}
-	get(t, h, "/api/tasks/"+task+"/nodes/f-1", http.StatusOK, &nodeDetail)
-	if nodeDetail["dive_disabled"] != "任务已结束" {
-		t.Fatalf("终态事实详情禁用态错误: %v", nodeDetail["dive_disabled"])
 	}
 }
 

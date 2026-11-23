@@ -39,7 +39,7 @@ export function ReportsPage() {
   };
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-3">
       <PageHeader
         title="报告"
         subtitle="跨任务导出 · 报告由账本直接组装 · 本任务报告在任务空间的报告标签"
@@ -57,7 +57,7 @@ export function ReportsPage() {
             <div
               role="button"
               tabIndex={0}
-              className="flex items-center gap-2 rounded-md border border-border/55 bg-card px-3 py-2 text-[13px] transition-colors cursor-pointer hover:bg-hover-lift"
+              className="flex h-8 items-center gap-2 rounded-md border border-border/55 bg-card px-3 text-xs transition-colors cursor-pointer hover:bg-hover-lift"
               onClick={toggleAll}
             >
               <Checkbox checked={allOn} indeterminate={!allOn && selected.size > 0} onCheckedChange={toggleAll} />
@@ -65,7 +65,7 @@ export function ReportsPage() {
             </div>
             <Button
               variant="outline"
-              className="h-9"
+              size="sm"
               disabled={selected.size === 0}
               onClick={() => setExportOpen(true)}
             >
@@ -77,7 +77,7 @@ export function ReportsPage() {
             </Label>
           </div>
 
-          <div className="flex flex-col gap-4">
+          <div className="grid auto-rows-fr gap-3" data-report-cards>
             {tasks.map((t) => {
               const st = taskStatusBadge(t);
               const on = selected.has(t.id);
@@ -87,27 +87,21 @@ export function ReportsPage() {
                   role="button"
                   tabIndex={0}
                   className={
-                    "flex flex-col gap-2 rounded-xl border border-border/55 bg-card p-4 text-left transition-shadow cursor-pointer " +
+                    "flex h-20 min-w-0 flex-col justify-center gap-2 rounded-xl border border-border/55 bg-card px-4 py-3 text-left transition-shadow cursor-pointer " +
                     (on ? "border-primary/60" : "hover:shadow-card")
                   }
                   onClick={() => toggle(t.id)}
                 >
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
                     <Checkbox checked={on} onCheckedChange={() => toggle(t.id)} />
-                    <Badge variant={st.variant} title={st.title}>
-                      {st.label}
-                    </Badge>
-                    <span className="text-sm font-medium">{t.title}</span>
-                    <span className="num text-xs text-muted-foreground">{t.id}</span>
-                    <span className="ml-auto num text-xs text-muted-foreground">
-                      目标 {t.goals_achieved}/{t.goals_total}
-                    </span>
+                    <span className="min-w-0 flex-1 truncate text-sm font-medium" title={t.title}>{t.title}</span>
+                    <Badge variant={st.variant} title={st.title}>{st.label}</Badge>
                   </div>
-                  {(t.targets || []).length > 0 && (
-                    <div className="truncate num text-xs text-muted-foreground" title={(t.targets || []).join(" · ")}>
-                      {(t.targets || []).join(" · ")}
-                    </div>
-                  )}
+                  <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+                    <span className="num min-w-0 max-w-48 truncate" title={t.id}>{t.id}</span>
+                    <span className="num min-w-0 flex-1 truncate" title={(t.targets || []).join(" · ")}>{(t.targets || []).join(" · ") || "—"}</span>
+                    <span className="num shrink-0">目标 {t.goals_achieved}/{t.goals_total}</span>
+                  </div>
                 </div>
               );
             })}

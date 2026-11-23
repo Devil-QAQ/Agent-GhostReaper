@@ -364,9 +364,11 @@ func (s *Server) reopenBlockedSteps(ctx context.Context, actor, reason string, o
 		}
 		events := make([]rings.Event, 0, len(steps))
 		for _, st := range steps {
+			// P5-05:重开回队带队首档标记(被打断的老单位优先于新排队
+			// 者——与挂等让位唤醒同档;投影合并 scope_head+head_seq)。
 			events = append(events, rings.Event{
 				Kind: rings.EventNodeStateChanged, Actor: actor,
-				Payload: rings.NodeStateChanged{NodeID: st.ID, Status: "dispatched"},
+				Payload: rings.NodeStateChanged{NodeID: st.ID, Status: "dispatched", Note: "scope_head"},
 			})
 		}
 		if _, err := s.Store.Append(ctx, t.ID, events...); err != nil {

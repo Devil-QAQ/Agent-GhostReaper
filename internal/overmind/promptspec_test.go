@@ -53,11 +53,6 @@ func TestOvermindPromptSpecClauses(t *testing.T) {
 	if fixed[2] != swarm.ResidentStyleRules {
 		t.Fatalf("主宰基线第 3 固定段应为常驻文风条款")
 	}
-	// P3-11a:假设评估会话(单发系统提示词)同样携带——裁决理由与
-	// 验证意图是上面板的研判叙述。
-	if !strings.Contains(hypoEvalSystemPrompt, swarm.ResidentStyleRules) {
-		t.Fatalf("假设评估提示词须含常驻文风条款")
-	}
 	// 虫群侧写回粒度条款(§11)在虫群基线——跨包断言见 swarm 包
 	// promptspec_test;此处核对主宰侧不重复携带虫群条款。
 	if strings.Contains(d, "写回粒度") {
@@ -83,7 +78,6 @@ func TestOvermindIntentStyleClause(t *testing.T) {
 		"反例:",
 		"反例(铺清单):对 10.0.0.5:4330 根目录直取 20 个常见顶层文件名",
 		"无定位、无数字、长而空",
-		"statement / impact",
 	} {
 		if !strings.Contains(overmindOutputContract, want) {
 			t.Fatalf("拆解契约缺 P4-11 ① 文风条款: %q", want)
@@ -167,7 +161,7 @@ func TestDeltaLinesCarryDirectives(t *testing.T) {
 		t.Fatalf("种事件失败: %v", err)
 	}
 	l := &Loop{TaskID: task, Store: store}
-	joined := strings.Join(l.deltaSinceLastAssessment(ctx), "\n")
+	joined := strings.Join(l.deltaSinceLastAssessment(ctx, map[string]bool{"a1": true}), "\n")
 	for _, want := range []string{
 		"人新增了目标 g1 [active] 摸清暴露面 → 据此补充探索方向",
 		"新资产 a1 [service] 演示站点 → 评估覆盖缺口",

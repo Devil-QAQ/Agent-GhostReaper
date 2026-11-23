@@ -42,6 +42,9 @@ func (s *Service) toolset(taskID, messageID string) []tool.CoreTool {
 		s.readProgressTool(taskID),
 		s.readFindingsTool(taskID),
 		s.readUnitsTool(taskID),
+		s.trafficSearchTool(taskID),
+		s.trafficGetTool(taskID),
+		s.trafficBlobTool(taskID),
 		s.adviseTool(taskID, messageID),
 		s.urgentIntentTool(taskID),
 		s.addGoalTool(taskID),
@@ -52,10 +55,28 @@ func (s *Service) toolset(taskID, messageID string) []tool.CoreTool {
 		s.setNotesTool(taskID),
 		s.addConstraintTool(taskID),
 		s.setAssetScopeTool(taskID),
-		s.setInfoSourceTool(taskID),
 		s.taskControlTool(taskID),
 		s.unitControlTool(taskID),
 	}
+}
+
+// ---- P5-04 牧者配发流量查询三件(与虫群同款单一实现,问题清单 #94)----
+//
+// 造物主追问成果的原始报文/请求方法/响应原文时,牧者直接从镜里捞,
+// 不再"账本里没有"式答不上、不再派急活重放。防慢三规矩随工具说明
+// 下发(与虫群同款文案单一来源):搜必须限定 host、默认轻量摘要、
+// 看原文按编号单取。
+
+func (s *Service) trafficSearchTool(taskID string) tool.CoreTool {
+	return swarm.TrafficSearchTool(s.Store, taskID)
+}
+
+func (s *Service) trafficGetTool(taskID string) tool.CoreTool {
+	return swarm.TrafficGetTool(s.Store, s.Blobs, taskID)
+}
+
+func (s *Service) trafficBlobTool(taskID string) tool.CoreTool {
+	return swarm.TrafficBlobTool(s.Store, s.Blobs, taskID)
 }
 
 // ---- 看:查图 / 查漏洞 / 看虫群在干嘛 ----
@@ -117,6 +138,10 @@ func (s *Service) readProgressTool(taskID string) tool.CoreTool {
 					}
 					fmt.Fprintf(&b, "  - %s [%s] %s (%s)\n", a.ID, a.AssetClass, a.Title, mark)
 				}
+				b.WriteString("资产已确认关联:\n")
+				for _, relation := range ag.Relations {
+					b.WriteString("  - " + relation.Summary() + "\n")
+				}
 			}
 			if roe, err := s.Store.CurrentRoE(ctx, taskID); err == nil {
 				b.WriteString("授权约束(RoE):\n")
@@ -140,13 +165,10 @@ func (s *Service) readProgressTool(taskID string) tool.CoreTool {
 	})
 }
 
-// readFindingsTool 发现(漏洞声明)、事实与假设的当前清单(查图/查漏洞
-// 的数据面)。已确认事实一并列出——它是 fact# 引用与研判输入的共同
-// 数据面(第四章 §1"看:查图、查漏洞")。
 func (s *Service) readFindingsTool(taskID string) tool.CoreTool {
 	return tool.Build(tool.Spec{
 		Name:        "read_findings",
-		Description: "读当前发现、事实与假设:漏洞判断(状态/存在性判断/严重级别)、已确认事实、虫群直觉回传(假设状态)。回答发现/事实类问题前先调用本工具;引用事实给编号(如 fact:f-xxxx)。",
+		Description: "读当前发现与事实:漏洞判断(状态/存在性判断/严重级别)、已确认事实。回答发现/事实类问题前先调用本工具;引用事实给编号(如 fact:f-xxxx)。",
 		Schema: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
@@ -174,14 +196,6 @@ func (s *Service) readFindingsTool(taskID string) tool.CoreTool {
 			}
 			for _, f := range facts {
 				fmt.Fprintf(&b, "  - %s: %s\n", f.ID, f.Title)
-			}
-			hyps, _ := s.Store.NodesByType(ctx, taskID, rings.NodeHypothesis, "")
-			b.WriteString("假设(虫群直觉回传):\n")
-			if len(hyps) == 0 {
-				b.WriteString("  (无)\n")
-			}
-			for _, h := range hyps {
-				fmt.Fprintf(&b, "  - %s [%s] %s\n", h.ID, rings.HypStatusWord(h.Status), h.Title)
 			}
 			return tool.Text(strings.TrimRight(b.String(), "\n")), nil
 		},
@@ -394,7 +408,7 @@ func (s *Service) addGoalTool(taskID string) tool.CoreTool {
 func (s *Service) addConstraintTool(taskID string) tool.CoreTool {
 	return tool.Build(tool.Spec{
 		Name:        "add_constraint",
-		Description: "追加授权约束:把工具加入禁用清单(RoE 收紧,下一轮生效,不硬中断在跑单位)。白名单与审批门槛的调整在 RoE 面板操作。",
+		Description: "追加授权约束:把工具加入禁用清单(RoE 收紧,下一轮生效,不硬中断在跑单位)。文字要求用 set_notes 的 append；工具清单也可在 RoE 面板修改。",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -437,85 +451,13 @@ func (s *Service) addConstraintTool(taskID string) tool.CoreTool {
 				Kind: rings.EventRoeUpdated, Actor: ActorShepherd,
 				Payload: rings.RoeUpdated{
 					AllowedTools: roe.AllowedTools, DeniedTools: merged,
-					ApprovalThreshold: roe.ApprovalThreshold, Note: note,
+					ApprovalThreshold: roe.ApprovalThreshold, IntentRules: roe.IntentRules, ExcludedAssets: roe.ExcludedAssets, ScopeApproved: roe.ScopeApproved, Note: note,
 				},
 			}); err != nil {
 				return tool.Errorf("约束记录失败: " + err.Error()), nil
 			}
 			s.wake(taskID)
 			return tool.Text(fmt.Sprintf("约束已记录:禁用 %v(下一轮生效)。", args.DenyTools)), nil
-		},
-	})
-}
-
-// setInfoSourceTool 信息源标记/撤销(P4-67 ⑥ 牧者通道;P4-68 ① 起与
-// RoE 面板标记同源):"xxx 是查资料的不是目标"→标记信息源
-// (swarm.AllowScopeAccess 统一入口——入清单＋同主机资产退役,与分诊
-// 自动授、面板标记行同一账本动作,RoE 面板同步可见);"xxx 别当信息
-// 源了"→撤销(恢复拦截,后续访问重新走分诊)。与 set_asset_scope 的
-// 分工:那个管"测不测"(纳入/摘除),这个管"用不用"(访问权)——
-// 信息源不入资产图、不算覆盖。
-func (s *Service) setInfoSourceTool(taskID string) tool.CoreTool {
-	return tool.Build(tool.Spec{
-		Name:        "set_info_source",
-		Description: "标记或撤销信息源(与 RoE 面板允许访问同源,面板实时可见)。标记=该地址是查资料用的公开信息服务(代码托管/搜索引擎/公共文档等),虫群访问它直接放行、不当作测试目标(不入资产图、不算覆盖);撤销=恢复拦截,再次访问会拦下问一次。造物主说「xxx 是查资料的不是目标」用 mark,「xxx 别当信息源了」用 revoke。地址给域名或 IP(可带端口)。",
-		Schema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"action": map[string]any{"type": "string", "enum": []string{"mark", "revoke"},
-					"description": "mark=标记为信息源(访问放行) / revoke=撤销(恢复拦截)"},
-				"hosts": map[string]any{"type": "array", "items": map[string]any{"type": "string"},
-					"description": "地址清单:域名或 IP(host[:port] 写法)"},
-				"basis": map[string]any{"type": "string",
-					"description": "标记依据一句话(mark 时给;撤销可省)"},
-			},
-			"required": []string{"action", "hosts"},
-		},
-		Permissions: allowAll,
-		Run: func(ctx context.Context, in json.RawMessage, _ *tool.ToolContext) (tool.Result, error) {
-			var args struct {
-				Action string   `json:"action"`
-				Hosts  []string `json:"hosts"`
-				Basis  string   `json:"basis"`
-			}
-			if err := json.Unmarshal(in, &args); err != nil {
-				return tool.Errorf("bad input: " + err.Error()), nil
-			}
-			args.Hosts = trimAll(args.Hosts)
-			if len(args.Hosts) == 0 {
-				return tool.Errorf("hosts 不能为空:给出域名或 IP(host[:port] 写法)"), nil
-			}
-			var b strings.Builder
-			switch args.Action {
-			case "mark":
-				for _, ident := range args.Hosts {
-					a, ok := rings.ScopeAnchorOf(ident)
-					if !ok {
-						fmt.Fprintf(&b, "%s 不是可识别的主机地址,跳过;\n", ident)
-						continue
-					}
-					basis := strings.TrimSpace(args.Basis)
-					if basis == "" {
-						basis = "操作者标记:查资料用的公开信息服务"
-					}
-					if err := swarm.AllowScopeAccess(ctx, s.Store, taskID, a.Host, basis, ActorShepherd); err != nil {
-						return tool.Errorf("标记信息源失败: " + err.Error()), nil
-					}
-					fmt.Fprintf(&b, "已标记 %s 为信息源(访问放行,不当作测试目标);\n", ident)
-				}
-				return tool.Text(strings.TrimRight(b.String(), ";\n") + "。RoE 面板同步可见,可随时撤销。"), nil
-			case "revoke":
-				for _, ident := range args.Hosts {
-					if err := swarm.RevokeInfoSource(ctx, s.Store, taskID, ident, ActorShepherd); err != nil {
-						fmt.Fprintf(&b, "%s: %v;\n", ident, err)
-						continue
-					}
-					fmt.Fprintf(&b, "已撤销 %s 的信息源标记(恢复拦截,再次访问会拦下问一次);\n", ident)
-				}
-				return tool.Text(strings.TrimRight(b.String(), ";\n") + "。RoE 面板同步可见。"), nil
-			default:
-				return tool.Errorf("action 须为 mark 或 revoke"), nil
-			}
 		},
 	})
 }
@@ -594,21 +536,18 @@ func (s *Service) setAssetScopeTool(taskID string) tool.CoreTool {
 				s.wake(taskID)
 				var b strings.Builder
 				for _, id := range res.Revived {
-					fmt.Fprintf(&b, "已复活 %s(此前转信息源退役,现重新纳入测试范围);\n", title(id))
+					fmt.Fprintf(&b, "已重新加入资产 %s;\n", title(id))
 				}
 				for _, id := range res.Approved {
-					fmt.Fprintf(&b, "已放行待批资产 %s;\n", title(id))
+					fmt.Fprintf(&b, "已加入资产 %s;\n", title(id))
 				}
 				for _, id := range res.Reincluded {
 					fmt.Fprintf(&b, "已纳入 %s,移回测试范围;\n", title(id))
 				}
 				for _, id := range res.AlreadyIn {
-					if s.taskTypeIs(ctx, taskID, rings.TaskTypePentest) {
-						fmt.Fprintf(&b, "%s 本就在测试范围内,无需纳入;\n", title(id))
-					} else {
-						fmt.Fprintf(&b, "%s 本就全部可测(红队任务不设待批),无需纳入;\n", title(id))
-					}
+					fmt.Fprintf(&b, "%s 已在资产列表中，无需重复加入;\n", title(id))
 				}
+
 				return tool.Text(strings.TrimRight(b.String(), ";\n") + "。RoE 面板同步可见,主宰已被通知。"), nil
 			case "exclude":
 				res, err := swarm.ExcludeAssets(ctx, s.Store, s.helm(), taskID, ids, ActorShepherd)
@@ -619,7 +558,6 @@ func (s *Service) setAssetScopeTool(taskID string) tool.CoreTool {
 				// 单位与未决卡即时收口——意图覆盖者终止留痕、不覆盖者唤醒
 				// 换路,卡按拒绝语义收口消红点(与 RoE 面板摘除/卡上禁止
 				// 测试同一条对账链)。
-				s.resolveScopeWakes(taskID)
 				s.wake(taskID)
 				var b strings.Builder
 				for _, id := range res.AlreadyOut {

@@ -40,7 +40,7 @@ export function SettingsPage() {
   const sys = data?.system;
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-3">
       <PageHeader title="系统设置" subtitle="系统级参数与全局拦截规则" />
 
       {error && (
@@ -310,7 +310,7 @@ function GuardRulesDialog({ open, onOpenChange, rules, error }) {
         name: rule.name,
         pattern: rule.pattern,
         tool_scope: rule.tool_scope || "",
-        action: rule.action || "",
+        action: "",
         enabled: true,
         note: rule.note || "",
       });
@@ -331,7 +331,7 @@ function GuardRulesDialog({ open, onOpenChange, rules, error }) {
         <DialogHeader>
           <DialogTitle>拦截规则</DialogTitle>
           <DialogDescription>
-            全局命令底线,全部任务生效;拒绝即终止该单位,需批准的等人工审批
+            全部任务生效；命中拒绝当前动作，不终止单位
           </DialogDescription>
         </DialogHeader>
         <div className="flex items-center justify-end">
@@ -426,7 +426,7 @@ function GuardRuleRow({ rule, onEdit, onDelete }) {
         name: rule.name,
         pattern: rule.pattern,
         tool_scope: rule.tool_scope || "",
-        action: rule.action || "",
+        action: "",
         enabled: next,
         note: rule.note || "",
       }));
@@ -456,7 +456,6 @@ function GuardRuleRow({ rule, onEdit, onDelete }) {
         title={enabled ? "启用中" : "已禁用"}
       />
       {builtin && <Badge variant="outline">内置</Badge>}
-      {rule.action === "gate" && <Badge variant="warning">需批准</Badge>}
       <span className="min-w-0 truncate font-medium" title={rule.name}>
         {builtin ? rule.name.replace(/^\[内置\]\s*/, "") : rule.name}
       </span>
@@ -494,7 +493,7 @@ function GuardRuleDialog({ open, onOpenChange, rule }) {
         group: rule?.group || HARD_RULE_GROUPS[0],
         pattern: rule?.pattern || "",
         tool_scope: rule?.tool_scope || "",
-        action: rule?.action || "",
+        action: "",
         note: rule?.note || "",
       });
       setAdvanced(false);
@@ -512,8 +511,7 @@ function GuardRuleDialog({ open, onOpenChange, rule }) {
       form.pattern !== rule.pattern ||
       form.group !== rule.group ||
       (form.tool_scope || "") !== (rule.tool_scope || "") ||
-      (form.action || "") !== (rule.action || "") ||
-      (form.note || "") !== (rule.note || "")
+            (form.note || "") !== (rule.note || "")
     );
   })();
 
@@ -549,7 +547,7 @@ function GuardRuleDialog({ open, onOpenChange, rule }) {
             {isBuiltin ? "编辑内置规则" : rule ? "编辑规则" : "新增规则"}
           </DialogTitle>
           <DialogDescription>
-            对工具参数文本做匹配;拒绝即终止该单位,需批准的等人工审批
+            对工具参数文本匹配；命中直接拒绝当前动作
           </DialogDescription>
         </DialogHeader>
         {!form ? (
@@ -613,23 +611,6 @@ function GuardRuleDialog({ open, onOpenChange, rule }) {
                       ))}
                     </SelectContent>
                   </Select>
-                </Field>
-                <Field label="处置">
-                  <Select
-                    value={form.action || "deny"}
-                    onValueChange={(v) => setForm({ ...form, action: v === "gate" ? "gate" : "" })}
-                  >
-                    <SelectTrigger className={cn(INPUT, "w-40")}>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="deny">拒绝</SelectItem>
-                      <SelectItem value="gate">需批准</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <span className="text-xs text-muted-foreground">
-                    需批准:命中提交面板审批,批准后执行原文命令
-                  </span>
                 </Field>
                 <Field label="说明">
                   <Input

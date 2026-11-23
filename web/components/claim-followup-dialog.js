@@ -21,22 +21,34 @@ import { iconOf } from "@/components/icons";
 import { postJSON, severityMeta, usePolling } from "@/lib/api";
 import { NodeSheetHost } from "@/views/node-sheets";
 
-// 成果追问大窗(P4-14,问题清单 #24):发现详情与会话页牧者组共用的
-// 居中弹出窗(约 720px)。一成果一会话、续接不新建——退出再开历史在;
-// "新开一轮"次要按钮下一问起新会话(旧轮留档,经牧者组条目回看)。
-// 开场第一条是链路摘要卡(定稿叙述 + 发现/反证/确认引用行),不空白
-// 开场;答题者为牧者:读账本、人话回答,引用节点可点(窗内节点抽屉
-// 下钻),查账本动作以工具折叠卡呈现。信息条独立计(按本会话锚对账)。
+// 追问大窗(P4-14 起;P5-07② 单一追问入口:锚定条目为漏洞或事实,
+// 合并原"深入"——问→牧者读账本作答;吩咐继续挖→牧者落实成动作
+//(急活通道,最高权限操作面既有),问与吩咐全走对话记账)。一条目
+// 一会话、续接不新建——退出再开历史在;"新开一轮"次要按钮下一问起
+// 新会话(旧轮留档,经牧者组条目回看)。开场第一条是链路摘要卡(与
+// 所锚条目详情同源),不空白开场;答题者为牧者:读账本、人话回答,
+// 引用节点可点(窗内节点抽屉下钻),查账本动作以工具折叠卡呈现。
+// 信息条独立计(按本会话锚对账)。
 
-export function ClaimFollowupDialog({ tid, claimID, round, open, onClose }) {
+// 追问输入区提示(P5-07② 锚例逐字,一个字不改)。
+const FOLLOWUP_HINT = "可问相关问题，也可让它深入继续挖";
+
+export function ClaimFollowupDialog({ tid, anchor, round, open, onClose }) {
+  // anchor = {kind: "claim"|"fact", id};kind 缺省按漏洞(既有调用点)。
+  const kind = anchor?.kind || "claim";
+  const claimID = anchor?.id || "";
   // 本窗查看的轮次:null = 最新轮(续问落点);入口可带旧轮(回看)。
   const [viewRound, setViewRound] = React.useState(round ?? null);
   React.useEffect(() => {
     if (open) setViewRound(round ?? null);
   }, [open, round, claimID]);
-  // 锚定条与预载摘要卡的数据面(与发现详情同一 API,同源对账)。
+  // 锚定条与预载摘要卡的数据面(与所锚条目详情同一 API,同源对账)。
   const { data: detail } = usePolling(
-    open && claimID ? `/api/tasks/${tid}/claims/${claimID}` : "/api/healthz",
+    open && claimID
+      ? kind === "fact"
+        ? `/api/tasks/${tid}/nodes/${claimID}`
+        : `/api/tasks/${tid}/claims/${claimID}`
+      : "/api/healthz",
     2000,
     { immediate: Boolean(open && claimID) }
   );
@@ -45,7 +57,7 @@ export function ClaimFollowupDialog({ tid, claimID, round, open, onClose }) {
   const { data: chat, setData: setChat } = usePolling(
     qaURL ? `${qaURL}${viewRound ? `?round=${viewRound}` : ""}` : "/api/healthz",
     (d) => (d?.busy ? 700 : 2000),
-    { immediate: Boolean(qaURL) }
+    { immediate: Boolean(qaURL), live: qaURL ? [`shepherd:${tid}:${claimID}`] : null }
   );
 
   const [text, setText] = React.useState("");
@@ -54,7 +66,9 @@ export function ClaimFollowupDialog({ tid, claimID, round, open, onClose }) {
   const [node, setNode] = React.useState(null); // 窗内节点抽屉(引用下钻不卸载本窗)
 
   const claim = detail?.claim || {};
-  const sev = severityMeta(claim.severity || detail?.repro?.severity);
+  const sev = kind === "claim" ? severityMeta(claim.severity || detail?.repro?.severity) : null;
+  const anchorTitle =
+    kind === "fact" ? detail?.polished_title || detail?.polished_statement || detail?.title || claimID : claim.title || claim.statement || claimID;
   const messages = chat?.messages || [];
   const hibernated = Boolean(chat?.hibernated);
   // 历史轮次只读:看的不是最新轮时不可续问(续接永远落在最新轮)。
@@ -62,7 +76,7 @@ export function ClaimFollowupDialog({ tid, claimID, round, open, onClose }) {
   const latestRound = chat?.latest_round || viewingRound;
   const readOnly = viewingRound > 0 && viewingRound < latestRound;
   const frozen = hibernated || readOnly;
-  // 流内容签名(P4-22):问答条数 + 末条回答量,贴底跟滚判据;换成果/
+  // 流内容签名(P4-22):问答条数 + 末条回答量,贴底跟滚判据;换条目/
   // 换轮次视作新会话,回到默认在底部。
   const sig = `${messages.length}|${tailGrowSig(messages[messages.length - 1])}`;
 
@@ -103,16 +117,16 @@ export function ClaimFollowupDialog({ tid, claimID, round, open, onClose }) {
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="flex h-[85vh] max-h-[85vh] w-[min(720px,calc(100vw-32px))] max-w-[720px] flex-col gap-4">
         <DialogHeader className="space-y-0 pb-0 text-left">
-          {/* 锚定条:严重级徽标 + 成果名 + 追问(轮次) */}
+          {/* 锚定条:徽标(漏洞带严重级)+ 条目名 + 追问(轮次) */}
           <DialogTitle className="flex min-w-0 flex-wrap items-center gap-2">
             {React.createElement(iconOf("messageCircle"), { className: "size-4 shrink-0 text-primary" })}
             {sev && <Badge variant={sev.variant} className="shrink-0">{sev.label}</Badge>}
             <span className="shrink-0">追问</span>
             <LongText
-              text={claim.statement || claimID || "…"}
+              text={anchorTitle || "…"}
               max={44}
               variant="dialog"
-              label="判断原文"
+              label="条目标题"
               className="min-w-0 flex-1 font-normal"
             />
             {(chat?.rounds || 0) > 1 && (
@@ -122,7 +136,7 @@ export function ClaimFollowupDialog({ tid, claimID, round, open, onClose }) {
             )}
           </DialogTitle>
           <DialogDescription className="truncate">
-            牧者读账本作答 · 引用可点击下钻 · 一成果一会话,续接不新建
+            牧者读账本作答 · 引用可点击下钻 · 一条目一会话,续接不新建
           </DialogDescription>
         </DialogHeader>
         <SessionInfoBar
@@ -144,13 +158,17 @@ export function ClaimFollowupDialog({ tid, claimID, round, open, onClose }) {
         {/* 对话流(贴底跟滚,P4-22):链路摘要卡开场 + 问答 */}
         <ChatStream
           sig={sig}
-          resetKey={`${claimID}|${viewRound}`}
+          resetKey={`${claimID}|${kind}|${viewRound}`}
           className="space-y-3 rounded-xl border border-border/55 bg-card px-3 py-3"
         >
-          <PreludeCard detail={detail} onSelectNode={setNode} />
+          {kind === "fact" ? (
+            <FactPreludeCard detail={detail} onSelectNode={setNode} />
+          ) : (
+            <ClaimPreludeCard detail={detail} onSelectNode={setNode} />
+          )}
           {messages.length === 0 && (
             <div className="py-6 text-center text-[13px] text-muted-foreground">
-              尚未追问。问一句,牧者基于账本作答。
+              尚未追问。{FOLLOWUP_HINT}。
             </div>
           )}
           {messages.map((m) => (
@@ -199,7 +217,7 @@ export function ClaimFollowupDialog({ tid, claimID, round, open, onClose }) {
                   ? "历史轮次只读;回到最新一轮后可续问"
                   : hibernated
                     ? "任务冬眠中,唤醒后继续追问"
-                    : "问这个发现的任何问题(牧者读账本作答)"
+                    : FOLLOWUP_HINT
               }
               className="min-h-[48px] text-[13px] resize-none"
               onChange={(e) => setText(e.target.value)}
@@ -233,10 +251,10 @@ export function ClaimFollowupDialog({ tid, claimID, round, open, onClose }) {
   );
 }
 
-// PreludeCard 链路摘要卡(开场第一条):P4-13 定稿叙述 + 关键节点引用行
-//(发现单位 / 反证 / 终态时刻——Confirmed 呈"确认",其余状态如实呈
-//"终态")——与发现详情同源数据,确定性呈现。
-function PreludeCard({ detail, onSelectNode }) {
+// ClaimPreludeCard 漏洞链路摘要卡(开场第一条):P4-13 定稿叙述 + 关键
+// 节点引用行(发现单位 / 反证 / 终态时刻)——与漏洞详情同源数据,
+// 确定性呈现。
+function ClaimPreludeCard({ detail, onSelectNode }) {
   const repro = detail?.repro;
   const origin = detail?.origin;
   const discoverer = origin?.discoverer;
@@ -248,7 +266,7 @@ function PreludeCard({ detail, onSelectNode }) {
     <div className="flex flex-col gap-1.5 rounded-lg border border-dashed bg-background px-3 py-3 text-xs">
       <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
         <Badge variant="outline">链路摘要</Badge>
-        <span>开场预载 · 与发现详情一致</span>
+        <span>开场预载 · 与漏洞详情一致</span>
       </div>
       <div className="leading-relaxed [overflow-wrap:anywhere]">
         {repro?.narrative || "定稿时未生成叙述"}
@@ -270,22 +288,74 @@ function PreludeCard({ detail, onSelectNode }) {
             "无记录"
           )}
         </span>
-        <span className="flex items-center gap-1">
-          反证 {falsifiers.length} 轮
-          {falsifiers.slice(0, 3).map((f, i) =>
-            f.step_id ? (
-              <NodeRefButton
-                key={`${f.step_id}-${i}`}
-                meta={{ id: f.step_id, type: "step", typeLabel: `第${f.round}轮` }}
-                onSelectNode={onSelectNode}
-              />
-            ) : null
-          )}
-        </span>
+        {falsifiers.length > 0 && (
+          <span className="flex items-center gap-1">
+            反证 {falsifiers.length} 轮
+            {falsifiers.slice(0, 3).map((f, i) =>
+              f.step_id ? (
+                <NodeRefButton
+                  key={`${f.step_id}-${i}`}
+                  meta={{ id: f.step_id, type: "step", typeLabel: `第${f.round}轮` }}
+                  onSelectNode={onSelectNode}
+                />
+              ) : null
+            )}
+          </span>
+        )}
         <span>
           {terminalWord} {confirmedAt ? confirmedAt.slice(5, 16) : "进行中"}
         </span>
       </div>
+    </div>
+  );
+}
+
+// FactPreludeCard 事实链路摘要卡(P5-07② 事实锚定):陈述 + 推断标记 +
+// 关联资产 + 发现单位 + 确认时刻 + 证据截头——与事实详情同源数据,
+// 确定性呈现。
+function FactPreludeCard({ detail, onSelectNode }) {
+  if (!detail?.id) {
+    return (
+      <div className="rounded-lg border border-dashed bg-background px-3 py-3 text-xs text-muted-foreground">
+        读取条目中…
+      </div>
+    );
+  }
+  const d = detail?.detail || {};
+  return (
+    <div className="flex flex-col gap-1.5 rounded-lg border border-dashed bg-background px-3 py-3 text-xs">
+      <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+        <Badge variant="outline">链路摘要</Badge>
+        <span>开场预载 · 与事实详情一致</span>
+      </div>
+      <div className="leading-relaxed [overflow-wrap:anywhere]">
+        {detail.polished_statement || detail.title || "(无陈述)"}
+      </div>
+      {(detail.assets || []).length > 0 && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+          <span className="flex items-center gap-1">
+            关联资产
+            {(detail.assets || []).map((a) => (
+              <NodeRefButton
+                key={a.id}
+                meta={{ id: a.id, type: "asset", typeLabel: a.title || a.id }}
+                onSelectNode={onSelectNode}
+              />
+            ))}
+          </span>
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+        {d.unit_id && <span>发现单位 <span className="num">{d.unit_id}</span></span>}
+        <span>
+          确认 {(detail.confirmed_at || detail.added_at || "").slice(5, 16) || "—"}
+        </span>
+      </div>
+      {(d.evidence_head || d.evidence) && (
+        <div className="truncate num text-[11px] text-muted-foreground" title={d.evidence_head || d.evidence}>
+          证据:{d.evidence_head || d.evidence}
+        </div>
+      )}
     </div>
   );
 }

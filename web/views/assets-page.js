@@ -3,8 +3,10 @@
 import * as React from "react";
 
 import { EmptyState } from "@/components/empty-state";
+import { AssetNetView } from "@/components/asset-net-view";
 import { iconOf } from "@/components/icons";
-import { KpiCard } from "@/components/kpi-card";
+import { SearchInput } from "@/components/search-input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -14,7 +16,7 @@ import { NodeSheetHost } from "@/views/node-sheets";
 import { cn } from "@/lib/utils";
 
 // 资产树页(8.7 [P1]):12 类筛选轮盘(badge 计数,点击过滤)+ 覆盖进度条
-// + 可折叠缩进树 + 点击节点 Sheet 抽屉(资产详情/事实与假设/挂载发现,
+// + 可折叠缩进树 + 点击节点 Sheet 抽屉(资产详情/事实/挂载发现,
 // P2-09 起引用可下钻、详情可跳图)。
 // 覆盖徽标三态:未测(灰)/已覆盖(绿)/范围外(灰,P4-05 与 RoE 联动——
 // 已从授权范围摘除,主宰不再派发);"测试中"数据路径未开(方案 §四)。
@@ -23,14 +25,17 @@ import { cn } from "@/lib/utils";
 // 红队/未标任务的入"发现的其他资产"分组(直接可测)。P4-52 ⑤:审批
 // 集中 RoE——待批分组只展示＋计数,处置跳 RoE 审批区(卡区两键/批量)。
 // P2-09 跳转协议:?focus=<资产ID> 直达定位——展开祖先链、滚动入视、
-// 短暂高亮(进度图「在图中查看」等视图的落点)。
+// 短暂高亮(任务投影「在图中查看」等视图的落点)。
 export function AssetsPage({ currentTask, focus }) {
   const tid = currentTask?.id;
   const { data, error } = usePolling(tid ? `/api/tasks/${tid}/assets` : "/api/healthz", 2000, {
     immediate: Boolean(tid),
   });
   const [classFilter, setClassFilter] = React.useState(null);
+  const [query, setQuery] = React.useState("");
+  const [view, setView] = React.useState("net");
   const [expanded, setExpanded] = React.useState({});
+  const [defaultExpanded, setDefaultExpanded] = React.useState(true);
   const [detail, setDetail] = React.useState(null);
   const [addOpen, setAddOpen] = React.useState(false);
   const [focusPulse, setFocusPulse] = React.useState(null);
@@ -38,13 +43,6 @@ export function AssetsPage({ currentTask, focus }) {
 
   const assets = data?.assets || [];
   const hierarchy = data?.hierarchy || [];
-
-  // 范围分组(P4-44):待批=渗透任务的范围外发现资产(锁定不测,处置
-  // 在 RoE 审批区);"发现的其他资产"=红队/未标任务的范围外发现资产
-  //(直接可测,归属标注呈现)。两类均不入主树与覆盖分母(待批不可测;
-  // "其他资产"单独分组呈现,计入总数不计入主树)。
-  const pendingAssets = assets.filter((a) => a.scope_state === "pending");
-  const otherAssets = assets.filter((a) => a.scope_state === "out_open");
 
   // 父子映射(sub_of 边 from=子、to=父);visited 防环兜底。
   const byID = {};
@@ -90,8 +88,8 @@ export function AssetsPage({ currentTask, focus }) {
 
   if (!tid) {
     return (
-      <div className="flex flex-col gap-6">
-        <PageHeader title="资产树" subtitle="资产随虫群探测生长 · 覆盖进度实时刷新" />
+      <div className="flex flex-col gap-3">
+        <PageHeader title="资产树" subtitle="查看目标资产、测试覆盖与关联发现" />
         <EmptyState
           icon="network"
           title="未选择任务"
@@ -104,9 +102,9 @@ export function AssetsPage({ currentTask, focus }) {
 
   if (assets.length === 0) {
     return (
-      <div className="flex flex-col gap-6">
-        <PageHeader title="资产树" subtitle="资产随虫群探测生长 · 覆盖进度实时刷新">
-          <Button onClick={() => setAddOpen(true)}>
+      <div className="flex flex-col gap-3">
+        <PageHeader title="资产树" subtitle="查看目标资产、测试覆盖与关联发现">
+          <Button size="sm" onClick={() => setAddOpen(true)}>
             {React.createElement(iconOf("plus"), { className: "size-4" })}
             新增资产
           </Button>
@@ -114,7 +112,7 @@ export function AssetsPage({ currentTask, focus }) {
         <EmptyState
           icon="network"
           title="暂无资产"
-          hint={error ? `读取失败:${error}` : "虫群探测回传后,资产树将在此生长;也可手动补入"}
+          hint={error ? `读取失败:${error}` : "暂无资产，可手动添加或等待任务发现"}
           action={{ label: "新增资产", onClick: () => setAddOpen(true) }}
         />
         <AssetAddDialog
@@ -127,32 +125,18 @@ export function AssetsPage({ currentTask, focus }) {
     );
   }
 
-  // 覆盖口径(P4-05):摘除资产不计入覆盖分母——它不在授权域内,不是
-  // 待测面;总数照实呈现。P4-44:待批资产不计入(锁定不可测,放行后回
-  // 分母);"发现的其他资产"可测、计入分母(单独分组呈现,不在主树)。
-  const inScope = assets.filter((a) => !a.excluded && a.scope_state !== "pending");
-  const covered = inScope.filter((a) => a.covered).length;
 
-  // 类计数(总数 + 覆盖数,轮盘完整版 P2-10:12 类全部在场,零计数类
-  // 置灰不隐藏;每类计数徽章 = 已覆盖/总数)。口径与覆盖进度同源
-  //(可测资产,含"发现的其他资产";待批与摘除不在内)。P4-44。
-  const classCount = {};
-  const classCovered = {};
-  for (const a of inScope) {
-    classCount[a.class] = (classCount[a.class] || 0) + 1;
-    if (a.covered) classCovered[a.class] = (classCovered[a.class] || 0) + 1;
-  }
+  const covered = assets.filter((a) => a.covered).length;
+  const roots = assets.filter((a) => !parentOf[a.id] || !byID[parentOf[a.id]]);
+  const branchIDs = assets.filter(a => (childrenOf[a.id] || []).some(id => byID[id])).map(a => a.id);
+  const anyExpanded = branchIDs.some(id => expanded[id] ?? defaultExpanded);
+  const toggleAll = () => {
+    const open = !anyExpanded;
+    setDefaultExpanded(open);
+    setExpanded({});
+  };
 
-  // 主树:范围内常规资产(待批与"发现的其他资产"在独立分组,不在主树;
-  // 父节点被分走的子节点上提为根,如实不断链)。
-  const treeAssets = assets.filter((a) => a.scope_state !== "pending" && a.scope_state !== "out_open");
-  const groupState = (a) => a.scope_state === "pending" || a.scope_state === "out_open";
-  const roots = treeAssets.filter((a) => {
-    const p = parentOf[a.id];
-    return !p || !byID[p] || groupState(byID[p]);
-  });
-
-  const matchFilter = (a) => !classFilter || a.class === classFilter;
+  const matchFilter = (a) => (!classFilter || a.class === classFilter) && (!query.trim() || String(`${a.title} ${a.id}`).toLowerCase().includes(query.trim().toLowerCase()));
 
   // 过滤态下,某节点的可见子孙数(决定是否显示)。
   const subtreeMatch = (id, visited) => {
@@ -169,78 +153,12 @@ const INDENT = [
   "ml-30", "ml-36", "ml-42", "ml-48", "ml-54",
 ];
 
-// 来源标记(P4-05 三态):图标 + 悬停说明,与账本 detail.source 同源。
-const SourceMark = ({ node }) => {
+// Source is explicit text so it is distinguishable from coverage color.
+function SourceMark({ node }) {
   const meta = assetSourceMeta(node.source);
-  return (
-    <span title={`${meta.label}资产`} className="shrink-0">
-      {React.createElement(iconOf(meta.icon), {
-        className: cn(
-          "size-3.5",
-          node.source === "manual" ? "text-primary" : "text-status-success"
-        ),
-      })}
-    </span>
-  );
-};
-
-// ScopeGroup 范围分组(P4-44):待批(渗透,锁定不测)与"发现的其他
-// 资产"(红队/未标,归属标注)。折叠分组 + 计数。P4-52 ⑤ 审批集中
-// RoE:待批分组只展示＋计数、不带处置按钮,头部"去 RoE 审批"跳转
-// 审批区;其他资产纯呈现。开合态由页面持有(轮询数据瞬时为空时卸载
-// 重挂不丢展开状态,与主树 expanded 同模式)。
-function ScopeGroup({ title, hint, items, badgeText, open, onToggle, onJump, onOpenDetail }) {
-  const renderRow = (a) => {
-    const meta = assetClassMeta(a.class);
-    const Icon = iconOf(meta.icon);
-    return (
-      <div
-        key={a.id}
-        className="flex items-center gap-2 rounded-md py-1 pr-2 hover:bg-hover-lift cursor-pointer transition-colors duration-150"
-        onClick={() => onOpenDetail(a.id)}
-      >
-        <span className="w-4 shrink-0" />
-        <Icon className="size-4 shrink-0 text-muted-foreground" />
-        <span className="truncate text-sm" title={a.title || a.id}>{a.title || a.id}</span>
-        <Badge variant="outline" className={badgeText === "待批" ? "text-status-warning" : "text-muted-foreground"}>
-          {badgeText}
-        </Badge>
-        <SourceMark node={a} />
-        <span className="ml-auto shrink-0 num text-xs text-muted-foreground">
-          事实 {a.fact_count} · {a.id}
-        </span>
-      </div>
-    );
-  };
-  return (
-    <div className="rounded-xl border border-border/55 bg-card px-3 py-2">
-      <div className="flex items-center gap-2 py-1">
-        <button
-          className="shrink-0 text-muted-foreground hover:text-foreground cursor-pointer"
-          title={open ? "收起" : "展开"}
-          onClick={onToggle}
-        >
-          {React.createElement(iconOf(open ? "chevronDown" : "chevronRight"), { className: "size-4" })}
-        </button>
-        <button className="flex items-center gap-2 cursor-pointer" onClick={onToggle}>
-          <span className="text-[13px] font-medium">{title}</span>
-          <span className="num text-xs text-muted-foreground">{items.length}</span>
-          <span className="text-xs text-muted-foreground" title={hint}>{hint}</span>
-        </button>
-        {onJump && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="ml-auto h-8 px-2 text-xs"
-            onClick={onJump}
-          >
-            去 RoE 审批
-          </Button>
-        )}
-      </div>
-      {open && <div className="flex flex-col">{items.map(renderRow)}</div>}
-    </div>
-  );
+  return <span className="inline-flex shrink-0 items-center gap-1 rounded-md bg-muted px-2 py-0.5 text-[11px] text-muted-foreground" title={`${meta.label}资产`}>
+    {React.createElement(iconOf(meta.icon), { className: "size-3" })}{meta.label}
+  </span>;
 }
 
 const renderNode = (node, depth, visited) => {
@@ -250,13 +168,12 @@ const renderNode = (node, depth, visited) => {
     const kids = (childrenOf[node.id] || [])
       .map((id) => byID[id])
       .filter(Boolean)
-      .filter((k) => !groupState(k))
-      .filter((k) => !classFilter || subtreeMatch(k.id, new Set()))
+      .filter((k) => (!classFilter && !query.trim()) || subtreeMatch(k.id, new Set()))
       .sort((x, y) => x.created_rev - y.created_rev || (x.id < y.id ? -1 : 1));
     const meta = assetClassMeta(node.class);
     const Icon = iconOf(meta.icon);
-    const hasKids = (childrenOf[node.id] || []).some((k) => byID[k] && !groupState(byID[k]));
-    const isOpen = expanded[node.id] !== false; // 默认展开
+    const hasKids = (childrenOf[node.id] || []).some((k) => byID[k]);
+    const isOpen = expanded[node.id] ?? defaultExpanded;
 
     return (
       <div key={node.id}>
@@ -285,21 +202,14 @@ const renderNode = (node, depth, visited) => {
           ) : (
             <span className="w-4 shrink-0" />
           )}
-          <Icon className="size-4 shrink-0 text-muted-foreground" />
-          <span className="truncate text-sm" title={node.title || node.id}>{node.title || node.id}</span>
-          {node.excluded ? (
-            <Badge variant="outline" className="text-muted-foreground">
-              {React.createElement(iconOf("shieldBan"), { className: "size-3" })}
-              范围外
-            </Badge>
-          ) : (
-            <Badge variant={node.covered ? "success" : "paused"}>
-              {node.covered ? "已覆盖" : "未测"}
-            </Badge>
-          )}
+          <Icon className={cn("size-4 shrink-0", node.covered ? "text-status-success" : "text-muted-foreground/55")} />
+          <span className={cn("min-w-0 flex-1 truncate text-sm", node.covered ? "text-status-success" : "text-muted-foreground")} title={node.title || node.id}>{node.display_title || node.title || node.id}</span>
           <SourceMark node={node} />
-          <span className="ml-auto shrink-0 num text-xs text-muted-foreground">
-            事实 {node.fact_count} · 假设 {node.hypothesis_count} · {node.id}
+		  <Badge variant={node.covered ? "success" : "outline"} className={node.covered ? "" : "text-muted-foreground"}>
+		    {node.covered ? "已覆盖" : "未测"}
+		  </Badge>
+          <span className="ml-auto hidden shrink-0 num text-xs text-muted-foreground sm:inline">
+            {node.id}
           </span>
         </div>
         {isOpen && kids.map((k) => renderNode(k, depth + 1, nextVisited))}
@@ -307,143 +217,53 @@ const renderNode = (node, depth, visited) => {
     );
   };
 
-  // 覆盖口径的呈现数字(P4-44):范围外计数含摘除与待批(均不可测)。
-  const excludedCount = assets.length - inScope.length - pendingAssets.length;
-
-  const pct = inScope.length ? Math.round((covered / inScope.length) * 100) : 0;
+  const pct = assets.length ? Math.round((covered / assets.length) * 100) : 0;
 
   return (
-    <div className="flex flex-col gap-6">
-      <PageHeader title="资产树" subtitle="资产随虫群探测生长 · 覆盖进度实时刷新">
-        <Button onClick={() => setAddOpen(true)}>
-          {React.createElement(iconOf("plus"), { className: "size-4" })}
-          新增资产
+    <div className="flex flex-col gap-3">
+      <PageHeader title="资产" subtitle="查看目标资产、测试覆盖与关联发现" />
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex w-fit max-w-full flex-wrap gap-0.5 rounded-lg bg-muted p-1" role="group" aria-label="资产视图">
+          {[["net", "资产网"], ["tree", "资产树"]].map(([id, label]) => <button key={id} aria-pressed={view === id} className={cn("flex items-center rounded-md px-3 py-1 text-[13px] transition-colors cursor-pointer", view === id ? "bg-popover text-foreground shadow-xs" : "text-muted-foreground hover:bg-hover-lift hover:text-foreground")} onClick={() => setView(id)}>{label}</button>)}
+        </div>
+        <Button size="sm" className="h-8 text-xs" onClick={() => setAddOpen(true)}>
+          {React.createElement(iconOf("plus"), { className: "size-4" })}新增资产
         </Button>
-      </PageHeader>
-
-      {/* 待批分组(P4-44 ③:渗透任务的范围外发现资产,折叠 + 计数;
-          P4-52 ⑤ 审批集中 RoE——只展示,处置跳 RoE 审批区) */}
-      {pendingAssets.length > 0 && (
-        <ScopeGroup
-          title="待批"
-          hint="虫群发现的范围外资产,未放行不测;处置在 RoE 审批区"
-          items={pendingAssets}
-          badgeText="待批"
-          open={expanded["grp-pending"] === true}
-          onToggle={() => setExpanded((m) => ({ ...m, "grp-pending": !(m["grp-pending"] === true) }))}
-          onJump={() => {
-            location.hash = `/task/${tid}/roe`;
-          }}
-          onOpenDetail={(id) => setDetail({ type: "asset", id })}
-        />
-      )}
-
-      {/* 覆盖统计 + 进度条 */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <KpiCard
-          label="资产"
-          value={assets.length}
-          hint={
-            excludedCount > 0 || pendingAssets.length > 0
-              ? `可测 ${inScope.length} · 范围外 ${excludedCount}${pendingAssets.length > 0 ? ` · 待批 ${pendingAssets.length}` : ""}`
-              : `覆盖 ${covered}/${inScope.length}(${pct}%)`
-          }
-        />
-        <KpiCard label="已覆盖" value={covered} hint="已有测试步骤覆盖" tone="success" />
-        <KpiCard
-          label="事实合计"
-          value={assets.reduce((s, a) => s + a.fact_count, 0)}
-          hint="按来源资产归集"
-        />
-        <KpiCard
-          label="假设合计"
-          value={assets.reduce((s, a) => s + a.hypothesis_count, 0)}
-          hint="待排除的其他解释"
-        />
-      </div>
-      <div>
-        <div className="mb-1 flex justify-between text-xs text-muted-foreground">
-          <span>覆盖进度{excludedCount > 0 ? "(范围内)" : ""}</span>
-          <span>
-            {covered}/{inScope.length} · {pct}%
-          </span>
-        </div>
-        <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-          <div
-            className="h-full rounded-full bg-primary transition-[width]"
-            style={{ width: `${pct}%` }}
-          />
-        </div>
       </div>
 
-      {/* 12 类筛选轮盘完整版(计数徽章 = 已覆盖/总数,点击过滤/再点取消;
-          零计数类置灰在场) */}
-      <div className="flex flex-wrap gap-2">
-        <button
-          className={cn(
-            "rounded-full border px-3 py-0.5 text-xs cursor-pointer transition-colors",
-            !classFilter
-              ? "border-primary bg-primary/15 font-medium text-primary"
-              : "border-border text-muted-foreground hover:text-foreground"
-          )}
-          title={`已覆盖 ${covered} / 可测 ${inScope.length}`}
-          onClick={() => setClassFilter(null)}
-        >
-          全部 {covered}/{inScope.length}
-        </button>
-        {ASSET_CLASSES.map(([v, label]) => {
-          const total = classCount[v] || 0;
-          const cov = classCovered[v] || 0;
-          return (
-            <button
-              key={v}
-              disabled={total === 0}
-              className={cn(
-                "rounded-full border px-3 py-0.5 text-xs transition-colors",
-                total === 0
-                  ? "cursor-not-allowed border-border text-muted-foreground/40"
-                  : "cursor-pointer",
-                total > 0 && classFilter === v
-                  ? "border-primary bg-primary/15 font-medium text-primary"
-                  : total > 0 && "border-border text-muted-foreground hover:text-foreground"
-              )}
-              title={total > 0 ? `${label}:已覆盖 ${cov} / 共 ${total}` : `${label}:暂无资产`}
-              onClick={() => setClassFilter(classFilter === v ? null : v)}
-            >
-              {label} {total > 0 ? `${cov}/${total}` : 0}
-            </button>
-          );
-        })}
+      {view === "net" ? <AssetNetView key={tid} assets={assets} hierarchy={hierarchy} relations={data?.relations || []} focus={focus} onOpenDetail={setDetail} /> : <>
+
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-muted/35 px-4 py-3">
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
+          <span className="text-muted-foreground">资产总数 <span className="ml-2 text-sm font-semibold text-foreground num">{assets.length}</span></span>
+          <span className="text-muted-foreground" >已覆盖 <span className="ml-2 text-sm font-semibold text-status-success num">{covered}<span className="text-xs font-normal text-muted-foreground"> / {assets.length}</span></span></span>
+          <div className="h-1 w-24 overflow-hidden rounded-full bg-muted" role="progressbar" aria-label="资产覆盖" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}><div className="h-full rounded-full bg-status-success transition-[width]" style={{ width: `${pct}%` }} /></div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="w-48 max-w-full"><SearchInput aria-label="搜索资产树" placeholder="搜索资产名称或编号" value={query} onChange={event => setQuery(event.target.value)} /></div>
+          <Select value={classFilter || "all"} onValueChange={value => setClassFilter(value === "all" ? null : value)}><SelectTrigger className="h-8 w-36 text-xs" aria-label="资产树类型"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部类型</SelectItem>{ASSET_CLASSES.map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select>
+          {branchIDs.length > 0 && <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs" aria-expanded={Boolean(anyExpanded)} onClick={toggleAll}>
+            {React.createElement(iconOf(anyExpanded ? "chevronRight" : "chevronDown"), { className: "size-3.5" })}{anyExpanded ? "全部收起" : "全部展开"}
+          </Button>}
+        </div>
       </div>
 
       {/* 缩进树 */}
-      <div className="rounded-xl border border-border/55 bg-card px-3 py-2">
-        {roots.some((r) => !classFilter || subtreeMatch(r.id, new Set())) ? (
+      <div className="rounded-xl bg-card px-3 py-2">
+        {roots.some((r) => (!classFilter && !query.trim()) || subtreeMatch(r.id, new Set())) ? (
           roots
-            .filter((r) => !classFilter || subtreeMatch(r.id, new Set()))
+            .filter((r) => (!classFilter && !query.trim()) || subtreeMatch(r.id, new Set()))
             .map((r) => renderNode(r, 0, new Set()))
         ) : (
           <div className="py-4 text-center text-sm text-muted-foreground">
-            该类暂无资产
+            没有匹配资产
           </div>
         )}
       </div>
 
-      {/* 发现的其他资产(P4-44 ④:红队/未标任务的范围外发现资产,归属
-          标注呈现;直接可测,无待批无操作) */}
-      {otherAssets.length > 0 && (
-        <ScopeGroup
-          title="发现的其他资产"
-          hint="任务范围外发现的相邻资产,直接可测"
-          items={otherAssets}
-          badgeText="范围外"
-          open={expanded["grp-other"] === true}
-          onToggle={() => setExpanded((m) => ({ ...m, "grp-other": !(m["grp-other"] === true) }))}
-          onOpenDetail={(id) => setDetail({ type: "asset", id })}
-        />
-      )}
+      </>}
 
-      <NodeSheetHost tid={tid} value={detail} onChange={setDetail} />
+      <NodeSheetHost tid={tid} value={detail} onChange={setDetail} animateNavigation />
       <AssetAddDialog
         open={addOpen}
         onOpenChange={setAddOpen}

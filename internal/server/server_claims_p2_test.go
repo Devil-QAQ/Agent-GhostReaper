@@ -49,44 +49,40 @@ func seedFullClaim(t *testing.T, store *rings.Store, task string) {
 			NodeID: "sf1", NodeType: rings.NodeStep, Title: "反证(第 1 轮)", Status: "done",
 			Detail: map[string]any{"kind": "falsify", "testclaim_id": "tc-f", "round": 1}}},
 		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "overmind", Payload: rings.NodeStateChanged{
-			NodeID: "tc-f", Status: rings.TestClaimTesting}},
+			NodeID: "tc-f", Status: "testing"}},
 		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "swarm:u2", Payload: rings.TestClaimRecord{
 			ClaimID: "tc-f", StepID: "sf1", UnitID: "u2", Type: rings.TestClaimRecFalsify, Round: 1,
-			ImpactSupported: true, ImpactLevel: "high",
-			Alternatives: []rings.AltResult{{ID: "alt1", Refuted: false}, {ID: "alt2", Refuted: true}},
 			EvidenceHead: "第 1 轮:归属已确认,缓存未除"}},
 		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "arbiter", Payload: rings.TestClaimRecord{
 			ClaimID: "tc-f", StepID: "sf1", Round: 1, Type: rings.TestClaimRecVerdict,
 			Decision: rings.VerdictAdvanceRound, PendingReason: "第 1 轮反证完成,1 条竞争性替代解释未排除(alt1),待派下一轮反证",
 			Conditions: []rings.ArbiterConditionResult{
-				{Kind: arbiter.CondFalsifyCompleted, Required: 1, Actual: 1, Satisfied: true},
-				{Kind: arbiter.CondExistenceNotRefuted, Required: 1, Actual: 1, Satisfied: true},
-				{Kind: arbiter.CondAlternativesKilled, Required: 2, Actual: 1},
-				{Kind: arbiter.CondImpactSupported, Required: 1, Actual: 1, Satisfied: true},
-				{Kind: arbiter.CondVerifierIndependent, Required: 1, Actual: 1, Satisfied: true},
+				{Kind: "falsify_completed", Required: 1, Actual: 1, Satisfied: true},
+				{Kind: "existence_not_refuted", Required: 1, Actual: 1, Satisfied: true},
+				{Kind: "alternatives_killed", Required: 2, Actual: 1},
+				{Kind: "impact_supported", Required: 1, Actual: 1, Satisfied: true},
+				{Kind: "verifier_independent", Required: 1, Actual: 1, Satisfied: true},
 			}}},
 		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "arbiter", Payload: rings.NodeStateChanged{
-			NodeID: "tc-f", Status: rings.TestClaimAwaitingRound}},
+			NodeID: "tc-f", Status: "awaiting_round"}},
 		// 第 2 轮:缓存穿透 → 全灭 → 确认。
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
 			NodeID: "sf2", NodeType: rings.NodeStep, Title: "反证(第 2 轮)", Status: "done",
 			Detail: map[string]any{"kind": "falsify", "testclaim_id": "tc-f", "round": 2}}},
 		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "overmind", Payload: rings.NodeStateChanged{
-			NodeID: "tc-f", Status: rings.TestClaimTesting}},
+			NodeID: "tc-f", Status: "testing"}},
 		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "swarm:u3", Payload: rings.TestClaimRecord{
 			ClaimID: "tc-f", StepID: "sf2", UnitID: "u3", Type: rings.TestClaimRecFalsify, Round: 2,
-			ImpactSupported: true, ImpactLevel: "high",
-			Alternatives: []rings.AltResult{{ID: "alt1", Refuted: true}},
 			EvidenceHead: "第 2 轮:穿透重放仍返回列举"}},
 		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "arbiter", Payload: rings.TestClaimRecord{
 			ClaimID: "tc-f", StepID: "sf2", Round: 2, Type: rings.TestClaimRecVerdict,
 			Decision: rings.VerdictConfirm, Satisfied: true,
 			Conditions: []rings.ArbiterConditionResult{
-				{Kind: arbiter.CondFalsifyCompleted, Required: 1, Actual: 1, Satisfied: true},
-				{Kind: arbiter.CondExistenceNotRefuted, Required: 1, Actual: 1, Satisfied: true},
-				{Kind: arbiter.CondAlternativesKilled, Required: 2, Actual: 2, Satisfied: true},
-				{Kind: arbiter.CondImpactSupported, Required: 1, Actual: 1, Satisfied: true},
-				{Kind: arbiter.CondVerifierIndependent, Required: 1, Actual: 1, Satisfied: true},
+				{Kind: "falsify_completed", Required: 1, Actual: 1, Satisfied: true},
+				{Kind: "existence_not_refuted", Required: 1, Actual: 1, Satisfied: true},
+				{Kind: "alternatives_killed", Required: 2, Actual: 2, Satisfied: true},
+				{Kind: "impact_supported", Required: 1, Actual: 1, Satisfied: true},
+				{Kind: "verifier_independent", Required: 1, Actual: 1, Satisfied: true},
 			}}},
 	)
 	// 复现步骤的交换原文:真实写入 Manager 根下的内容寻址存储(与镜装配
@@ -193,46 +189,29 @@ func TestServerClaimDetail(t *testing.T) {
 		t.Fatalf("定稿级别与可重开标记不符: %+v %v", claim, d["reopenable"])
 	}
 
-	// 冻结解释:alt1/alt2 均已排除(当前战役)。
-	alts, _ := d["alternatives"].([]any)
-	if len(alts) != 2 {
-		t.Fatalf("冻结解释应恰 2 条: %+v", alts)
-	}
-	for _, a := range alts {
-		m := a.(map[string]any)
-		if m["killed"] != true {
-			t.Fatalf("两轮反证后解释应全部标记已排除: %+v", m)
-		}
+	// 冻结解释清单已随 P5-02⑥ 砍除——详情不再呈现 alternatives。
+	if alts, ok := d["alternatives"].([]any); ok && len(alts) > 0 {
+		t.Fatalf("解释清单应已砍除: %+v", alts)
 	}
 
-	// 完整时间线:created → state(testing) → falsify(R1) → verdict(advance)
-	// → state(awaiting) → state(testing) → falsify(R2) → verdict(confirm)
-	// → repro → state(confirmed)。
+	// 完整时间线:created → state(testing) → verdict(advance) → state
+	// (awaiting) → state(testing) → verdict(confirm) → repro → state
+	//(confirmed)。(P5-03③:旧 falsify 写回条目不再呈现/入投影。)
 	tl, _ := d["timeline"].([]any)
 	var kinds []string
 	for _, e := range tl {
 		kinds = append(kinds, e.(map[string]any)["kind"].(string))
 	}
-	want := "created,state,falsify,verdict,state,state,falsify,verdict,repro,state"
+	want := "created,state,verdict,state,state,verdict,repro,state"
 	if strings.Join(kinds, ",") != want {
 		t.Fatalf("时间线种类序列不符:\n得到 %s\n期望 %s", strings.Join(kinds, ","), want)
 	}
-	// R1 反证条目:逐条解释结论可见(alt1 未除/alt2 已除)。
-	f1 := tl[2].(map[string]any)
-	if f1["round"] != float64(1) || f1["unit_id"] != "u2" {
-		t.Fatalf("第 1 轮反证条目不符: %+v", f1)
-	}
-	altRes, _ := f1["alt_results"].([]any)
-	if len(altRes) != 2 || altRes[0].(map[string]any)["refuted"] != false ||
-		altRes[1].(map[string]any)["refuted"] != true {
-		t.Fatalf("逐条解释结论应随时间线呈现: %+v", altRes)
-	}
 	// 轮末评估:advance_round + 理由。
-	v1 := tl[3].(map[string]any)
+	v1 := tl[2].(map[string]any)
 	if v1["decision"] != "advance_round" || !strings.Contains(v1["pending_reason"].(string), "alt1") {
 		t.Fatalf("第 1 轮评估应为 advance_round: %+v", v1)
 	}
-	v2 := tl[7].(map[string]any)
+	v2 := tl[5].(map[string]any)
 	if v2["decision"] != "confirm" || v2["satisfied"] != true {
 		t.Fatalf("第 2 轮评估应为 confirm: %+v", v2)
 	}
@@ -331,11 +310,11 @@ func TestServerClaimReopen(t *testing.T) {
 	var resp map[string]string
 	post(t, h, http.MethodPost, "/api/tasks/"+task+"/claims/tc-f/reopen",
 		`{"reason":"新证据显示可能是缓存污染","trigger":"new_evidence"}`, http.StatusOK, &resp)
-	if resp["status"] != rings.TestClaimTesting {
-		t.Fatalf("重开应回 testing: %+v", resp)
+	if resp["status"] != rings.TestClaimCandidate {
+		t.Fatalf("重开应回候选(等新交卷重验): %+v", resp)
 	}
 	node, err := store.Node(ctx, task, "tc-f")
-	if err != nil || node.Status != rings.TestClaimTesting {
+	if err != nil || node.Status != rings.TestClaimCandidate {
 		t.Fatalf("重开后声明应回反证中: %+v %v", node, err)
 	}
 	// reopen 记录与重开轮反证 Step 同批落账(轮次续号 3)。
@@ -364,8 +343,9 @@ func TestServerClaimReopen(t *testing.T) {
 		!strings.Contains(reopen.Reason, "缓存污染") {
 		t.Fatalf("重开记录不符: %+v", reopen)
 	}
-	if stepRound != 3 {
-		t.Fatalf("重开轮反证步骤应续号 round=3: %d", stepRound)
+	// P5-01⑤:重开不再派反证步骤——历史轮次仍是铺垫的 round=2。
+	if stepRound != 2 {
+		t.Fatalf("重开不得派生新反证步骤(轮次应停在铺垫的 2): %d", stepRound)
 	}
 	// 幽灵声明 404。
 	post(t, h, http.MethodPost, "/api/tasks/"+task+"/claims/tc-404/reopen",

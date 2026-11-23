@@ -152,6 +152,10 @@ func main() {
 	shep := &shepherd.Service{
 		Store: store, Provider: provider, RootDir: *tasksDir,
 		Model: chain.ActiveModel(), Hiber: hiberGate,
+		// Blobs 与虫群执行器同一物理 blob 目录(P5-04 牧者配发流量
+		// 查询三件:追问原始报文时直接从镜的原文存储里捞)。内容寻址
+		// 存储,两个实例读写同一目录安全。
+		Blobs: swarm.NewBlobStore(filepath.Join(*tasksDir, "blobs")),
 		// Loops 在跑主宰循环注册表(P4-69 ①:牧者摘除资产后即时对账
 		// 收口挂等单位与未决卡,与面板三通道同源)。
 		Loops:    loops,
@@ -311,16 +315,11 @@ func main() {
 		if e == nil {
 			return
 		}
-		// P4-64(问题清单 #82)显示层包装钩子:swarm 侧入账点(反证轮
-		// 结论/复测结论)按任务路由到在跑主宰循环生成包装文本——钩子
-		// 读注册表实时取循环,循环退出后自然退 nil(读侧退原文,不阻塞
-		// 入账);执行器为全局一个、循环每任务一个,故经注册表分发。
-		e.RoundHumanGen = func(ctx context.Context, taskID, claimID string, rec *rings.TestClaimRecord) *rings.ClaimRoundHuman {
-			if l := loops.Get(taskID); l != nil {
-				return l.GenRoundHumanFor(ctx, claimID, rec)
-			}
-			return nil
-		}
+		// P4-64(问题清单 #82)显示层包装钩子:swarm 侧入账点(复测结论)
+		// 按任务路由到在跑主宰循环生成包装文本——钩子读注册表实时取循环,
+		// 循环退出后自然退 nil(读侧退原文,不阻塞入账);执行器为全局一个、
+		// 循环每任务一个,故经注册表分发。(旧反证轮人话钩子 RoundHumanGen
+		// 已随三段流水线退役删除,P5-03③。)
 		e.RetestNotePolisher = func(ctx context.Context, taskID, claimID string, round int, verdict, note string) *rings.RetestNotePolish {
 			if l := loops.Get(taskID); l != nil {
 				return l.PolishRetestNote(ctx, claimID, round, verdict, note)
@@ -409,4 +408,11 @@ func (h *hibernateSink) ExpirePending(taskID, reason string) {
 	if e := h.execOf(); e != nil {
 		e.ExpirePendingApprovals(taskID, reason)
 	}
+}
+
+func (h *hibernateSink) ReleaseGateWaits(taskID string) int {
+	if e := h.execOf(); e != nil {
+		return e.ReleaseGateWaits(taskID)
+	}
+	return 0
 }

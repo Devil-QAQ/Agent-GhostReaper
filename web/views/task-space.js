@@ -5,10 +5,9 @@ import * as React from "react";
 import { EmptyState } from "@/components/empty-state";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { iconOf } from "@/components/icons";
-import { AnnulusPage } from "@/views/annulus-page";
 import { AssetsPage } from "@/views/assets-page";
 import { FindingsPage } from "@/views/findings-page";
-import { ProgressPage } from "@/views/progress-page";
+import { PanoramaPage } from "@/views/panorama-page";
 import { ReportPage } from "@/views/report-page";
 import { RoePage } from "@/views/roe-page";
 import { SessionsPage } from "@/views/sessions-page";
@@ -25,8 +24,7 @@ import { enabledTaskTabs } from "@/lib/nav";
 const TAB_PAGE_OF = {
   workbench: WorkbenchPage,
   sessions: SessionsPage,
-  progress: ProgressPage,
-  annulus: AnnulusPage,
+  panorama: PanoramaPage,
   findings: FindingsPage,
   assets: AssetsPage,
   roe: RoePage,
@@ -95,11 +93,11 @@ export function TaskSpace({ tasks, taskID, tab, focus, unit }) {
   const pageProps =
     tab === "sessions" ? { currentTask: current, unitFocus: unit } : { currentTask: current, focus };
   return (
-    <div className="flex flex-col gap-6">
-      <div className="sticky top-[53px] z-30 -mx-2 bg-background/95 px-2 py-2 backdrop-blur">
+    <div className="task-space flex min-w-0 flex-col gap-3">
+      <div className="sticky top-14 z-30 -mx-2 bg-background/95 px-2 backdrop-blur" data-task-navigation>
         {/* 8.9 质感:分段控件去描边靠表面色阶,当前项浅表面+微投影(克制,
             不整块铺品牌色),hover 所在层提亮 */}
-        <div className="flex w-fit gap-0.5 rounded-lg bg-muted p-1">
+        <div className="flex w-fit max-w-full flex-wrap gap-0.5 rounded-lg bg-muted p-1">
           {tabs.map((t) => (
             <button
               key={t.id}
@@ -138,15 +136,19 @@ export function TaskSpace({ tasks, taskID, tab, focus, unit }) {
                   {roePending}
                 </span>
               )}
-              {/* 发现未读红点+计数(P4-47 A):汇总位——成果或事实任一
-                  有未读即亮,两个子页签全看过才灭;点击进发现页 */}
+              {/* 发现未读红点+计数(P5-08⑤ 三页签汇总):意图/事实/漏洞
+                  任一有新即亮,三页全进过才灭;点击进发现页 */}
               {t.id === "findings" &&
-                (current.unread_claims > 0 || current.unread_facts > 0) && (
+                (current.unread_intents > 0 ||
+                  current.unread_claims > 0 ||
+                  current.unread_facts > 0) && (
                   <span
                     className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold leading-none text-primary-foreground num"
-                    title={`未读:成果 ${current.unread_claims ?? 0} 条 · 事实 ${current.unread_facts ?? 0} 条`}
+                    title={`未读:意图 ${current.unread_intents ?? 0} 条 · 事实 ${current.unread_facts ?? 0} 条 · 漏洞 ${current.unread_claims ?? 0} 条`}
                   >
-                    {(current.unread_claims ?? 0) + (current.unread_facts ?? 0)}
+                    {(current.unread_intents ?? 0) +
+                      (current.unread_claims ?? 0) +
+                      (current.unread_facts ?? 0)}
                   </span>
                 )}
             </button>
@@ -160,7 +162,7 @@ export function TaskSpace({ tasks, taskID, tab, focus, unit }) {
         <ErrorBoundary key={`${current.id}:${tab}`}>
           <Page {...pageProps} />
         </ErrorBoundary>
-      ) : null}
+      ) : <EmptyState icon="circleHelp" title="页面不存在" action={{ label: "回任务列表", href: "/tasks" }} />}
     </div>
   );
 }

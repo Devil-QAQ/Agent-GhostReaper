@@ -105,7 +105,6 @@ func TestAppendAndDualGraphProjection(t *testing.T) {
 			Status: "pending", Detail: map[string]any{"intent_class": "只读探测"}}}, // r11
 		ea(EdgeCovers, "s1", "www1"), // r12
 	)
-	// 虫群执行回流:状态推进、事实产出、直觉假设
 	mustAppend(t, s, task,
 		Event{Kind: EventNodeStateChanged, Actor: "swarm:u1", Payload: NodeStateChanged{NodeID: "s1", Status: "done"}}, // r13
 		Event{Kind: EventNodeAdded, Actor: "swarm:u1", Payload: NodeAdded{
@@ -113,25 +112,23 @@ func TestAppendAndDualGraphProjection(t *testing.T) {
 			Detail: map[string]any{"evidence": map[string]any{"mirror_ref": "sha256:ab12", "tool": "dns_resolve"}}}}, // r14
 		ea(EdgeProduces, "s1", "f1"), // r15
 		ea(EdgeAbout, "f1", "www1"),  // r16
-		na(NodeHypothesis, "h1", "10.0.0.5:8080 疑似旧版管理后台", "candidate", "", nil), // r17
-		ea(EdgeAbout, "h1", "svc1"), // r18
 	)
 	// 主宰收割:候选漏洞声明 + 反证意图
 	mustAppend(t, s, task,
-		na(NodeTestClaim, "tc1", "www.example.com 反射型 XSS", "candidate", "", nil), // r19
-		ea(EdgeDerivedFrom, "tc1", "f1"),                                          // r20
-		na(NodeStep, "s2", "对 tc1 执行单轮反证", "pending", "", nil),                    // r21
-		ea(EdgeDependsOn, "s2", "s1"),                                             // r22
-		ea(EdgeCovers, "s2", "www1"),                                              // r23
+		na(NodeTestClaim, "tc1", "www.example.com 反射型 XSS", "candidate", "", nil), // r17
+		ea(EdgeDerivedFrom, "tc1", "f1"),                                          // r18
+		na(NodeStep, "s2", "对 tc1 执行单轮反证", "pending", "", nil),                    // r19
+		ea(EdgeDependsOn, "s2", "s1"),                                             // r20
+		ea(EdgeCovers, "s2", "www1"),                                              // r21
 	)
 
-	// 事件流:23 条,revision 1..23 连续,信封字段可回读
+	// 事件流:21 条,revision 1..21 连续,信封字段可回读
 	evs, err := s.Events(ctx, task, 0, 0)
 	if err != nil {
 		t.Fatalf("查询事件失败: %v", err)
 	}
-	if len(evs) != 23 {
-		t.Fatalf("事件数 = %d, 期望 23", len(evs))
+	if len(evs) != 21 {
+		t.Fatalf("事件数 = %d, 期望 21", len(evs))
 	}
 	for i, e := range evs {
 		if e.Revision != int64(i+1) {
@@ -152,8 +149,8 @@ func TestAppendAndDualGraphProjection(t *testing.T) {
 		t.Fatalf("r5 负载回读不符: %+v", www)
 	}
 	rev, err := s.CurrentRevision(ctx, task)
-	if err != nil || rev != 23 {
-		t.Fatalf("CurrentRevision = (%d, %v), 期望 23", rev, err)
+	if err != nil || rev != 21 {
+		t.Fatalf("CurrentRevision = (%d, %v), 期望 21", rev, err)
 	}
 
 	// 资产图投影
@@ -174,80 +171,84 @@ func TestAppendAndDualGraphProjection(t *testing.T) {
 	if len(ag.Assets) != 5 {
 		t.Fatalf("资产数 = %d, 期望 5", len(ag.Assets))
 	}
-	if a := asset("www1"); !a.Covered || a.FactCount != 1 || a.HypothesisCount != 0 ||
-		a.AssetClass != AssetSubdomain || a.Title != "www.example.com" || a.CreatedRev != 5 || a.UpdatedRev != 5 {
+	if a := asset("www1"); !a.Covered || a.FactCount != 1 ||
+		a.AssetClass != AssetDomain || a.Title != "www.example.com" || a.CreatedRev != 5 || a.UpdatedRev != 5 {
 		t.Fatalf("www1 投影不符: %+v", a)
 	}
-	if a := asset("svc1"); a.Covered || a.FactCount != 0 || a.HypothesisCount != 1 {
+	if a := asset("svc1"); a.Covered || a.FactCount != 0 {
 		t.Fatalf("svc1 投影不符: %+v", a)
 	}
 	for _, id := range []string{"org1", "dom1", "host1"} {
-		if a := asset(id); a.Covered || a.FactCount != 0 || a.HypothesisCount != 0 {
+		if a := asset(id); a.Covered || a.FactCount != 0 {
 			t.Fatalf("资产 %s 不应有覆盖或证据计数: %+v", id, a)
 		}
 	}
 	wantHierarchy := []EdgeView{
-		{Type: EdgeSubOf, From: "dom1", To: "org1", CreatedRev: 4},
-		{Type: EdgeSubOf, From: "www1", To: "dom1", CreatedRev: 6},
-		{Type: EdgeSubOf, From: "host1", To: "dom1", CreatedRev: 8},
 		{Type: EdgeSubOf, From: "svc1", To: "host1", CreatedRev: 10},
+		{Type: EdgeSubOf, From: "www1", To: "dom1", CreatedRev: 6},
 	}
 	if !reflect.DeepEqual(ag.Hierarchy, wantHierarchy) {
 		t.Fatalf("层级边不符:\n得到 %+v\n期望 %+v", ag.Hierarchy, wantHierarchy)
 	}
+	// The tree uses address structure. Historical organization ownership and
+	// DNS-as-parent records remain readable in the original ledger unchanged.
+	rawHierarchy, err := s.Edges(ctx, task, EdgeSubOf)
+	if err != nil || len(rawHierarchy) != 4 {
+		t.Fatalf("historical hierarchy changed: %+v %v", rawHierarchy, err)
+	}
 
-	// 进度图投影
+	// 任务投影投影
 	nv := func(id string, nt NodeType, title, status string, created, updated int64) NodeView {
 		return NodeView{ID: id, Type: nt, Title: title, Status: status, CreatedRev: created, UpdatedRev: updated}
 	}
-	pg, err := s.ProgressGraph(ctx, task)
+	pg, err := s.Graph(ctx, task)
 	if err != nil {
-		t.Fatalf("查询进度图失败: %v", err)
+		t.Fatalf("查询任务投影失败: %v", err)
 	}
 	wantGoals := []NodeView{nv("g1", NodeGoal, "完成对 example.com 的授权测试", "active", 1, 1)}
 	wantSteps := []NodeView{
 		nv("s1", NodeStep, "探测 www.example.com 的解析与服务", "done", 11, 13),
-		nv("s2", NodeStep, "对 tc1 执行单轮反证", "pending", 21, 21),
+		nv("s2", NodeStep, "对 tc1 执行单轮反证", "pending", 19, 19),
 	}
 	wantFacts := []NodeView{nv("f1", NodeFact, "www.example.com 解析到 10.0.0.5", "active", 14, 14)}
-	wantClaims := []NodeView{nv("tc1", NodeTestClaim, "www.example.com 反射型 XSS", "candidate", 19, 19)}
+	wantClaims := []NodeView{nv("tc1", NodeTestClaim, "www.example.com 反射型 XSS", "candidate", 17, 17)}
 	wantLineage := []EdgeView{
 		{Type: EdgeProduces, From: "s1", To: "f1", CreatedRev: 15},
-		{Type: EdgeDerivedFrom, From: "tc1", To: "f1", CreatedRev: 20},
+		{Type: EdgeDerivedFrom, From: "tc1", To: "f1", CreatedRev: 18},
 	}
-	if !reflect.DeepEqual(pg.Goals, wantGoals) || !reflect.DeepEqual(pg.Steps, wantSteps) ||
-		!reflect.DeepEqual(pg.Facts, wantFacts) || !reflect.DeepEqual(pg.TestClaims, wantClaims) {
-		t.Fatalf("进度图节点不符:\ngoals  %+v\nsteps  %+v\nfacts  %+v\nclaims  %+v",
-			pg.Goals, pg.Steps, pg.Facts, pg.TestClaims)
+	if !reflect.DeepEqual(graphNodes(pg, NodeGoal), wantGoals) || !reflect.DeepEqual(graphNodes(pg, NodeStep), wantSteps) ||
+		!reflect.DeepEqual(graphNodes(pg, NodeFact), wantFacts) || !reflect.DeepEqual(graphNodes(pg, NodeTestClaim), wantClaims) {
+		t.Fatalf("任务投影节点不符:\ngoals  %+v\nsteps  %+v\nfacts  %+v\nclaims  %+v",
+			graphNodes(pg, NodeGoal), graphNodes(pg, NodeStep), graphNodes(pg, NodeFact), graphNodes(pg, NodeTestClaim))
 	}
-	if !reflect.DeepEqual(pg.Lineage, wantLineage) {
-		t.Fatalf("血缘边不符:\n得到 %+v\n期望 %+v", pg.Lineage, wantLineage)
+	if !reflect.DeepEqual(graphLineage(pg), wantLineage) {
+		t.Fatalf("血缘边不符:\n得到 %+v\n期望 %+v", graphLineage(pg), wantLineage)
 	}
 
 	// 追加状态推进事件后投影随之变化(仲裁者确认 tc1)
 	mustAppend(t, s, task,
-		Event{Kind: EventNodeStateChanged, Actor: "arbiter", Payload: NodeStateChanged{NodeID: "tc1", Status: "confirmed"}}) // r24
-	pg2, err := s.ProgressGraph(ctx, task)
+		Event{Kind: EventNodeStateChanged, Actor: "arbiter", Payload: NodeStateChanged{NodeID: "tc1", Status: "confirmed"}}) // r22
+	pg2, err := s.Graph(ctx, task)
 	if err != nil {
-		t.Fatalf("再次查询进度图失败: %v", err)
+		t.Fatalf("再次查询任务投影失败: %v", err)
 	}
-	if pg2.TestClaims[0].Status != "confirmed" || pg2.TestClaims[0].UpdatedRev != 24 {
-		t.Fatalf("tc1 状态推进未反映: %+v", pg2.TestClaims[0])
+	if graphNodes(pg2, NodeTestClaim)[0].Status != "confirmed" || graphNodes(pg2, NodeTestClaim)[0].UpdatedRev != 22 {
+		t.Fatalf("tc1 状态推进未反映: %+v", graphNodes(pg2, NodeTestClaim)[0])
 	}
 
 	// 投影=事件流确定性重放:重建前后双图与事件流完全一致
 	agBefore, _ := s.AssetGraph(ctx, task)
-	pgBefore, _ := s.ProgressGraph(ctx, task)
+	pgBefore, _ := s.Graph(ctx, task)
 	evsBefore, _ := s.Events(ctx, task, 0, 0)
 	nodesBefore, edgesBefore := countRows(t, s, "nodes"), countRows(t, s, "edges")
 	if err := s.RebuildProjections(ctx); err != nil {
 		t.Fatalf("重放重建失败: %v", err)
 	}
 	agAfter, _ := s.AssetGraph(ctx, task)
-	pgAfter, _ := s.ProgressGraph(ctx, task)
+	pgAfter, _ := s.Graph(ctx, task)
 	evsAfter, _ := s.Events(ctx, task, 0, 0)
 	if !reflect.DeepEqual(agBefore, agAfter) || !reflect.DeepEqual(pgBefore, pgAfter) {
-		t.Fatalf("重建前后投影不一致:\n资产图 %+v → %+v\n进度图 %+v → %+v", agBefore, agAfter, pgBefore, pgAfter)
+		t.Fatalf("重建前后投影不一致:\n资产图 %+v → %+v\n任务投影 %+v → %+v", agBefore, agAfter, pgBefore, pgAfter)
 	}
 	if !reflect.DeepEqual(evsBefore, evsAfter) {
 		t.Fatal("重建不得改动事件流")
@@ -258,8 +259,8 @@ func TestAppendAndDualGraphProjection(t *testing.T) {
 	if n := countRows(t, s, "edges"); n != edgesBefore {
 		t.Fatalf("重建后 edges = %d, 期望 %d", n, edgesBefore)
 	}
-	if nodesBefore != 11 || edgesBefore != 11 {
-		t.Fatalf("投影规模: nodes=%d edges=%d, 期望 11/11", nodesBefore, edgesBefore)
+	if nodesBefore != 10 || edgesBefore != 10 {
+		t.Fatalf("投影规模: nodes=%d edges=%d, 期望 10/10", nodesBefore, edgesBefore)
 	}
 }
 
@@ -419,18 +420,18 @@ func TestConcurrentAppendSingleWriter(t *testing.T) {
 	if rev, _ := s.CurrentRevision(ctx, task); rev != int64(total) {
 		t.Fatalf("CurrentRevision = %d, 期望 %d", rev, total)
 	}
-	pg, err := s.ProgressGraph(ctx, task)
+	pg, err := s.Graph(ctx, task)
 	if err != nil {
-		t.Fatalf("查询进度图失败: %v", err)
+		t.Fatalf("查询任务投影失败: %v", err)
 	}
-	if len(pg.Facts) != total {
-		t.Fatalf("事实节点数 = %d, 期望 %d", len(pg.Facts), total)
+	if len(graphNodes(pg, NodeFact)) != total {
+		t.Fatalf("事实节点数 = %d, 期望 %d", len(graphNodes(pg, NodeFact)), total)
 	}
 	if err := s.RebuildProjections(ctx); err != nil {
 		t.Fatalf("并发写入后重放重建失败: %v", err)
 	}
-	if pg2, _ := s.ProgressGraph(ctx, task); len(pg2.Facts) != total {
-		t.Fatalf("重建后事实节点数 = %d, 期望 %d", len(pg2.Facts), total)
+	if pg2, _ := s.Graph(ctx, task); len(graphNodes(pg2, NodeFact)) != total {
+		t.Fatalf("重建后事实节点数 = %d, 期望 %d", len(graphNodes(pg2, NodeFact)), total)
 	}
 }
 
@@ -671,12 +672,12 @@ func TestSwarmRecordNoProjectionButReplayable(t *testing.T) {
 	}
 
 	// 不进双图投影(nodes/edges 不变),但事件流可查、负载可解码
-	pg, err := s.ProgressGraph(ctx, task)
+	pg, err := s.Graph(ctx, task)
 	if err != nil {
-		t.Fatalf("查询进度图失败: %v", err)
+		t.Fatalf("查询任务投影失败: %v", err)
 	}
-	if len(pg.Steps) != 1 || pg.Steps[0].Status != "dispatched" {
-		t.Fatalf("swarm.record 不应改动图节点: %+v", pg.Steps)
+	if len(graphNodes(pg, NodeStep)) != 1 || graphNodes(pg, NodeStep)[0].Status != "dispatched" {
+		t.Fatalf("swarm.record 不应改动图节点: %+v", graphNodes(pg, NodeStep))
 	}
 	evs, err := s.Events(ctx, task, 0, 0)
 	if err != nil {
@@ -757,12 +758,12 @@ func TestArbiterVerdictNoProjectionButReplayable(t *testing.T) {
 	}
 
 	// 不进双图投影(Goal 状态迁移走 node.state_changed,本事件是审计流)。
-	pg, err := s.ProgressGraph(ctx, task)
+	pg, err := s.Graph(ctx, task)
 	if err != nil {
-		t.Fatalf("查询进度图失败: %v", err)
+		t.Fatalf("查询任务投影失败: %v", err)
 	}
-	if len(pg.Goals) != 1 || pg.Goals[0].Status != "achieved" {
-		t.Fatalf("verdict 事件不应直接改图;状态迁移经 state_changed: %+v", pg.Goals)
+	if len(graphNodes(pg, NodeGoal)) != 1 || graphNodes(pg, NodeGoal)[0].Status != "achieved" {
+		t.Fatalf("verdict 事件不应直接改图;状态迁移经 state_changed: %+v", graphNodes(pg, NodeGoal))
 	}
 	evs, err := s.Events(ctx, task, 0, 0)
 	if err != nil || len(evs) != 3 {
@@ -780,13 +781,13 @@ func TestArbiterVerdictNoProjectionButReplayable(t *testing.T) {
 	}
 
 	// 重放确定性:含 verdict 的事件流重建后投影不变。
-	snapGoals, _ := s.ProgressGraph(ctx, task)
+	snapGoals, _ := s.Graph(ctx, task)
 	if err := s.RebuildProjections(ctx); err != nil {
 		t.Fatalf("重放重建失败: %v", err)
 	}
-	goals2, _ := s.ProgressGraph(ctx, task)
+	goals2, _ := s.Graph(ctx, task)
 	if !reflect.DeepEqual(snapGoals, goals2) {
-		t.Fatalf("重放后进度图漂移:\n%+v\n%+v", snapGoals, goals2)
+		t.Fatalf("重放后任务投影漂移:\n%+v\n%+v", snapGoals, goals2)
 	}
 }
 
@@ -851,9 +852,9 @@ func TestApprovalRecordValidationAndReplay(t *testing.T) {
 		string(got.ToolArgs) != `{"command":"id"}` || got.Intent != "主动验证" {
 		t.Fatalf("approval 负载往返不符: %+v", got)
 	}
-	pg, _ := s.ProgressGraph(ctx, task)
+	pg, _ := s.Graph(ctx, task)
 	ag, _ := s.AssetGraph(ctx, task)
-	if len(pg.Steps) != 0 && len(ag.Assets) != 0 {
+	if len(graphNodes(pg, NodeStep)) != 0 && len(ag.Assets) != 0 {
 		t.Fatalf("审批记录不得进双图投影")
 	}
 	if err := s.RebuildProjections(ctx); err != nil {
@@ -933,14 +934,12 @@ func TestTestClaimRecordValidationAndReplay(t *testing.T) {
 		ea(EdgeDerivedFrom, "tc-1", "s1"),
 	)
 
-	// 合法两连:反证单位写回结构化结论 → 仲裁者裁决(Confirmed)。
-	// P2-02:impact_supported=true 必带四级影响面定级;轮次与逐条竞争
-	// 解释结论随写回落账。
+	// 合法两连:反证单位写回结论记录 → 仲裁者裁决(Confirmed)。
+	// P5-01③:反证结构化结论字段已物理删除,falsify 记录只保留锚定
+	// 字段;交卷单(submit)六字段校验见 TestSubmitClaimRecord。
 	falsify := TestClaimRecord{
 		ClaimID: "tc-1", StepID: "s2", UnitID: "u2", Type: TestClaimRecFalsify,
-		Round: 1, ExistenceRefuted: false, ImpactSupported: true, ImpactLevel: "high",
-		Alternatives: []AltResult{{ID: "alt1", Refuted: true}},
-		EvidenceRef:  "sha256:ab", EvidenceHead: "curl 200 mock backup archive listing",
+		Round: 1, EvidenceRef: "sha256:ab", EvidenceHead: "curl 200 mock backup archive listing",
 	}
 	verdict := TestClaimRecord{
 		ClaimID: "tc-1", StepID: "s2", UnitID: "u2", Type: TestClaimRecVerdict,
@@ -981,18 +980,21 @@ func TestTestClaimRecordValidationAndReplay(t *testing.T) {
 			Payload: TestClaimRecord{ClaimID: "tc-1", UnitID: "u2", Type: TestClaimRecFalsify}},
 		{Kind: EventTestClaimRecord, Actor: "arbiter",
 			Payload: TestClaimRecord{ClaimID: "tc-1", Type: TestClaimRecVerdict, Satisfied: true}},
-		// P2-02:falsify 的 impact_supported=true 缺定级。
+		// P5-01②:交卷单缺六字段必填项(summary 空)拒收。
 		{Kind: EventTestClaimRecord, Actor: "swarm:u2",
-			Payload: TestClaimRecord{ClaimID: "tc-2", StepID: "sx", UnitID: "u2",
-				Type: TestClaimRecFalsify, ImpactSupported: true}},
-		// P2-02:定级不在四级词汇内。
+			Payload: TestClaimRecord{ClaimID: "tc-3", StepID: "sx", UnitID: "u2",
+				Type: TestClaimRecSubmit, Severity: "high", EvidenceRefs: []string{"ms-a.1"},
+				ProvingMarker: "13800000000", CountercheckNote: "重放排除了缓存"}},
+		// P5-01②:交卷自报级别超五值词表拒收。
 		{Kind: EventTestClaimRecord, Actor: "swarm:u2",
-			Payload: TestClaimRecord{ClaimID: "tc-2", StepID: "sx", UnitID: "u2",
-				Type: TestClaimRecFalsify, ImpactSupported: true, ImpactLevel: "严重"}},
-		// P2-02:解释结论缺 ID。
+			Payload: TestClaimRecord{ClaimID: "tc-3", StepID: "sx", UnitID: "u2",
+				Type: TestClaimRecSubmit, Summary: "s", Severity: "严重",
+				EvidenceRefs: []string{"ms-a.1"}, ProvingMarker: "x", CountercheckNote: "y"}},
+		// P5-01②:交卷单缺证明证据引用拒收。
 		{Kind: EventTestClaimRecord, Actor: "swarm:u2",
-			Payload: TestClaimRecord{ClaimID: "tc-2", StepID: "sx", UnitID: "u2",
-				Type: TestClaimRecFalsify, Alternatives: []AltResult{{Refuted: true}}}},
+			Payload: TestClaimRecord{ClaimID: "tc-3", StepID: "sx", UnitID: "u2",
+				Type: TestClaimRecSubmit, Summary: "s", Severity: "high",
+				ProvingMarker: "x", CountercheckNote: "y"}},
 		// P2-02:decision=confirm 但 satisfied=false(不自洽)。
 		{Kind: EventTestClaimRecord, Actor: "arbiter",
 			Payload: TestClaimRecord{ClaimID: "tc-1", Type: TestClaimRecVerdict,
@@ -1032,16 +1034,16 @@ func TestTestClaimRecordValidationAndReplay(t *testing.T) {
 					Method: "GET", URL: "http://mock/old-backup/", Status: 200, BlobRef: "sha256:ab"}}}},
 	)
 
-	// 不进双图投影(审计流):TestClaim 节点本身在进度图,记录事件不增节点边。
-	pg, err := s.ProgressGraph(ctx, task)
+	// 不进双图投影(审计流):TestClaim 节点本身在任务投影,记录事件不增节点边。
+	pg, err := s.Graph(ctx, task)
 	if err != nil {
-		t.Fatalf("查询进度图失败: %v", err)
+		t.Fatalf("查询任务投影失败: %v", err)
 	}
-	if len(pg.TestClaims) != 1 || pg.TestClaims[0].Status != TestClaimConfirmed {
-		t.Fatalf("进度图应恰 1 条已确认声明(状态迁移走 state_changed): %+v", pg.TestClaims)
+	if len(graphNodes(pg, NodeTestClaim)) != 1 || graphNodes(pg, NodeTestClaim)[0].Status != TestClaimConfirmed {
+		t.Fatalf("任务投影应恰 1 条已确认声明(状态迁移走 state_changed): %+v", graphNodes(pg, NodeTestClaim))
 	}
-	if len(pg.Lineage) != 1 || pg.Lineage[0].Type != EdgeDerivedFrom {
-		t.Fatalf("血缘应恰含 derived_from(tc-1→s1): %+v", pg.Lineage)
+	if len(graphLineage(pg)) != 1 || graphLineage(pg)[0].Type != EdgeDerivedFrom {
+		t.Fatalf("血缘应恰含 derived_from(tc-1→s1): %+v", graphLineage(pg))
 	}
 	ag, _ := s.AssetGraph(ctx, task)
 	if len(ag.Assets) != 1 {
@@ -1062,13 +1064,13 @@ func TestTestClaimRecordValidationAndReplay(t *testing.T) {
 	if evs[5].Actor != "swarm:u2" || evs[6].Actor != "arbiter" {
 		t.Fatalf("actor 不符: %q / %q", evs[5].Actor, evs[6].Actor)
 	}
-	snap, _ := s.ProgressGraph(ctx, task)
+	snap, _ := s.Graph(ctx, task)
 	if err := s.RebuildProjections(ctx); err != nil {
 		t.Fatalf("重放重建失败: %v", err)
 	}
-	after, _ := s.ProgressGraph(ctx, task)
+	after, _ := s.Graph(ctx, task)
 	if !reflect.DeepEqual(snap, after) {
-		t.Fatalf("重放后进度图漂移:\n%+v\n%+v", snap, after)
+		t.Fatalf("重放后任务投影漂移:\n%+v\n%+v", snap, after)
 	}
 }
 
@@ -1149,13 +1151,13 @@ func TestRetestRecordValidation(t *testing.T) {
 		got.StepID != "retest-tc-1-r2" || got.EvidenceHead == "" {
 		t.Fatalf("retest 记录负载往返不符: %+v", got)
 	}
-	snap, _ := s.ProgressGraph(ctx, task)
+	snap, _ := s.Graph(ctx, task)
 	if err := s.RebuildProjections(ctx); err != nil {
 		t.Fatalf("重放重建失败: %v", err)
 	}
-	after, _ := s.ProgressGraph(ctx, task)
+	after, _ := s.Graph(ctx, task)
 	if !reflect.DeepEqual(snap, after) {
-		t.Fatalf("重放后进度图漂移")
+		t.Fatalf("重放后任务投影漂移")
 	}
 }
 
@@ -1229,12 +1231,12 @@ func TestMirrorRecordValidationAndReplay(t *testing.T) {
 	}
 
 	// 不进双图投影(审计流,同 swarm.record)。
-	pg, err := s.ProgressGraph(ctx, task)
+	pg, err := s.Graph(ctx, task)
 	if err != nil {
-		t.Fatalf("查询进度图失败: %v", err)
+		t.Fatalf("查询任务投影失败: %v", err)
 	}
-	if len(pg.Steps) != 1 || len(pg.Lineage) != 0 {
-		t.Fatalf("mirror.record 不得进进度图: %+v", pg)
+	if len(graphNodes(pg, NodeStep)) != 1 || len(graphLineage(pg)) != 0 {
+		t.Fatalf("mirror.record 不得进任务投影: %+v", pg)
 	}
 	ag, _ := s.AssetGraph(ctx, task)
 	if len(ag.Assets) != 1 {
@@ -1255,121 +1257,13 @@ func TestMirrorRecordValidationAndReplay(t *testing.T) {
 	if evs[3].Actor != "mirror" || evs[4].Actor != "mirror" {
 		t.Fatalf("actor 不符: %q / %q", evs[3].Actor, evs[4].Actor)
 	}
-	snap, _ := s.ProgressGraph(ctx, task)
+	snap, _ := s.Graph(ctx, task)
 	if err := s.RebuildProjections(ctx); err != nil {
 		t.Fatalf("重放重建失败(含 mirror.record): %v", err)
 	}
-	after, _ := s.ProgressGraph(ctx, task)
+	after, _ := s.Graph(ctx, task)
 	if !reflect.DeepEqual(snap, after) {
-		t.Fatalf("重放后进度图漂移:\n%+v\n%+v", snap, after)
-	}
-}
-
-// TestHypothesisRecordValidationAndReplay P2-03:hypothesis.record 受控入口
-// 校验(评估三去向词汇 + 理由必填;结论词汇受限 + 须绑验证 Step 与单位)
-// 与假设边规则(produces Step→Hypothesis / verifies Step→Hypothesis)、
-// 不进投影 + 重放确定性。
-func TestHypothesisRecordValidationAndReplay(t *testing.T) {
-	s := openTestStore(t)
-	ctx := context.Background()
-	const task = "t-hypo"
-
-	// 铺垫:资产 + 发现 Step + 候选假设(produces/about 回流轨迹)。
-	mustAppend(t, s, task,
-		na(NodeAsset, "a1", "http://mock", "active", AssetService, nil),
-		na(NodeStep, "s1", "发现", "done", "", map[string]any{"action_level": "只读探测"}),
-		na(NodeHypothesis, "h-1", "疑似管理后台", HypothesisCandidate, "",
-			map[string]any{"basis": "配置风格", "unit_id": "u1", "step_id": "s1"}),
-		ea(EdgeProduces, "s1", "h-1"),
-		ea(EdgeAbout, "h-1", "a1"),
-	)
-
-	// 合法评估(verify,带验证步骤绑定)+ 合法结论(supported)。
-	evalRec := HypothesisRecord{
-		HypothesisID: "h-1", StepID: "s2", Type: HypothesisRecEvaluation,
-		Decision: HypothesisVerify, Reason: "可低成本证伪", VerifyIntent: "探测根路径",
-	}
-	resultRec := HypothesisRecord{
-		HypothesisID: "h-1", StepID: "s2", UnitID: "u2", Type: HypothesisRecResult,
-		Verdict: HypothesisSupported, EvidenceHead: "401 + console",
-	}
-	mustAppend(t, s, task,
-		Event{Kind: EventHypothesisRecord, Actor: "overmind", Payload: evalRec},
-		Event{Kind: EventHypothesisRecord, Actor: "swarm:u2", Payload: resultRec},
-	)
-
-	// 受控入口:未知类型 / 未知去向 / 未知结论 / 评估缺理由 / 结论缺
-	// 验证步骤或单位,一律拒。
-	bad := []Event{
-		{Kind: EventHypothesisRecord, Actor: "overmind",
-			Payload: HypothesisRecord{HypothesisID: "h-1", Type: "guess"}},
-		{Kind: EventHypothesisRecord, Actor: "overmind",
-			Payload: HypothesisRecord{HypothesisID: "h-1", Type: HypothesisRecEvaluation, Decision: "maybe"}},
-		{Kind: EventHypothesisRecord, Actor: "overmind",
-			Payload: HypothesisRecord{HypothesisID: "h-1", Type: HypothesisRecEvaluation,
-				Decision: HypothesisDiscard}}, // 废案缺理由(R10)
-		{Kind: EventHypothesisRecord, Actor: "swarm:u2",
-			Payload: HypothesisRecord{HypothesisID: "h-1", Type: HypothesisRecResult, Verdict: "maybe"}},
-		{Kind: EventHypothesisRecord, Actor: "swarm:u2",
-			Payload: HypothesisRecord{HypothesisID: "h-1", Type: HypothesisRecResult,
-				Verdict: HypothesisRefuted, UnitID: "u2"}}, // 缺验证步骤
-		{Kind: EventHypothesisRecord, Actor: "swarm:u2",
-			Payload: HypothesisRecord{HypothesisID: "h-1", Type: HypothesisRecResult,
-				Verdict: HypothesisRefuted, StepID: "s2"}}, // 缺单位
-		{Kind: EventHypothesisRecord, Actor: "overmind",
-			Payload: HypothesisRecord{Type: HypothesisRecEvaluation,
-				Decision: HypothesisHold, Reason: "r"}}, // 缺假设 ID
-	}
-	for i, ev := range bad {
-		if _, err := s.Append(ctx, task, ev); err == nil {
-			t.Fatalf("非法记录 #%d 应被拒", i)
-		}
-	}
-
-	// 边规则:verifies 仅 Step→Hypothesis;Fact 不得 verifies。
-	mustAppend(t, s, task,
-		na(NodeStep, "s2", "验证假设", "dispatched", "",
-			map[string]any{"kind": "verify", "hypothesis_id": "h-1"}),
-		ea(EdgeVerifies, "s2", "h-1"),
-	)
-	mustAppend(t, s, task, na(NodeFact, "f1", "事实", "confirmed", "", nil))
-	if _, err := s.Append(ctx, task, ea(EdgeVerifies, "f1", "h-1")); !errors.Is(err, ErrEdgeRuleViolation) {
-		t.Fatalf("Fact ─verifies→ Hypothesis 应违反类型规则, 得到 %v", err)
-	}
-	if _, err := s.Append(ctx, task, ea(EdgeVerifies, "s2", "f1")); !errors.Is(err, ErrEdgeRuleViolation) {
-		t.Fatalf("Step ─verifies→ Fact 应违反类型规则, 得到 %v", err)
-	}
-	if _, err := s.Append(ctx, task, ea(EdgeProduces, "h-1", "f1")); !errors.Is(err, ErrEdgeRuleViolation) {
-		t.Fatalf("Hypothesis ─produces→ Fact 应违反类型规则(产出边只从 Step 出), 得到 %v", err)
-	}
-
-	// hypothesis.record 不进双图投影;负载往返 + 重放确定性。
-	pg, _ := s.ProgressGraph(ctx, task)
-	for _, f := range pg.Facts {
-		if f.ID == "h-1" {
-			t.Fatalf("hypothesis.record 不得进进度图: %+v", pg)
-		}
-	}
-	evs, err := s.Events(ctx, task, 0, 0)
-	if err != nil {
-		t.Fatalf("查询事件流失败: %v", err)
-	}
-	var gotE, gotR HypothesisRecord
-	_ = json.Unmarshal(evs[5].Payload, &gotE)
-	_ = json.Unmarshal(evs[6].Payload, &gotR)
-	if !reflect.DeepEqual(gotE, evalRec) || !reflect.DeepEqual(gotR, resultRec) {
-		t.Fatalf("hypothesis.record 负载往返不符:\n%+v\n%+v", gotE, evalRec)
-	}
-	if evs[5].Actor != "overmind" || evs[6].Actor != "swarm:u2" {
-		t.Fatalf("actor 不符: %q / %q", evs[5].Actor, evs[6].Actor)
-	}
-	snap, _ := s.ProgressGraph(ctx, task)
-	if err := s.RebuildProjections(ctx); err != nil {
-		t.Fatalf("重放重建失败(含 hypothesis.record): %v", err)
-	}
-	after, _ := s.ProgressGraph(ctx, task)
-	if !reflect.DeepEqual(snap, after) {
-		t.Fatalf("重放后进度图漂移:\n%+v\n%+v", snap, after)
+		t.Fatalf("重放后任务投影漂移:\n%+v\n%+v", snap, after)
 	}
 }
 
@@ -1542,12 +1436,12 @@ func TestOvermindRecordValidationAndReplay(t *testing.T) {
 	}
 
 	// 不进双图投影(审计流)。
-	pg, err := s.ProgressGraph(ctx, task)
+	pg, err := s.Graph(ctx, task)
 	if err != nil {
-		t.Fatalf("查询进度图失败: %v", err)
+		t.Fatalf("查询任务投影失败: %v", err)
 	}
-	if len(pg.Steps) != 1 {
-		t.Fatalf("overmind.record 不得进进度图: %+v", pg.Steps)
+	if len(graphNodes(pg, NodeStep)) != 1 {
+		t.Fatalf("overmind.record 不得进任务投影: %+v", graphNodes(pg, NodeStep))
 	}
 
 	// 负载往返 + actor + 重放确定性。
@@ -1652,13 +1546,13 @@ func TestReplayRecordValidation(t *testing.T) {
 		got.ReplayResults[0].NewExchangeID != "ms-bbb1" {
 		t.Fatalf("replay 记录负载往返不符: %+v", got)
 	}
-	pg, _ := s.ProgressGraph(ctx, task)
+	pg, _ := s.Graph(ctx, task)
 	if err := s.RebuildProjections(ctx); err != nil {
 		t.Fatalf("重放重建失败: %v", err)
 	}
-	after, _ := s.ProgressGraph(ctx, task)
+	after, _ := s.Graph(ctx, task)
 	if !reflect.DeepEqual(pg, after) {
-		t.Fatalf("重放后进度图漂移")
+		t.Fatalf("重放后任务投影漂移")
 	}
 }
 
@@ -1702,4 +1596,24 @@ func TestHibernateDeduct(t *testing.T) {
 	if got := store.HibernateDeduct(ctx, "deduct-none", time.Now()); got != 0 {
 		t.Fatalf("无冬眠任务应为 0: %v", got)
 	}
+}
+
+// graphNodes 保持旧断言的节点类型筛选，查询本身走正式 Graph。
+func graphNodes(g *GraphView, typ NodeType) []NodeView {
+	var out []NodeView
+	for _, n := range g.Nodes {
+		if n.Type == typ {
+			out = append(out, n.NodeView)
+		}
+	}
+	return out
+}
+func graphLineage(g *GraphView) []EdgeView {
+	var out []EdgeView
+	for _, e := range g.Edges {
+		if e.Type == EdgeProduces || e.Type == EdgeDerivedFrom {
+			out = append(out, e)
+		}
+	}
+	return out
 }

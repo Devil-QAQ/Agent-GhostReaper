@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 
 // KPI 卡(#40):副文案承载健康度,整卡可点击跳转(hash 路由)。
 // tone=danger 时数值用状态色(如待审批>0)。
-// P4-31 ①②④:圆角 14、内边距 16×18、等宽标签带字距、30px 粗等宽大数字。
+// P4-31 ①②④:圆角 14、内边距 12×16、等宽标签带字距、30px 粗等宽大数字。
 export function KpiCard({ label, value, hint, href, onClick, tone, className }) {
   const clickable = Boolean(href || onClick);
   const handle = () => {
@@ -17,17 +17,18 @@ export function KpiCard({ label, value, hint, href, onClick, tone, className }) 
   return (
     <Card
       className={cn(
-        "gap-1 rounded-[14px] px-[18px] py-4",
+        "gap-1 rounded-[14px] px-4 py-3",
         clickable && "cursor-pointer transition-shadow hover:shadow-card",
         className
       )}
+      data-card-kind="kpi"
       onClick={clickable ? handle : undefined}
     >
       <CardContent className="p-0">
-        <div className="k-label">{label}</div>
+        <div className="k-label truncate" title={label}>{label}</div>
         <div
           className={cn(
-            "k-value mt-1.5",
+            "k-value mt-1 leading-tight",
             tone === "danger" && "text-status-danger",
             tone === "warning" && "text-status-warning",
             tone === "success" && "text-status-success"
@@ -35,9 +36,7 @@ export function KpiCard({ label, value, hint, href, onClick, tone, className }) 
         >
           {value}
         </div>
-        {hint && (
-          <div className="mt-1 text-[11px] text-muted-foreground">{hint}</div>
-        )}
+        <div className="mt-1 min-h-4 truncate text-[11px] text-muted-foreground" title={hint}>{hint || "\u00a0"}</div>
       </CardContent>
     </Card>
   );

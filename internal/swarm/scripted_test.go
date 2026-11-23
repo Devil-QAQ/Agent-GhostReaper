@@ -16,11 +16,13 @@ import (
 // 内容,由 script 函数按观察到的对话状态决定——与真实模型"看到工具
 // 结果后决定下一步"同构。虫群引擎链路(适配器/流式/工具广告)全真。
 type scriptedModel struct {
-	srv    *httptest.Server
-	mu     sync.Mutex
-	reqs   []recordedRequest
-	bad    int
-	script func(rr *recordedRequest) scriptedReply
+	srv     *httptest.Server
+	mu      sync.Mutex
+	reqs    []recordedRequest
+	reviews []recordedRequest // auxiliary policy requests, independently observable
+	bad     int
+	script  func(rr *recordedRequest) scriptedReply
+	review  func(rr *recordedRequest) scriptedReply
 }
 
 type oaMessage struct {
@@ -68,6 +70,18 @@ func newScriptedModel(script func(rr *recordedRequest) scriptedReply) *scriptedM
 	return m
 }
 
+// Existing engine lifecycle tests choose a policy response explicitly rather
+// than relying on the retired intent-level threshold to synthesize approval.
+func (m *scriptedModel) requireBashApproval() {
+	m.review = func(rr *recordedRequest) scriptedReply {
+		var in ActionReviewInput
+		if json.Unmarshal([]byte(rr.LastUser), &in) == nil && in.Tool == "bash" {
+			return scriptedReply{Text: `{"decision":"approval","reason":"测试要求批准当前调用"}`}
+		}
+		return scriptedReply{Text: `{"decision":"allow","reason":"测试中的已授权调用"}`}
+	}
+}
+
 func (m *scriptedModel) Close() { m.srv.Close() }
 
 func (m *scriptedModel) provider() (llm.Provider, error) {
@@ -83,6 +97,12 @@ func (m *scriptedModel) requests() []recordedRequest {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]recordedRequest(nil), m.reqs...)
+}
+
+func (m *scriptedModel) policyRequests() []recordedRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]recordedRequest(nil), m.reviews...)
 }
 
 func (m *scriptedModel) requestCount() int {
@@ -134,6 +154,19 @@ func (m *scriptedModel) handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rr.IsSummary = strings.Contains(rr.System, "summarizing conversations")
+	if rr.System == actionReviewPrompt {
+		m.mu.Lock()
+		rr.Index = len(m.reviews)
+		m.reviews = append(m.reviews, rr)
+		review := m.review
+		m.mu.Unlock()
+		reply := scriptedReply{Text: `{"decision":"allow","reason":"测试中的已授权动作"}`}
+		if review != nil {
+			reply = review(&rr)
+		}
+		m.writeJSON(w, reply, rr)
+		return
+	}
 	m.mu.Lock()
 	rr.Index = len(m.reqs)
 	m.reqs = append(m.reqs, rr)

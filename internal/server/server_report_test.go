@@ -109,16 +109,15 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 	mainURL := target.MainURL()
 	u, _ := url.Parse(mainURL)
 
-	// 脚本模型:
+	// 脚本模型(P5-01 单会话连打链路):
 	//   拆解:审计与主动测试两条意图未齐时派发,齐则空(状态感知);
-	//   反证包:按"存在性声明:"行分支(备份=影响面成立/版本=不足);
 	//   主动测试包(own intent 含"畸形请求"):一次 bash 打 /fuzz-probe
 	//     (L2 → 弹门)→ 收口;
-	//   审计包:port_probe → robots/备份/版本 → 两条 submit_test_claim
-	//     → submit_candidate_fact → 收口。
+	//   审计包:port_probe → robots(bash) → 备份/版本(http_probe 拿
+	//     exchange= 编号) → 两条 submit_claim 交卷(六字段,evidence_refs
+	//     引用刚才的交换) → submit_candidate_fact → 收口(反证自查在
+	//     会话内完成,交卷后即停——不再有反证包)。
 	ownIntentRe := regexp.MustCompile(`(?m)^二、本步骤意图[^\n]*\n\s+([^\n]+)`)
-	claimIDRe := regexp.MustCompile(`判断 (tc-[0-9a-f]+)`)
-	stmtBackupRe := regexp.MustCompile(`(?m)^\s*存在性判断: .*备份目录`)
 	model := newSModel(func(rr *srecorded) sreply {
 		// P4-62/P4-73 复现挑选会话(零工具,系统段带"组装复现数据包"):
 		// 回种子步骤的选择 JSON(种子固定,无前置可补)。
@@ -135,38 +134,14 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 		if len(rr.ToolsOffered) == 0 && strings.Contains(rr.System, "人话三段") {
 			return sreply{Text: `{"rounds":[{"round":1,"doubt":"会不会是 /old-backup/ 的列举来自共享缓存,而不是目标真实文件?","how":"绕开缓存直接请求 /old-backup/,连续 2 次都返回同样的备份文件列举","conclusion":"已排除"}]}`}
 		}
-		// P4-59 ① 判断摘要会话(零工具,系统段带"判断文本"):回报告级
-		// 锚口径的摘要 JSON(坏回复路径由 overmind 单测覆盖)。P4-64 ②
-		// 起立账批次(收割立判断)复用同一系统段,同分支覆盖——按声明
-		// 原文精确区分(事实包里常见"版本号"字样,宽词会劫走备份声明的
-		// 会话);校对/重写轮按会话内已写稿区分(同会话上下文可见);
-		// 版本号句写为不撞机器语闸门的形态。
-		if len(rr.ToolsOffered) == 0 && strings.Contains(rr.System, "判断文本") {
-			versionClaim := strings.Contains(rr.LastUser, `"statement":"/api/version`) ||
-				strings.Contains(rr.LastUser, "原文:/api/version 接口") ||
-				strings.Contains(rr.LastUser, "原文:/api/version 公开")
-			if !versionClaim {
-				for _, m := range rr.Messages {
-					if m.Role == "assistant" && strings.Contains(m.Content, `"/api/version`) {
-						versionClaim = true
-						break
-					}
-				}
-			}
-			if versionClaim {
-				return sreply{Text: `{"statement":"/api/version 接口无需登录即可读取,返回内容带有服务版本号","impact":"","facts":[]}`}
-			}
-			return sreply{Text: `{"statement":"主站备份目录没有登录校验,任何知道地址的人都能下载备份文件","impact":"无需任何账号口令,可下载 1 个数据库备份压缩包","facts":[]}`}
+		// 只有实际漏洞进入判断摘要；版本信息拒收后走下方事实通道。
+		if len(rr.ToolsOffered) == 0 && strings.Contains(rr.System, "漏洞的名称") {
+			return sreply{Text: `{"statement":"主站备份目录没有登录校验,任何知道地址的人都能下载备份文件","impact":"无需任何账号口令,可下载1个数据库备份压缩包","facts":[]}`}
 		}
-		// P4-64 ③⑥ 事实文本会话(零工具,系统段带"确认的事实改写"):
+		// P4-64 ③⑥ 事实文本会话(零工具,系统段带"整理事实的名称和说明"):
 		// 回标题短句+描述 JSON(坏回复路径由 overmind 单测覆盖)。
-		if len(rr.ToolsOffered) == 0 && strings.Contains(rr.System, "确认的事实改写") {
+		if len(rr.ToolsOffered) == 0 && strings.Contains(rr.System, "整理事实的名称和说明") {
 			return sreply{Text: `{"facts":[{"fact_id":"f-any","title":"主站服务在线,HTTP 指纹已确认","statement":"主站服务在线,HTTP 指纹已确认"}]}`}
-		}
-		// P4-64 ④⑥⑧ 假设文本会话(零工具,系统段带"待验证猜测改写"):
-		// 回标题/依据/理由 JSON(坏回复路径由 overmind 单测覆盖)。
-		if len(rr.ToolsOffered) == 0 && strings.Contains(rr.System, "待验证猜测改写") {
-			return sreply{Text: `{"hypotheses":[]}`}
 		}
 		if len(rr.ToolsOffered) == 0 {
 			hasAudit := strings.Contains(rr.LastUser, "审计主站敏感路径")
@@ -174,43 +149,15 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 			if hasAudit && hasActive {
 				return sreply{Text: `{"new_intents":[]}`}
 			}
+			goal := regexp.MustCompile(`(?m)^\s*-\s+(\S+) \[active\] 摸清主站暴露面$`).FindStringSubmatch(rr.LastUser)
+			if goal == nil {
+				return sreply{Text: `{"new_intents":[]}`}
+			}
 			return sreply{Text: fmt.Sprintf(
 				`{"new_intents":[`+
-					`{"intent":"审计主站敏感路径暴露(robots/备份目录/版本接口)","expected_observation":"敏感路径清单与内容证据","action_level":"只读探测","covers":[%q]},`+
-					`{"intent":"发送畸形请求探测主站错误处理行为","expected_observation":"错误响应形态","action_level":"主动测试","covers":[%q]}]}`,
-				assetArg(t, rr.LastUser), assetArg(t, rr.LastUser))}
-		}
-		if strings.Contains(rr.LastUser, "八、反证任务") {
-			m := claimIDRe.FindStringSubmatch(rr.LastUser)
-			if m == nil {
-				return sreply{Text: "反证任务包缺判断 ID。"}
-			}
-			claimID := m[1]
-			if stmtBackupRe.MatchString(rr.LastUser) {
-				switch {
-				case !sSeenToolResult(rr, "bash", "mock backup archive listing"):
-					return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
-						ID: "fb", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/old-backup/"}`, mainURL)}}}
-				case !sSeenToolResult(rr, "submit_falsify_result", "已记录"):
-					return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
-						ID: "fr1", Name: "submit_falsify_result",
-						// P4-73:证据带完整 URL(证明交换经回查兜底锚定)。
-						Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":true},{"id":"alt2","refuted":true},{"id":"alt3","refuted":true},{"id":"alt4","refuted":true}],"evidence":"独立重放 %s/old-backup/ 仍返回备份文件列举,影响面成立"}`, claimID, mainURL)}}}
-				default:
-					return sreply{Text: "反证完成:存在性未推翻,影响面证据充分。"}
-				}
-			}
-			switch {
-			case !sSeenToolResult(rr, "bash", `"version":"2.4.1"`):
-				return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
-					ID: "fv", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/api/version"}`, mainURL)}}}
-			case !sSeenToolResult(rr, "submit_falsify_result", "已记录"):
-				return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
-					ID: "fr2", Name: "submit_falsify_result",
-					Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":false,"alternatives":[{"id":"alt1","refuted":true},{"id":"alt2","refuted":true},{"id":"alt3","refuted":true},{"id":"alt4","refuted":true}],"evidence":"独立重放仅返回版本号,影响面证据不足"}`, claimID)}}}
-			default:
-				return sreply{Text: "反证完成:存在性未推翻,但影响面证据不足。"}
-			}
+					`{"goal_id":%q,"intent":"审计主站敏感路径暴露(robots/备份目录/版本接口)","expected_observation":"敏感路径清单与内容证据","action_level":"只读探测","covers":[%q]},`+
+					`{"goal_id":%q,"intent":"发送畸形请求探测主站错误处理行为","expected_observation":"错误响应形态","action_level":"主动测试","covers":[%q]}]}`,
+				goal[1], assetArg(t, rr.LastUser), goal[1], assetArg(t, rr.LastUser))}
 		}
 		// P2-06b 批准续跑:审批结果是新的用户消息(tool 结果不占 user 位,
 		// 续跑消息在余下会话里恒为 LastUser)——未成功则重发自己上一条
@@ -243,28 +190,37 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 		case !sSeenToolResult(rr, "bash", "Disallow: /old-backup"):
 			return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
 				ID: "d1", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/robots.txt"}`, mainURL)}}}
-		case !sSeenToolResult(rr, "bash", "mock backup archive listing"):
+		case !sSeenToolResult(rr, "http_probe", "mock backup archive listing"):
 			return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
-				ID: "d2", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/old-backup/"}`, mainURL)}}}
-		case !sSeenToolResult(rr, "bash", `"version":"2.4.1"`):
+				ID: "d2", Name: "http_probe", Args: fmt.Sprintf(`{"url":%q}`, mainURL+"/old-backup/")}}}
+		case !sSeenToolResult(rr, "http_probe", `"version":"2.4.1"`):
 			return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
-				ID: "d3", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/api/version"}`, mainURL)}}}
-		case !hasSVarToolCall(rr, "submit_test_claim", "备份目录可公开匿名列举"):
+				ID: "d3", Name: "http_probe", Args: fmt.Sprintf(`{"url":%q}`, mainURL+"/api/version")}}}
+		case !hasSVarToolCall(rr, "submit_claim", "备份目录可公开匿名列举"):
 			return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
-				ID: "d4", Name: "submit_test_claim",
-				Args: fmt.Sprintf(`{"statement":"/old-backup/ 备份目录可公开匿名列举","impact":"备份文件可被未授权下载,存在敏感数据泄露","evidence":"curl 实测返回列举","asset_id":%q,"vulnclass":"信息暴露"}`, assetArg(t, rr.LastUser))}}}
-		case !hasSVarToolCall(rr, "submit_test_claim", "公开暴露服务版本号"):
+				ID: "d4", Name: "submit_claim",
+				Args: fmt.Sprintf(`{"summary":"/old-backup/ 备份目录可公开匿名列举","severity":"high","evidence_refs":[%q],"proving_marker":"mock backup archive listing","countercheck_note":"直接请求与加随机参数绕缓存各一次,返回一致,排除缓存假象","impact_note":"备份文件可被未授权下载","asset_id":%q,"vulnclass":"信息暴露"}`,
+					sLastExchange(rr, "mock backup archive listing"), assetArg(t, rr.LastUser))}}}
+		case !hasSVarToolCall(rr, "submit_claim", "公开暴露服务版本号"):
 			return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
-				ID: "d5", Name: "submit_test_claim",
-				Args: fmt.Sprintf(`{"statement":"/api/version 公开暴露服务版本号","impact":"版本号可支撑定向利用","evidence":"curl 实测返回 2.4.1","asset_id":%q,"vulnclass":"信息暴露"}`, assetArg(t, rr.LastUser))}}}
+				ID: "d5", Name: "submit_claim",
+				Args: fmt.Sprintf(`{"summary":"/api/version 公开暴露服务版本号","severity":"none","evidence_refs":[%q],"proving_marker":"2.4.1","countercheck_note":"重放一次确认稳定返回,非一次性状态","asset_id":%q,"vulnclass":"信息暴露"}`,
+					sLastExchange(rr, `"version":"2.4.1"`), assetArg(t, rr.LastUser))}}}
 		case !sSeenToolResult(rr, "submit_candidate_fact", "已提交新进事实"):
 			return sreply{ToolCalls: []struct{ ID, Name, Args string }{{
 				ID: "d6", Name: "submit_candidate_fact",
-				Args: fmt.Sprintf(`{"statement":"主站服务在线,HTTP 指纹已确认","evidence":"port_probe state=open;robots 已实测","asset_id":%q}`, assetArg(t, rr.LastUser))}}}
+				Args: fmt.Sprintf(`{"statement":"主站服务在线，版本号观察为2.4.1","evidence":"port_probe state=open;本次/api/version返回版本2.4.1","asset_id":%q}`, assetArg(t, rr.LastUser))}}}
 		default:
-			return sreply{Text: "审计完成:两条声明与一条候选事实已提交。"}
+			return sreply{Text: "审计完成:两条交卷单与一条候选事实已提交。"}
 		}
 	})
+	model.review = func(rr *srecorded) string {
+		var in swarm.ActionReviewInput
+		if json.Unmarshal([]byte(rr.LastUser), &in) == nil && strings.Contains(in.Intent, "畸形请求") {
+			return "approval"
+		}
+		return "allow"
+	}
 	t.Cleanup(model.Close)
 	prov, err := model.provider()
 	if err != nil {
@@ -274,6 +230,7 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 	gate := swarm.NewLedgerGate(store)
 	ex := swarm.NewExecutor(store, prov, filepath.Join(dir, "tasks"), swarm.Budget{})
 	ex.Gate = gate
+	ex.Mirror = mirror.New(store, ex.Blobs, filepath.Join(dir, "tasks"))
 	mgr, err := manager.New(manager.Config{
 		Store: store, RootDir: filepath.Join(dir, "tasks"),
 		OnTaskRun: func(tctx context.Context, taskID string, wake <-chan struct{}) {
@@ -318,7 +275,7 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 	// 本节验证门槛收紧——先把审批门槛收到"主动测试及以上弹门"再唤醒。
 	var roeUpdated map[string]any
 	post(t, h, http.MethodPost, "/api/tasks/"+task+"/roe",
-		`{"approval_threshold":"主动测试","note":"总验收收紧门槛"}`, http.StatusOK, &roeUpdated)
+		`{"creator_notes":"本地总验收中的主动测试需由操作者确认","note":"总验收动作约束"}`, http.StatusOK, &roeUpdated)
 	post(t, h, http.MethodPost, "/api/tasks/"+task+"/wake", `{}`, http.StatusOK, &created)
 
 	// ---- ③ 危险操作弹门:待决可见,批准前主动测试零触达 ----
@@ -388,30 +345,38 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 	// ---- ② 漏洞进列表:一 Confirmed 一待确认(带搁置理由) ----
 	var claims []map[string]any
 	get(t, h, "/api/tasks/"+task+"/claims", http.StatusOK, &claims)
-	if len(claims) != 2 {
-		t.Fatalf("应恰 2 条发现: %+v", claims)
+	if len(claims) != 1 {
+		t.Fatalf("应恰1条真实漏洞，信息性尝试不入列表: %+v", claims)
 	}
-	confirmedN, pendingN := 0, 0
+	// 版本信息性尝试已拒收；实际漏洞仍完整经三查确认。
+	confirmedN := 0
 	for _, c := range claims {
-		switch c["status"] {
-		case "confirmed":
+		if c["status"] == "confirmed" {
 			confirmedN++
-		case "pending":
-			pendingN++
-			// R4 不变式 = 待确认必带搁置理由。理由有两个设计内来源(P4-54
-			// 放宽特指):正常路径是轮末评估的"证据不足以支撑申报的影响";
-			// 完成清点竞态路径是 P4-43 终局清点的"任务完成中断反证,可被
-			// 唤醒"(完成时反证在途、锤炼未完,如实挂起)。两者都满足 R4,
-			// 全量并行负载下两态均合法出现。
-			reason := fmt.Sprint(c["pending_reason"])
-			if !strings.Contains(reason, "证据不足以支撑申报的影响") &&
-				!strings.Contains(reason, "任务完成中断反证") {
-				t.Fatalf("待确认必须带搁置理由(R4): %+v", c)
-			}
 		}
 	}
-	if confirmedN != 1 || pendingN != 1 {
-		t.Fatalf("应一 Confirmed 一待确认: confirmed=%d pending=%d", confirmedN, pendingN)
+	if confirmedN != 1 {
+		t.Fatalf("P5-02:证据成立的交卷应经三查确认: %+v", claims)
+	}
+	// 交卷单事件六字段落账(引用可回查:命中镜留痕)。
+	evsClaim, _ := store.Events(ctx, task, 0, 0)
+	submits := 0
+	for _, ev := range evsClaim {
+		if ev.Kind != rings.EventTestClaimRecord {
+			continue
+		}
+		var r rings.TestClaimRecord
+		if json.Unmarshal(ev.Payload, &r) != nil || r.Type != rings.TestClaimRecSubmit {
+			continue
+		}
+		submits++
+		if r.Summary == "" || !rings.IsValidSubmitSeverity(r.Severity) ||
+			len(r.EvidenceRefs) == 0 || r.ProvingMarker == "" || r.CountercheckNote == "" {
+			t.Fatalf("交卷单六字段必须齐全: %+v", r)
+		}
+	}
+	if submits != 1 {
+		t.Fatalf("应恰1条实际漏洞交卷: %d", submits)
 	}
 
 	// ---- ④ Goal 经仲裁者判定完成 + ③ 弹门留痕 + ⑤ completed 落账 ----
@@ -428,7 +393,13 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 		case rings.EventTaskLifecycle:
 			completedEvent = completedEvent || strings.Contains(string(ev.Payload), `"completed"`)
 		case rings.EventApprovalRecord:
-			approvalTrail++
+			var rec rings.ApprovalRecord
+			if err := json.Unmarshal(ev.Payload, &rec); err != nil {
+				t.Fatal(err)
+			}
+			if rec.Type == rings.ApprovalRecRequested || rec.Type == rings.ApprovalRecApproved {
+				approvalTrail++
+			}
 		}
 	}
 	if !achievedByArbiter {
@@ -440,9 +411,9 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 	if approvalTrail != 2 {
 		t.Fatalf("弹门留痕应恰 requested+approved 2 条,实际 %d", approvalTrail)
 	}
-	// 靶站真实命中(发现与反证两轮 HTTP,非账本自说自话)。
-	if target.Hits("main", "/old-backup/") < 2 || target.Hits("main", "/api/version") < 2 {
-		t.Fatalf("靶站应被发现与反证两轮真实命中: backup=%d version=%d",
+	// 靶站真实命中(交换单引用的证明交换非账本自说自话)。
+	if target.Hits("main", "/old-backup/") < 1 || target.Hits("main", "/api/version") < 1 {
+		t.Fatalf("靶站应被证明交换真实命中: backup=%d version=%d",
 			target.Hits("main", "/old-backup/"), target.Hits("main", "/api/version"))
 	}
 
@@ -452,18 +423,11 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 		t.Fatalf("GET report = %d: %s", rec1.Code, rec1.Body.String())
 	}
 	md := rec1.Body.String()
+	// P5-01:零确认发现(交卷停候选,三查归 P5-02)——报告骨架与审批
+	// 留痕照常;发现正文形态随 P5-02/P5-07 演进。
 	for _, want := range []string{
 		"# 渗透测试报告 · P1 总验收试跑",
 		"任务状态:已完成(completed)",
-		"已确认发现:**1** 条;证据不足:1 条",
-		// P4-59 ①:标题/存在性判断优先定稿校对稿(报告级锚),节点原文
-		// 不再进标题。P4-64 ②:立账批次摘要生效——证据不足发现无定稿,
-		// 读立账稿(P-1);已确认发现由定稿稿覆盖(C-1,scripted 两稿
-		// 同句)。
-		"### C-1 主站备份目录没有登录校验,任何知道地址的人都能下载备份文件",
-		"### P-1 /api/version 接口无需登录即可读取,返回内容带有服务版本号",
-		"证据不足:",
-		"资产锚点:`" + assetID,
 		"需批准:请求 1 · 批准 1 · 拒绝 0",
 	} {
 		if !strings.Contains(md, want) {
@@ -485,6 +449,30 @@ func assetArg(t *testing.T, pack string) string {
 		t.Fatalf("任务包缺 service 资产行:\n%s", pack)
 	}
 	return m[1]
+}
+
+// sLastExchange 从会话历史里含 marker 的工具结果中提取最近的
+// exchange= 编号行(模拟模型读 http_probe 结果引用证明交换)。
+func sLastExchange(rr *srecorded, marker string) string {
+	id2name := map[string]string{}
+	for _, msg := range rr.Messages {
+		for _, tc := range msg.ToolCalls {
+			if tc.ID != "" {
+				id2name[tc.ID] = tc.Function.Name
+			}
+		}
+	}
+	re := regexp.MustCompile(`(?m)^exchange=(ms-[0-9a-z.-]+)`)
+	last := ""
+	for _, msg := range rr.Messages {
+		if msg.Role == "tool" && id2name[msg.ToolCallID] == "http_probe" &&
+			strings.Contains(msg.Content, marker) {
+			if m := re.FindStringSubmatch(msg.Content); m != nil {
+				last = m[1]
+			}
+		}
+	}
+	return last
 }
 
 // ---- P2-13:导出端点(格式矩阵 / 漏洞级 / 跨任务)+ 列表 repro_steps ----
@@ -520,7 +508,7 @@ func seedExportTask(t *testing.T, store *rings.Store, root, task string) {
 			EdgeType: rings.EdgeAbout, FromNode: "tc-1", ToNode: "web1"}},
 		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "swarm:u2", Payload: rings.TestClaimRecord{
 			ClaimID: "tc-1", StepID: "s2", UnitID: "u2", Type: rings.TestClaimRecFalsify,
-			ExistenceRefuted: false, ImpactSupported: true, ImpactLevel: "high", EvidenceHead: "独立重放仍返回列举"}},
+			EvidenceHead: "独立重放仍返回列举"}},
 		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "arbiter", Payload: rings.TestClaimRecord{
 			ClaimID: "tc-1", StepID: "s2", UnitID: "u2", Type: rings.TestClaimRecVerdict, Satisfied: true,
 			Conditions: []rings.ArbiterConditionResult{

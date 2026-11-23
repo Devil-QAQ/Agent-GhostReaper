@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -284,7 +285,7 @@ func TestGoalArbiterE2E(t *testing.T) {
 	if got := countNodes(t, store, task, rings.NodeStep, ""); got != 2 {
 		t.Fatalf("全程应恰 2 条步骤,实际 %d", got)
 	}
-	if err := loop.LastErr(); err != nil {
+	if err := loopErr(loop); err != nil {
 		t.Fatalf("干净运行不应残留错误: %v", err)
 	}
 }
@@ -317,10 +318,19 @@ func TestArbiterRejectsLLMSatisfaction(t *testing.T) {
 	//   1 = 虫群不探测,直接经受控入口提交"已满足"候选事实(全合法通道);
 	//   2 = 主宰拆解回复"目标已满足"+空意图(LLM 的达成宣称);
 	//   3 = 虫群真实 port_probe(机器观察落地)。
-	phase := 1
+	var phase atomic.Int32
+	phase.Store(1)
+	var claimingPlans atomic.Int32
 	packAssetRe := regexp.MustCompile(`-\s+(web1) \[service\] (http://\S+)`)
 	model := newGatedScriptedModel(func(rr *recordedRequest) scriptedReply {
+		currentPhase := phase.Load()
 		if len(rr.ToolsOffered) == 0 {
+			if !strings.Contains(rr.System, "态势规划标准五问") {
+				return scriptedReply{Text: "{}", Finish: "stop"}
+			}
+			if currentPhase == 2 {
+				claimingPlans.Add(1)
+			}
 			return scriptedReply{
 				Text:   "目标已满足:全部完成条件均已达成,无需派发任何意图。{\"new_intents\":[]}",
 				Finish: "stop",
@@ -331,19 +341,19 @@ func TestArbiterRejectsLLMSatisfaction(t *testing.T) {
 			return scriptedReply{Text: "任务包无绑定资产。", Finish: "stop"}
 		}
 		switch {
-		case phase == 1 && !seenToolResult(rr, "submit_candidate_fact", "已提交新进事实"):
+		case currentPhase == 1 && !seenToolResult(rr, "submit_candidate_fact", "已提交新进事实"):
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
 				ID: "claim", Name: "submit_candidate_fact",
 				Args: fmt.Sprintf(`{"statement":"Goal g1 已满足:主站暴露面已全部确认,无需进一步探测","evidence":"模型研判:目标完成条件已满足","asset_id":"web1"}`),
 			}}, Finish: "tool_calls"}
-		case phase >= 3 && !seenToolResult(rr, "port_probe", "state="):
+		case currentPhase >= 3 && !seenToolResult(rr, "port_probe", "state="):
 			u, _ := url.Parse(mainURL)
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
 				ID: "probe", Name: "port_probe",
 				Args: fmt.Sprintf(`{"host":%q,"port":%s}`, u.Hostname(), u.Port()),
 			}}, Finish: "tool_calls"}
 		default:
-			if phase >= 3 {
+			if currentPhase >= 3 {
 				return scriptedReply{Text: "探测完成:port_probe 已实测端口开放。", Finish: "stop"}
 			}
 			return scriptedReply{Text: "目标已达成,无需继续探测。", Finish: "stop"}
@@ -386,7 +396,7 @@ func TestArbiterRejectsLLMSatisfaction(t *testing.T) {
 	if _, err := ex.RunStep(ctx, task, "s1"); err != nil {
 		t.Fatalf("执行 s1 失败: %v", err)
 	}
-	if _, err := Harvest(ctx, store, task, nil); err != nil {
+	if _, err := Harvest(ctx, store, task); err != nil {
 		t.Fatalf("收割失败: %v", err)
 	}
 	if facts := countNodes(t, store, task, rings.NodeFact, "confirmed"); facts != 1 {
@@ -416,10 +426,10 @@ func TestArbiterRejectsLLMSatisfaction(t *testing.T) {
 	}
 
 	// ---- 阶段 2:主宰拆解宣称"目标已满足"——同样翻不动目标 ----
-	phase = 2
+	phase.Store(2)
 	tk.Wake()
 	waitFor(t, 30*time.Second, "宣称达成的拆解请求到达", func() bool {
-		return len(model.decomposeRequests()) == 1
+		return claimingPlans.Load() > 0
 	})
 	time.Sleep(300 * time.Millisecond) // 给循环留足回静默的时间
 	if got := goalStatus(t, store, task, "g1"); got != GoalStatusActive {
@@ -429,8 +439,11 @@ func TestArbiterRejectsLLMSatisfaction(t *testing.T) {
 		t.Fatalf("LLM 宣称不得产生裁决: %+v", vs)
 	}
 
+	// 已确认事实会即时触发增量研判；这不等于接受模型的完成宣称。
+	// 机器观察就绪后的终审仍不得再依赖一次模型调用。
+	plansBeforeMachineObservation := len(model.decomposeRequests())
 	// ---- 阶段 3:机器观察落地(port_probe 实测),裁决才翻为达成 ----
-	phase = 3
+	phase.Store(3)
 	if err := DispatchStep(ctx, store, task, "s2", "对主站执行只读端口探测",
 		DispatchOptions{GoalID: "g1", CoversAssets: []string{"web1"}, ActionLevel: "只读探测"}); err != nil {
 		t.Fatalf("派发 s2 失败: %v", err)
@@ -449,10 +462,10 @@ func TestArbiterRejectsLLMSatisfaction(t *testing.T) {
 	if vs[0].Conditions[1].Actual != 1 {
 		t.Fatalf("达成应源于真实机器观察: %+v", vs[0].Conditions[1])
 	}
-	if got := len(model.decomposeRequests()); got != 1 {
-		t.Fatalf("达成应由机器判定而非 LLM 宣称触发,拆解应保持 1 次,实际 %d", got)
+	if got := len(model.decomposeRequests()); got != plansBeforeMachineObservation {
+		t.Fatalf("机器观察就绪后，终审不得再调用模型: before=%d after=%d", plansBeforeMachineObservation, got)
 	}
-	if err := loop.LastErr(); err != nil {
+	if err := loopErr(loop); err != nil {
 		t.Fatalf("干净运行不应残留错误: %v", err)
 	}
 }

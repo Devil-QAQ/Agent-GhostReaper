@@ -18,8 +18,8 @@ import (
 // handleOperatorDive 下达深入指令(POST /api/tasks/{id}/dive,body
 // {node_id, direction}):① 任务与锚定节点须在账本(节点限发现/事实——
 // 深入的锚定面,P4-48 ①);② 任务终态(已停止/已完成)拒收——主宰循环
-// 已收场,指令无处执行;③ 适用一切节点状态(已确认/待确认/不成立/
-// 锤炼中各过程态,已废弃/被反驳的同样可深入——以此为线索让主宰重新
+// 已收场,指令无处执行;③ 适用一切节点状态(已确认/证据不足/被推翻
+// 均可深入——以此为线索让主宰重新
 // 探索);④ 同一节点可多次深入,每次一条事件各自可溯。落账后唤醒
 // (wake):未在跑任务的唤醒落进容量 1 的通道,拉起后消费,不丢。
 func (s *Server) handleOperatorDive(w http.ResponseWriter, r *http.Request) {
@@ -75,14 +75,9 @@ func (s *Server) taskEnded(ctx context.Context, taskID string) bool {
 	return row.Status == "stopped" || row.Status == "completed"
 }
 
-// diveDisabledOf 深入按钮的禁用态(空 = 可用;终态任务返回悬停文案
-// "任务已结束")。发现详情与事实详情(节点详情)共用同源判定。
-func (s *Server) diveDisabledOf(ctx context.Context, taskID string) string {
-	if s.taskEnded(ctx, taskID) {
-		return "任务已结束"
-	}
-	return ""
-}
+// (diveDisabledOf 深入按钮禁用态已随按钮退役删除,P5-07②——深入并入
+// 追问窗一句话触发,追问窗无终态置灰:终态任务的追问照常入账,模型
+// 应答侧自会说明任务已结束。)
 
 // nodeWordOf 节点类型的人话词(错误消息用,与全站术语一致)。
 func nodeWordOf(t rings.NodeType) string {
@@ -97,8 +92,6 @@ func nodeWordOf(t rings.NodeType) string {
 		return "目标"
 	case rings.NodeStep:
 		return "步骤"
-	case rings.NodeHypothesis:
-		return "假设"
 	}
 	return string(t)
 }

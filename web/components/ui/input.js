@@ -1,8 +1,12 @@
+"use client";
+
 import * as React from "react";
 
 import { cn } from "@/lib/utils";
+import { compositionInputHandlers } from "@/lib/composition-input";
 
 function Input({ className, type, ...props }) {
+  const composing = React.useRef(false);
   return (
     <input
       type={type}
@@ -13,6 +17,7 @@ function Input({ className, type, ...props }) {
         className
       )}
       {...props}
+      {...compositionInputHandlers(composing, props)}
     />
   );
 }

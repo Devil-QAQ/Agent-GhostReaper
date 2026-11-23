@@ -46,6 +46,26 @@ func (s *Service) buildSnapshot(ctx context.Context, taskID, target, sessionID s
 	return s.unitSnapshot(ctx, taskID, sessionID)
 }
 
+// currentLedgerState 与历史请求快照分开标明读取时点。历史研判中的完成
+// 叙述不能替代任务/目标投影，尤其不能把已结束单位说成整个任务已达成。
+func (s *Service) currentLedgerState(ctx context.Context, taskID string) string {
+	task, err := s.Store.Task(ctx, taskID)
+	if err != nil {
+		return "\n【答复时的账本状态】读取失败，不能用历史研判推定当前任务已完成。\n"
+	}
+	goals, err := s.Store.NodesByType(ctx, taskID, rings.NodeGoal, "")
+	if err != nil {
+		return "\n【答复时的账本状态】目标状态读取失败，不能用历史研判推定目标已达成。\n"
+	}
+	achieved := 0
+	for _, g := range goals {
+		if g.Status == "achieved" {
+			achieved++
+		}
+	}
+	return fmt.Sprintf("\n【答复时的账本状态】本节在回答时读取，区别于上面的历史请求快照和以前问答。任务状态:%s；目标已达成:%d/%d。任务是否结束与目标是否达成是两件事；历史研判的完成叙述不改变这里的实际状态。\n", task.Status, achieved, len(goals))
+}
+
 // unitIdentity 单位身份与状态(账本扫描:步骤/单位/终因)。
 func (s *Service) unitIdentity(ctx context.Context, taskID, sessionID string) (stepID, unitID, stepTitle, status, finishNote string, err error) {
 	evs, err := s.Store.Events(ctx, taskID, 0, 0)
@@ -105,7 +125,7 @@ func (s *Service) unitSnapshot(ctx context.Context, taskID, sessionID string) (s
 	}
 	b.WriteString("\n【目标的系统提示(按当前配置重建)】\n")
 	b.WriteString(swarm.RenderRoEConstraint("你的探索手段受此框定。",
-		roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, nil, nil, roe.CreatorNotes, roe.InfoSources))
+		roe.AllowedTools, roe.DeniedTools, nil, rings.PolicyNotes(roe.CreatorNotes,roe.IntentRules)))
 	b.WriteString("\n")
 	b.WriteString(strings.Join(swarm.WorkerPromptSpec.Assemble(ctx, s.Store), "\n\n"))
 
@@ -179,12 +199,9 @@ func (s *Service) overmindSnapshot(ctx context.Context, taskID string) (string, 
 		excluded = nil
 	}
 	b.WriteString("\n【目标的系统提示(按当前配置重建)】\n")
-	pending, perr := s.Store.PendingScopeAssets(ctx, taskID)
-	if perr != nil {
-		pending = nil
-	}
+
 	b.WriteString(swarm.RenderRoEConstraint("派发的意图与采用的手段不得越出此边界。",
-		roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, excluded, pending, roe.CreatorNotes, roe.InfoSources))
+		roe.AllowedTools, roe.DeniedTools, excluded, rings.PolicyNotes(roe.CreatorNotes,roe.IntentRules)))
 	b.WriteString("\n")
 	b.WriteString(strings.Join(overmind.OvermindPromptSpec.Assemble(ctx, s.Store), "\n\n"))
 	b.WriteString("\n\n【目标的可用工具(只读目录)】研判会话无工具(态势快照经 user turn 注入,重放里可见)。\n")

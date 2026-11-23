@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -31,65 +32,29 @@ import (
 // unitEnv 是一只虫群单位执行期间的共享环境:受控入口(提交候选)与
 // 工具(大输出落 blob、HTTP 通道经镜)都从这里拿账本句柄与单位身份。
 type unitEnv struct {
-	Executor     *Executor
-	TaskID       string
-	StepID       string
-	UnitID       string
-	TranscriptID string
-	mirror       *mirror.Session // 本单位的镜会话(nil=无镜直连,P1 行为);接管对工具透明
+	Executor        *Executor
+	TaskID          string
+	StepID          string
+	UnitID          string
+	TranscriptID    string
+	graphVersion    int64
+	auditMu         sync.Mutex
+	auditedResults  map[string]int
+	owner           *rings.ExecutionOwner
+	callsMu         sync.Mutex
+	calls           sync.WaitGroup
+	callbackCancel  context.CancelFunc
+	callsClosed     bool
+	executionClosed bool
+	reviewMu        sync.Mutex      // one policy decision/approval ticket at a time per unit
+	mirror          *mirror.Session // 本单位的镜会话(nil=无镜直连,P1 行为);接管对工具透明
 
-	// P2-06b 三级处置 v2 的执行段状态(单 goroutine 顺序使用:审批回调
-	// 在引擎循环内、与 drive 同 goroutine,无并发)。
+	// Segment state is shared by parallel callbacks. The drive reads it only
+	// after cancellation and callback drain. Policy decisions use reviewMu.
 	segCancel    context.CancelFunc // 当前执行段的取消句柄(弹门挂起/拒绝熔断/暂停挂起收段用)
 	park         *GateTicket        // 挂起中的弹门票(非 nil = 当前段因弹门收拢,drive 停在票上等裁决)
 	allowance    *gateAllowance     // 批准续跑的单次放行配额(重试同一调用时消费)
-	bypassPass   *gateGroupPass     // P4-17 代理旁路组单位级放行(该组批准一次后武装,销毁即失效)
-	stepPass     *gateStepPass      // P4-27 ⑧ 同步骤放行(审批门槛批准一次后武装,本步骤后续命令不再逐条弹门)
-	deniedReason string             // 拒绝即熔断:非空 = 单位以 approval_denied 终态收场
-
-	// P4-63 B:同单位生命周期内按规则累计的确定性拒绝次数(键
-	// hr:<硬规则ID> / ir:<意图规则ID>,累计不重置;并行工具调用下加锁)。
-	denyMu   sync.Mutex
-	denyHits map[string]int
-
-	// P4-44 范围判定的 DNS 缓存:单位生命周期内 host[:port] → 是否在
-	// 闭包内,一次判定不再重复(并行工具调用下加锁)。P4-50 ②种子域名
-	// 的解析缓存在闭包内(多单位共享);scopeResolve 为解析器注入点
-	//(nil=DefaultScopeResolver,测试打桩)。
-	// P4-66 scopeLocalAddrs 为本机网络地址集注入点(nil=枚举本机接口,
-	// 进程级缓存;测试打桩保确定性)——判定面前的本机设施豁免用。
-	scopeMu         sync.Mutex
-	scopeHits       map[string]bool
-	scopeTried      map[string]bool
-	scopeResolve    rings.ScopeResolver
-	scopeLocalAddrs func() map[string]bool
-	// P4-51 范围等待批准的段状态(denyScope 命中范围外时置位,drive 收段
-	// 后消费):scopeHold=出待决卡＋冻结收场让位名额(步骤落 scope_wait
-	// 态);scopeReclaim=目标已获准但本单位闭包是领取时快照(步骤回可领
-	// 取重领新包);scopeNow 为范围判定"现值"缓存(现 RoE/现资产,与
-	// 领取时冻结闭包区分)。
-	scopeHold    *scopeHoldInfo
-	scopeReclaim bool
-	scopeNow     *scopeNowState
-
-	// P4-67 研判分诊:triage 为分诊调用注入点(nil=按 Executor 的模型链
-	// 构造,测试打桩保确定性);任务级缓存＝信息源清单(RoeState)+tg-
-	// 留痕,单位不另设缓存(撤销信息源后立即恢复拦截,不染单位生命周期)。
-	// goalSummary 为分诊输入的任务目标摘要(领取时从 pack 冻结)。
-	// P4-68 lastTriageBasis 为信息源清单命中的动作复查依据(带给攻击卡
-	// 的卡面说明;逐命令即弃)。
-	triage          TriageFunc
-	goalSummary     string
-	lastTriageBasis string
-
-	// P4-70 ③ 信息源攻击卡的会话档(档键=单位×信息源 host,同一单位对
-	// 不同信息源各自定档):裁决一次后同会话不再重复问——true=允许(该
-	// 单位会话内对该信息源的后续攻击动作放行免卡,零判定调用;不计连
-	// 拒升级计数——已授权动作不是拒绝)、false=禁止(后续同类攻击自动
-	// 拒不弹卡,计入 gd:attack 连拒升级保险)。单位销毁即失效,换单位
-	// 攻击同一信息源重新出卡;并行工具调用下加锁。
-	attackMu      sync.Mutex
-	attackRulings map[string]bool
+	deniedReason string             // 拒绝即熔断:非空 = 单位以 approval_denied 终态收场(仅拒绝线 denyGuard)
 
 	// P2-08 单位暂停/任务冬眠的段状态(暂停请求由 guard 在调用边界置位,
 	// drive 消费;审批挂起锚点在进票时记录)。
@@ -97,6 +62,11 @@ type unitEnv struct {
 	ticketRev      int64         // 弹门挂起时的图版本(等待期间冬眠过的,R14 复检锚点)
 	ticketGen      uint64        // 弹门挂起时的冬眠代数(代数前进 = 等过一场冬眠)
 	deadlineCredit time.Duration // 冬眠时长抵扣(唤醒续跑段的任务收尾线顺延量)
+	// P5-05 暂停挂等的宽限状态:parkYielded=宽限耗尽已让位(闩已静默
+	// 清除,drive 落 pause_wait 收场);latchSince=本段暂停插曲的起算
+	//(继续即清零重计)。
+	parkYielded bool
+	latchSince  time.Time
 
 	// resumed 原会话续(P2-06f 重启收养 + P3-05c ① 受阻重开 + P3-07 断点
 	// 续接,第七章「恢复粒度」):本单位领取的步骤存在可续会话——首段经
@@ -106,6 +76,10 @@ type unitEnv struct {
 	// 措辞随之不同;转录缺失/为空时在首段续跑处降级回全新会话接力。
 	resumed    bool
 	resumeKind string // ""(全新)| adoption(崩溃残留)| blocked(受阻保留)| checkpoint(断点存档)
+	// resumeYield 让位收场的续跑上下文(P5-05,仅 resumeKind=yield):
+	// 让位时冻结的挂等来源与被拦命令——续跑首条指令按此组装,审批类
+	// 批准同时武装放行配额。
+	resumeYield *rings.YieldNote
 
 	// retest 复测会话绑定(P3-06):非 nil = 复测单位——工具集收窄为
 	// 复测受限集(bash/只读探测/read + submit_retest_result),结论
@@ -373,13 +347,21 @@ func (env *unitEnv) bashTool() tool.CoreTool {
 // runBashFG 前台执行:限时内完成即合并输出返回;超时且可转后台(非
 // sleep 类、非单发路径)则进程脱手继续跑、输出续写文件;ctx 取消
 // (段收拢/单位硬停)杀整组进程。
+// P5-01②:镜接管时结果尾部标注本次新增的交换编号(exchange= 行,
+// 交换单 evidence_refs 的引用来源——bash 通道此前取不到编号,照抄
+// http_probe 的快照差分语义;一次命令可能产生多条交换,按受理次序
+// 全列,模型引用直接证明结论的那条)。
 func (env *unitEnv) runBashFG(ctx context.Context, command, dir string, timeout time.Duration) (tool.Result, error) {
+	var mirrorSeq int
+	if env.mirror != nil {
+		mirrorSeq = env.mirror.ExchangeCount()
+	}
 	p, err := env.startBash(command, dir)
 	if err != nil {
 		return tool.Errorf("启动命令失败: " + err.Error()), nil
 	}
 	// finish 前台完成/取消的收尾:删文件(输出走返回文本)、拼退出注记、
-	// 大输出入 blob(R18)。
+	// 大输出入 blob(R18)、附本次交换编号。
 	finish := func() tool.Result {
 		p.f.Close()
 		out, _ := os.ReadFile(p.outPath)
@@ -387,6 +369,11 @@ func (env *unitEnv) runBashFG(ctx context.Context, command, dir string, timeout 
 		text := string(out)
 		if p.waitErr != nil {
 			text += fmt.Sprintf("\n[exit: %v]", p.waitErr)
+		}
+		if env.mirror != nil {
+			for _, ex := range env.mirror.ExchangesSince(mirrorSeq) {
+				text += fmt.Sprintf("\nexchange=%s %s", ex.ID, ex.URL)
+			}
 		}
 		if ref, head := env.Executor.Blobs.spill(text); ref != "" {
 			return tool.Text(fmt.Sprintf("%s\n[输出超长,全文已存档: %s]", head, ref))
@@ -618,15 +605,12 @@ func stripProxyEnv(env []string) []string {
 // 快照直问用)共用同一批常量,两处不得漂移。
 
 const (
-	toolDescBash                   = "在授权范围内执行 shell 命令(单条或管道),返回合并输出。单条命令默认限时 120 秒,可用 timeout_ms 自行调整(上限 600 秒);超时未完成的命令自动转入后台继续运行(输出落文件可稍后读取,sleep 类等待命令除外),也可用 run_in_background 直接后台跑。后台命令输出上限 100MB(超出省略)、最长运行 30 分钟。大输出会被存档并截断,需要全文时按存档引用查阅。"
-	toolDescPortProbe              = "只读探测:检测 host:port 的 TCP 开放状态并尝试读取服务 banner。banner 只取前 256 字节且可能静默——勿据此认为已测完;需要更多服务特征时改用 http_probe 或 bash 通道。"
-	toolDescHTTPProbe              = "只读 HTTP 探测:对指定 URL 发起 HTTP 请求(GET 或 HEAD),返回状态码、关键响应头(Server/Content-Type/Content-Length)与响应体开头内容。响应体只返回前 1536 字节——勿据此认为已读全,需要完整响应时改用 bash(curl)并注意该意图的审批分级。"
-	toolDescSubmitCandidateFact    = "提交一条新进事实(你本次真实观察到的结论)。须经主宰检查归纳确认后才成为正式事实。陈述须有本次执行取得的证据。观察到图上没有的对象(新域名/主机/服务/接口/泄漏信息等)时,随本条事实一并申报 new_asset(12 类选型+标识)——检查归纳时对象入图,后续工作可锚定它;已知对象用 asset_id 锚定,两者不得同时给。本机回环(127.0.0.1/localhost/::1)与镜等测试环境自身设施不是发现对象——对它们的观察会被拒收并记为环境观察;任务资产清单内的目标不受此限。"
-	toolDescSubmitHypothesis       = "提交一条待验证的猜测(直觉/线索/疑似问题,尚未取得直接证据)。必须指向具体资产并写明依据;每个任务包最多附带 3 条。不指向本机回环上的发现型资产(测试环境自身,入口拒收)。"
-	toolDescSubmitHypothesisResult = "假设验证任务专用:写回你独立验证的结构化结论。verdict=supported(成立)|refuted(被推翻)|inconclusive(未能定论);须附本轮真实取得的证据;note 文本不构成结论。验证中取得的可保留观察仍走 submit_candidate_fact / submit_test_claim 正常回传。"
-	toolDescSubmitTestClaim        = "提交一条待反证的漏洞判断(你本次真实触发并取得可复现证据的发现)。提交前先用 list_claims 查已报清单:同一资产上已报过的漏洞不得重复报(入口会拒收)。存在性与影响面必须分开申报;须尽力列出其他可能原因(否则系统兜底四条基线:缓存污染/不可复现/影响高估/归属错误)。判断将交由独立单位多轮反证、仲裁者机器判定,不得自评已确认、不得自报严重级别。立判门槛:" + ClaimHarmGate + "。本机回环(127.0.0.1/localhost/::1)与镜等测试环境自身设施不是目标攻击面——锚点或证据流量指向它们的判断会被拒收并记为环境观察;任务资产清单内的目标不受此限。"
-	toolDescSubmitFalsifyResult    = "反证任务专用:写回你本轮独立反证的结构化结论。existence_refuted=你能否推翻存在性判断;impact_supported=影响面证据是否足以支撑所申报的影响(成立时必须给 impact_level:critical|high|medium|low);" + SeverityAnchor + "。alternatives=任务包列出的每条其他可能原因按 ID 写回 refuted(本轮是否排除)。须附本轮真实取得的证据;note 文本不参与机器判定。evidence_exchanges=结论所依据的交换编号(工具结果里 exchange= 行给出的;结论所依据的交换必须附引用,通常恰 1 条——直接证明结论的那条;可达性确认、对照请求、重复重放与无关探测不引用;bash 通道取不到编号时留空,系统按证据文本中的地址回查)。"
-	toolDescListClaims             = "只读查询:列出本任务已报的漏洞判断清单(ID、状态、锚定资产、判断摘要)。提交 submit_test_claim 之前先查一遍——同一资产上已报过的漏洞不要重复报(重复提交会被入口直接拒收);确有新证据或不同影响面的,改写判断另立。"
+	toolDescBash                = "在授权范围内执行 shell 命令(单条或管道),返回合并输出。单条命令默认限时 120 秒,可用 timeout_ms 自行调整(上限 600 秒);超时未完成的命令自动转入后台继续运行(输出落文件可稍后读取,sleep 类等待命令除外),也可用 run_in_background 直接后台跑。后台命令输出上限 100MB(超出省略)、最长运行 30 分钟。大输出会被存档并截断,需要全文时按存档引用查阅。"
+	toolDescPortProbe           = "只读探测:检测 host:port 的 TCP 开放状态并尝试读取服务 banner。banner 只取前 256 字节且可能静默——勿据此认为已测完;需要更多服务特征时改用 http_probe 或 bash 通道。"
+	toolDescHTTPProbe           = "只读 HTTP 探测:对指定 URL 发起 HTTP 请求(GET 或 HEAD),返回状态码、关键响应头(Server/Content-Type/Content-Length)与响应体开头内容。响应体只返回前 1536 字节——勿据此认为已读全,需要完整响应时改用 bash(curl)并注意该意图的审批分级。"
+	toolDescSubmitCandidateFact = "观察到资产解析、部署等关系时，随证据提交asset_relations；使用实际资产编号，已有资产不重复申报，申报的新对象可用$new引用。关系不等于父子层级、产生来源或授权。提交一条新进事实(你本次真实观察到的结论)。须经主宰检查归纳确认后才成为正式事实。陈述须有本次执行取得的证据。观察到清单以外的域名、IP或服务入口时，可随本条事实申报new_asset，操作者选择加入后才进入资产与后续规划。子域名仍选domain，IP选host，API路径归所属服务，不逐路径建资产。组织、人员、登记资料、文件、泄露内容写在事实和证据中，不申报资产；不得把文件名中的点号当成发现域名。独立应用或小程序仅在确为任务对象且有明确标识时申报。已知对象用 asset_id 锚定,两者不得同时给。只提交本次实际观察及证据，不提交未验证的猜测；意图之外的实际观察也可写回，由主宰决定是否跟进。本机回环(127.0.0.1/localhost/::1)与镜等测试环境自身设施不是发现对象——对它们的观察会被拒收并记为环境观察;任务资产清单内的目标不受此限。"
+	toolDescSubmitClaim         = "交卷:把你在本会话真实坐实的漏洞交出去(探索→发现→证明→反证自查完成后调用,做完即停)。提交前先用 list_claims 查已报清单:同一资产上已报过的漏洞不得重复报(入口会拒收)。六字段全部必写:summary=漏洞一句话(本质+影响对象);severity=自报级别(critical|high|medium|low;" + SeverityAnchor + ");evidence_refs=证明证据引用列表(工具结果里 exchange= 行给出的交换编号,通常恰 1 条主证明——直接证明结论的那条;多步组合链按复现顺序逐环排列);proving_marker=从证据原文里抄的关键证明物字符串(如拿到的手机号、返回的敏感字段值——系统会机器核验它真的出现在证据响应体里,抄不准交不进);countercheck_note=反证自查结果自由文本(做了什么检查、为什么没翻车);impact_note=影响列点(可空,可列 1~3 条;只写有依据的,有几条写几条,猜测要标明是猜测,照实进报告)。交卷后系统即时机器核验:未过会告诉你缺什么,补做后带 claim_id 重交(补考只有一次)。立判门槛:" + ClaimHarmGate + "。本机回环(127.0.0.1/localhost/::1)与镜等测试环境自身设施不是目标攻击面——锚点或证据流量指向它们的交卷会被拒收并记为环境观察;任务资产清单内的目标不受此限。"
+	toolDescListClaims          = "只读查询:列出本任务已报的漏洞清单(ID、状态、锚定资产、判断摘要)。交卷前先查一遍——同一资产上已报过的漏洞不要重复交(重复提交会被入口直接拒收);确有新证据或不同影响面的,改写判断另立。"
 )
 
 // ToolEntry 工具目录条目(只读呈现用)。
@@ -637,6 +621,8 @@ type ToolEntry struct {
 
 // ToolCatalog 工具全集目录(名称 + 描述;P2-08f 插话快照直问用——目标
 // 的工具定义进快照,模型看得懂目标在引用什么,但应答自身无工具)。
+// P5-04 起含知情查询五件(search_facts/list_assets/search_trails/
+// traffic 三件;查漏洞=既有 list_claims)。
 func ToolCatalog() []ToolEntry {
 	return []ToolEntry{
 		{"bash", toolDescBash},
@@ -646,11 +632,14 @@ func ToolCatalog() []ToolEntry {
 		{"web_search", toolDescWebSearch},
 		{"web_fetch", toolDescWebFetch},
 		{"list_claims", toolDescListClaims},
+		{"search_facts", toolDescSearchFacts},
+		{"list_assets", toolDescListAssets},
+		{"search_trails", toolDescSearchTrails},
+		{"traffic_search", toolDescTrafficSearch},
+		{"traffic_get", toolDescTrafficGet},
+		{"traffic_blob", toolDescTrafficBlob},
 		{"submit_candidate_fact", toolDescSubmitCandidateFact},
-		{"submit_hypothesis", toolDescSubmitHypothesis},
-		{"submit_hypothesis_result", toolDescSubmitHypothesisResult},
-		{"submit_test_claim", toolDescSubmitTestClaim},
-		{"submit_falsify_result", toolDescSubmitFalsifyResult},
+		{"submit_claim", toolDescSubmitClaim},
 	}
 }
 
@@ -661,53 +650,58 @@ func ToolCatalog() []ToolEntry {
 // detail 携带证据与 transcript_id(第二章:图上执行记录引用转录 ID)。
 // ReadOnly:只写自家账本、不碰目标环境——不设审批门(防审批疲劳),
 // RoE 工具过滤对它照常生效。
+func candidateFactSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"statement":       map[string]any{"type": "string", "description": "新进事实陈述:一句话可复核命题,写明资产与完整定位要素(域名或 IP 起头、host:port 形态,不用裸端口/裸路径指代目标),使他人可独立重验"},
+			"evidence":        map[string]any{"type": "string", "description": "支撑证据:须含可独立复核的关键原文(请求/响应片段、命令与其输出);只写结论不附原文的证据过不了检查归纳"},
+			"asset_id":        map[string]any{"type": "string", "description": "关联资产节点 ID(可选;已知对象锚定用,与 new_asset 互斥)"},
+			"asset_relations": map[string]any{"type": "array", "maxItems": 64, "description": "本次证据直接观察到的资产关系；不是父子层级、产生来源或执行前置。from/to使用本任务资产编号；本条new_asset对象可用$new引用。已有资产之间的关系直接填编号，无需重复申报新资产。推断不得填写。", "items": map[string]any{"type": "object", "properties": map[string]any{"from": map[string]any{"type": "string"}, "to": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string", "enum": []string{"resolves_to", "hosted_on", "related_to"}, "description": "resolves_to=前者解析到后者；hosted_on=前者部署在后者；related_to=明确观察到的其他关联，陈述中写清含义"}}, "required": []string{"from", "to", "kind"}}},
+			"result_types":    map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"credential", "data", "permission", "foothold", "plain", "unclassified"}}, "uniqueItems": true, "description": "本条事实实际取得的结果，可多选：credential=取得可用凭据；data=取得敏感数据；permission=实际取得访问能力；foothold=实际建立可用立足点。普通观察或未发现成果只选 plain；拿不准只选 unclassified。按本次证据判断，不按陈述出现的词判断；推断线索不能标成已取得成果。"},
+			"new_asset": map[string]any{
+				"type":        "object",
+				"description": "新对象申报(可选;本次观察到新的任务对象时随事实申报；操作者加入后才入资产清单，与asset_id互斥)",
+				"properties": map[string]any{
+					"class":  map[string]any{"type": "string", "enum": []string{"domain", "host", "service", "miniprogram", "app"}, "description": "域名domain、IP host、服务入口service，独立应用app或小程序miniprogram；不为背景资料建资产"},
+					"title":  map[string]any{"type": "string", "description": "域名、IP、完整服务地址或独立应用标识；API路径写入事实与证据，资产按服务入口归一"},
+					"parent": map[string]any{"type": "string", "description": "父资产节点 ID(可选；只填所属域名或服务地址本身。DNS解析、共享IP、部署关联不作为父子层级，另写asset_relations)"},
+				},
+				"required": []string{"class", "title"},
+			},
+		},
+		"required": []string{"statement", "evidence"},
+	}
+}
+
 func (env *unitEnv) submitCandidateFactTool() tool.CoreTool {
 	return tool.Build(tool.Spec{
 		Name:        "submit_candidate_fact",
 		Description: toolDescSubmitCandidateFact,
-		Schema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"statement": map[string]any{"type": "string", "description": "新进事实陈述:一句话可复核命题,写明资产与完整定位要素(域名或 IP 起头、host:port 形态,不用裸端口/裸路径指代目标),使他人可独立重验"},
-				"evidence":  map[string]any{"type": "string", "description": "支撑证据:须含可独立复核的关键原文(请求/响应片段、命令与其输出);只写结论不附原文的证据过不了检查归纳"},
-				"asset_id":  map[string]any{"type": "string", "description": "关联资产节点 ID(可选;已知对象锚定用,与 new_asset 互斥)"},
-				"new_asset": map[string]any{
-					"type":        "object",
-					"description": "新对象申报(可选;本次观察到图上没有的对象时随事实申报,检查归纳时入图;与 asset_id 互斥)",
-					"properties": map[string]any{
-						"class":  map[string]any{"type": "string", "enum": []string{"domain", "subdomain", "host", "service", "api", "organization", "miniprogram", "app", "wechat_account", "person", "leak_info", "other"}, "description": "对象类别(12 类选型)"},
-						"title":  map[string]any{"type": "string", "description": "对象标识(域名/主机:端口/URL/接口路径等,与图上既有资产不同名)"},
-						"parent": map[string]any{"type": "string", "description": "父资产节点 ID(可选;层级挂靠,如发现的子域挂所属域名)"},
-					},
-					"required": []string{"class", "title"},
-				},
-			},
-			"required": []string{"statement", "evidence"},
-		},
+		Schema:      candidateFactSchema(),
 		ReadOnly:    alwaysRO,
 		Permissions: allowReadOnly,
 		Run: func(ctx context.Context, in json.RawMessage, _ *tool.ToolContext) (tool.Result, error) {
 			var args struct {
-				Statement string          `json:"statement"`
-				Evidence  string          `json:"evidence"`
-				AssetID   string          `json:"asset_id"`
-				NewAsset  json.RawMessage `json:"new_asset"`
+				Statement   string                 `json:"statement"`
+				Evidence    string                 `json:"evidence"`
+				AssetID     string                 `json:"asset_id"`
+				ResultTypes []rings.FactResultType `json:"result_types"`
+				NewAsset    *NewAssetDecl          `json:"new_asset"`
+				Relations   []rings.AssetRelation  `json:"asset_relations"`
 			}
-			if err := json.Unmarshal(in, &args); err != nil {
-				return tool.Errorf("bad input: " + err.Error()), nil
+			if err := decodeCandidateFactInput(in, &args); err != nil {
+				return tool.Errorf(err.Error()), nil
 			}
-			var decl *NewAssetDecl
-			if len(args.NewAsset) > 0 && string(args.NewAsset) != "null" {
-				decl = &NewAssetDecl{}
-				if err := json.Unmarshal(args.NewAsset, decl); err != nil {
-					return tool.Errorf("new_asset 申报格式不对: " + err.Error()), nil
-				}
-			}
-			id, err := env.SubmitCandidateFact(ctx, args.Statement, args.Evidence, args.AssetID, decl)
+			id, err := env.SubmitCandidateFactWithRelations(ctx, args.Statement, args.Evidence, args.AssetID, args.NewAsset, args.Relations, args.ResultTypes...)
 			if err != nil {
 				return tool.Errorf("提交失败: " + err.Error()), nil
 			}
-			return tool.Text(fmt.Sprintf("已提交新进事实 %s(status=candidate),待主宰检查归纳确认", id)), nil
+			status := "candidate"
+			if n, err := env.Executor.Store.Node(ctx, env.TaskID, id); err == nil {
+				status = n.Status
+			}
+			return tool.Text(fmt.Sprintf("已提交新进事实 %s(status=%s)", id, status)), nil
 		},
 	})
 }
@@ -717,18 +711,42 @@ func (env *unitEnv) submitCandidateFactTool() tool.CoreTool {
 // 血缘挂发现步骤与单位)。归 swarm 定义、overmind 收割侧消费,形状
 // 单一不漂移。
 type NewAssetDecl struct {
-	Class  string `json:"class"`            // 12 类之一(入口校验)
+	Class  string `json:"class"`            // 通过共享资产身份校验并归一
 	Title  string `json:"title"`            // 对象标识(与图上既有资产查重)
 	Parent string `json:"parent,omitempty"` // 父资产节点 ID(可选)
 }
 
-// SubmitCandidateFact 受控入口:候选 Fact 节点 + produces 血缘边
-// (Step→Fact)+ 可选 about 边(Fact→Asset)。程序化调用与工具调用
-// 走同一条路(R8:子代理再多也不会绕过账本)。
-// P4-12:new_asset 声明(图上没有的新对象)随事实入 detail,与 asset_id
-// 互斥——锚定已知对象或声明新对象,二者择一;对象本身由主宰收割时
-// 入图(虫群无写权,收割通道点亮 source=discovered)。
-func (env *unitEnv) SubmitCandidateFact(ctx context.Context, statement, evidence, assetID string, newAsset *NewAssetDecl) (string, error) {
+func decodeCandidateFactInput(in json.RawMessage, dst any) error {
+	d := json.NewDecoder(strings.NewReader(string(in)))
+	d.DisallowUnknownFields()
+	err := d.Decode(dst)
+	if err == nil {
+		var extra any
+		if d.Decode(&extra) != io.EOF {
+			err = errors.New("一次只提交一个JSON对象")
+		}
+	}
+	if err == nil {
+		return nil
+	}
+	props := candidateFactSchema()["properties"].(map[string]any)
+	keys := func(properties map[string]any) string {
+		var names []string
+		for name := range properties {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		return strings.Join(names, ", ")
+	}
+	asset := props["new_asset"].(map[string]any)["properties"].(map[string]any)
+	return fmt.Errorf("提交参数不符: %v。可用字段: %s；new_asset字段: %s。按字段说明修正，不更换事实或证据", err, keys(props), keys(asset))
+}
+
+func (env *unitEnv) SubmitCandidateFact(ctx context.Context, statement, evidence, assetID string, newAsset *NewAssetDecl, resultTypes ...rings.FactResultType) (string, error) {
+	return env.SubmitCandidateFactWithRelations(ctx, statement, evidence, assetID, newAsset, nil, resultTypes...)
+}
+
+func (env *unitEnv) SubmitCandidateFactWithRelations(ctx context.Context, statement, evidence, assetID string, newAsset *NewAssetDecl, relations []rings.AssetRelation, resultTypes ...rings.FactResultType) (string, error) {
 	if strings.TrimSpace(statement) == "" || strings.TrimSpace(evidence) == "" {
 		return "", fmt.Errorf("swarm: 新进事实须同时具备陈述与证据")
 	}
@@ -740,12 +758,23 @@ func (env *unitEnv) SubmitCandidateFact(ctx context.Context, statement, evidence
 		if newAsset.Title == "" {
 			return "", fmt.Errorf("swarm: 新对象申报缺标识(title)")
 		}
-		if !rings.IsValidAssetClass(rings.AssetClass(strings.TrimSpace(newAsset.Class))) {
-			return "", fmt.Errorf("swarm: 新对象 %q 的类 %q 不在 12 类词汇表内", newAsset.Title, newAsset.Class)
+		class, title, _, err := rings.AssetIdentity(rings.AssetClass(strings.TrimSpace(newAsset.Class)), newAsset.Title)
+		if err != nil {
+			return "", fmt.Errorf("new_asset标识不符: %v；域名用domain、IP用host、服务用service。背景资料保留在statement和evidence，不填new_asset", err)
 		}
+		// Share identity rules with inventory/adoption, rather than inviting a
+		// new classification and asking the model to retry it downstream.
+		newAsset = &NewAssetDecl{Class: string(class), Title: title, Parent: strings.TrimSpace(newAsset.Parent)}
 		if p := strings.TrimSpace(newAsset.Parent); p != "" {
-			if _, err := env.Executor.Store.Node(ctx, env.TaskID, p); err != nil {
+			parent, err := env.Executor.Store.Node(ctx, env.TaskID, p)
+			if err != nil {
 				return "", fmt.Errorf("swarm: 新对象 %q 的父资产 %s: %w", newAsset.Title, p, err)
+			}
+			if parent.Type != rings.NodeAsset || parent.Status == rings.AssetStatusRetired {
+				return "", fmt.Errorf("父资产不可用")
+			}
+			if err := rings.ValidateAssetParent(rings.AssetClass(newAsset.Class), newAsset.Title, parent.AssetClass, parent.Title); err != nil {
+				return "", err
 			}
 		}
 	}
@@ -772,6 +801,15 @@ func (env *unitEnv) SubmitCandidateFact(ctx context.Context, statement, evidence
 		"transcript_id": env.TranscriptID,
 		"unit_id":       env.UnitID,
 	}
+	for _, kind := range resultTypes {
+		if !rings.ValidFactResult(kind) {
+			return "", fmt.Errorf("事实结果类型无效")
+		}
+	}
+	detail["result_types"] = rings.NormalizeFactResults(resultTypes)
+	if err := rings.ValidateFactResult(detail); err != nil {
+		return "", err
+	}
 	if ref, head := env.Executor.Blobs.spill(evidence); ref != "" {
 		detail["evidence_ref"], detail["evidence_head"] = ref, head
 	} else {
@@ -783,6 +821,17 @@ func (env *unitEnv) SubmitCandidateFact(ctx context.Context, statement, evidence
 			"title":  newAsset.Title,
 			"parent": strings.TrimSpace(newAsset.Parent),
 		}
+	}
+	if len(relations) > 0 {
+		detail["asset_relations"] = relations
+		if err := env.Executor.Store.ValidateAssetRelations(ctx, env.TaskID, detail); err != nil {
+			return "", err
+		}
+		clean, err := rings.AssetRelationsFromDetail(detail)
+		if err != nil {
+			return "", err
+		}
+		detail["asset_relations"] = clean
 	}
 	events := []rings.Event{
 		{Kind: rings.EventNodeAdded, Actor: "swarm:" + env.UnitID, Payload: rings.NodeAdded{
@@ -801,223 +850,22 @@ func (env *unitEnv) SubmitCandidateFact(ctx context.Context, statement, evidence
 			Payload: rings.EdgeAdded{EdgeType: rings.EdgeAbout, FromNode: id, ToNode: assetID},
 		})
 	}
-	if _, err := env.Executor.Store.Append(ctx, env.TaskID, events...); err != nil {
+	anchors := map[string]bool{assetID: true}
+	for _, r := range relations {
+		for _, ref := range []string{strings.TrimSpace(r.From), strings.TrimSpace(r.To)} {
+			if ref == "$new" || anchors[ref] {
+				continue
+			}
+			anchors[ref] = true
+			events = append(events, rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:" + env.UnitID, Payload: rings.EdgeAdded{EdgeType: rings.EdgeAbout, FromNode: id, ToNode: ref}})
+		}
+	}
+	if _, err := env.appendBusiness(ctx, events...); err != nil {
 		return "", fmt.Errorf("swarm: 新进事实写入: %w", err)
 	}
+	env.Executor.factSubmitted(env.TaskID)
 	return id, nil
 }
-
-// MaxHypothesesPerStep 每个 Step 限量附带的假设条数(第四章 §5:防噪音)。
-const MaxHypothesesPerStep = 3
-
-// submitHypothesisTool 虫群直觉回流(第四章 §5):假设必须指向具体资产
-// 并写明依据(允许弱依据);以 candidate 状态入图,主宰收割时裁决。
-// 每 Step 限量附带(MaxHypothesesPerStep,防噪音)。ReadOnly:同
-// submit_candidate_fact——只写自家账本,不设审批门。
-func (env *unitEnv) submitHypothesisTool() tool.CoreTool {
-	return tool.Build(tool.Spec{
-		Name:        "submit_hypothesis",
-		Description: toolDescSubmitHypothesis,
-		Schema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"statement": map[string]any{"type": "string", "description": "假设陈述"},
-				"asset_id":  map[string]any{"type": "string", "description": "指向的资产节点 ID(必填)"},
-				"basis":     map[string]any{"type": "string", "description": "依据(允许弱依据,如配置风格相似)"},
-			},
-			"required": []string{"statement", "asset_id", "basis"},
-		},
-		ReadOnly:    alwaysRO,
-		Permissions: allowReadOnly,
-		Run: func(ctx context.Context, in json.RawMessage, _ *tool.ToolContext) (tool.Result, error) {
-			var args struct {
-				Statement string `json:"statement"`
-				AssetID   string `json:"asset_id"`
-				Basis     string `json:"basis"`
-			}
-			if err := json.Unmarshal(in, &args); err != nil {
-				return tool.Errorf("bad input: " + err.Error()), nil
-			}
-			id, err := env.SubmitHypothesis(ctx, args.Statement, args.Basis, args.AssetID)
-			if err != nil {
-				return tool.Errorf("提交假设失败: " + err.Error()), nil
-			}
-			return tool.Text(fmt.Sprintf("已提交待验证的猜测 %s(status=candidate),待主宰检查归纳判定", id)), nil
-		},
-	})
-}
-
-// SubmitHypothesis 受控入口:候选 Hypothesis 节点(status=candidate)+
-// 血缘边 produces(发现 Step→Hypothesis,P2-03 起直觉同为 Step 产出物,
-// 回流轨迹"哪一步提出"全程可查)+ 资产锚点边 about(Hypothesis→Asset)。
-// 每 Step 限量附带(MaxHypothesesPerStep):超出拒收,防直觉刷屏。
-// 程序化调用与工具调用走同一条路(R8:子代理再多也不会绕过账本)。
-func (env *unitEnv) SubmitHypothesis(ctx context.Context, statement, basis, assetID string) (string, error) {
-	if strings.TrimSpace(statement) == "" || strings.TrimSpace(basis) == "" {
-		return "", fmt.Errorf("swarm: 假设须同时具备陈述与依据")
-	}
-	if strings.TrimSpace(assetID) == "" {
-		return "", fmt.Errorf("swarm: 假设必须指向具体资产(asset_id)")
-	}
-	if _, err := env.Executor.Store.Node(ctx, env.TaskID, assetID); err != nil {
-		return "", fmt.Errorf("swarm: 假设指向资产 %s: %w", assetID, err)
-	}
-	// P4-25 ① 环回自指排除:发现型环回资产(测试环境自身)不作猜测
-	// 对象,拒收并记环境观察。
-	if a, hit := env.selfRefAssetAnchor(ctx, assetID); hit {
-		env.recordEnvObservation("猜测", a, statement, basis)
-		return "", fmt.Errorf("swarm: 假设指向的资产 %s 属本机环回(发现型,测试环境自身),不作为发现对象;观察已记为环境观察供排查", a)
-	}
-	// 每 Step 限量:同一发现步骤名下已有 MaxHypothesesPerStep 条即拒收。
-	hyps, err := env.Executor.Store.NodesByType(ctx, env.TaskID, rings.NodeHypothesis, "")
-	if err != nil {
-		return "", fmt.Errorf("swarm: 假设限量核查: %w", err)
-	}
-	own := 0
-	for _, h := range hyps {
-		if sid, _ := h.Detail["step_id"].(string); sid == env.StepID {
-			own++
-		}
-	}
-	if own >= MaxHypothesesPerStep {
-		return "", fmt.Errorf("swarm: 本步骤已附 %d 条假设(每步上限 %d),不再收直觉——把最值得跟的留到假设里", own, MaxHypothesesPerStep)
-	}
-	id := shortID("h")
-	events := []rings.Event{
-		{Kind: rings.EventNodeAdded, Actor: "swarm:" + env.UnitID, Payload: rings.NodeAdded{
-			NodeID: id, NodeType: rings.NodeHypothesis, Title: statement, Status: rings.HypothesisCandidate,
-			Detail: map[string]any{
-				"basis": basis, "transcript_id": env.TranscriptID,
-				"unit_id": env.UnitID, "step_id": env.StepID,
-			},
-		}},
-		{Kind: rings.EventEdgeAdded, Actor: "swarm:" + env.UnitID, Payload: rings.EdgeAdded{
-			EdgeType: rings.EdgeProduces, FromNode: env.StepID, ToNode: id,
-		}},
-		{Kind: rings.EventEdgeAdded, Actor: "swarm:" + env.UnitID, Payload: rings.EdgeAdded{
-			EdgeType: rings.EdgeAbout, FromNode: id, ToNode: assetID,
-		}},
-	}
-	if _, err := env.Executor.Store.Append(ctx, env.TaskID, events...); err != nil {
-		return "", fmt.Errorf("swarm: 假设写入: %w", err)
-	}
-	return id, nil
-}
-
-// submitHypothesisResultTool 验证单位写回假设结构化结论的受控入口
-// (P2-03):验证类 Step(主宰收割评估"值得跟"派发)专用。结论三值:
-// supported(成立)/ refuted(不成立)/ inconclusive(未能定论)。
-// 文本结论不构成裁决依据,必须经本入口落结构化记录。ReadOnly:同上,
-// 只写自家账本。
-func (env *unitEnv) submitHypothesisResultTool() tool.CoreTool {
-	return tool.Build(tool.Spec{
-		Name:        "submit_hypothesis_result",
-		Description: toolDescSubmitHypothesisResult,
-		Schema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"hypothesis_id": map[string]any{"type": "string", "description": "你正在验证的假设 ID(任务包假设验证节给出)"},
-				"verdict":       map[string]any{"type": "string", "enum": []string{"supported", "refuted", "inconclusive"}, "description": "验证结论"},
-				"evidence":      map[string]any{"type": "string", "description": "本轮验证取得的证据:须含可独立复核的关键原文(请求/响应片段、命令与其输出),只写结论不算证据"},
-				"note":          map[string]any{"type": "string", "description": "备注(可选;不构成结论)"},
-			},
-			"required": []string{"hypothesis_id", "verdict", "evidence"},
-		},
-		ReadOnly:    alwaysRO,
-		Permissions: allowReadOnly,
-		Run: func(ctx context.Context, in json.RawMessage, _ *tool.ToolContext) (tool.Result, error) {
-			var args struct {
-				HypothesisID string `json:"hypothesis_id"`
-				Verdict      string `json:"verdict"`
-				Evidence     string `json:"evidence"`
-				Note         string `json:"note"`
-			}
-			if err := json.Unmarshal(in, &args); err != nil {
-				return tool.Errorf("bad input: " + err.Error()), nil
-			}
-			if err := env.SubmitHypothesisResult(ctx, args.HypothesisID, args.Verdict, args.Evidence, args.Note); err != nil {
-				return tool.Errorf("写回验证结论失败: " + err.Error()), nil
-			}
-			return tool.Text("验证结论已记录(hypothesis.record),待主宰检查归纳迁移结论状态"), nil
-		},
-	})
-}
-
-// SubmitHypothesisResult 受控入口:验证结论落 hypothesis.record(result)。
-// 入口校验:假设在验证中、本 Step 确为该假设的验证 Step(防跨步骤伪造)、
-// R12 验证单位 ≠ 提出单位(发现者不得自证)、结论词汇受限、本 Step 尚未
-// 写回(每验证步骤一次)。证据经内容寻址落 blob(R18),账本只存引用与
-// 截头;Note 文本不进结论。
-func (env *unitEnv) SubmitHypothesisResult(ctx context.Context, hypothesisID, verdict, evidence, note string) error {
-	if strings.TrimSpace(hypothesisID) == "" {
-		return fmt.Errorf("swarm: 验证结论必须指明 hypothesis_id")
-	}
-	if strings.TrimSpace(evidence) == "" {
-		return fmt.Errorf("swarm: 验证结论必须附本轮证据")
-	}
-	if !rings.IsValidHypothesisVerdict(strings.TrimSpace(verdict)) {
-		return fmt.Errorf("swarm: 验证结论必须是 supported|refuted|inconclusive 之一,得到 %q", verdict)
-	}
-	hyp, err := env.Executor.Store.Node(ctx, env.TaskID, hypothesisID)
-	if err != nil {
-		return fmt.Errorf("swarm: 验证假设 %s: %w", hypothesisID, err)
-	}
-	if hyp.Type != rings.NodeHypothesis {
-		return fmt.Errorf("swarm: 节点 %s 是 %s 不是 hypothesis", hypothesisID, hyp.Type)
-	}
-	if hyp.Status != rings.HypothesisTesting {
-		return fmt.Errorf("swarm: 假设 %s 当前状态 %s,不在验证中(状态机拒绝写回)", hypothesisID, hyp.Status)
-	}
-	step, err := env.Executor.Store.Node(ctx, env.TaskID, env.StepID)
-	if err != nil {
-		return fmt.Errorf("swarm: 验证步骤 %s: %w", env.StepID, err)
-	}
-	if kind, _ := step.Detail["kind"].(string); kind != "verify" {
-		return fmt.Errorf("swarm: 步骤 %s 不是验证类步骤(detail.kind=%q)", env.StepID, kind)
-	}
-	if bound, _ := step.Detail["hypothesis_id"].(string); bound != hypothesisID {
-		return fmt.Errorf("swarm: 步骤 %s 不是假设 %s 的验证步骤(绑定 %q)", env.StepID, hypothesisID, bound)
-	}
-	if proposer, _ := hyp.Detail["unit_id"].(string); proposer == env.UnitID {
-		return fmt.Errorf("swarm: R12 发现者不得自证:假设 %s 由本单位(%s)提出,验证必须由不同单位执行", hypothesisID, env.UnitID)
-	}
-	rec := rings.HypothesisRecord{
-		HypothesisID: hypothesisID, StepID: env.StepID, UnitID: env.UnitID,
-		Type: rings.HypothesisRecResult, Verdict: strings.TrimSpace(verdict),
-		Note: strings.TrimSpace(note),
-	}
-	// 每验证步骤一次写回:同 Step 已有 result 记录即拒收。
-	evs, err := env.Executor.Store.Events(ctx, env.TaskID, 0, 0)
-	if err != nil {
-		return fmt.Errorf("swarm: 查验证写回历史: %w", err)
-	}
-	for _, ev := range evs {
-		if ev.Kind != rings.EventHypothesisRecord {
-			continue
-		}
-		var prev rings.HypothesisRecord
-		if err := json.Unmarshal(ev.Payload, &prev); err != nil {
-			return fmt.Errorf("swarm: 解码历史假设记录: %w", err)
-		}
-		if prev.Type == rings.HypothesisRecResult && prev.HypothesisID == hypothesisID && prev.StepID == env.StepID {
-			return fmt.Errorf("swarm: 假设 %s 的验证步骤 %s 已写回过结论,每步只许一次(旧结论不得改写,R1)",
-				hypothesisID, env.StepID)
-		}
-	}
-	if ref, head := env.Executor.Blobs.spill(evidence); ref != "" {
-		rec.EvidenceRef, rec.EvidenceHead = ref, head
-	} else {
-		rec.EvidenceHead = clipLine(evidence, 2048)
-	}
-	if _, err := env.Executor.Store.Append(ctx, env.TaskID, rings.Event{
-		Kind: rings.EventHypothesisRecord, Actor: "swarm:" + env.UnitID, Payload: rec,
-	}); err != nil {
-		return fmt.Errorf("swarm: 验证结论写入: %w", err)
-	}
-	return nil
-}
-
-// ---- 受控入口工具:TestClaim 候选与反证写回(P1-08 + P2-02,第三章 §5) ----
 
 // listClaimsTool 虫群查重只读能力(P2-08f):报 TestClaim 前可查已报声明
 // 清单,防重复报同一漏洞浪费整轮反证(只读不违 R8)。描述即规则(§11):
@@ -1104,11 +952,6 @@ func (env *unitEnv) ListClaims(ctx context.Context, assetID string) ([]string, e
 	return out, nil
 }
 
-// normalizeClaimText 声明文本归一(大小写与空白形态不影响查重比对)。
-func normalizeClaimText(s string) string {
-	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
-}
-
 // duplicateClaim 查重:同资产上存在归一后存在的性声明相同的已报声明
 // (任何状态都算已报——被反证推翻的也一样,重复报同样浪费)即命中。
 func (env *unitEnv) duplicateClaim(ctx context.Context, assetID, statement string) (string, string, bool) {
@@ -1122,367 +965,313 @@ func (env *unitEnv) duplicateClaim(ctx context.Context, assetID, statement strin
 			claimAsset[e.From] = e.To
 		}
 	}
-	want := normalizeClaimText(statement)
+	want := rings.NormalizeClaimText(statement)
 	for _, c := range claims {
 		if claimAsset[c.ID] != assetID {
 			continue
 		}
-		if normalizeClaimText(c.Title) == want && want != "" {
+		if rings.NormalizeClaimText(c.Title) == want && want != "" {
 			return c.ID, rings.ClaimStatusWord(c.Status), true
 		}
 	}
 	return "", "", false
 }
 
-// DefaultAlternativeLabels 竞争性替代解释基线(第三章 §5 示例定稿):
-// 发现者未自带解释清单时兜底冻结,保证每条声明至少挂着这四条待检验
-// 反面假设——负向认证不因发现者"想不出反例"而退化。
-var DefaultAlternativeLabels = []string{
-	"缓存污染:观察内容可能来自中间缓存而非目标本体",
-	"不可复现:观察依赖特定时窗或一次性状态",
-	"影响高估:所声称的实际影响缺乏证据支撑",
-	"归属错误:观察可能来自其他资产或共用组件",
-}
-
-// BuildAlternatives 编译冻结解释清单:模型列出的照收(空白条目丢弃),
-// 空则兜底基线;ID 顺序编号(alt1…),反证写回按 ID 引用。P2-06 起
-// 虫群 submit_test_claim 与主宰组合声明(overmind)共用——冻结解释
-// 清单的编译语义必须同一份代码,不得两处漂移。
-func BuildAlternatives(labels []string) []rings.Alternative {
-	var out []rings.Alternative
-	add := func(l string) {
-		if l = strings.TrimSpace(l); l != "" {
-			out = append(out, rings.Alternative{ID: fmt.Sprintf("alt%d", len(out)+1), Label: l})
-		}
-	}
-	if len(labels) == 0 {
-		for _, l := range DefaultAlternativeLabels {
-			add(l)
-		}
-		return out
-	}
-	for _, l := range labels {
-		add(l)
-	}
-	if len(out) == 0 {
-		return BuildAlternatives(nil) // 全空白输入退回基线
-	}
-	return out
-}
-
-// submitTestClaimTool 虫群提交可证伪漏洞声明的受控入口:存在性与影响面
-// 分开声明(报告级别跟影响面证据走——发现者无级别通道,级别只来自
-// 反证轮的影响面证据);竞争性替代解释随创建冻结进 detail(P2-02),
-// 仲裁者确认裁决只认这份清单的结构化排除结论。判定标准(full_falsify)
-// 同批冻结。ReadOnly:同 submit_candidate_fact——只写自家账本,不设
-// 审批门,RoE 过滤照常生效。P2-08f:提交前先 list_claims 查重,同资产
-// 同声明的重复提交被入口直接拒收。
-func (env *unitEnv) submitTestClaimTool() tool.CoreTool {
+// submitClaimTool 交卷受控入口(P5-01②,单会话连打交卷):虫群在同意图
+// 的同一会话内完成探索→发现→证明→反证自查后,经本工具交出六字段交卷单;
+// 反证自查是提示词自觉(无结构化强制字段),交卷门槛=本次真实触发过、
+// 拿到可复现证据。声明节点(candidate)与交卷单事件(testclaim.record
+// submit)同批落账;落账后同步触发机器三查(交卷即查,毫秒-秒级)——
+// 结果随工具反馈回给本会话:全过=已确认;未过=失败原因(缺哪样)注入,
+// 补做后带 claim_id 重交(上限 1 次,再不过落证据不足)。
+// ReadOnly:同 submit_candidate_fact——只写自家账本,不设审批门,
+// RoE 过滤照常生效。查重:交卷前先 list_claims,同资产同声明的重复
+// 交卷被入口直接拒收(带 claim_id 的补考重交除外——同单更新)。
+// 环回自指排除:锚点或证据流量指向本机环回(镜/面板等系统设施)
+// 不立,拒收并记环境观察。
+func (env *unitEnv) submitClaimTool() tool.CoreTool {
 	return tool.Build(tool.Spec{
-		Name:        "submit_test_claim",
-		Description: toolDescSubmitTestClaim,
+		Name:        "submit_claim",
+		Description: toolDescSubmitClaim,
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"statement":    map[string]any{"type": "string", "description": "存在性判断:一句话可检验命题(什么可被观察到),写明定位要素使反证单位可独立重放。" + StructuredFieldStyle},
-				"impact":       map[string]any{"type": "string", "description": "影响面判断(该存在性实际造成什么影响,与存在性分开)。一句话写明资产与定位要素," + StructuredFieldStyle},
-				"evidence":     map[string]any{"type": "string", "description": "本次执行取得的支撑证据:须含可独立复核的关键原文(请求/响应片段、命令与其输出);只写结论不算证据"},
-				"asset_id":     map[string]any{"type": "string", "description": "资产锚点:指向的资产节点 ID(必填)"},
-				"vulnclass":    map[string]any{"type": "string", "description": "漏洞类型(可选,如 信息暴露/弱口令/注入)"},
-				"alternatives": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "其他可能原因清单(每条一句话反面假设,如 缓存污染/不可复现/影响高估/归属错误;可选)"},
-			},
-			"required": []string{"statement", "impact", "evidence", "asset_id"},
-		},
-		ReadOnly:    alwaysRO,
-		Permissions: allowReadOnly,
-		Run: func(ctx context.Context, in json.RawMessage, _ *tool.ToolContext) (tool.Result, error) {
-			var args struct {
-				Statement    string   `json:"statement"`
-				Impact       string   `json:"impact"`
-				Evidence     string   `json:"evidence"`
-				AssetID      string   `json:"asset_id"`
-				Vulnclass    string   `json:"vulnclass"`
-				Alternatives []string `json:"alternatives"`
-			}
-			if err := json.Unmarshal(in, &args); err != nil {
-				return tool.Errorf("bad input: " + err.Error()), nil
-			}
-			id, err := env.SubmitTestClaim(ctx, args.Statement, args.Impact, args.Evidence, args.AssetID, args.Vulnclass, args.Alternatives)
-			if err != nil {
-				return tool.Errorf("提交判断失败: " + err.Error()), nil
-			}
-			return tool.Text(fmt.Sprintf("已提交待验证的判断 %s(冻结竞争解释 %d 条),待主宰派独立单位反证", id, len(BuildAlternatives(args.Alternatives)))), nil
-		},
-	})
-}
-
-// SubmitTestClaim 受控入口:候选 TestClaim 节点(status=candidate)+
-// 血缘边 derived_from(声明→发现 Step)+ 资产锚点边 about(声明→资产)。
-// detail 冻结:判定标准与竞争解释清单(仲裁者确认裁决的唯一依据,
-// P2-02)、发现单位与发现步骤(R12 反证独立性核验锚点)、证据(R18:
-// 大证据入 blob,账本存引用)。
-func (env *unitEnv) SubmitTestClaim(ctx context.Context, statement, impact, evidence, assetID, vulnclass string, alternatives []string) (string, error) {
-	if strings.TrimSpace(statement) == "" || strings.TrimSpace(impact) == "" || strings.TrimSpace(evidence) == "" {
-		return "", fmt.Errorf("swarm: 漏洞判断须同时具备存在性判断、影响面判断与证据(分开申报,缺一不可)")
-	}
-	if strings.TrimSpace(assetID) == "" {
-		return "", fmt.Errorf("swarm: 漏洞判断必须锚定具体资产(asset_id)")
-	}
-	if _, err := env.Executor.Store.Node(ctx, env.TaskID, assetID); err != nil {
-		return "", fmt.Errorf("swarm: 判断锚定资产 %s: %w", assetID, err)
-	}
-	// P2-08f 查重:同资产 + 归一后相同的存在性声明 = 重复报同一漏洞,
-	// 直接拒收(防浪费整轮反证);模型读到拒收原因后自行核对已报清单。
-	if dupID, dupStatus, dup := env.duplicateClaim(ctx, assetID, statement); dup {
-		return "", fmt.Errorf("swarm: 与已报判断 %s[%s] 重复:同一资产上同一漏洞不得重复报;若有新证据或不同影响面,改写存在性判断另立,或引用 %s 补充(先可用 list_claims 核对清单)", dupID, dupStatus, dupID)
-	}
-	// P4-25 ① 环回自指排除:锚点是发现型环回资产、或证据流量指向本机
-	// 环回(镜/面板等系统设施),不立判断——无判断节点产生,拒收并记
-	// 环境观察(信息不丢,供排查)。种子/手动资产(本地靶标)是操作者
-	// 声明的目标,不受排除。
-	if a, hit := env.selfRefAssetAnchor(ctx, assetID); hit {
-		env.recordEnvObservation("漏洞判断", a, statement, evidence)
-		return "", fmt.Errorf("swarm: 锚点资产 %s 属本机环回(发现型,测试环境自身),不立判断;观察已记为环境观察供排查,任务目标不受影响", a)
-	}
-	if e, hit := env.selfRefEvidence(ctx, evidence); hit {
-		env.recordEnvObservation("漏洞判断", e, statement, evidence)
-		return "", fmt.Errorf("swarm: 证据流量指向本机环回 %s(测试环境自身,镜等系统设施),不立判断;观察已记为环境观察供排查,任务目标不受影响", e)
-	}
-	alts := BuildAlternatives(alternatives)
-	rawAlts := make([]any, 0, len(alts))
-	for _, a := range alts {
-		rawAlts = append(rawAlts, map[string]any{"id": a.ID, "label": a.Label})
-	}
-	id := shortID("tc")
-	detail := map[string]any{
-		"unit_id":       env.UnitID,
-		"step_id":       env.StepID,
-		"transcript_id": env.TranscriptID,
-		"impact":        impact,
-		"standard":      arbiter.DefaultClaimStandard(),
-		"alternatives":  rawAlts,
-	}
-	if vulnclass != "" {
-		detail["vulnclass"] = vulnclass
-	}
-	if ref, head := env.Executor.Blobs.spill(evidence); ref != "" {
-		detail["evidence_ref"], detail["evidence_head"] = ref, head
-	} else {
-		detail["evidence"] = evidence
-	}
-	events := []rings.Event{
-		{Kind: rings.EventNodeAdded, Actor: "swarm:" + env.UnitID, Payload: rings.NodeAdded{
-			NodeID: id, NodeType: rings.NodeTestClaim, Title: statement, Status: rings.TestClaimCandidate, Detail: detail,
-		}},
-		{Kind: rings.EventEdgeAdded, Actor: "swarm:" + env.UnitID, Payload: rings.EdgeAdded{
-			EdgeType: rings.EdgeDerivedFrom, FromNode: id, ToNode: env.StepID,
-		}},
-		{Kind: rings.EventEdgeAdded, Actor: "swarm:" + env.UnitID, Payload: rings.EdgeAdded{
-			EdgeType: rings.EdgeAbout, FromNode: id, ToNode: assetID,
-		}},
-	}
-	if _, err := env.Executor.Store.Append(ctx, env.TaskID, events...); err != nil {
-		return "", fmt.Errorf("swarm: 待验证判断写入: %w", err)
-	}
-	return id, nil
-}
-
-// submitFalsifyResultTool 反证单位写回结构化结论的受控入口(P2-02
-// 完整版):存在性与影响面分开反证;竞争解释逐条按 ID 写回排除结论;
-// 影响面成立时必须给出四级定级(级别跟影响面证据走的证据侧来源)。
-// 文本结论不构成裁决依据,必须经本入口落结构化记录。ReadOnly:同上,
-// 只写自家账本。
-func (env *unitEnv) submitFalsifyResultTool() tool.CoreTool {
-	return tool.Build(tool.Spec{
-		Name:        "submit_falsify_result",
-		Description: toolDescSubmitFalsifyResult,
-		Schema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"claim_id":          map[string]any{"type": "string", "description": "你正在反证的判断 ID(任务包反证节给出)"},
-				"existence_refuted": map[string]any{"type": "boolean", "description": "是否推翻了存在性判断(true=判断被推翻)"},
-				"impact_supported":  map[string]any{"type": "boolean", "description": "影响面证据是否足以支撑申报的影响"},
-				"impact_level":      map[string]any{"type": "string", "enum": []string{"critical", "high", "medium", "low"}, "description": "影响面定级(impact_supported=true 时必填;定级锚:critical=系统级权限或大量敏感数据;high=管理员或敏感数据访问;medium=普通业务越权或有限敏感信息;low=需苛刻前提才有影响——级别只跟直接影响走)"},
-				"alternatives": map[string]any{
+				"summary":  map[string]any{"type": "string", "description": "简短说明实际问题与影响对象，必要的访问前提与结论范围保留；对象由 asset_id 定位，精确请求、载荷与完整响应由 evidence_refs 提供。" + StructuredFieldStyle},
+				"severity": map[string]any{"type": "string", "enum": []string{"critical", "high", "medium", "low"}, "description": "只为已坐实且有实际影响的漏洞定级;" + SeverityAnchor},
+				"evidence_refs": map[string]any{
 					"type":        "array",
-					"description": "逐条其他可能原因的结论(任务包反证节列出的 ID)",
-					"items": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"id":      map[string]any{"type": "string", "description": "解释 ID(任务包反证节给出的编号)"},
-							"refuted": map[string]any{"type": "boolean", "description": "本轮是否排除了该解释"},
-						},
-						"required": []string{"id", "refuted"},
-					},
+					"description": "证明证据引用列表:工具结果里 exchange= 行给出的交换编号;通常恰 1 条主证明——直接证明结论的那条;多步组合链按复现顺序逐环排列每环引用",
+					"items":       map[string]any{"type": "string", "description": "交换编号(如 ms-ab12cd.3)"},
 				},
-				"evidence": map[string]any{"type": "string", "description": "本轮反证取得的证据:须含可独立复核的关键原文(请求/响应片段、命令与其输出),只写结论不参与机器判定"},
-				"evidence_exchanges": map[string]any{
-					"type": "array", "description": "结论所依据的交换编号(工具结果里 exchange= 行给出的;结论所依据的交换必须附引用;经 bash 通道取得、没有编号的证据可留空,系统按证据文本中的地址回查)",
-					"items": map[string]any{"type": "string", "description": "交换编号(如 ms-ab12cd.3)"},
-				},
-				"note": map[string]any{"type": "string", "description": "备注(可选;不参与机器判定)"},
+				"proving_marker":    map[string]any{"type": "string", "description": "关键证明物字符串:从主证据响应体原文里抄的关键值(拿到的手机号、返回的敏感字段值等)——机器按子串匹配核验它出现在证据响应体中"},
+				"countercheck_note": map[string]any{"type": "string", "description": "反证自查结果自由文本:交前自己再想想(缓存假象?权限本来就有?环境因素?)——做了什么检查、为什么没翻车,如实写"},
+				"impact_note":       map[string]any{"type": "string", "description": "影响列点(可选;可列 1~3 条,每条一行)。三规矩:只写有依据的;有几条写几条;猜测要标明是猜测。照实进报告"},
+				"asset_id":          map[string]any{"type": "string", "description": "资产锚点:指向的资产节点 ID"},
+				"vulnclass":         map[string]any{"type": "string", "description": "漏洞类型(可选,如 信息暴露/弱口令/注入)"},
+				"claim_id":          map[string]any{"type": "string", "description": "补考重交时必带:机器核验未过反馈里给出的交卷单号——同单补做后重交(上限 1 次);新交卷不填"},
+				"source_refs":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "实际依据的资产、意图、已确认事实或已确认漏洞编号。只记录来源，不替代证明证据；没有明确引用时省略"},
 			},
-			"required": []string{"claim_id", "existence_refuted", "impact_supported", "evidence"},
+			"required": []string{"summary", "severity", "evidence_refs", "proving_marker", "countercheck_note", "asset_id"},
 		},
 		ReadOnly:    alwaysRO,
 		Permissions: allowReadOnly,
 		Run: func(ctx context.Context, in json.RawMessage, _ *tool.ToolContext) (tool.Result, error) {
 			var args struct {
-				ClaimID           string            `json:"claim_id"`
-				ExistenceRefuted  bool              `json:"existence_refuted"`
-				ImpactSupported   bool              `json:"impact_supported"`
-				ImpactLevel       string            `json:"impact_level"`
-				Alternatives      []rings.AltResult `json:"alternatives"`
-				Evidence          string            `json:"evidence"`
-				EvidenceExchanges []string          `json:"evidence_exchanges"`
-				Note              string            `json:"note"`
+				Summary          string   `json:"summary"`
+				Severity         string   `json:"severity"`
+				EvidenceRefs     []string `json:"evidence_refs"`
+				ProvingMarker    string   `json:"proving_marker"`
+				CountercheckNote string   `json:"countercheck_note"`
+				ImpactNote       string   `json:"impact_note"`
+				AssetID          string   `json:"asset_id"`
+				Vulnclass        string   `json:"vulnclass"`
+				ClaimID          string   `json:"claim_id"`
+				SourceRefs       []string `json:"source_refs"`
 			}
 			if err := json.Unmarshal(in, &args); err != nil {
 				return tool.Errorf("bad input: " + err.Error()), nil
 			}
-			if err := env.SubmitFalsifyResult(ctx, args.ClaimID, args.ExistenceRefuted, args.ImpactSupported,
-				args.ImpactLevel, args.Alternatives, args.Evidence, args.EvidenceExchanges, args.Note); err != nil {
-				return tool.Errorf("写回反证结论失败: " + err.Error()), nil
+			id, check, err := env.SubmitClaim(ctx, args.Summary, args.Severity, args.EvidenceRefs, args.ProvingMarker,
+				args.CountercheckNote, args.ImpactNote, args.AssetID, args.Vulnclass, args.ClaimID, args.SourceRefs...)
+			if err != nil {
+				return tool.Errorf("交卷失败: " + err.Error()), nil
 			}
-			return tool.Text("反证结论已记录(testclaim.record),待仲裁者机器判定"), nil
+			return tool.Text(submitClaimFeedback(id, check)), nil
 		},
 	})
 }
 
-// SubmitFalsifyResult 受控入口:反证结论落 testclaim.record(falsify_result)。
-// 入口校验:声明在反证中、本 Step 确为该声明的反证 Step(防跨步骤伪造)、
-// R12 反证单位 ≠ 发现单位(发现者不得自证)、本轮尚未写回(每轮一次)、
-// 解释 ID ⊆ 冻结清单、影响面定级与 impact_supported 自洽(成立必填、
-// 不成立不得携带)。轮次号从 step.detail.round 机器填写(模型无通道)。
-// 证据经内容寻址落 blob(R18),账本只存引用与截头;仲裁者求值只吃
-// 布尔、逐条解释结论与定级词汇,Note 文本不进裁决(契约④)。
-// P4-73 ①:证据交换引用(evidenceExchanges)只收不拦——修剪去空去重后
-// 随结论入账,命中与否由确认门槛校验(仲裁确认路径)解析;提交侧不
-// 因引用缺失或未命中拒绝(回查兜底在收割侧)。
-func (env *unitEnv) SubmitFalsifyResult(ctx context.Context, claimID string, existenceRefuted, impactSupported bool,
-	impactLevel string, alts []rings.AltResult, evidence string, evidenceExchanges []string, note string) error {
-	if strings.TrimSpace(claimID) == "" {
-		return fmt.Errorf("swarm: 反证结论必须指明 claim_id")
+// submitClaimFeedback 交卷工具反馈(机器核验结果注入交卷会话;交卷即查
+// 未接(无在跑主宰循环)时按"待机器核验"回话——收割兜底轮重查)。
+func submitClaimFeedback(id string, check *ClaimCheckResult) string {
+	if check == nil {
+		return fmt.Sprintf("交卷单 %s 已记录(六字段齐全,待机器核验)", id)
 	}
-	if strings.TrimSpace(evidence) == "" {
-		return fmt.Errorf("swarm: 反证结论必须附本轮证据")
+	switch check.Status {
+	case "confirmed":
+		return fmt.Sprintf("交卷单 %s 机器核验通过,已确认", id)
+	case "insufficient":
+		return fmt.Sprintf("交卷单 %s 补考仍未通过:%s。已记证据不足,本条到此为止", id, check.Reason)
+	default:
+		return fmt.Sprintf("交卷单 %s 机器核验未过:%s。缺什么补什么,补做后重交:submit_claim 带 claim_id=%s,六字段重新写全(补考只有一次)", id, check.Reason, id)
 	}
-	claim, err := env.Executor.Store.Node(ctx, env.TaskID, claimID)
-	if err != nil {
-		return fmt.Errorf("swarm: 反证判断 %s: %w", claimID, err)
+}
+
+// SubmitClaim 交卷受控入口(P5-01②;P5-02 补考重交与交卷即查):
+// 声明 TestClaim 节点(status=candidate)+ 血缘边 derived_from
+// (声明→执行意图 Step)+ 资产锚点边 about(声明→资产)+ 交卷单事件
+// testclaim.record(submit)一批落账;落账后同步触发机器三查(Executor
+// 的 ClaimCheck 钩子,毫秒-秒级,结果随工具反馈回注入本会话——三查
+// 不过即补考反馈)。claimID 非空为补考重交:同单第二次交换单(不查重
+// ——同单更新;上限 1 次,战役内已有两单即拒)。detail 冻结:判定
+// 标准(R2 契约②,创建时冻结变更须走新事件——查三依据)、自报级别、
+// 交卷单位与步骤(血缘可查)。入口校验:六字段齐全(impact_note 可空)、
+// 级别词表受限、evidence_refs 非空、资产锚点存在;引用命中与
+// proving_marker 核验归机器三查,提交侧只收不拦(直连形态可引用 URL
+// 字符串,查一回查)。
+func (env *unitEnv) SubmitClaim(ctx context.Context, summary, severity string, evidenceRefs []string,
+	provingMarker, countercheckNote, impactNote, assetID, vulnclass, claimID string, sourceRefs ...string) (string, *ClaimCheckResult, error) {
+	if strings.TrimSpace(summary) == "" {
+		return "", nil, fmt.Errorf("swarm: 交卷单缺 summary(漏洞一句话:本质+影响对象)")
 	}
-	if claim.Type != rings.NodeTestClaim {
-		return fmt.Errorf("swarm: 节点 %s 是 %s 不是 testclaim", claimID, claim.Type)
+	severity = strings.TrimSpace(strings.ToLower(severity))
+	if severity == "none" {
+		return "", nil, fmt.Errorf("信息性观察不立漏洞。请用submit_candidate_fact提交实际观察及证据；不要改级别重交。普通核对完成后正常结束意图，无需交漏洞单")
 	}
-	if claim.Status != rings.TestClaimTesting {
-		return fmt.Errorf("swarm: 判断 %s 当前状态 %s,不在反证中(状态机拒绝写回)", claimID, claim.Status)
+	if !rings.IsValidSubmitSeverity(severity) {
+		return "", nil, fmt.Errorf("swarm: 交卷自报级别必须是 critical|high|medium|low 之一,得到 %q", severity)
 	}
-	step, err := env.Executor.Store.Node(ctx, env.TaskID, env.StepID)
-	if err != nil {
-		return fmt.Errorf("swarm: 反证步骤 %s: %w", env.StepID, err)
-	}
-	if bound, _ := step.Detail["testclaim_id"].(string); bound != claimID {
-		return fmt.Errorf("swarm: 步骤 %s 不是判断 %s 的反证步骤(绑定 %q)", env.StepID, claimID, bound)
-	}
-	if discoverer, _ := claim.Detail["unit_id"].(string); discoverer == env.UnitID {
-		return fmt.Errorf("swarm: R12 发现者不得自证:判断 %s 由本单位(%s)发现,反证必须由不同单位执行", claimID, env.UnitID)
-	}
-	// 影响面定级自洽:成立必填四级之一;不成立不得携带(级别只来自影响面证据)。
-	impactLevel = strings.TrimSpace(strings.ToLower(impactLevel))
-	if impactSupported {
-		switch impactLevel {
-		case "critical", "high", "medium", "low":
-		default:
-			return fmt.Errorf("swarm: impact_supported=true 时必须给出四级影响面定级(critical|high|medium|low),得到 %q", impactLevel)
-		}
-	} else if impactLevel != "" {
-		return fmt.Errorf("swarm: impact_supported=false 时不得携带 impact_level(级别只跟影响面证据走)")
-	}
-	// 解释结论:ID 必须落在冻结清单内(竞争解释创建时冻结,反证不得增删)。
-	frozen := map[string]bool{}
-	if raw, ok := claim.Detail["alternatives"].([]any); ok {
-		for _, item := range raw {
-			if m, ok := item.(map[string]any); ok {
-				if id, _ := m["id"].(string); id != "" {
-					frozen[id] = true
-				}
-			}
-		}
-	}
+	refs := make([]string, 0, len(evidenceRefs))
 	seen := map[string]bool{}
-	for _, a := range alts {
-		if !frozen[a.ID] {
-			return fmt.Errorf("swarm: 解释结论 %q 不在判断 %s 的冻结清单内(竞争解释不得增删)", a.ID, claimID)
-		}
-		if seen[a.ID] {
-			return fmt.Errorf("swarm: 解释结论 %q 重复写回", a.ID)
-		}
-		seen[a.ID] = true
-	}
-	// 轮次号与每轮一次写回:轮次取 step.detail.round(机器填写)。
-	round, _ := step.Detail["round"].(float64)
-	rec := rings.TestClaimRecord{
-		ClaimID: claimID, StepID: env.StepID, UnitID: env.UnitID, Type: rings.TestClaimRecFalsify,
-		Round: int(round), ExistenceRefuted: existenceRefuted, ImpactSupported: impactSupported,
-		ImpactLevel: impactLevel, Alternatives: alts,
-		Note: strings.TrimSpace(note),
-	}
-	// P4-73 ①:交换引用只收不拦(修剪去空去重,保序)。
-	seenEx := map[string]bool{}
-	for _, id := range evidenceExchanges {
-		id = strings.TrimSpace(id)
-		if id == "" || seenEx[id] {
+	for _, r := range evidenceRefs {
+		r = strings.TrimSpace(r)
+		if r == "" || seen[r] {
 			continue
 		}
-		seenEx[id] = true
-		rec.EvidenceExchanges = append(rec.EvidenceExchanges, id)
+		seen[r] = true
+		refs = append(refs, r)
 	}
+	if len(refs) == 0 {
+		return "", nil, fmt.Errorf("swarm: 交卷单缺 evidence_refs(证明证据引用:工具结果里 exchange= 行给出的交换编号)")
+	}
+	if strings.TrimSpace(provingMarker) == "" {
+		return "", nil, fmt.Errorf("swarm: 交卷单缺 proving_marker(从证据原文里抄的关键证明物)")
+	}
+	if strings.TrimSpace(countercheckNote) == "" {
+		return "", nil, fmt.Errorf("swarm: 交卷单缺 countercheck_note(反证自查结果:做了什么检查、为什么没翻车)")
+	}
+	if strings.TrimSpace(assetID) == "" {
+		return "", nil, fmt.Errorf("swarm: 交卷必须锚定具体资产(asset_id)")
+	}
+	if _, err := env.Executor.Store.Node(ctx, env.TaskID, assetID); err != nil {
+		return "", nil, fmt.Errorf("swarm: 交卷锚定资产 %s: %w", assetID, err)
+	}
+	retake := strings.TrimSpace(claimID)
+	var addedSources []rings.Event
+	if retake != "" {
+		// 补考重交:同单更新——声明在候选态、战役内恰一单(上限 1 次)。
+		n, err := env.Executor.Store.Node(ctx, env.TaskID, retake)
+		if err != nil {
+			return "", nil, fmt.Errorf("swarm: 补考重交查交卷单 %s: %w", retake, err)
+		}
+		if n.Type != rings.NodeTestClaim {
+			return "", nil, fmt.Errorf("swarm: 节点 %s 是 %s 不是交卷单", retake, n.Type)
+		}
+		if n.Status != rings.TestClaimCandidate {
+			return "", nil, fmt.Errorf("swarm: 交卷单 %s 当前状态 %s,只有机器核验未过待补考的交卷单可重交", retake, n.Status)
+		}
+		submits, reopened, err := env.campaignSubmission(ctx, retake)
+		if err != nil {
+			return "", nil, err
+		}
+		if submits >= 2 {
+			return "", nil, fmt.Errorf("swarm: 交卷单 %s 补考已用(上限 1 次),不得再交", retake)
+		}
+		if submits == 0 && !reopened {
+			return "", nil, fmt.Errorf("swarm: 交卷单 %s 战役内无交换单,不是补考重交形态", retake)
+		}
+		if len(sourceRefs) > 0 {
+			existing, err := env.Executor.Store.Edges(ctx, env.TaskID, rings.EdgeSourcedFrom)
+			if err != nil {
+				return "", nil, err
+			}
+			known := map[string]bool{}
+			for _, e := range existing {
+				if e.From == retake {
+					known[e.To] = true
+				}
+			}
+			var fresh []string
+			for _, ref := range sourceRefs {
+				if !known[strings.TrimSpace(ref)] {
+					if !reopened || submits != 0 {
+						return "", nil, fmt.Errorf("本轮补做沿用首次交卷的来源引用，新增依据须重开后提交")
+					}
+					fresh = append(fresh, ref)
+				}
+			}
+			addedSources, err = env.Executor.Store.SourceEvents(ctx, env.TaskID, retake, "swarm:"+env.UnitID, fresh)
+			if err != nil {
+				return "", nil, err
+			}
+		}
+	} else {
+		// 新交卷查重(P2-08f 既有):同资产 + 归一后相同的声明 = 重复交
+		// 同一漏洞,直接拒收;模型读到拒收原因后自行核对已报清单。
+		if dupID, dupStatus, dup := env.duplicateClaim(ctx, assetID, summary); dup {
+			return "", nil, fmt.Errorf("swarm: 与已报漏洞 %s[%s] 重复:同一资产上同一漏洞不得重复交；先用 list_claims 核对已有结果，补做按反馈使用 claim_id 重交", dupID, dupStatus)
+		}
+	}
+	// P4-25 ① 环回自指排除(既有):锚点是发现型环回资产、或证据引用
+	// 命中的交换指向本机环回(镜/面板等系统设施),不立声明——拒收并
+	// 记环境观察。
+	if a, hit := env.selfRefAssetAnchor(ctx, assetID); hit {
+		env.recordEnvObservation("交卷", a, summary, provingMarker)
+		return "", nil, fmt.Errorf("swarm: 锚点资产 %s 属本机环回(发现型,测试环境自身),不立漏洞;观察已记为环境观察供排查,任务目标不受影响", a)
+	}
+	if e, hit := env.selfRefEvidenceRef(ctx, refs); hit {
+		env.recordEnvObservation("交卷", e, summary, strings.Join(refs, ","))
+		return "", nil, fmt.Errorf("swarm: 证据引用指向本机环回 %s(测试环境自身,镜等系统设施),不立漏洞;观察已记为环境观察供排查,任务目标不受影响", e)
+	}
+	var events []rings.Event
+	if retake == "" {
+		id := shortID("tc")
+		detail := map[string]any{
+			"unit_id":       env.UnitID,
+			"step_id":       env.StepID,
+			"transcript_id": env.TranscriptID,
+			"severity":      severity,
+			"standard":      arbiter.DefaultClaimStandard(),
+		}
+		if vulnclass != "" {
+			detail["vulnclass"] = vulnclass
+		}
+		events = []rings.Event{
+			{Kind: rings.EventNodeAdded, Actor: "swarm:" + env.UnitID, Payload: rings.NodeAdded{
+				NodeID: id, NodeType: rings.NodeTestClaim, Title: summary, Status: rings.TestClaimCandidate, Detail: detail,
+			}},
+			{Kind: rings.EventEdgeAdded, Actor: "swarm:" + env.UnitID, Payload: rings.EdgeAdded{
+				EdgeType: rings.EdgeDerivedFrom, FromNode: id, ToNode: env.StepID,
+			}},
+			{Kind: rings.EventEdgeAdded, Actor: "swarm:" + env.UnitID, Payload: rings.EdgeAdded{
+				EdgeType: rings.EdgeAbout, FromNode: id, ToNode: assetID,
+			}},
+		}
+		claimID = id
+		sources, err := env.Executor.Store.SourceEvents(ctx, env.TaskID, id, "swarm:"+env.UnitID, sourceRefs)
+		if err != nil {
+			return "", nil, err
+		}
+		events = append(events, sources...)
+	}
+	if retake != "" {
+		derived, err := env.Executor.Store.Edges(ctx, env.TaskID, rings.EdgeDerivedFrom)
+		if err != nil {
+			return "", nil, err
+		}
+		linked := false
+		for _, edge := range derived {
+			if edge.From == claimID && edge.To == env.StepID {
+				linked = true
+				break
+			}
+		}
+		if !linked {
+			events = append(events, rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:" + env.UnitID, Payload: rings.EdgeAdded{EdgeType: rings.EdgeDerivedFrom, FromNode: claimID, ToNode: env.StepID}})
+		}
+	}
+	events = append(events, addedSources...)
+	// 新交与重交共用交换单；后者只补真实执行血缘，不重建节点。
+	events = append(events, rings.Event{Kind: rings.EventTestClaimRecord, Actor: "swarm:" + env.UnitID, Payload: rings.TestClaimRecord{
+		ClaimID: claimID, StepID: env.StepID, UnitID: env.UnitID, Type: rings.TestClaimRecSubmit,
+		Summary: strings.TrimSpace(summary), Severity: severity, EvidenceRefs: refs,
+		ProvingMarker: strings.TrimSpace(provingMarker), CountercheckNote: strings.TrimSpace(countercheckNote),
+		ImpactNote: strings.TrimSpace(impactNote),
+	}})
+	if _, err := env.appendBusiness(ctx, events...); err != nil {
+		return "", nil, fmt.Errorf("swarm: 交卷单写入: %w", err)
+	}
+	// 交卷即查(P5-02②):交卷事件落账后同步触发机器三查(毫秒-秒级,
+	// 不经收割轮);判定与落账在钩子侧(主宰循环),结果回传本会话。
+	// 钩子未接(无在跑循环)按待核验回话,收割兜底轮重查;钩子失败
+	// 如实回错——交换单已入账,单位按待核验处理(勿重复交卷)。
+	check, cerr := env.Executor.claimCheck(ctx, env.TaskID, claimID)
+	if cerr != nil {
+		return claimID, nil, fmt.Errorf("swarm: 交卷单 %s 已记录,机器核验暂未完成(%s):按待核验处理,勿重复交卷", claimID, cerr.Error())
+	}
+	return claimID, check, nil
+}
+
+// campaignSubmitCount 声明当前战役(reopen 清边界)内的交换单数
+// (补考上限判定)。
+func (env *unitEnv) campaignSubmission(ctx context.Context, claimID string) (int, bool, error) {
 	evs, err := env.Executor.Store.Events(ctx, env.TaskID, 0, 0)
 	if err != nil {
-		return fmt.Errorf("swarm: 查反证写回历史: %w", err)
+		return 0, false, err
 	}
+	campaignRev := int64(0)
+	n := 0
 	for _, ev := range evs {
 		if ev.Kind != rings.EventTestClaimRecord {
 			continue
 		}
-		var prev rings.TestClaimRecord
-		if err := json.Unmarshal(ev.Payload, &prev); err != nil {
-			return fmt.Errorf("swarm: 解码历史反证记录: %w", err)
+		var r rings.TestClaimRecord
+		if json.Unmarshal(ev.Payload, &r) != nil || r.ClaimID != claimID {
+			continue
 		}
-		if prev.Type == rings.TestClaimRecFalsify && prev.ClaimID == claimID && prev.Round == rec.Round {
-			return fmt.Errorf("swarm: 判断 %s 第 %d 轮已写回过结论,每轮只许一次(旧轮结论不得改写,R1)",
-				claimID, rec.Round)
-		}
-	}
-	if ref, head := env.Executor.Blobs.spill(evidence); ref != "" {
-		rec.EvidenceRef, rec.EvidenceHead = ref, head
-	} else {
-		rec.EvidenceHead = clipLine(evidence, 2048)
-	}
-	events := []rings.Event{{
-		Kind: rings.EventTestClaimRecord, Actor: "swarm:" + env.UnitID, Payload: rec,
-	}}
-	// P4-64 ①(问题清单 #82):反证轮人话三段逐轮同链生成——与机器记录
-	// 同批落账(钩子侧失败回退拼句,不阻塞本轮入账;无在跑主宰循环时
-	// 不落人话,读侧退机器层)。
-	if env.Executor.RoundHumanGen != nil {
-		if rh := env.Executor.RoundHumanGen(ctx, env.TaskID, claimID, &rec); rh != nil {
-			events = append(events, rings.Event{
-				Kind: rings.EventClaimRoundHuman, Actor: "overmind", Payload: *rh,
-			})
+		switch r.Type {
+		case rings.TestClaimRecReopen:
+			campaignRev = ev.Revision
+			n = 0
+		case rings.TestClaimRecSubmit:
+			if ev.Revision > campaignRev {
+				n++
+			}
 		}
 	}
-	if _, err := env.Executor.Store.Append(ctx, env.TaskID, events...); err != nil {
-		return fmt.Errorf("swarm: 反证结论写入: %w", err)
-	}
-	return nil
+	return n, campaignRev > 0, nil
 }
 
-// toolset 工具全集(Q7 边界的全集侧):bash 通道 + 只读探测(TCP/HTTP)
-// + 只读辅助(P3-03:read 本机文件 / web_search 外网搜索 / web_fetch
-// 外网取文)+ 只读查重(list_claims,P2-08f)+ 五个受控回流入口。
-// 经 RoE 过滤后进入会话。复测单位(P3-06)走受限集(retestToolset:
-// 复测不是发现通道)。
 func (env *unitEnv) toolset() []tool.CoreTool {
 	if env.retest != nil {
 		return env.retestToolset()
@@ -1495,11 +1284,14 @@ func (env *unitEnv) toolset() []tool.CoreTool {
 		env.webSearchTool(),
 		env.webFetchTool(),
 		env.listClaimsTool(),
+		env.searchFactsTool(),
+		env.listAssetsTool(),
+		env.searchTrailsTool(),
+		TrafficSearchTool(env.Executor.Store, env.TaskID),
+		TrafficGetTool(env.Executor.Store, env.Executor.Blobs, env.TaskID),
+		TrafficBlobTool(env.Executor.Store, env.Executor.Blobs, env.TaskID),
 		env.submitCandidateFactTool(),
-		env.submitHypothesisTool(),
-		env.submitHypothesisResultTool(),
-		env.submitTestClaimTool(),
-		env.submitFalsifyResultTool(),
+		env.submitClaimTool(),
 	}
 }
 

@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { iconOf } from "@/components/icons";
 import { ClosureDialog } from "@/components/closure-dialog";
 import { CommandPalette } from "@/components/command-palette";
+import { EmptyState } from "@/components/empty-state";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { ThemeMenu } from "@/components/theme-menu";
 import { SettingsPage } from "@/views/settings-page";
@@ -31,7 +32,6 @@ import {
   NAV_ITEMS,
   ROUTES,
   defaultTaskTab,
-  isTaskTabEnabled,
 } from "@/lib/nav";
 import { cn } from "@/lib/utils";
 
@@ -86,6 +86,7 @@ function readStoredTask() {
 function parseHash() {
   const raw = location.hash.replace(/^#\/?/, "");
   const [path, query] = raw.split("?");
+  if (!path) return { kind: "flat", id: "tasks" };
   const parts = path.split("/").filter(Boolean);
   if (parts[0] === "task") {
     const params = new URLSearchParams(query || "");
@@ -102,7 +103,7 @@ function parseHash() {
   if (ROUTES.includes(path)) return { kind: "flat", id: path };
   // P2-06g 前的平铺路由(四页已迁入任务空间),由壳层效应重定向。
   if (LEGACY_TASK_ROUTES.includes(path)) return { kind: "legacy", id: path };
-  return { kind: "flat", id: "tasks" };
+  return { kind: "missing" };
 }
 
 function useHashRoute() {
@@ -143,7 +144,7 @@ function Shell() {
   React.useEffect(() => {
     if (route.kind === "legacy") {
       location.hash = taskID ? `/task/${taskID}/${route.id}` : "/tasks";
-    } else if (route.kind === "task" && (!route.taskID || !isTaskTabEnabled(route.tab))) {
+    } else if (route.kind === "task" && (!route.taskID || !route.tab)) {
       location.hash = route.taskID
         ? `/task/${route.taskID}/${defaultTaskTab()}`
         : "/tasks";
@@ -237,6 +238,7 @@ function Shell() {
   }, []);
 
   const FlatPage = PAGE_OF[route.kind === "flat" ? route.id : "tasks"] || TasksPage;
+  const categoryTitle = NAV_ITEMS.find(item => item.id === route.id)?.title || "任务";
 
   return (
     <div className="flex min-h-screen">
@@ -244,14 +246,15 @@ function Shell() {
           层次靠表面色阶不用描边、hover 所在层提亮、当前项克制强调、
           分组靠留白不靠分割线 */}
       <aside
+        data-collapsed={collapsed}
         className={cn(
-          "sticky top-0 flex h-screen shrink-0 flex-col bg-card transition-[width] duration-200",
+          "app-sidebar sticky top-0 flex h-dvh shrink-0 flex-col bg-card transition-[width] duration-200",
           collapsed ? "w-14" : "w-56"
         )}
       >
-        <div className="flex items-center gap-2 px-4 py-5">
+        <div className={cn("flex h-14 items-center gap-2", collapsed ? "px-2" : "px-4")}>
           {!collapsed && (
-            <span className="flex items-center gap-2 font-semibold tracking-tight">
+            <span className="sidebar-expanded flex items-center gap-2 text-sm font-semibold tracking-tight">
               {/* 品牌徽标(P4-26 审核迭代 2):与 favicon 同源(public/icon.svg
                   镰刀徽标),替代原通用骷髅线形图标 */}
               {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -293,10 +296,11 @@ function Shell() {
               // 待批资产任务红点(P4-44 ③,与受阻同款形态):渗透任务有
               // 待批资产(范围外发现,等放行/忽略)的任务数——处理即消。
               const scopeTasks =
-                item.id === "tasks" ? list.filter((t) => t.pending_scope > 0).length : 0;
+                item.id === "tasks" ? list.filter((t) => t.pending_approvals > 0).length : 0;
               return (
                 <button
                   key={item.id}
+                  aria-label={item.title}
                   className={cn(
                     "relative flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors duration-150 cursor-pointer",
                     active
@@ -330,11 +334,11 @@ function Shell() {
                       </span>
                     )}
                   </span>
-                  {!collapsed && <span className="truncate">{item.title}</span>}
+                  {!collapsed && <span className="sidebar-expanded truncate">{item.title}</span>}
                   {/* 受阻任务计数:紧跟词条之后(展开态) */}
                   {!collapsed && blockedTasks > 0 && (
                     <span
-                      className="-ml-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold text-primary-foreground"
+                      className="sidebar-expanded -ml-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold text-primary-foreground"
                       title={`受阻任务 ${blockedTasks} 个`}
                     >
                       {blockedTasks}
@@ -343,7 +347,7 @@ function Shell() {
                   {/* 待批资产任务计数(P4-44):受阻计数之后(展开态) */}
                   {!collapsed && scopeTasks > 0 && (
                     <span
-                      className="-ml-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold text-primary-foreground"
+                      className="sidebar-expanded -ml-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold text-primary-foreground"
                       title={`待批资产任务 ${scopeTasks} 个`}
                     >
                       {scopeTasks}
@@ -356,7 +360,7 @@ function Shell() {
         </nav>
 
         {/* 健康状态(年轮账本连通性)与实时推送状态——留白分组,不用分割线 */}
-        <div className="flex flex-col gap-1.5 px-5 pb-4 text-xs text-muted-foreground">
+        <div className="sidebar-footer flex flex-col gap-1.5 px-5 pb-4 text-xs text-muted-foreground">
           <span className="flex items-center gap-2">
             <span
               className={cn(
@@ -364,17 +368,17 @@ function Shell() {
                 healthy ? "bg-status-success" : "bg-status-danger"
               )}
             />
-            {!collapsed && (healthy ? "年轮账本连通" : "后端未连通")}
+            {!collapsed && <span className="sidebar-expanded">{healthy ? "年轮账本连通" : "后端未连通"}</span>}
           </span>
           {!collapsed && liveStatus !== "open" && (
             <span className="flex items-center gap-2">
               <span className="size-2 rounded-full bg-status-warning" />
-              实时推送未连接
+              <span className="sidebar-expanded">实时推送未连接</span>
             </span>
           )}
           {/* 版本号(P4-26 ④):小号次级色纯显示,不可点——与运行日志头、
               诊断包同源(ldflags 注入) */}
-          {!collapsed && version && <span title="GhostReaper">版本 {version}</span>}
+          {!collapsed && version && <span className="sidebar-expanded" title="GhostReaper">版本 {version}</span>}
           {/* 退出登录(P3-09 面板认证):吊销本次会话并回登录页 */}
           <button
             className="flex items-center gap-2 pt-1 text-left cursor-pointer hover:text-foreground transition-colors duration-150"
@@ -385,7 +389,7 @@ function Shell() {
             }}
           >
             {React.createElement(iconOf("logOut"), { className: "size-3.5 shrink-0" })}
-            {!collapsed && "退出登录"}
+            {!collapsed && <span className="sidebar-expanded">退出登录</span>}
           </button>
         </div>
       </aside>
@@ -393,9 +397,9 @@ function Shell() {
       {/* 主区 */}
       <div className="flex min-w-0 flex-1 flex-col">
         {/* 顶栏 */}
-        <header className="sticky top-0 z-40 flex items-center gap-3 border-b bg-background/95 px-6 py-3 backdrop-blur">
-          <div className="flex items-center gap-2 text-sm">
-            {current ? (
+        <header className="app-header sticky top-0 z-40 flex h-14 shrink-0 items-center gap-3 border-b bg-background/95 px-4 backdrop-blur sm:px-6">
+          <div className="flex min-w-0 items-center gap-2 text-sm">
+            {route.kind === "task" && current ? (
               <>
                 <span className="max-w-96 truncate font-medium" title={current.title || current.id}>
                   {current.title || current.id}
@@ -407,7 +411,7 @@ function Shell() {
                 {/* P2-14b①:顶栏不再常显任务 ID,悬停标题可见完整标识 */}
               </>
             ) : (
-              <span className="text-muted-foreground">未选择任务</span>
+              <span className="font-medium">{categoryTitle}</span>
             )}
           </div>
           <div className="ml-auto flex items-center gap-2">
@@ -438,13 +442,13 @@ function Shell() {
 
         <main
           className={cn(
-            "mx-auto w-full flex-1 px-8 py-8",
+            "app-content mx-auto w-full min-w-0 flex-1 px-4 py-4 sm:px-6",
             // 页面壳(8.4):平铺页内容区 1200px 居中,宽屏不满铺;任务
             // 空间整体铺满视口(每任务全家桶同宽)。
             route.kind === "task" ? "max-w-none" : "max-w-[1440px]"
           )}
         >
-          {route.kind === "task" ? (
+          {route.kind === "missing" ? <EmptyState icon="circleHelp" title="页面不存在" action={{ label: "回任务列表", href: "/tasks" }} /> : route.kind === "task" ? (
             <TaskSpace tasks={tasks} taskID={route.taskID} tab={route.tab} focus={route.focus} unit={route.unit} />
           ) : (
             // 页面级渲染错误边界(P4-60 ④):页面崩降级为区块错误,侧栏

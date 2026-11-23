@@ -46,16 +46,16 @@ func TestServerTaskSeedFormAndAssetTree(t *testing.T) {
 	h := srv.Handler()
 	ctx := context.Background()
 
-	// 种子表单:四层链(domain → subdomain → host → service)+ 独立
-	// leak_info,共 5 资产 3 条 sub_of。
+	// 域名/子域和IP/服务各自成层级；解析不冒充父子。
+	// 独立显式资料种子保留，共5资产2条sub_of。
 	var created map[string]any
 	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam",
 		"id":"seed-form","title":"资产同步 v1 验证","goals":["种子目标"],
 		"assets":[
 			{"class":"domain","title":"example.com"},
 			{"class":"subdomain","title":"www.example.com","parent":"example.com"},
-			{"class":"host","title":"web-01","parent":"www.example.com"},
-			{"class":"service","title":"http://10.10.0.5:8080","parent":"web-01"},
+			{"class":"host","title":"192.0.2.1"},
+			{"class":"service","title":"http://192.0.2.1:8080","parent":"192.0.2.1"},
 			{"class":"leak_info","title":"git 仓库暴露"}
 		]}`, http.StatusOK, &created)
 	if created["id"] != "seed-form" {
@@ -64,20 +64,19 @@ func TestServerTaskSeedFormAndAssetTree(t *testing.T) {
 
 	// 资产树 API:节点字段 + 层级边(child → parent)。
 	type node struct {
-		ID         string `json:"id"`
-		Title      string `json:"title"`
-		Class      string `json:"class"`
-		Status     string `json:"status"`
-		Covered    bool   `json:"covered"`
-		FactCount  int    `json:"fact_count"`
-		Hypothesis int    `json:"hypothesis_count"`
+		ID        string `json:"id"`
+		Title     string `json:"title"`
+		Class     string `json:"class"`
+		Status    string `json:"status"`
+		Covered   bool   `json:"covered"`
+		FactCount int    `json:"fact_count"`
 	}
 	var tree struct {
 		Assets []node                      `json:"assets"`
 		Tree   []struct{ From, To string } `json:"hierarchy"`
 	}
 	get(t, h, "/api/tasks/seed-form/assets", http.StatusOK, &tree)
-	if len(tree.Assets) != 5 || len(tree.Tree) != 3 {
+	if len(tree.Assets) != 5 || len(tree.Tree) != 2 {
 		t.Fatalf("资产树不符: %+v", tree)
 	}
 	byTitle := map[string]node{}
@@ -85,15 +84,15 @@ func TestServerTaskSeedFormAndAssetTree(t *testing.T) {
 		byTitle[a.Title] = a
 	}
 	for _, want := range []struct{ title, class string }{
-		{"example.com", "domain"}, {"www.example.com", "subdomain"},
-		{"web-01", "host"}, {"http://10.10.0.5:8080", "service"},
+		{"example.com", "domain"}, {"www.example.com", "domain"},
+		{"192.0.2.1", "host"}, {"http://192.0.2.1:8080", "service"},
 		{"git 仓库暴露", "leak_info"},
 	} {
 		got := byTitle[want.title]
 		if got.ID == "" || got.Class != want.class || got.Status != "active" {
 			t.Fatalf("资产 %q 投影不符: %+v", want.title, got)
 		}
-		if got.Covered || got.FactCount != 0 || got.Hypothesis != 0 {
+		if got.Covered || got.FactCount != 0 {
 			t.Fatalf("新种子资产应未覆盖零计数: %+v", got)
 		}
 	}
@@ -105,12 +104,12 @@ func TestServerTaskSeedFormAndAssetTree(t *testing.T) {
 	for _, e := range tree.Tree {
 		subOf[titleOf[e.From]] = titleOf[e.To]
 	}
-	if subOf["www.example.com"] != "example.com" || subOf["web-01"] != "www.example.com" ||
-		subOf["http://10.10.0.5:8080"] != "web-01" {
+	if subOf["www.example.com"] != "example.com" || subOf["192.0.2.1"] != "" ||
+		subOf["http://192.0.2.1:8080"] != "192.0.2.1" {
 		t.Fatalf("sub_of 层级不符: %+v", subOf)
 	}
 
-	// 账本:种子入账 actor=creator(node.added × 5 + edge.added × 3)。
+	// 账本:种子入账 actor=creator(node.added × 5 + edge.added × 2)。
 	evs, _ := store.Events(ctx, "seed-form", 0, 0)
 	var nodeEv, edgeEv int
 	for _, ev := range evs {
@@ -124,12 +123,12 @@ func TestServerTaskSeedFormAndAssetTree(t *testing.T) {
 			edgeEv++
 		}
 	}
-	if nodeEv != 5 || edgeEv != 3 {
+	if nodeEv != 5 || edgeEv != 2 {
 		t.Fatalf("种子入账不符: node.added=%d edge.added=%d", nodeEv, edgeEv)
 	}
 
 	// 覆盖生长:一个 Step covers 服务资产后,投影 covered 翻转、计数跟进。
-	svc := byTitle["http://10.10.0.5:8080"].ID
+	svc := byTitle["http://192.0.2.1:8080"].ID
 	if _, err := store.Append(ctx, "seed-form",
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
 			NodeID: "s1", NodeType: rings.NodeStep, Title: "探测服务", Status: "dispatched",
@@ -150,7 +149,7 @@ func TestServerTaskSeedFormAndAssetTree(t *testing.T) {
 	}
 	get(t, h, "/api/tasks/seed-form/assets", http.StatusOK, &tree2)
 	for _, a := range tree2.Assets {
-		if a.Title == "http://10.10.0.5:8080" {
+		if a.Title == "http://192.0.2.1:8080" {
 			if !a.Covered || a.FactCount != 1 {
 				t.Fatalf("覆盖生长后资产树应反映: %+v", a)
 			}
@@ -308,9 +307,13 @@ func TestServerTaskFuseIsolationE2E(t *testing.T) {
 	model := newSModel(func(rr *srecorded) sreply {
 		if len(rr.ToolsOffered) == 0 {
 			if m := uncoveredRe.FindStringSubmatch(rr.LastUser); m != nil {
+				goal := regexp.MustCompile(`(?m)^\s*-\s+(\S+) \[active\] 摸清服务存活$`).FindStringSubmatch(rr.LastUser)
+				if goal == nil {
+					return sreply{Text: `{"new_intents":[]}`}
+				}
 				return sreply{Text: fmt.Sprintf(
-					`{"new_intents":[{"intent":"对 %s 做只读端口探测","expected_observation":"state=open","action_level":"只读探测","covers":["%s"]}]}`,
-					m[2], m[1])}
+					`{"new_intents":[{"goal_id":%q,"intent":"对 %s 做只读端口探测","expected_observation":"state=open","action_level":"只读探测","covers":["%s"]}]}`,
+					goal[1], m[2], m[1])}
 			}
 			return sreply{Text: `{"new_intents":[]}`}
 		}

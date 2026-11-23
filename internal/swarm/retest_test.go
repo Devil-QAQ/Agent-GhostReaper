@@ -43,8 +43,6 @@ func seedRetestableClaim(t *testing.T, store *rings.Store, task, claimID, statem
 			}}},
 		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
 			EdgeType: rings.EdgeAbout, FromNode: claimID, ToNode: assetID}},
-		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "overmind", Payload: rings.NodeStateChanged{
-			NodeID: claimID, Status: rings.TestClaimTesting}},
 		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "arbiter", Payload: rings.NodeStateChanged{
 			NodeID: claimID, Status: rings.TestClaimConfirmed}},
 		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "arbiter", Payload: rings.TestClaimRecord{
@@ -99,9 +97,6 @@ func newRetestEnv(t *testing.T, dir, task, claimID string, round int) (*Executor
 	return ex, env
 }
 
-// TestRetestToolsetRestricted 受限工具集:复测单位只有 bash/只读探测/
-// read + submit_retest_result——无候选回流、无声明提交、无假设通道;
-// 结论工具参数无声明 ID(服务端定死,串号在结构上不可能)。
 func TestRetestToolsetRestricted(t *testing.T) {
 	dir := t.TempDir()
 	_, env := newRetestEnv(t, dir, "retest-tools", "tc-a1", 1)
@@ -119,8 +114,8 @@ func TestRetestToolsetRestricted(t *testing.T) {
 		}
 	}
 	for _, banned := range []string{
-		"submit_candidate_fact", "submit_test_claim", "submit_hypothesis",
-		"submit_falsify_result", "web_search", "web_fetch", "list_claims",
+		"submit_candidate_fact", "submit_claim", "submit_hypothesis",
+		"web_search", "web_fetch", "list_claims",
 	} {
 		if got[banned] {
 			t.Fatalf("复测单位不得携带 %s(复测不是发现通道)", banned)

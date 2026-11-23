@@ -2,13 +2,14 @@
 
 import * as React from "react";
 import { toast } from "sonner";
+import { ReadableText } from "@/components/readable-text";
 
 import { iconOf } from "@/components/icons";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
 // 牧者侧对话块共用组件(自会话页抽出单一实现,P4-14 起牧者主对话与
-// 成果追问大窗共用):一条问答(送达态/思考/工具折叠卡/建议内联卡/
+// 追问大窗共用):一条问答(送达态/思考/工具折叠卡/建议内联卡/
 // 回复引用可点)。数据形状同 shepherd 读会话 API 的 messages 项。
 
 // DELIVERY 送达状态词表(queued|delivered|replied|failed → 徽标)。
@@ -115,13 +116,13 @@ export function MessageBlock({ msg, taskID, onNode }) {
         </div>
         {(msg.thinking || msg.tool_calls?.length > 0 || msg.reply) && (
           <div className="flex flex-col items-start gap-2">
-            {msg.thinking && <ThinkingCard text={msg.thinking} />}
+            {msg.thinking && <ThinkingCard text={msg.thinking} active={msg.thinking_active && msg.state === "delivered"} />}
             {(msg.tool_calls || []).map((c, i) => (
               <ToolCallCard key={i} call={c} />
             ))}
             {msg.reply && (
               <div className="t-body max-w-[90%] rounded-lg border border-border/55 bg-background px-3 py-2 whitespace-pre-wrap [overflow-wrap:anywhere]">
-                <RefText text={msg.reply} taskID={taskID} onNode={onNode} />
+                <ReadableText text={msg.reply} renderText={paragraph => <RefText text={paragraph} taskID={taskID} onNode={onNode} />} />
                 <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
                   <Badge variant="outline">进展总结</Badge>
                   <span className="num">{msg.reply_at?.slice(11)}</span>
@@ -151,7 +152,7 @@ export function MessageBlock({ msg, taskID, onNode }) {
       {/* 牧者 */}
       {(msg.thinking || msg.tool_calls?.length > 0 || msg.reply) && (
         <div className="flex flex-col items-start gap-2">
-          {msg.thinking && <ThinkingCard text={msg.thinking} />}
+          {msg.thinking && <ThinkingCard text={msg.thinking} active={msg.thinking_active && msg.state === "delivered"} />}
           {(msg.tool_calls || []).map((c, i) => (
             <ToolCallCard key={i} call={c} />
           ))}
@@ -160,7 +161,7 @@ export function MessageBlock({ msg, taskID, onNode }) {
           ))}
           {msg.reply && (
             <div className="t-body max-w-[90%] rounded-lg border border-border/55 bg-background px-3 py-2 whitespace-pre-wrap [overflow-wrap:anywhere]">
-              <RefText text={msg.reply} taskID={taskID} onNode={onNode} />
+              <ReadableText text={msg.reply} renderText={paragraph => <RefText text={paragraph} taskID={taskID} onNode={onNode} />} />
               <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
                 <Badge variant="outline">回复</Badge>
                 <span className="num">{msg.reply_at?.slice(11)}</span>
@@ -174,25 +175,27 @@ export function MessageBlock({ msg, taskID, onNode }) {
 }
 
 // ThinkingCard 思考段(消息类型徽标:thinking)。
-export function ThinkingCard({ text }) {
+export function ThinkingCard({ text, active = false }) {
   const [open, setOpen] = React.useState(false);
   return (
     <div className="max-w-[85%] rounded-lg border border-border/55 bg-background">
       <button
+        type="button"
+        aria-expanded={open}
         className="flex w-full items-center gap-2 px-3 py-1 text-[11px] text-muted-foreground cursor-pointer"
         onClick={() => setOpen((o) => !o)}
       >
-        <Badge variant="outline">思考</Badge>
+        <Badge variant="outline">{active ? "思考中" : "思考"}</Badge>
         <span className="truncate">{text.slice(0, 60)}…</span>
         {React.createElement(iconOf(open ? "chevronDown" : "chevronRight"), {
           className: "ml-auto size-3.5 shrink-0",
         })}
       </button>
-      {open && (
-        <div className="border-t px-3 py-2 text-xs text-muted-foreground whitespace-pre-wrap [overflow-wrap:anywhere]">
-          {text}
+      <div className="grid transition-[grid-template-rows,opacity] duration-150 motion-reduce:transition-none" style={{ gridTemplateRows: open ? "1fr" : "0fr", opacity: open ? 1 : 0 }} aria-hidden={!open}>
+        <div className="min-h-0 overflow-hidden">
+          <div className="border-t px-3 py-2 text-xs text-muted-foreground whitespace-pre-wrap [overflow-wrap:anywhere]">{text}</div>
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -275,9 +278,9 @@ export function InlineAdvice({ advice }) {
 
 // 引用词形两种:带前缀编号(fact:f-xx / claim:c-xx / step:s1 / asset:a-xx,
 // 牧者提示词约定)与图上 ID 的列表写法(f-xxxx: / tc-chain-xxxx: /
-// h-xxxx: / a-xxxx: / g-xxxx:,后跟冒号的定义式——模型的常见列表格式)。
+// a-xxxx: / g-xxxx:,后跟冒号的定义式——模型的常见列表格式)。
 const REF_RE =
-  /(fact|claim|step|asset|goal|hypo)[:#]([A-Za-z0-9_-]+)|\b((?:tc-chain-|f-|h-|a-|g-)[a-z0-9]+)(?=\**:)/g;
+  /(fact|claim|step|asset|goal)[:#]([A-Za-z0-9_-]+)|\b((?:tc-chain-|f-|a-|g-)[a-z0-9]+)(?=\**:)/g;
 
 export function RefText({ text, taskID, onNode }) {
   const parts = [];

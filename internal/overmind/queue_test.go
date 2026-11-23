@@ -50,13 +50,14 @@ func TestQueueAdmissionConcurrentAndExemptions(t *testing.T) {
 			t.Fatal("普通探索伪造豁免标记")
 		}
 	}
-	for i, source := range []dispatchSource{sourceFalsify, sourceVerify, sourceUrgent} {
-		if err := DispatchStep(ctx, s, task, fmt.Sprintf("exempt%d", i), "受控豁免", DispatchOptions{source: source, ActionLevel: "只读探测"}); err != nil {
+	// P5-03②:豁免清单只剩急活——满队下急活可派(唯一豁免源)。
+	for i, source := range []dispatchSource{sourceUrgent} {
+		if err := DispatchStep(ctx, s, task, fmt.Sprintf("exempt%d", i), "受控豁免", DispatchOptions{source: source, ActionLevel: "只读探测", Detail: map[string]any{"urgent": true}}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if got := countNodes(t, s, task, rings.NodeStep, ""); got != 9 {
-		t.Fatalf("满队豁免应收3，实际%d", got)
+	if got := countNodes(t, s, task, rings.NodeStep, ""); got != 7 {
+		t.Fatalf("满队豁免应收1，实际%d", got)
 	}
 	if got := countNodes(t, s, "other-task", rings.NodeStep, ""); got != 0 {
 		t.Fatal("跨任务串队")
@@ -149,17 +150,18 @@ func TestQueueCancellationAuditDependenciesAndProtection(t *testing.T) {
 	if err != nil || n.Detail["cancellation_reason"] == nil {
 		t.Fatalf("重放丢取消原因: %+v %v", n, err)
 	}
-	// 被反证依赖的普通前置不可取消。
+	// 急活的关键前置不可取消(P5-03②:保护清单只剩急活,反证/验证保护
+	// 已随豁免清理删除)。
 	if err := DispatchStep(ctx, s, task, "s4", "关键前置", DispatchOptions{ActionLevel: "只读探测"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := DispatchStep(ctx, s, task, "s5", "反证", DispatchOptions{source: sourceFalsify, ActionLevel: "只读探测", DependsOn: []string{"s4"}, Detail: map[string]any{"kind": "falsify"}}); err != nil {
+	if err := DispatchStep(ctx, s, task, "s5", "急活", DispatchOptions{source: sourceUrgent, ActionLevel: "只读探测", DependsOn: []string{"s4"}, Detail: map[string]any{"urgent": true}}); err != nil {
 		t.Fatal(err)
 	}
 	rev, _ = s.CurrentRevision(ctx, task)
 	p.StepID = "s4"
 	if err := l.cancelQueued(ctx, p, rev); err == nil {
-		t.Fatal("取消了反证的关键前置")
+		t.Fatal("取消了急活的关键前置")
 	}
 	n, _ = s.Node(ctx, task, "s4")
 	if n.Status != "dispatched" {
@@ -216,8 +218,8 @@ func TestQueueNoSelfPlanningAndNoFaultOnCapacity(t *testing.T) {
 	if countNodes(t, s, task, rings.NodeStep, "") != 6 {
 		t.Fatal("普通探索超限")
 	}
-	if l.LastErr() != nil || l.llmFails != 0 {
-		t.Fatalf("满队被当作故障: %v", l.LastErr())
+	if loopErr(l) != nil || l.llmFails != 0 {
+		t.Fatalf("满队被当作故障: %v", loopErr(l))
 	}
 	snap, _, err := l.snapshot(ctx)
 	if err != nil || !strings.Contains(snap, "执行中 3 / 排队 3 / 等前置 0 / 本轮还可新增 0") || !strings.Contains(snap, "派发已满") {

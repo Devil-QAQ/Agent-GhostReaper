@@ -1,18 +1,12 @@
 package overmind
 
-// P4-24 ①(问题清单 #39):定稿校对——收割定稿冻结入账前,对将上面板
-// 的模型文本(复现步骤描述 P4-08 ④ / 来龙去脉叙述 P4-13)在同一会话
-// 里跑一次自我校对改写;失败保留上一稿(生成稿 / 确定性兜底),不阻塞
-// 确认裁决。与 ② 模式闸门(machinegate.go)串联:校对 → 特征扫描 →
-// 不合格退回重写一次 → 再不合格如实标注(Unpolished /
-// NarrativeUnpolished)不阻塞。成本有界:每冻结文本族校对恰一次、闸门
-// 重写至多一次;同会话续问,转录与 token 记账同锚点连续(用量可见)。
-// P4-59 ①(问题清单 #80①③):人话标准升级为报告级锚(四段正反样例,
-// proofreadHumanStandard);声明摘要族(claimsummary.go)入通道。
+// 显示稿首次生成携带阅读标准，只有具体字段校验失败才修正一次。
+// 原始证据和业务状态不因文风改写改变；生成与修正在同一会话留痕。
 
 import (
 	"context"
 	"fmt"
+	"ghostreaper/internal/failover"
 	"path/filepath"
 	"strings"
 
@@ -30,21 +24,25 @@ import (
 
 // genSession 定稿生成的同会话运行件:生成与校对/重写共用一个引擎
 // 会话(模型看得见自己刚写的原文),转录 JSONL 与 token 用量在同一
-// 锚点上连续累计。零值不可用,经 Loop.newGenSession 创建。
+// 锚点上连续记账;引擎用量只在一次 Prompt 内累计。零值不可用,
+// 经 Loop.newGenSession 创建。
 type genSession struct {
-	l     *Loop
-	sess  *agentcore.Session
-	usage *swarm.UsageTracker
-	sid   string
+	l    *Loop
+	sess *agentcore.Session
+	sid  string
 }
+
+// Display traffic has a process-wide ceiling; planning and unit execution do
+// not wait for these permits. Waiting here is cancellable and is not a call.
+var displayRequests = make(chan struct{}, 2)
 
 // newGenSession 起一个无工具单轮形态的生成会话(引擎链路、适配器、
 // 流式与用量记账全同拆解会话);system 为该文本族的系统段。
 func (l *Loop) newGenSession(system string) *genSession {
 	sid := l.nextSessionID("r")
 	opts := agentcore.Options{
-		Provider:               stripTokensProvider{l.Provider},
-		SystemPrompt:           []string{system},
+		Provider:               failover.LibraryOutput(swarm.MeterProvider(l.Provider, l.Store, rings.TokenUsage{TaskID: l.TaskID, Agent: ActorOvermind, Model: l.Model, TranscriptID: sid}, l.setErr)),
+		SystemPrompt:           []string{system, proofreadHumanStandard},
 		Tools:                  []tool.CoreTool{}, // 显式空表:生成会话无工具(nil 会挂引擎默认工具集)
 		PermissionMode:         permission.ModeDefault,
 		MaxTurns:               2,
@@ -57,11 +55,7 @@ func (l *Loop) newGenSession(system string) *genSession {
 	return &genSession{
 		l:    l,
 		sess: agentcore.NewSession(opts),
-		usage: &swarm.UsageTracker{
-			Store: l.Store, TaskID: l.TaskID, Agent: ActorOvermind,
-			Model: l.Model, ModelOf: l.modelNow(sid), Transcript: sid, // MaxTurns=0:规划会话不落里程碑
-		},
-		sid: sid,
+		sid:  sid,
 	}
 }
 
@@ -72,16 +66,17 @@ func (s *genSession) close() { s.sess.Close() }
 // assistant 文本(跨段拼接;Terminal 携带全会话消息,只取本轮尾段——
 // 续问轮不能把前几轮的回复再拼进来);用量逐次入 token 独立表。
 func (s *genSession) ask(ctx context.Context, user string) (string, error) {
+	select {
+	case displayRequests <- struct{}{}:
+		defer func() { <-displayRequests }()
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 	before := len(s.sess.Messages())
 	var termErr error
 	for ev, err := range s.sess.Prompt(ctx, user) {
 		if err != nil {
 			return "", fmt.Errorf("生成会话: %w", err)
-		}
-		if ev.Kind == harness.KindUsage && ev.Usage != nil {
-			if uerr := s.usage.OnUsage(*ev.Usage); uerr != nil {
-				s.l.setErr(uerr)
-			}
 		}
 		if ev.Kind == harness.KindResult && ev.Terminal != nil {
 			if ev.Terminal.Err != nil {
@@ -103,33 +98,15 @@ func (s *genSession) ask(ctx context.Context, user string) (string, error) {
 	return strings.Join(texts, ""), nil
 }
 
-// ---- ① 定稿校对(同会话自我校对改写) ----
+// ---- 首次生成的阅读要求 ----
 
 // proofreadHumanStandard 人话标准与锚例(P4-59 ① 起升级为报告级锚,
 // 问题清单 #80①③;造物主定方向"靠硬规则不够、升级模型能力"——四段
 // 正反样例泛化自造物主本人报告文风,不含任何报告原始信息)。P4-27 ③
 // 目标完整标识约束保留。锚例自身须过模式闸门(模型照锚例写的句子不会
 // 再被闸门打回;改文风标准时先跑 machinegate_test.go 的锚例用例)。
-const proofreadHumanStandard = `人话标准(报告级,写给不懂技术的读者也能读懂):平实书面白话,短句;数字一律写精确实际值(3,214 条、8 次、200),不写"大量/部分/若干/较多";无 emoji;不写工具名与实现细节。
-提到目标一律用完整标识:域名或 IP 起头、host:port 形态(如 jkysd.cn:9902、10.0.0.5:8080);不用裸端口、裸路径指代目标(读者不知道说的是哪个目标)。
-四类文本的正例(照这个口径写):
-- 描述(说清这是什么问题):一句话本质+影响对象,如"10.0.0.5 的管理接口没有登录校验,任何知道地址的人都能进入管理后台";问题本身不好懂时补一句通俗原理,用"就是…从而…"句式,如"就是服务器把访客提交的内容原样拼进了数据库查询,从而精心构造的内容能改变这条查询的本意"。
-- 危害(说清能拿到什么、能干什么):直接说结果与数字,如"无需任何账号口令,可下载全部 3,214 名用户的姓名、手机号和证件号"。
-- 验证过程(说清怎么证实的):按"做了什么→看到什么→说明了什么"的链条写,如"向该接口直接发 GET 请求,不携带登录凭据;返回 200,内容是 1,847 条员工记录;说明该接口的数据不登录也能拿到";同类请求验证了多条时,写明"仅获取 N 条展示"。
-- 修复建议(说清怎么改):每条一个具体动作,如"对该接口增加登录与权限校验";要改多处才分条,每条仍是一个具体动作;不写"加强防护"这类没有动作的空话。
-反例(出现即不合格):"存在未授权访问漏洞,风险较高,建议加强防护"(哪个目标、能拿到什么、具体改什么都没说);"获取了大量敏感数据"(数字不清);"已对该方面进行了安全加固与综合整改"(空话)。
-禁这些机器语:内部编号、解释编号、裸版本号数字、程序报错原文、英文状态词、无动词的压缩名词堆。`
-
-// reproProofreadAsk 步骤三层描述的校对续问(同会话,模型可见自己刚写
-// 的全部步骤;P4-35 ② 起短名/做什么/作用三段同批校对)。
-const reproProofreadAsk = `校对改写你刚写的全部步骤(短名/描述/作用):只改文风,事实一字不动(方法、目标、路径、凭据、数字、状态码、特征全照抄);短名仍不超过 8 个字,描述仍是一步一句可照做的指令。
-` + proofreadHumanStandard + `
-只输出 JSON:{"steps":[{"seq":1,"short":"…","desc":"…","purpose":"…"},…]},seq 与你上一轮一致,覆盖全部选中步骤。`
-
-// narrativeProofreadAsk 叙述的校对续问。
-const narrativeProofreadAsk = `校对改写你刚写的叙述:只改文风,事实一字不动(单位、轮次、地址、数字全照抄);仍写清四件事——在哪发现、谁发现、怎么验证、怎么确认;一段不超过 150 字。
-` + proofreadHumanStandard + `
-只输出 JSON:{"narrative":"…"}`
+const proofreadHumanStandard = `阅读目标：让操作者先看懂结果与影响，再按需核对过程。用平实中文，说明说清问题，影响只写证据支持的后果，验证过程围绕关键动作和观察，修复建议给具体动作。内容组织按材料决定，不套“就是…从而…”或固定段落顺序。
+概览不逐项抄写报文、参数、载荷与内部编号；精确请求、凭据和操作仍保留在正式复现与证据中。首次出现的对象要明确，已列资产的上下文中不必反复写完整地址。数字、前提和结论范围保持真实；未验证、证据不足与未发现的含义不同，不为表达简洁改变。没有材料时不补造，不用 emoji、套话或空泛评价。`
 
 // ---- ② 模式闸门(扫描 + 退回重写一次 + 如实标注) ----
 
@@ -145,15 +122,6 @@ const talkRewriteReferralNote = `命中特征若出自必须照抄的原文值(�
 // 作用三段),命中则同会话退回重写一次并复扫,仍命中的步骤如实标注
 // Unpolished(原文保留,不阻塞定稿)。
 func (l *Loop) polishReproDescs(ctx context.Context, claimID string, gs *genSession, rec *rings.TestClaimRecord) {
-	if text, err := gs.ask(ctx, reproProofreadAsk); err != nil {
-		runlog.Warnf("定稿校对失败: 任务 %s 判断 %s 原因 %s(保留生成稿)",
-			l.TaskID, claimID, clipEval(err.Error()))
-	} else if descs, _, perr := parseReproDescs(text); perr != nil {
-		runlog.Warnf("定稿校对解析失败: 任务 %s 判断 %s 原因 %s(保留生成稿)",
-			l.TaskID, claimID, clipEval(perr.Error()))
-	} else {
-		applyReproTexts(rec, descs)
-	}
 	// 闸门:逐步扫;有命中 → 同会话重写一次 → 复扫;仍命中如实标注。
 	dirty := reproDescHits(rec)
 	if len(dirty) == 0 {
@@ -181,7 +149,7 @@ func stepMachineHits(st rings.ReproStep) []talkHit {
 		if strings.TrimSpace(text) == "" {
 			continue
 		}
-		hits = append(hits, ScanMachineTalk(text)...)
+		hits = append(hits, scanDisplayText(text)...)
 	}
 	return hits
 }
@@ -229,16 +197,7 @@ func (l *Loop) rewriteReproDescs(ctx context.Context, claimID string, gs *genSes
 
 // polishNarrative 叙述的校对+闸门链(同 polishReproDescs 的单文本版)。
 func (l *Loop) polishNarrative(ctx context.Context, claimID string, gs *genSession, rec *rings.TestClaimRecord) {
-	if text, err := gs.ask(ctx, narrativeProofreadAsk); err != nil {
-		runlog.Warnf("定稿校对失败: 任务 %s 判断 %s 原因 %s(保留生成稿)",
-			l.TaskID, claimID, clipEval(err.Error()))
-	} else if t, perr := parseClaimNarrative(text); perr != nil {
-		runlog.Warnf("定稿校对解析失败: 任务 %s 判断 %s 原因 %s(保留生成稿)",
-			l.TaskID, claimID, clipEval(perr.Error()))
-	} else {
-		rec.Narrative = clipLine(t, narrativeClip)
-	}
-	hits := ScanMachineTalk(rec.Narrative)
+	hits := scanDisplayText(rec.Narrative)
 	if len(hits) == 0 {
 		return
 	}
@@ -246,8 +205,8 @@ func (l *Loop) polishNarrative(ctx context.Context, claimID string, gs *genSessi
 		runlog.Warnf("定稿改写失败: 任务 %s 判断 %s 原因 %s(如实标注)",
 			l.TaskID, claimID, clipEval(err.Error()))
 	} else {
-		rec.Narrative = clipLine(t, narrativeClip)
-		hits = ScanMachineTalk(rec.Narrative)
+		rec.Narrative = strings.TrimSpace(t)
+		hits = scanDisplayText(rec.Narrative)
 	}
 	if len(hits) > 0 {
 		rec.NarrativeUnpolished = true

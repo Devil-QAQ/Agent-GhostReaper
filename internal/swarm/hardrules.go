@@ -25,8 +25,8 @@ import (
 // 态——反弹 shell / 数据回传是渗透合法动作,不误伤,需要时手动开。
 // 不做优先级链、不做 LLM 裁判:弹门即人审兜底,保持确定性哲学。
 // P4-63:系统破坏/数据库破坏两组按三档判定位收窄(动作位拒/非动作位
-// 放/模糊弹门,见 hardpos.go);确定性拒绝只拒本次动作,同规则累计
-// HardDenyEscalateAfter 次升级杀单位(denyHardAction)。
+// 放/模糊弹门,见 hardpos.go);确定性拒绝只拒本次动作(denyHardAction,
+// P5-03③ 起无连拒计数升级杀——拒绝仅是反馈,虫群自行换路)。
 
 // 硬规则配置键(rings v6 通用配置键值表)。
 const (
@@ -72,7 +72,6 @@ const HardRuleBuiltinPrefix = "[内置]"
 
 // 硬规则处置词表(P4-03 ②):空 = 拒绝(命中直接拒绝并终止该单位,
 // 默认);gate = 弹门(命中挂起等面板人审,批准执行、拒绝照旧熔断)。
-const HardActionGate = "gate"
 
 // HardRule 一条参数级硬规则。Pattern 对工具调用参数的字符串值做正则
 // 匹配(参数 JSON 递归抽取全部字符串值,逐条匹配);ToolScope 限定
@@ -170,7 +169,6 @@ func builtinHardRules() []HardRule {
 	for i := range rules {
 		if rules[i].Group == HardGroupProxyBypass {
 			rules[i].Note = proxyBypassNote
-			rules[i].Action = HardActionGate
 		}
 	}
 	return rules
@@ -219,20 +217,10 @@ func SeedHardRules(ctx context.Context, store *rings.Store) error {
 		if tombs[r.ID] {
 			continue
 		}
-		if e, ok, err := store.Setting(ctx, keyHardRulePrefix+r.ID); err != nil {
+		if _, ok, err := store.Setting(ctx, keyHardRulePrefix+r.ID); err != nil {
 			return fmt.Errorf("swarm: 播种硬规则 %s: %w", r.ID, err)
 		} else if ok {
-			if r.Group == HardGroupProxyBypass && r.Action == HardActionGate {
-				var old HardRule
-				if json.Unmarshal([]byte(e.Value), &old) == nil && old.ID == r.ID && old.Action == "" {
-					old.Action = HardActionGate
-					if raw, merr := json.Marshal(old); merr == nil {
-						if serr := store.SetSetting(ctx, keyHardRulePrefix+r.ID, string(raw), "system"); serr != nil {
-							return fmt.Errorf("swarm: 迁移硬规则处置 %s: %w", r.ID, serr)
-						}
-					}
-				}
-			}
+
 			continue
 		}
 		raw, err := json.Marshal(r)
@@ -242,46 +230,6 @@ func SeedHardRules(ctx context.Context, store *rings.Store) error {
 		if err := store.SetSetting(ctx, keyHardRulePrefix+r.ID, string(raw), "system"); err != nil {
 			return fmt.Errorf("swarm: 播种硬规则 %s: %w", r.ID, err)
 		}
-	}
-	return migrateProxyBypassDefaultOff(ctx, store, tombs)
-}
-
-// migrateProxyBypassDefaultOff P4-21 一次性迁移:内置代理旁路条目(默认
-// 曾经启用)一律置为不启用,存量部署与新默认行为统一。只认内置清单里的
-// 代理旁路 ID 且库存条目仍属该组(自建条目、被用户改组的条目不动);
-// 已是禁用态的条目跳过写。迁移完成写标记键,此后重启不再触碰。
-func migrateProxyBypassDefaultOff(ctx context.Context, store *rings.Store, tombs map[string]bool) error {
-	if e, ok, err := store.Setting(ctx, keyHardRuleBypassOff); err != nil {
-		return fmt.Errorf("swarm: 读代理旁路迁移标记: %w", err)
-	} else if ok && e.Value != "" {
-		return nil
-	}
-	for _, r := range builtinHardRules() {
-		if r.Group != HardGroupProxyBypass || tombs[r.ID] {
-			continue
-		}
-		e, ok, err := store.Setting(ctx, keyHardRulePrefix+r.ID)
-		if err != nil {
-			return fmt.Errorf("swarm: 迁移代理旁路默认禁用 %s: %w", r.ID, err)
-		}
-		if !ok {
-			continue
-		}
-		var old HardRule
-		if json.Unmarshal([]byte(e.Value), &old) != nil || old.ID != r.ID || old.Group != HardGroupProxyBypass || !old.Enabled {
-			continue
-		}
-		old.Enabled = false
-		raw, merr := json.Marshal(old)
-		if merr != nil {
-			return fmt.Errorf("swarm: 序列化硬规则 %s: %w", r.ID, merr)
-		}
-		if serr := store.SetSetting(ctx, keyHardRulePrefix+r.ID, string(raw), "system"); serr != nil {
-			return fmt.Errorf("swarm: 迁移代理旁路默认禁用 %s: %w", r.ID, serr)
-		}
-	}
-	if err := store.SetSetting(ctx, keyHardRuleBypassOff, "1", "system"); err != nil {
-		return fmt.Errorf("swarm: 写代理旁路迁移标记: %w", err)
 	}
 	return nil
 }
@@ -313,10 +261,17 @@ func ListHardRules(ctx context.Context, store *rings.Store) ([]HardRule, error) 
 	}
 	var out []HardRule
 	for _, e := range entries {
+		if e.Key == keyHardRuleTomb || e.Key == keyHardRuleBypassOff {
+			continue
+		}
 		var r HardRule
 		if err := json.Unmarshal([]byte(e.Value), &r); err != nil {
-			continue // 脏值跳过(单条坏数据不拖垮整表读取)
+			return nil, fmt.Errorf("拦截规则 %s 读取失败", strings.TrimPrefix(e.Key, keyHardRulePrefix))
 		}
+		if r.ID == "" || keyHardRulePrefix+r.ID != e.Key {
+			return nil, fmt.Errorf("拦截规则 %s 标识无效", strings.TrimPrefix(e.Key, keyHardRulePrefix))
+		}
+		r.Action = "" // old stored action values do not grant approval paths
 		out = append(out, r)
 	}
 	sortHardRules(out)
@@ -372,8 +327,8 @@ func SaveHardRule(ctx context.Context, store *rings.Store, r HardRule, by string
 	if r.ToolScope != "" && !knownToolScopes[r.ToolScope] {
 		return "", fmt.Errorf("swarm: 适用工具 %q 不在工具全集内", r.ToolScope)
 	}
-	if r.Action != "" && r.Action != HardActionGate {
-		return "", fmt.Errorf("swarm: 处置 %q 不在词表内(空=拒绝 / gate=需批准)", r.Action)
+	if r.Action != "" {
+		return "", fmt.Errorf("硬规则命中直接拒绝，不支持其他处置")
 	}
 	if _, err := regexp.Compile(r.Pattern); err != nil {
 		return "", fmt.Errorf("swarm: 匹配模式编译失败: %w", err)
@@ -391,13 +346,13 @@ func SaveHardRule(ctx context.Context, store *rings.Store, r HardRule, by string
 	return r.ID, nil
 }
 
-// knownToolScopes 适用工具词表(虫群工具全集,tools.go toolset)。
 var knownToolScopes = map[string]bool{
 	"bash": true, "port_probe": true, "http_probe": true,
 	"list_claims":           true,
-	"submit_candidate_fact": true, "submit_hypothesis": true,
-	"submit_hypothesis_result": true, "submit_test_claim": true,
-	"submit_falsify_result": true,
+	"submit_candidate_fact": true,
+	"submit_claim":          true,
+	"search_facts":          true, "list_assets": true, "search_trails": true,
+	"traffic_search": true, "traffic_get": true, "traffic_blob": true,
 }
 
 // DeleteHardRule 删除一条硬规则:内置条目同时记入墓碑(重启播种不复活)。
@@ -432,68 +387,6 @@ func DeleteHardRule(ctx context.Context, store *rings.Store, id string) error {
 		}
 	}
 	return nil
-}
-
-// ---- 判定(每次工具调用逐条读当前规则,永远新鲜) ----
-
-// activeHardRules 判定用规则集:读键值表;键值表整体为空(未播种的
-// 新库 / 读失败)退代码内置清单的启用项——拦截底线不因配置不可读而
-// 失守(fail-safe 方向:宁可多拦,交给面板禁用来放开)。
-func activeHardRules(ctx context.Context, store *rings.Store) []HardRule {
-	if store != nil {
-		if rules, err := ListHardRules(ctx, store); err == nil && len(rules) > 0 {
-			return rules
-		}
-	}
-	var out []HardRule
-	for _, r := range builtinHardRules() {
-		out = append(out, r)
-	}
-	return out
-}
-
-// matchHardRule 对一次工具调用匹配硬规则:命中返回规则、匹配串与判定位
-// 三档之一(P4-63 A)。匹配目标 = 参数 JSON 递归抽取的全部字符串值(对
-// bash 是 command、对 http_probe 是 url 等,逐值判定);禁用的规则不参
-// 与;适用工具不符的不参与;模式编译失败的条目跳过(存入口已校验,仅防
-// 键值表脏数据)。
-//
-// 三档语义(收窄组 = 系统破坏/数据库破坏):任一命中处动作位 → 动作位
-// 拒;无动作位但有模糊形态 → 模糊弹门;全部处非动作位 → 该规则不命中
-// (放行,不当动作)。非收窄组命中即动作位(现行语义)。规则序即优先
-// 序:先命中的规则先裁决。
-func matchHardRule(ctx context.Context, store *rings.Store, toolName string, input json.RawMessage) (HardRule, string, hardTier, bool) {
-	for _, r := range activeHardRules(ctx, store) {
-		if !r.Enabled {
-			continue
-		}
-		if r.ToolScope != "" && r.ToolScope != toolName {
-			continue
-		}
-		re, err := regexp.Compile(r.Pattern)
-		if err != nil {
-			continue
-		}
-		ambiguous, ambMatch := false, ""
-		for _, value := range argStringValuesSlice(input) {
-			if strings.TrimSpace(value) == "" {
-				continue
-			}
-			for _, loc := range re.FindAllStringIndex(value, -1) {
-				m := value[loc[0]:loc[1]]
-				switch judgeMatchPosition(value, loc[0], m, r.Group) {
-				case hardTierAction:
-					return r, m, hardTierAction, true
-				case hardTierAmbiguous:
-					ambiguous, ambMatch = true, m
-				}
-			}
-		}
-		if ambiguous {
-			return r, ambMatch, hardTierAmbiguous, true
-		}
-	}
-	return HardRule{}, "", hardTierAction, false
 }
 
 // argStringValuesSlice 递归抽取 JSON 参数里的全部字符串值(逐值为判定
@@ -533,28 +426,14 @@ func hardRuleDenyReason(r HardRule, matched string) string {
 	return reason
 }
 
-// hardRuleGateNote 弹门处置规则的待决卡上下文(P4-03 ②):说明为何命中
-// 拦截规则却到了人面前——命令原文在审批卡的参数区,这里只给规则与
-// 命中片段(人裁决"直连复测是否正当"所需的最小事实)。
-func hardRuleGateNote(r HardRule, matched string) string {
-	note := fmt.Sprintf("命中内置拦截规则:%s · %s(命中片段 %q)", r.Group, strings.TrimPrefix(r.Name, HardRuleBuiltinPrefix), clipLine(matched, 80))
-	if n := strings.TrimSpace(r.Note); n != "" {
-		note += " · " + n
-	}
-	return note
-}
-
 // ---- P4-63 B:确定性拒绝改"拒动作不杀单位" ----
 //
 // 硬规则与意图拦截的确定性拒绝只拒那一条命令:工具层返回拒绝结果(含
 // 规则名与人话换路指引——"报错文案写成路由教学"既有机制),单位存活
 // 读到反馈自行换路(工作不丢,与 P4-51 范围拦截改等批同一哲学延伸)。
-// 防硬撞/试探保险:同单位生命周期内同规则累计命中 HardDenyEscalateAfter
-// 次(不重置)升级杀单位;面板人工拒绝(弹门拒)语义不同,照旧杀单位。
-
-// HardDenyEscalateAfter 同规则累计确定性拒绝达到此次数后升级杀单位
-// (问题清单 #85 ⑤,数字实测可调)。
-const HardDenyEscalateAfter = 3
+// P5-03③(造物主 2026-11-16 定):连拒计数升级杀删除——无连拒计数熔断
+// (宪法第四章 §3 v2.3),拒绝仅是反馈,虫群自行换路;无路可走自然
+// 落地交主宰研判,极端停滞由心跳巡检/任务总闸/人工兜底。
 
 // hardGroupHarmWords 拒绝反馈的组级危害句(锚例:数据库破坏组逐字取自
 // 造物主 2026-11-09 拍板文案,其余组同构)。

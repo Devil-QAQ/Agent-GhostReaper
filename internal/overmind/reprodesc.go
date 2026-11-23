@@ -39,15 +39,6 @@ import (
 // 未生成（挑选失败）"(种子是唯一法定不经模型挑选进复现区的条目,
 // 确认门槛校验与装配同源解析保证"确认 ⟹ 包内至少含证明交换")。
 
-// reproDescClip 单步描述(做什么)的落账上限(超长截断;面板与报告同文)。
-const reproDescClip = 400
-
-// reproShortClip / reproPurposeClip 短名与作用的落账上限(P4-35 ②:
-// 短名是标题段 ≤8 字、作用是一句,超长截断)。
-const reproShortClip = 24
-
-const reproPurposeClip = 160
-
 // reproNoReproFailed 挑选失败(重试一次后仍失败)的固定标注(子计划
 // P4-62 定稿文案)。
 const reproNoReproFailed = "复现包未生成（挑选失败）"
@@ -216,7 +207,7 @@ func (l *Loop) pickSeededReproSteps(ctx context.Context, claimID string, rec *ri
 // 否则(及池空/理由缺失)按入池诊断确定性拼装(8.5:陈述事实、数字
 // 精确、能短则短)。
 func noReproReason(diag ReproPoolDiag, modelReason string) string {
-	if s := clipLine(strings.TrimSpace(modelReason), reproPurposeClip); s != "" && len(ScanMachineTalk(s)) == 0 {
+	if s := strings.TrimSpace(modelReason); s != "" && len(scanDisplayText(s)) == 0 {
 		return reproNoReproPrefix + s
 	}
 	var parts []string
@@ -249,13 +240,13 @@ func applyReproPick(rec *rings.TestClaimRecord, picks []reproDescStep) bool {
 			if p.Seq != st.Seq {
 				continue
 			}
-			if s := clipLine(strings.TrimSpace(p.Short), reproShortClip); s != "" {
+			if s := strings.TrimSpace(p.Short); s != "" {
 				st.Short = s
 			}
-			if d := clipLine(strings.TrimSpace(p.Desc), reproDescClip); d != "" {
+			if d := strings.TrimSpace(p.Desc); d != "" {
 				st.Desc = d
 			}
-			if pu := clipLine(strings.TrimSpace(p.Purpose), reproPurposeClip); pu != "" {
+			if pu := strings.TrimSpace(p.Purpose); pu != "" {
 				st.Purpose = pu
 			}
 			chosen = append(chosen, st)
@@ -292,13 +283,13 @@ func applySeededPick(rec *rings.TestClaimRecord, picks []reproDescStep, seedSeqs
 		p, picked := pickSet[st.Seq]
 		if seedSet[st.Seq] || picked {
 			if picked {
-				if s := clipLine(strings.TrimSpace(p.Short), reproShortClip); s != "" {
+				if s := strings.TrimSpace(p.Short); s != "" {
 					st.Short = s
 				}
-				if d := clipLine(strings.TrimSpace(p.Desc), reproDescClip); d != "" {
+				if d := strings.TrimSpace(p.Desc); d != "" {
 					st.Desc = d
 				}
-				if pu := clipLine(strings.TrimSpace(p.Purpose), reproPurposeClip); pu != "" {
+				if pu := strings.TrimSpace(p.Purpose); pu != "" {
 					st.Purpose = pu
 				}
 				hit = true
@@ -330,13 +321,13 @@ func applyReproTexts(rec *rings.TestClaimRecord, steps []reproDescStep) {
 		if !ok {
 			continue
 		}
-		if s := clipLine(strings.TrimSpace(d.Short), reproShortClip); s != "" {
+		if s := strings.TrimSpace(d.Short); s != "" {
 			rec.Steps[i].Short = s
 		}
-		if t := clipLine(strings.TrimSpace(d.Desc), reproDescClip); t != "" {
+		if t := strings.TrimSpace(d.Desc); t != "" {
 			rec.Steps[i].Desc = t
 		}
-		if pu := clipLine(strings.TrimSpace(d.Purpose), reproPurposeClip); pu != "" {
+		if pu := strings.TrimSpace(d.Purpose); pu != "" {
 			rec.Steps[i].Purpose = pu
 		}
 	}
@@ -539,7 +530,8 @@ func parseReproDescs(text string) ([]reproDescStep, string, error) {
 // P4-62:空选是合法回答(池中无可证明漏洞的包时如实说原因,程序不再
 // 倒池)。P4-73:seed 标注的证明交换已固定,模型在种子之上补全流程
 // (前置步骤),种子单独可复现时不补。
-const reproDescSystem = `为渗透测试发现组装复现数据包。输入是验证过程中的交换事实(已按方法+路径+状态去重;部分请求包由工具命令还原,响应可能未留存)。输入里 "seed":true 的步骤是该发现结论依据的证明交换——已固定在包内,不可删、不可换,你必须为它们写三段说明。任务:
+const reproDescSystem = `为渗透测试发现组装复现数据包。输入是验证过程中的交换事实(已按方法+路径+状态去重;部分请求包由工具命令还原,响应可能未留存)。输入里 "seed":true 的步骤是该发现结论依据的证明交换——已固定在包内,不可删、不可换,你必须为它们写三段说明。所有说明只解释给定发现与实际交换，不能把无需凭据或公开可读改写成未授权访问、权限绕过或泄露；只有材料明确证明相应权限边界失败时才可这样称呼。复现条件须体现该发现的实际判据，返回正常状态码本身不证明问题成立。
+任务:
 
 1. 在证明交换之上补全复现流程:复现需要的前置步骤(如 先登录拿会话凭据 → 凭据换票据 → 再调目标接口)从其余候选里挑出来,与种子一起构成完整流程;证明交换已定,不靠它承载前置。证明交换单独就能复现(一步型)时不补任何步骤。对比交换(如带凭据的对照请求)、反证变体(换 UA / 防缓存参数 / 近似请求体)、枚举试错(大量同型尝试)、无关流量(与该问题无关的主页、资源请求)一律不选。该几步就几步,不凑数。
 2. 输入没有 seed 标注时,从候选里挑出构成复现流程的必要步骤:一步就能复现的(如接口未授权访问)恰选 1 条;复现真要多步就选 N 条。全部交换都不能证明该问题成立时,steps 给空数组,并写 skip_reason 一句说明原因(如"池内交换均为无关流量,不能证明该问题"式,陈述事实)。

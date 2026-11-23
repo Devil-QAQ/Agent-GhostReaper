@@ -213,8 +213,8 @@ func TestBlobStore(t *testing.T) {
 func TestFilterTools(t *testing.T) {
 	env := &unitEnv{Executor: &Executor{Store: nil}}
 	all := env.toolset()
-	if len(all) != 12 {
-		t.Fatalf("工具全集应为 12 个(bash/port_probe/http_probe/read/web_search/web_fetch/list_claims/五个受控入口), 实际 %d", len(all))
+	if len(all) != 15 {
+		t.Fatalf("工具全集应为 15 个(bash/port_probe/http_probe/read/web_search/web_fetch/list_claims + P5-04 知情查询六件:search_facts/list_assets/search_trails/traffic_search/traffic_get/traffic_blob + 两个受控入口:事实/交卷), 实际 %d", len(all))
 	}
 	names := func(ts []tool.CoreTool) string {
 		var ns []string
@@ -223,10 +223,10 @@ func TestFilterTools(t *testing.T) {
 		}
 		return strings.Join(ns, ",")
 	}
-	if got := names(filterTools(all, RoE{})); got != "bash,port_probe,http_probe,read,web_search,web_fetch,list_claims,submit_candidate_fact,submit_hypothesis,submit_hypothesis_result,submit_test_claim,submit_falsify_result" {
+	if got := names(filterTools(all, RoE{})); got != "bash,port_probe,http_probe,read,web_search,web_fetch,list_claims,search_facts,list_assets,search_trails,traffic_search,traffic_get,traffic_blob,submit_candidate_fact,submit_claim" {
 		t.Fatalf("无 RoE 应全集放行: %s", got)
 	}
-	if got := names(filterTools(all, RoE{DeniedTools: []string{"bash"}})); got != "port_probe,http_probe,read,web_search,web_fetch,list_claims,submit_candidate_fact,submit_hypothesis,submit_hypothesis_result,submit_test_claim,submit_falsify_result" {
+	if got := names(filterTools(all, RoE{DeniedTools: []string{"bash"}})); got != "port_probe,http_probe,read,web_search,web_fetch,list_claims,search_facts,list_assets,search_trails,traffic_search,traffic_get,traffic_blob,submit_candidate_fact,submit_claim" {
 		t.Fatalf("黑名单应移除 bash: %s", got)
 	}
 	if got := names(filterTools(all, RoE{AllowedTools: []string{"port_probe"}})); got != "port_probe" {
@@ -328,7 +328,7 @@ func TestExecutorE2E(t *testing.T) {
 		t.Fatalf("系统提示词缺基线条款:\n%s", reqs[0].System)
 	}
 	adv := strings.Join(reqs[0].ToolsOffered, ",")
-	for _, want := range []string{"bash", "port_probe", "submit_candidate_fact", "submit_hypothesis"} {
+	for _, want := range []string{"bash", "port_probe", "submit_candidate_fact"} {
 		if !strings.Contains(adv, want) {
 			t.Fatalf("工具广告缺 %s: %s", want, adv)
 		}
@@ -440,24 +440,24 @@ func TestExecutorE2E(t *testing.T) {
 	if n := harvestLikeOvermind(t, store, task); n != 1 {
 		t.Fatalf("收割结果不符: confirmed=%d(应为 1)", n)
 	}
-	pg, err := store.ProgressGraph(ctx, task)
+	pg, err := store.Graph(ctx, task)
 	if err != nil {
-		t.Fatalf("查进度图失败: %v", err)
+		t.Fatalf("查任务投影失败: %v", err)
 	}
-	if len(pg.Facts) != 1 || pg.Facts[0].Status != "confirmed" || pg.Facts[0].Title == "" {
-		t.Fatalf("收割后 Fact 应为 confirmed: %+v", pg.Facts)
+	if len(graphNodes(pg, rings.NodeFact)) != 1 || graphNodes(pg, rings.NodeFact)[0].Status != "confirmed" || graphNodes(pg, rings.NodeFact)[0].Title == "" {
+		t.Fatalf("收割后 Fact 应为 confirmed: %+v", graphNodes(pg, rings.NodeFact))
 	}
-	if len(pg.Steps) != 1 || pg.Steps[0].Status != "done" {
-		t.Fatalf("Step 终态应为 done: %+v", pg.Steps)
+	if len(graphNodes(pg, rings.NodeStep)) != 1 || graphNodes(pg, rings.NodeStep)[0].Status != "done" {
+		t.Fatalf("Step 终态应为 done: %+v", graphNodes(pg, rings.NodeStep))
 	}
 	foundLineage := false
-	for _, e := range pg.Lineage {
-		if e.Type == rings.EdgeProduces && e.From == "s1" && e.To == pg.Facts[0].ID {
+	for _, e := range graphLineage(pg) {
+		if e.Type == rings.EdgeProduces && e.From == "s1" && e.To == graphNodes(pg, rings.NodeFact)[0].ID {
 			foundLineage = true
 		}
 	}
 	if !foundLineage {
-		t.Fatalf("缺 produces 血缘边 s1→%s: %+v", pg.Facts[0].ID, pg.Lineage)
+		t.Fatalf("缺 produces 血缘边 s1→%s: %+v", graphNodes(pg, rings.NodeFact)[0].ID, graphLineage(pg))
 	}
 	// 资产图:靶标被覆盖且挂上已确认事实
 	ag, err := store.AssetGraph(ctx, task)
@@ -533,12 +533,12 @@ func TestSwarmNoOffCourseDigging(t *testing.T) {
 		t.Fatalf("虫群偏航:对意图外线索端口发起了探测")
 	}
 	// 意图外线索必须以候选证据回流(而不是被丢弃或被深挖)
-	pg, _ := store.ProgressGraph(ctx, task)
-	if len(pg.Facts) != 1 || pg.Facts[0].Status != "candidate" {
-		t.Fatalf("意图外线索应以候选 Fact 回流: %+v", pg.Facts)
+	pg, _ := store.Graph(ctx, task)
+	if len(graphNodes(pg, rings.NodeFact)) != 1 || graphNodes(pg, rings.NodeFact)[0].Status != "candidate" {
+		t.Fatalf("意图外线索应以候选 Fact 回流: %+v", graphNodes(pg, rings.NodeFact))
 	}
-	if !strings.Contains(pg.Facts[0].Title, fmt.Sprintf(":%d", decoyPort)) {
-		t.Fatalf("候选内容应指向意图外线索: %q", pg.Facts[0].Title)
+	if !strings.Contains(graphNodes(pg, rings.NodeFact)[0].Title, fmt.Sprintf(":%d", decoyPort)) {
+		t.Fatalf("候选内容应指向意图外线索: %q", graphNodes(pg, rings.NodeFact)[0].Title)
 	}
 	// 红线条款确实在系统提示词中(行为约束的锚)
 	if !strings.Contains(model.requests()[0].System, "不许自己拐过去挖") {
@@ -596,9 +596,9 @@ func TestStaleGraphRefused(t *testing.T) {
 		t.Fatalf("复检失败后不得发生任何模型调用,实际 %d 次", model.requestCount())
 	}
 	// step 不得被置 running,仍是待领取态
-	pg, _ := store.ProgressGraph(ctx, task)
-	if pg.Steps[0].Status != "dispatched" {
-		t.Fatalf("拒绝执行后 step 应保持 dispatched: %+v", pg.Steps)
+	pg, _ := store.Graph(ctx, task)
+	if graphNodes(pg, rings.NodeStep)[0].Status != "dispatched" {
+		t.Fatalf("拒绝执行后 step 应保持 dispatched: %+v", graphNodes(pg, rings.NodeStep))
 	}
 	// 拒绝留痕:stale_refused 记录携带新旧版本
 	recs := swarmRecords(t, store, task)
@@ -692,12 +692,12 @@ func TestBudgetExhausted(t *testing.T) {
 		t.Fatalf("到线应原会话续跑完成(非 failed/非切段): %+v", res)
 	}
 	// 收尾把发现写回了图:候选存在,待收割
-	pg, _ := store.ProgressGraph(ctx, task)
-	if len(pg.Facts) != 1 || pg.Facts[0].Status != "candidate" {
-		t.Fatalf("收尾应写回候选: %+v", pg.Facts)
+	pg, _ := store.Graph(ctx, task)
+	if len(graphNodes(pg, rings.NodeFact)) != 1 || graphNodes(pg, rings.NodeFact)[0].Status != "candidate" {
+		t.Fatalf("收尾应写回候选: %+v", graphNodes(pg, rings.NodeFact))
 	}
-	if len(pg.Steps) != 1 || pg.Steps[0].Status != "done" {
-		t.Fatalf("step 应为 done(同单位续跑完成): %+v", pg.Steps)
+	if len(graphNodes(pg, rings.NodeStep)) != 1 || graphNodes(pg, rings.NodeStep)[0].Status != "done" {
+		t.Fatalf("step 应为 done(同单位续跑完成): %+v", graphNodes(pg, rings.NodeStep))
 	}
 	// 转录单文件连续:收尾指令与续跑指令同在一条会话轨迹(换人税为零)。
 	raw := readTranscript(t, filepath.Join(dir, "tasks"), task, res.TranscriptID)
@@ -705,8 +705,6 @@ func TestBudgetExhausted(t *testing.T) {
 		t.Fatalf("转录应同文件含收尾与续跑指令(原会话连续)")
 	}
 }
-
-// ---- 受控入口:程序化提交与工具提交同路;假设回流 ----
 
 func TestControlledEntries(t *testing.T) {
 	dir := t.TempDir()
@@ -746,32 +744,6 @@ func TestControlledEntries(t *testing.T) {
 		t.Fatalf("大证据应入 blob: %+v", n2.Detail)
 	}
 
-	// 假设工具走同一受控入口语义:必须有资产与依据
-	hyp := env.submitHypothesisTool()
-	// 通过工具体直接调(与引擎调用同构)
-	res, err := hyp.Call(ctx, []byte(`{"statement":"靶标疑似弱口令","asset_id":"target","basis":"banner 风格相似"}`), nil)
-	if err != nil || res.IsError {
-		t.Fatalf("假设提交失败: %v %+v", err, res)
-	}
-	if res2, _ := hyp.Call(ctx, []byte(`{"statement":"x","asset_id":"ghost","basis":"y"}`), nil); !res2.IsError {
-		t.Fatalf("幽灵资产假设应报错")
-	}
-
-	// 假设节点与 about 边入图
-	hyps, err := store.NodesByType(ctx, task, rings.NodeHypothesis, "candidate")
-	if err != nil || len(hyps) != 1 {
-		t.Fatalf("候选假设应入图: %v %+v", err, hyps)
-	}
-	abouts, _ := store.Edges(ctx, task, rings.EdgeAbout)
-	foundAbout := false
-	for _, e := range abouts {
-		if e.From == hyps[0].ID && e.To == "target" {
-			foundAbout = true
-		}
-	}
-	if !foundAbout {
-		t.Fatalf("假设应挂 about 边指向资产: %+v", abouts)
-	}
 	_ = fid
 	_ = fid2
 }
@@ -876,18 +848,18 @@ func TestConcurrentRunStepNoFalseStale(t *testing.T) {
 			t.Fatalf("并发单位不得误判过期: %+v", r)
 		}
 	}
-	pg, err := store.ProgressGraph(ctx, task)
+	pg, err := store.Graph(ctx, task)
 	if err != nil {
-		t.Fatalf("查进度图失败: %v", err)
+		t.Fatalf("查任务投影失败: %v", err)
 	}
 	done := 0
-	for _, s := range pg.Steps {
+	for _, s := range graphNodes(pg, rings.NodeStep) {
 		if s.Status == "done" {
 			done++
 		}
 	}
 	if done != 3 {
-		t.Fatalf("三条意图应全部 done: %+v", pg.Steps)
+		t.Fatalf("三条意图应全部 done: %+v", graphNodes(pg, rings.NodeStep))
 	}
 }
 
@@ -916,7 +888,7 @@ func claimRecords(t *testing.T, store *rings.Store, task, typ string) []rings.Te
 	return out
 }
 
-func TestSubmitTestClaimEntry(t *testing.T) {
+func TestSubmitClaimEntry(t *testing.T) {
 	dir := t.TempDir()
 	store := openStore(t, dir)
 	ctx := context.Background()
@@ -926,38 +898,31 @@ func TestSubmitTestClaimEntry(t *testing.T) {
 	ex := NewExecutor(store, nil, filepath.Join(dir, "tasks"), Budget{})
 	env := &unitEnv{Executor: ex, TaskID: task, StepID: "s1", UnitID: "u1", TranscriptID: "swarm-u1"}
 
-	// 程序化提交:存在性与影响面分开、锚定资产、判定标准随创建冻结。
-	tcID, err := env.SubmitTestClaim(ctx, "/old-backup/ 备份目录可公开列举",
-		"备份文件可被未授权下载,存在敏感数据泄露风险",
-		"curl 实测返回目录列举: db-2026-09-01.sql.gz, config.bak", "target", "信息暴露",
-		[]string{"缓存污染:内容可能来自中间缓存", "归属错误:可能来自其他资产"})
+	// 程序化交卷:六字段齐全、锚定资产、判定标准随创建冻结。
+	tcID, _, err := env.SubmitClaim(ctx, "target:8080 /old-backup/ 备份目录可公开列举",
+		"high", []string{"ms-a1.1"}, "db-2026-09-01.sql.gz",
+		"绕过缓存直接重放仍返回列举;目录内容为真实备份数据非缓存副本", "备份文件可被未授权下载", "target", "信息暴露", "")
 	if err != nil {
-		t.Fatalf("提交声明失败: %v", err)
+		t.Fatalf("交卷失败: %v", err)
 	}
 	n, err := store.Node(ctx, task, tcID)
 	if err != nil || n.Type != rings.NodeTestClaim || n.Status != rings.TestClaimCandidate {
-		t.Fatalf("候选声明应入图: %v %+v", err, n)
+		t.Fatalf("交卷声明应入图: %v %+v", err, n)
 	}
-	if n.Title != "/old-backup/ 备份目录可公开列举" {
-		t.Fatalf("存在性声明应为节点标题: %q", n.Title)
+	if n.Title != "target:8080 /old-backup/ 备份目录可公开列举" {
+		t.Fatalf("声明一句话应为节点标题: %q", n.Title)
 	}
-	if n.Detail["impact"] == nil || n.Detail["unit_id"] != "u1" || n.Detail["step_id"] != "s1" {
-		t.Fatalf("声明 detail 应含影响面/发现单位/发现步骤: %+v", n.Detail)
+	if n.Detail["severity"] != "high" || n.Detail["unit_id"] != "u1" || n.Detail["step_id"] != "s1" {
+		t.Fatalf("声明 detail 应含自报级别/交卷单位/交卷步骤: %+v", n.Detail)
+	}
+	if n.Detail["alternatives"] != nil {
+		t.Fatalf("P5-01②:交卷单不再冻结竞争解释清单: %+v", n.Detail["alternatives"])
 	}
 	st, _ := n.Detail["standard"].(map[string]any)
 	if st == nil || st["kind"] != "full_falsify" {
-		t.Fatalf("判定标准应随创建冻结为 full_falsify: %+v", n.Detail)
+		t.Fatalf("判定标准应随创建冻结(R2 契约②,查三依据): %+v", n.Detail)
 	}
-	// P2-02:竞争解释清单随创建冻结(模型列出的照收,ID 顺序编号)。
-	alts, ok := n.Detail["alternatives"].([]any)
-	if !ok || len(alts) != 2 {
-		t.Fatalf("冻结解释清单应恰 2 条: %+v", n.Detail["alternatives"])
-	}
-	first, _ := alts[0].(map[string]any)
-	if first["id"] != "alt1" || !strings.Contains(first["label"].(string), "缓存污染") {
-		t.Fatalf("解释条目应带稳定 ID 与标签: %+v", first)
-	}
-	// 血缘:derived_from(声明→发现 Step)+ about(声明→资产锚点)。
+	// 血缘:derived_from(声明→执行意图 Step)+ about(声明→资产锚点)。
 	derived, about := false, false
 	for _, e := range edgesOf(t, store, task) {
 		if e.Type == rings.EdgeDerivedFrom && e.From == tcID && e.To == "s1" {
@@ -968,41 +933,88 @@ func TestSubmitTestClaimEntry(t *testing.T) {
 		}
 	}
 	if !derived || !about {
-		t.Fatalf("声明应挂 derived_from 与 about 边: derived=%v about=%v", derived, about)
+		t.Fatalf("交卷应挂 derived_from 与 about 边: derived=%v about=%v", derived, about)
+	}
+	// 交卷事件(P5-01③):六字段随 testclaim.record(submit) 落账。
+	recs := claimRecords(t, store, task, rings.TestClaimRecSubmit)
+	if len(recs) != 1 {
+		t.Fatalf("应恰 1 条交卷单记录: %+v", recs)
+	}
+	r := recs[0]
+	if r.ClaimID != tcID || r.StepID != "s1" || r.UnitID != "u1" {
+		t.Fatalf("交卷单锚定不符: %+v", r)
+	}
+	if r.Summary == "" || r.Severity != "high" || r.ProvingMarker != "db-2026-09-01.sql.gz" ||
+		r.CountercheckNote == "" || r.ImpactNote == "" || len(r.EvidenceRefs) != 1 || r.EvidenceRefs[0] != "ms-a1.1" {
+		t.Fatalf("交卷单六字段应齐全落账: %+v", r)
 	}
 
-	// 入口校验:缺存在性/影响/证据/资产、幽灵资产,一律拒。
-	for _, args := range [][4]string{
-		{"  ", "影响", "证据", "target"},
-		{"声明", "  ", "证据", "target"},
-		{"声明", "影响", "  ", "target"},
-		{"声明", "影响", "证据", ""},
-		{"声明", "影响", "证据", "ghost"},
+	// 入口校验类级(六字段各缺一拒):summary 空/severity 超词表/evidence_refs
+	// 空/proving_marker 空/countercheck_note 空/asset_id 空或幽灵,一律拒。
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{"summary 空", func() error {
+			_, _, err := env.SubmitClaim(ctx, "  ", "high", []string{"ms-x.1"}, "m", "c", "", "target", "", "")
+			return err
+		}},
+		{"severity 超词表", func() error {
+			_, _, err := env.SubmitClaim(ctx, "另一声明", "致命", []string{"ms-x.1"}, "m", "c", "", "target", "", "")
+			return err
+		}},
+		{"evidence_refs 空", func() error {
+			_, _, err := env.SubmitClaim(ctx, "另一声明", "high", nil, "m", "c", "", "target", "", "")
+			return err
+		}},
+		{"evidence_refs 全空白去重后为空", func() error {
+			_, _, err := env.SubmitClaim(ctx, "另一声明", "high", []string{" ", ""}, "m", "c", "", "target", "", "")
+			return err
+		}},
+		{"proving_marker 空", func() error {
+			_, _, err := env.SubmitClaim(ctx, "另一声明", "high", []string{"ms-x.1"}, "  ", "c", "", "target", "", "")
+			return err
+		}},
+		{"countercheck_note 空", func() error {
+			_, _, err := env.SubmitClaim(ctx, "另一声明", "high", []string{"ms-x.1"}, "m", " ", "", "target", "", "")
+			return err
+		}},
+		{"asset_id 空", func() error {
+			_, _, err := env.SubmitClaim(ctx, "另一声明", "high", []string{"ms-x.1"}, "m", "c", "", "", "", "")
+			return err
+		}},
+		{"幽灵资产", func() error {
+			_, _, err := env.SubmitClaim(ctx, "另一声明", "high", []string{"ms-x.1"}, "m", "c", "", "ghost", "", "")
+			return err
+		}},
 	} {
-		if _, err := env.SubmitTestClaim(ctx, args[0], args[1], args[2], args[3], "", nil); err == nil {
-			t.Fatalf("非法声明 %v 应被拒", args)
+		if tc.call() == nil {
+			t.Fatalf("%s 应被拒", tc.name)
 		}
 	}
 
-	// 工具体直调与程序化同构。
-	res, err := env.submitTestClaimTool().Call(ctx,
-		[]byte(`{"statement":"管理接口未授权可达","impact":"可未授权访问管理功能","evidence":"curl 401 质询","asset_id":"target","vulnclass":"访问控制缺失"}`), nil)
+	// 四档真实漏洞可交卷；none信息性结果必须走事实。
+	for _, sev := range []string{"critical", "high", "medium", "low"} {
+		if _, _, err := env.SubmitClaim(ctx, "声明-"+sev, sev, []string{"ms-s." + sev}, "marker-"+sev,
+			"自查通过", "", "target", "", ""); err != nil {
+			t.Fatalf("severity=%s 应合法: %v", sev, err)
+		}
+	}
+
+	// 工具体直调与程序化同构(六字段 schema)。
+	res, err := env.submitClaimTool().Call(ctx,
+		[]byte(`{"summary":"管理接口未授权可达","severity":"high","evidence_refs":["ms-b2.2"],"proving_marker":"admin-panel","countercheck_note":"直接请求未经缓存","impact_note":"可未授权访问管理功能","asset_id":"target","vulnclass":"访问控制缺失"}`), nil)
 	if err != nil || res.IsError {
-		t.Fatalf("工具体提交失败: %v %+v", err, res)
+		t.Fatalf("工具体交卷失败: %v %+v", err, res)
 	}
 	claims, _ := store.NodesByType(ctx, task, rings.NodeTestClaim, rings.TestClaimCandidate)
-	if len(claims) != 2 {
-		t.Fatalf("应恰 2 条候选声明: %d", len(claims))
-	}
-	// 未列解释的声明兜底四条基线(设计文档 §3.5 示例定稿)。
-	dflt, _ := claims[1].Detail["alternatives"].([]any)
-	if len(dflt) != 4 {
-		t.Fatalf("缺省解释清单应兜底 4 条基线: %+v", claims[1].Detail["alternatives"])
+	if len(claims) != 6 { // 首报1＋四级4＋工具体1
+		t.Fatalf("应恰 6 条候选声明: %d", len(claims))
 	}
 }
 
 // TestClaimDedupAndListing P2-08f 虫群查重:list_claims 只读清单(可按
-// 资产过滤)+ submit_test_claim 入口确定性查重——同资产同声明(大小写
+// 资产过滤)+ submit_claim 入口确定性查重——同资产同声明(大小写
 // 与空白形态无关)拒收并指认已报条目;不同资产同声明、同资产不同声明
 // 不误伤。
 func TestClaimDedupAndListing(t *testing.T) {
@@ -1023,15 +1035,15 @@ func TestClaimDedupAndListing(t *testing.T) {
 	ex := NewExecutor(store, nil, filepath.Join(dir, "tasks"), Budget{})
 	env := &unitEnv{Executor: ex, TaskID: task, StepID: "s1", UnitID: "u1", TranscriptID: "swarm-u1"}
 
-	tcID, err := env.SubmitTestClaim(ctx, "/old-backup/ 备份目录可公开列举",
-		"备份可被未授权下载", "curl 实测列举", "target", "信息暴露", nil)
+	tcID, _, err := env.SubmitClaim(ctx, "/old-backup/ 备份目录可公开列举",
+		"high", []string{"ms-a1.1"}, "db.sql.gz", "自查通过", "备份可被未授权下载", "target", "信息暴露", "")
 	if err != nil {
 		t.Fatalf("首报失败: %v", err)
 	}
 
-	// 重复报同一漏洞(大小写/空白形态不同):拒收并指认已报条目。
-	_, err = env.SubmitTestClaim(ctx, "  /old-backup/  备份目录可公开列举  ",
-		"备份可被未授权下载", "curl 再次实测", "target", "信息暴露", nil)
+	// 重复交同一漏洞(大小写/空白形态不同):拒收并指认已报条目。
+	_, _, err = env.SubmitClaim(ctx, "  /old-backup/  备份目录可公开列举  ",
+		"high", []string{"ms-a1.2"}, "db.sql.gz", "自查通过", "备份可被未授权下载", "target", "信息暴露", "")
 	if err == nil {
 		t.Fatalf("同资产同声明应被查重拒收")
 	}
@@ -1040,13 +1052,13 @@ func TestClaimDedupAndListing(t *testing.T) {
 	}
 
 	// 同声明不同资产:另一靶标上的同一问题是独立声明,不误伤。
-	if _, err := env.SubmitTestClaim(ctx, "/old-backup/ 备份目录可公开列举",
-		"备份可被未授权下载", "curl 实测列举", "target2", "信息暴露", nil); err != nil {
+	if _, _, err := env.SubmitClaim(ctx, "/old-backup/ 备份目录可公开列举",
+		"high", []string{"ms-a1.3"}, "db.sql.gz", "自查通过", "备份可被未授权下载", "target2", "信息暴露", ""); err != nil {
 		t.Fatalf("不同资产的同声明不应被误拦: %v", err)
 	}
 	// 同资产不同声明:改写后的新声明另立,不误伤。
-	if _, err := env.SubmitTestClaim(ctx, "/old-backup/config.bak 管理凭据明文可读",
-		"凭据直接可用", "curl 实测原文", "target", "敏感信息明文存储", nil); err != nil {
+	if _, _, err := env.SubmitClaim(ctx, "/old-backup/config.bak 管理凭据明文可读",
+		"high", []string{"ms-a1.4"}, "admin:pass", "自查通过", "凭据直接可用", "target", "敏感信息明文存储", ""); err != nil {
 		t.Fatalf("同资产不同声明不应被误拦: %v", err)
 	}
 
@@ -1073,164 +1085,46 @@ func TestClaimDedupAndListing(t *testing.T) {
 	}
 }
 
-func TestSubmitFalsifyResultGuards(t *testing.T) {
+// TestSubmitFalsifyRetired P5-01②⑤:反证写回工具(submit_falsify_result)
+// 与反证任务包已随三段流水线退役——工具面零暴露、任务包零装配、
+// 反证单位零通道(反证自查回到交卷单 countercheck_note)。
+func TestSubmitFalsifyRetired(t *testing.T) {
 	dir := t.TempDir()
 	store := openStore(t, dir)
 	ctx := context.Background()
-	const task = "falsify-entry"
-	seedGraph(t, store, task, "审计敏感路径")
-
-	ex := NewExecutor(store, nil, filepath.Join(dir, "tasks"), Budget{})
-	discoverer := &unitEnv{Executor: ex, TaskID: task, StepID: "s1", UnitID: "u1", TranscriptID: "swarm-u1"}
-	tcID, err := discoverer.SubmitTestClaim(ctx, "备份目录可公开列举", "备份可被未授权下载", "curl 实测列举", "target", "",
-		[]string{"缓存污染:内容可能来自中间缓存"})
-	if err != nil {
-		t.Fatalf("提交声明失败: %v", err)
-	}
-
-	// 派发绑定声明的反证步骤(与 overmind.HarvestClaims 同构)并迁移声明到 testing。
-	if _, err := store.Append(ctx, task,
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
-			NodeID: "s2", NodeType: rings.NodeStep, Title: "反证(第 1 轮): 备份目录可公开列举", Status: "dispatched",
-			Detail: map[string]any{"kind": "falsify", "testclaim_id": tcID, "round": 1,
-				"alternatives": []any{map[string]any{"id": "alt1", "label": "缓存污染:内容可能来自中间缓存"}},
-				"action_level": "只读探测"}}},
-		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "overmind",
-			Payload: rings.NodeStateChanged{NodeID: tcID, Status: rings.TestClaimTesting}},
-	); err != nil {
-		t.Fatalf("派发反证步骤失败: %v", err)
-	}
-
-	// 非绑定步骤(发现步骤 s1)写回拒绝。
-	s1Env := &unitEnv{Executor: ex, TaskID: task, StepID: "s1", UnitID: "u2", TranscriptID: "swarm-u2"}
-	if err := s1Env.SubmitFalsifyResult(ctx, tcID, false, true, "high", nil, "证据", nil, ""); err == nil {
-		t.Fatalf("非反证绑定步骤(s1)写回应被拒")
-	}
-
-	// R12:发现单位(u1)即使在绑定步骤上也必须被拒。
-	u1Env := &unitEnv{Executor: ex, TaskID: task, StepID: "s2", UnitID: "u1", TranscriptID: "swarm-u1"}
-	if err := u1Env.SubmitFalsifyResult(ctx, tcID, false, true, "high", nil, "证据", nil, ""); err == nil {
-		t.Fatalf("R12:发现者自证应被拒")
-	}
-
-	// 空证据拒绝。
-	s2Env := &unitEnv{Executor: ex, TaskID: task, StepID: "s2", UnitID: "u9", TranscriptID: "swarm-u9"}
-	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, true, "high", nil, "  ", nil, ""); err == nil {
-		t.Fatalf("空证据应被拒")
-	}
-
-	// P2-02:影响面成立缺定级拒绝;不成立携带定级拒绝;定级超词汇拒绝。
-	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, true, "", nil, "证据", nil, ""); err == nil {
-		t.Fatalf("impact_supported=true 缺定级应被拒")
-	}
-	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, true, "致命", nil, "证据", nil, ""); err == nil {
-		t.Fatalf("定级超四级词汇应被拒")
-	}
-	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, false, "high", nil, "证据", nil, ""); err == nil {
-		t.Fatalf("impact_supported=false 携带定级应被拒")
-	}
-	// P2-02:解释 ID 不在冻结清单内拒绝。
-	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, true, "high",
-		[]rings.AltResult{{ID: "alt9", Refuted: true}}, "证据", nil, ""); err == nil {
-		t.Fatalf("冻结清单外的解释 ID 应被拒")
-	}
-
-	// 正常写回:独立单位 + 绑定步骤 + testing 状态 + 逐条解释结论 +
-	// 交换引用(P4-73 ①:只收不拦,修剪去空去重随结论入账)。
-	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, true, "high",
-		[]rings.AltResult{{ID: "alt1", Refuted: true}}, "curl 重放仍返回列举 http://t9.local/x",
-		[]string{" ms-a1.1 ", "", "ms-a1.1", "ms-a2.3 "}, "复核一致"); err != nil {
-		t.Fatalf("合法写回失败: %v", err)
-	}
-	recs := claimRecords(t, store, task, rings.TestClaimRecFalsify)
-	if len(recs) != 1 {
-		t.Fatalf("应恰 1 条反证写回: %+v", recs)
-	}
-	r := recs[0]
-	if r.ClaimID != tcID || r.StepID != "s2" || r.UnitID != "u9" || r.ExistenceRefuted || !r.ImpactSupported {
-		t.Fatalf("反证写回负载不符: %+v", r)
-	}
-	if r.Round != 1 || r.ImpactLevel != "high" || len(r.Alternatives) != 1 || r.Alternatives[0].ID != "alt1" {
-		t.Fatalf("P2-02 字段(轮次/定级/解释结论)应随写回落账: %+v", r)
-	}
-	if len(r.EvidenceExchanges) != 2 || r.EvidenceExchanges[0] != "ms-a1.1" || r.EvidenceExchanges[1] != "ms-a2.3" {
-		t.Fatalf("交换引用应修剪去空去重随写回落账: %+v", r.EvidenceExchanges)
-	}
-	// P2-02:同轮二次写回拒绝(每轮一次,R1)。
-	if err := s2Env.SubmitFalsifyResult(ctx, tcID, false, true, "high", nil, "再写一次", nil, ""); err == nil {
-		t.Fatalf("同轮重复写回应被拒")
-	}
-	if r.EvidenceHead == "" {
-		t.Fatalf("反证证据截头必须落账(R18)")
-	}
-
-	// 幽灵声明拒绝。
-	if err := s2Env.SubmitFalsifyResult(ctx, "tc-ghost", false, true, "high", nil, "证据", nil, ""); err == nil {
-		t.Fatalf("幽灵声明应被拒")
-	}
-}
-
-func TestClaimPackFalsifyContext(t *testing.T) {
-	dir := t.TempDir()
-	store := openStore(t, dir)
-	ctx := context.Background()
-	const task = "tc-pack"
+	const task = "falsify-retired"
 	seedGraph(t, store, task, "审计敏感路径")
 
 	ex := NewExecutor(store, nil, filepath.Join(dir, "tasks"), Budget{})
 	env := &unitEnv{Executor: ex, TaskID: task, StepID: "s1", UnitID: "u1", TranscriptID: "swarm-u1"}
-	tcID, err := env.SubmitTestClaim(ctx, "备份目录可公开列举", "备份可被未授权下载",
-		"curl 实测列举: db-2026-09-01.sql.gz", "target", "信息暴露",
-		[]string{"缓存污染:内容可能来自中间缓存", "归属错误:可能来自其他资产"})
-	if err != nil {
-		t.Fatalf("提交声明失败: %v", err)
-	}
-	// 派发绑定声明的反证步骤(与 HarvestClaims 同构)。
-	if _, err := store.Append(ctx, task,
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
-			NodeID: "s2", NodeType: rings.NodeStep, Title: "反证(第 2 轮): 备份目录可公开列举", Status: "dispatched",
-			Detail: map[string]any{"kind": "falsify", "testclaim_id": tcID, "round": 2,
-				"alternatives": []any{map[string]any{"id": "alt1", "label": "缓存污染:内容可能来自中间缓存"}},
-				"action_level": "只读探测"}}},
-		rings.Event{Kind: rings.EventEdgeAdded, Actor: "overmind", Payload: rings.EdgeAdded{
-			EdgeType: rings.EdgeCovers, FromNode: "s2", ToNode: "target"}},
-		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "overmind",
-			Payload: rings.NodeStateChanged{NodeID: tcID, Status: rings.TestClaimTesting}},
-	); err != nil {
-		t.Fatalf("派发反证步骤失败: %v", err)
-	}
 
-	pack, err := ex.Claim(ctx, task, "s2")
-	if err != nil {
-		t.Fatalf("领取反证步骤失败: %v", err)
-	}
-	if pack.Falsify == nil {
-		t.Fatalf("反证任务包必须携带声明上下文")
-	}
-	f := pack.Falsify
-	if f.ClaimID != tcID || f.Statement != "备份目录可公开列举" ||
-		f.Impact != "备份可被未授权下载" || f.Vulnclass != "信息暴露" || f.DiscovererUnit != "u1" {
-		t.Fatalf("反证上下文不符: %+v", f)
-	}
-	// P2-02:轮次与派发冻结的存活解释清单随任务包交付。
-	if f.Round != 2 || len(f.Alternatives) != 1 || f.Alternatives[0].ID != "alt1" {
-		t.Fatalf("反证任务包应携带轮次与本轮存活解释: %+v", f)
-	}
-	rendered := pack.Render()
-	for _, want := range []string{"八、反证任务(验证类意图 · 第 2 轮", "存在性判断", "影响面判断",
-		"submit_falsify_result", "R12", "alt1: 缓存污染", "impact_level"} {
-		if !strings.Contains(rendered, want) {
-			t.Fatalf("反证任务渲染缺 %q:\n%s", want, rendered)
+	// 工具面零暴露:全集目录与 toolset 均无 submit_falsify_result /
+	// submit_test_claim(旧名一并退役)。
+	for _, cat := range ToolCatalog() {
+		if cat.Name == "submit_falsify_result" || cat.Name == "submit_test_claim" {
+			t.Fatalf("旧工具 %s 不得再出现在工具目录", cat.Name)
 		}
 	}
-
-	// 普通意图步骤不携带反证节。
-	p1, err := ex.Claim(ctx, task, "s1")
-	if err != nil {
-		t.Fatalf("领取普通步骤失败: %v", err)
+	for _, tl := range env.toolset() {
+		if n := tl.Name(); n == "submit_falsify_result" || n == "submit_test_claim" {
+			t.Fatalf("旧工具 %s 不得再进入会话工具面", n)
+		}
 	}
-	if p1.Falsify != nil || strings.Contains(p1.Render(), "八、反证任务") {
-		t.Fatalf("普通意图不得携带反证节")
+	// 存量反证步骤(旧账本遗留 detail.testclaim_id 绑定)领取后不装配
+	// 反证节:任务包零反证上下文、渲染零反证节(P5-01⑤ 执行侧)。
+	if _, err := store.Append(ctx, task, rings.Event{
+		Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
+			NodeID: "s9", NodeType: rings.NodeStep, Title: "反证(存量遗留)", Status: "dispatched",
+			Detail: map[string]any{"kind": "falsify", "testclaim_id": "tc-old", "round": 9}},
+	}); err != nil {
+		t.Fatalf("造存量反证步骤失败: %v", err)
+	}
+	pack, err := ex.Claim(ctx, task, "s9")
+	if err != nil {
+		t.Fatalf("领取存量反证步骤失败: %v", err)
+	}
+	if strings.Contains(pack.Render(), "反证任务") {
+		t.Fatalf("任务包不得再渲染反证节(P5-01⑤):\n%s", pack.Render())
 	}
 }
 
@@ -1244,215 +1138,22 @@ func edgesOf(t *testing.T, store *rings.Store, task string) []rings.EdgeView {
 	return es
 }
 
-// TestSubmitHypothesisEntry P2-03:假设受控入口——produces 血缘边
-// (发现 Step→假设)+ about 资产锚点 + 每 Step 限量(防噪音)。
-func TestSubmitHypothesisEntry(t *testing.T) {
-	dir := t.TempDir()
-	store := openStore(t, dir)
-	ctx := context.Background()
-	const task = "hypo-entry"
-	seedGraph(t, store, task, "审计敏感路径")
-
-	ex := NewExecutor(store, nil, filepath.Join(dir, "tasks"), Budget{})
-	env := &unitEnv{Executor: ex, TaskID: task, StepID: "s1", UnitID: "u1", TranscriptID: "swarm-u1"}
-
-	// 缺依据 / 缺资产 / 幽灵资产拒绝。
-	if _, err := env.SubmitHypothesis(ctx, "疑似后台", " ", "target"); err == nil {
-		t.Fatalf("缺依据应被拒")
-	}
-	if _, err := env.SubmitHypothesis(ctx, "疑似后台", "风格", ""); err == nil {
-		t.Fatalf("缺资产应被拒")
-	}
-	if _, err := env.SubmitHypothesis(ctx, "疑似后台", "风格", "ghost"); err == nil {
-		t.Fatalf("幽灵资产应被拒")
-	}
-
-	id, err := env.SubmitHypothesis(ctx, "独立端口服务疑似管理后台", "配置风格", "target")
-	if err != nil {
-		t.Fatalf("提交假设失败: %v", err)
-	}
-	// 回流轨迹:produces(s1→假设)+ about(假设→target)。
-	hyp, err := store.Node(ctx, task, id)
-	if err != nil {
-		t.Fatalf("查假设失败: %v", err)
-	}
-	if hyp.Type != rings.NodeHypothesis || hyp.Status != rings.HypothesisCandidate {
-		t.Fatalf("假设节点不符: %+v", hyp)
-	}
-	if hyp.Detail["step_id"] != "s1" || hyp.Detail["unit_id"] != "u1" || hyp.Detail["basis"] != "配置风格" {
-		t.Fatalf("假设 detail 应记录提出步骤/单位/依据: %+v", hyp.Detail)
-	}
-	has := func(et rings.EdgeType, from, to string) bool {
-		for _, e := range edgesOf(t, store, task) {
-			if e.Type == et && e.From == from && e.To == to {
-				return true
-			}
+// graphNodes 保持旧断言的节点类型筛选，查询本身走正式 Graph。
+func graphNodes(g *rings.GraphView, typ rings.NodeType) []rings.NodeView {
+	var out []rings.NodeView
+	for _, n := range g.Nodes {
+		if n.Type == typ {
+			out = append(out, n.NodeView)
 		}
-		return false
 	}
-	if !has(rings.EdgeProduces, "s1", id) {
-		t.Fatalf("假设提交必须落 produces 血缘边(s1 → %s)", id)
-	}
-	if !has(rings.EdgeAbout, id, "target") {
-		t.Fatalf("假设提交必须落 about 资产锚点(%s → target)", id)
-	}
-
-	// 每 Step 限量:本步已有 1 条,再提 2 条到上限,第 4 条拒绝。
-	if _, err := env.SubmitHypothesis(ctx, "隐藏路径", "风格", "target"); err != nil {
-		t.Fatalf("第 2 条应成功: %v", err)
-	}
-	if _, err := env.SubmitHypothesis(ctx, "备份凭据", "风格", "target"); err != nil {
-		t.Fatalf("第 3 条应成功: %v", err)
-	}
-	if _, err := env.SubmitHypothesis(ctx, "第四条", "风格", "target"); err == nil {
-		t.Fatalf("超出每步上限应被拒(防噪音)")
-	}
-	// 换步骤不受限(限量按 Step 计)。
-	env2 := &unitEnv{Executor: ex, TaskID: task, StepID: "s2", UnitID: "u2", TranscriptID: "swarm-u2"}
-	if _, err := store.Append(ctx, task, rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind",
-		Payload: rings.NodeAdded{NodeID: "s2", NodeType: rings.NodeStep, Title: "另一步", Status: "done"}}); err != nil {
-		t.Fatalf("铺步骤失败: %v", err)
-	}
-	if _, err := env2.SubmitHypothesis(ctx, "另一步的假设", "风格", "target"); err != nil {
-		t.Fatalf("另一步首条应成功: %v", err)
-	}
+	return out
 }
-
-// TestSubmitHypothesisResultGuards P2-03:验证结论写回守卫——状态机、
-// 步骤绑定、R12 提出者不自证、结论词汇、每验证步骤一次。
-func TestSubmitHypothesisResultGuards(t *testing.T) {
-	dir := t.TempDir()
-	store := openStore(t, dir)
-	ctx := context.Background()
-	const task = "hypo-result"
-	seedGraph(t, store, task, "审计敏感路径")
-
-	ex := NewExecutor(store, nil, filepath.Join(dir, "tasks"), Budget{})
-	proposer := &unitEnv{Executor: ex, TaskID: task, StepID: "s1", UnitID: "u1", TranscriptID: "swarm-u1"}
-	hypID, err := proposer.SubmitHypothesis(ctx, "独立端口服务疑似管理后台", "配置风格", "target")
-	if err != nil {
-		t.Fatalf("提交假设失败: %v", err)
-	}
-
-	// 未派发验证(candidate 状态)写回拒绝。
-	verifier := &unitEnv{Executor: ex, TaskID: task, StepID: "s2", UnitID: "u9", TranscriptID: "swarm-u9"}
-	if err := verifier.SubmitHypothesisResult(ctx, hypID, rings.HypothesisSupported, "证据", ""); err == nil {
-		t.Fatalf("非验证中状态写回应被拒")
-	}
-
-	// 派发绑定假设的验证步骤(与 overmind.dispatchVerifyStep 同构)。
-	if _, err := store.Append(ctx, task,
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
-			NodeID: "s2", NodeType: rings.NodeStep, Title: "验证假设: 独立端口服务疑似管理后台", Status: "dispatched",
-			Detail: map[string]any{"kind": "verify", "hypothesis_id": hypID, "action_level": "只读探测"}}},
-		rings.Event{Kind: rings.EventEdgeAdded, Actor: "overmind", Payload: rings.EdgeAdded{
-			EdgeType: rings.EdgeVerifies, FromNode: "s2", ToNode: hypID}},
-		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "overmind",
-			Payload: rings.NodeStateChanged{NodeID: hypID, Status: rings.HypothesisTesting}},
-	); err != nil {
-		t.Fatalf("派发验证步骤失败: %v", err)
-	}
-
-	// 非绑定步骤(发现步骤 s1)写回拒绝。
-	s1Env := &unitEnv{Executor: ex, TaskID: task, StepID: "s1", UnitID: "u2", TranscriptID: "swarm-u2"}
-	if err := s1Env.SubmitHypothesisResult(ctx, hypID, rings.HypothesisSupported, "证据", ""); err == nil {
-		t.Fatalf("非验证绑定步骤(s1)写回应被拒")
-	}
-	// R12:提出单位(u1)即使在绑定步骤上也必须被拒。
-	u1Env := &unitEnv{Executor: ex, TaskID: task, StepID: "s2", UnitID: "u1", TranscriptID: "swarm-u1"}
-	if err := u1Env.SubmitHypothesisResult(ctx, hypID, rings.HypothesisSupported, "证据", ""); err == nil {
-		t.Fatalf("R12:提出者自证应被拒")
-	}
-	// 结论超词汇 / 空证据拒绝。
-	if err := verifier.SubmitHypothesisResult(ctx, hypID, "maybe", "证据", ""); err == nil {
-		t.Fatalf("结论超词汇应被拒")
-	}
-	if err := verifier.SubmitHypothesisResult(ctx, hypID, rings.HypothesisSupported, " ", ""); err == nil {
-		t.Fatalf("空证据应被拒")
-	}
-	if err := verifier.SubmitHypothesisResult(ctx, "h-ghost", rings.HypothesisSupported, "证据", ""); err == nil {
-		t.Fatalf("幽灵假设应被拒")
-	}
-
-	// 合法写回:独立单位 + 绑定步骤 + testing 状态。
-	if err := verifier.SubmitHypothesisResult(ctx, hypID, rings.HypothesisSupported, "401 + console", "备注不构成结论"); err != nil {
-		t.Fatalf("合法写回失败: %v", err)
-	}
-	evs, _ := store.Events(ctx, task, 0, 0)
-	var recs []rings.HypothesisRecord
-	for _, ev := range evs {
-		if ev.Kind != rings.EventHypothesisRecord {
-			continue
-		}
-		var r rings.HypothesisRecord
-		if json.Unmarshal(ev.Payload, &r) == nil {
-			recs = append(recs, r)
+func graphLineage(g *rings.GraphView) []rings.EdgeView {
+	var out []rings.EdgeView
+	for _, e := range g.Edges {
+		if e.Type == rings.EdgeProduces || e.Type == rings.EdgeDerivedFrom {
+			out = append(out, e)
 		}
 	}
-	if len(recs) != 1 || recs[0].Type != rings.HypothesisRecResult {
-		t.Fatalf("应恰 1 条验证结论: %+v", recs)
-	}
-	r := recs[0]
-	if r.HypothesisID != hypID || r.StepID != "s2" || r.UnitID != "u9" ||
-		r.Verdict != rings.HypothesisSupported || r.EvidenceHead == "" {
-		t.Fatalf("验证结论负载不符: %+v", r)
-	}
-	// 每验证步骤一次。
-	if err := verifier.SubmitHypothesisResult(ctx, hypID, rings.HypothesisRefuted, "再写", ""); err == nil {
-		t.Fatalf("同一验证步骤重复写回应被拒")
-	}
-}
-
-// TestHypothesisPackVerifyContext P2-03:验证类步骤的任务包携带假设上下文
-// (陈述/依据/提出单位),渲染假设验证节;普通意图不携带。
-func TestHypothesisPackVerifyContext(t *testing.T) {
-	dir := t.TempDir()
-	store := openStore(t, dir)
-	ctx := context.Background()
-	const task = "hypo-pack"
-	seedGraph(t, store, task, "审计敏感路径")
-
-	ex := NewExecutor(store, nil, filepath.Join(dir, "tasks"), Budget{})
-	env := &unitEnv{Executor: ex, TaskID: task, StepID: "s1", UnitID: "u1", TranscriptID: "swarm-u1"}
-	hypID, err := env.SubmitHypothesis(ctx, "独立端口服务疑似管理后台", "配置风格相似", "target")
-	if err != nil {
-		t.Fatalf("提交假设失败: %v", err)
-	}
-	if _, err := store.Append(ctx, task,
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
-			NodeID: "s2", NodeType: rings.NodeStep, Title: "验证假设: 独立端口服务疑似管理后台", Status: "dispatched",
-			Detail: map[string]any{"kind": "verify", "hypothesis_id": hypID, "action_level": "只读探测"}}},
-		rings.Event{Kind: rings.EventEdgeAdded, Actor: "overmind", Payload: rings.EdgeAdded{
-			EdgeType: rings.EdgeCovers, FromNode: "s2", ToNode: "target"}},
-	); err != nil {
-		t.Fatalf("派发验证步骤失败: %v", err)
-	}
-
-	pack, err := ex.Claim(ctx, task, "s2")
-	if err != nil {
-		t.Fatalf("领取验证步骤失败: %v", err)
-	}
-	if pack.Verify == nil {
-		t.Fatalf("验证任务包必须携带假设上下文")
-	}
-	v := pack.Verify
-	if v.HypothesisID != hypID || v.Statement != "独立端口服务疑似管理后台" ||
-		v.Basis != "配置风格相似" || v.ProposerUnit != "u1" {
-		t.Fatalf("验证上下文不符: %+v", v)
-	}
-	rendered := pack.Render()
-	for _, want := range []string{"九、假设验证任务", "假设陈述", "提出者依据", "submit_hypothesis_result", "R12", "R11"} {
-		if !strings.Contains(rendered, want) {
-			t.Fatalf("验证任务渲染缺 %q:\n%s", want, rendered)
-		}
-	}
-
-	// 普通意图步骤不携带验证节。
-	p1, err := ex.Claim(ctx, task, "s1")
-	if err != nil {
-		t.Fatalf("领取普通步骤失败: %v", err)
-	}
-	if p1.Verify != nil || strings.Contains(p1.Render(), "九、假设验证任务") {
-		t.Fatalf("普通意图不得携带假设验证节")
-	}
+	return out
 }

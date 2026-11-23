@@ -18,7 +18,6 @@ import (
 var p459AnchorClean = []string{
 	proofreadHumanStandard,
 	summarySystem,
-	summaryProofreadAsk,
 	"10.0.0.5 的管理接口没有登录校验,任何知道地址的人都能进入管理后台",
 	"服务器把访客提交的内容原样存进了页面文件,就是任何人都能把一段脚本存进去,从而其他用户打开该页面时会在自己浏览器里执行这段脚本",
 	"无需任何账号口令,可下载全部 3,214 名用户的姓名、手机号和证件号",
@@ -31,7 +30,7 @@ var p459AnchorClean = []string{
 // 注意事项 4 的契约)。
 func TestP459AnchorGateClean(t *testing.T) {
 	for _, text := range p459AnchorClean {
-		if hits := ScanMachineTalk(text); len(hits) > 0 {
+		if hits := scanDisplayText(text); len(hits) > 0 {
 			t.Errorf("锚例未过闸(%s…): %+v", clipLine(text, 24), hits)
 		}
 	}
@@ -78,10 +77,7 @@ func TestP459SummaryPipeline(t *testing.T) {
 
 	t.Run("生成干净直接冻结", func(t *testing.T) {
 		l, model := mk(t, func(rr *recordedRequest) scriptedReply {
-			if strings.Contains(rr.LastUser, "校对改写") {
-				return scriptedReply{Text: p459Clean, Finish: "stop"}
-			}
-			return scriptedReply{Text: p459Dirty, Finish: "stop"}
+			return scriptedReply{Text: p459Clean, Finish: "stop"}
 		})
 		defer model.Close()
 		seedSummaryClaim(t, l, l.TaskID)
@@ -95,13 +91,11 @@ func TestP459SummaryPipeline(t *testing.T) {
 			!strings.HasPrefix(rec.Facts[0].Statement, "登录接口 /admin 不校验会话") {
 			t.Fatalf("事实描述应冻结: %+v", rec.Facts)
 		}
-		if n := len(model.requests()); n != 2 {
-			t.Fatalf("干净稿恰 2 次请求(生成+校对),得到 %d", n)
+		if n := len(model.requests()); n != 1 {
+			t.Fatalf("干净稿只生成一次,得到 %d", n)
 		}
-		// 同会话铁证:系统段为判断文本契约,校对请求可见生成轮原稿。
-		reqs := model.requests()
-		if !strings.Contains(reqs[0].System, "判断文本") || !strings.Contains(reqs[1].LastUser, "校对改写") {
-			t.Fatalf("摘要族会话形态不符: system=%q ask=%q", reqs[0].System, reqs[1].LastUser)
+		if !strings.Contains(model.requests()[0].System, proofreadHumanStandard) {
+			t.Fatal("首次生成未携带阅读要求")
 		}
 	})
 
@@ -119,11 +113,11 @@ func TestP459SummaryPipeline(t *testing.T) {
 		if !strings.HasPrefix(rec.Statement, "10.0.0.5") || len(rec.Facts) != 1 {
 			t.Fatalf("重写成功应冻结干净稿: %+v", rec)
 		}
-		if n := len(model.requests()); n != 3 {
-			t.Fatalf("至多 3 次请求(生成+校对+重写),得到 %d", n)
+		if n := len(model.requests()); n != 2 {
+			t.Fatalf("生成及一次具体修正,得到 %d", n)
 		}
-		if !strings.Contains(model.requests()[2].LastUser, "内部编号") {
-			t.Fatalf("重写续问应点名命中特征: %s", model.requests()[2].LastUser)
+		if !strings.Contains(model.requests()[1].LastUser, "内部编号") {
+			t.Fatalf("重写续问应点名命中特征: %s", model.requests()[1].LastUser)
 		}
 	})
 
@@ -135,8 +129,8 @@ func TestP459SummaryPipeline(t *testing.T) {
 		seedSummaryClaim(t, l, l.TaskID)
 		rec := &rings.TestClaimRecord{ClaimID: "tc-x", Type: rings.TestClaimRecRepro}
 		l.genClaimSummary(ctx, "tc-x", rec)
-		if n := len(model.requests()); n != 3 {
-			t.Fatalf("恰 3 次请求封顶,得到 %d", n)
+		if n := len(model.requests()); n != 2 {
+			t.Fatalf("两次请求封顶,得到 %d", n)
 		}
 		// 含机器语的字段(内部编号/英文状态词/解释编号)不冻结;闸门只
 		// 兜下限——"泄露大量数据"不含机器语特征(空话归锚例管),保留

@@ -128,7 +128,7 @@ func TestAdviceAdjudicationE2E(t *testing.T) {
 	ex := swarm.NewExecutor(store, prov, root, swarm.Budget{})
 	loop := &Loop{TaskID: task, Store: store, Swarm: ex, Provider: prov}
 
-	if loop.cycle(ctx) {
+	if loop.cycle(ctx, true) {
 		t.Fatalf("目标未达成不应判完成")
 	}
 	if !sawAdvice.Load() {
@@ -148,7 +148,7 @@ func TestAdviceAdjudicationE2E(t *testing.T) {
 		t.Fatalf("采纳建议应体现为意图派发: %+v", steps)
 	}
 	// 幂等:再跑一轮(建议已裁决),模型不再看到待裁决建议,零新增裁决。
-	if loop.cycle(ctx) {
+	if loop.cycle(ctx, true) {
 		t.Fatalf("目标未达成不应判完成")
 	}
 	_, verdicts = adviceEvents(t, store, task)

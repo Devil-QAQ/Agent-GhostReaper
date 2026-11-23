@@ -2,20 +2,12 @@ package overmind
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"ghostreaper/internal/rings"
 )
-
-// P4-64(问题清单 #82)生成管线类级确定性单测:
-//   - ① 逐轮人话:零 Provider 拼句兜底、scripted 生成覆盖、解析失败回退
-//     拼句、闸门重写一次、仍脏 Unpolished;
-//   - ② 立账摘要:claim.summary 事件落账、坏回复不落;
-//   - ③⑥ 事实文本:干净冻结、标题仍脏 Unpolished、描述仍脏不冻结;
-//   - ④⑥⑧ 假设文本:干净冻结、字段仍脏不冻结;
-//   - ⑦ 复测备注:干净冻结、坏回复 nil、仍脏 nil;
-//   - 标题短句标准锚例自身过闸(锚例管上限的前提)。
 
 func p464Task(seq int) string { return "p464-t-" + string(rune('a'+seq-1)) }
 
@@ -23,9 +15,6 @@ func p464Task(seq int) string { return "p464-t-" + string(rune('a'+seq-1)) }
 var p464TitleAnchorClean = []string{
 	titleShortStandard,
 	factTextSystem,
-	factTextProofreadAsk,
-	hypoTextSystem,
-	hypoTextProofreadAsk,
 	retestNoteSystem,
 	"example.com:8080 的备份接口无需登录即可下载",
 	"10.0.0.5 的备份包内带有后台管理员明文口令",
@@ -49,7 +38,7 @@ func p464SeedClaimWithAlts(t *testing.T, l *Loop) {
 	if _, err := l.Store.Append(context.Background(), l.TaskID, rings.Event{
 		Kind: rings.EventNodeAdded, Actor: "swarm:u1", Payload: rings.NodeAdded{
 			NodeID: "tc-r", NodeType: rings.NodeTestClaim, Title: "原始存在性判断原文",
-			Status: rings.TestClaimTesting,
+			Status: "testing",
 			Detail: map[string]any{"unit_id": "u1", "alternatives": alts},
 		}}); err != nil {
 		t.Fatalf("铺判断失败: %v", err)
@@ -59,128 +48,14 @@ func p464SeedClaimWithAlts(t *testing.T, l *Loop) {
 func p464FalsifyRec() *rings.TestClaimRecord {
 	return &rings.TestClaimRecord{
 		ClaimID: "tc-r", StepID: "s9", UnitID: "u9", Type: rings.TestClaimRecFalsify, Round: 3,
-		Alternatives: []rings.AltResult{
-			{ID: "alt1", Refuted: true}, {ID: "alt2", Refuted: true}},
 		EvidenceHead: "GET /old-backup/ 连续 8 次返回同样的备份列举",
 	}
 }
 
-func TestP464RoundHumanZeroProviderFallback(t *testing.T) {
-	store := openStore(t)
-	l := &Loop{TaskID: p464Task(1), Store: store}
-	p464SeedClaimWithAlts(t, l)
-	out := l.GenRoundHumanFor(context.Background(), "tc-r", p464FalsifyRec())
-	if out == nil {
-		t.Fatalf("零 Provider 也应返回拼句兜底")
-	}
-	if !strings.Contains(out.Doubt, "缓存污染") || !strings.Contains(out.Doubt, "归属错误") {
-		t.Fatalf("拼句疑点应为替代解释疑问句: %q", out.Doubt)
-	}
-	if !strings.Contains(out.How, "u9") || !strings.Contains(out.How, "备份列举") {
-		t.Fatalf("拼句应含独立单位与证据: %q", out.How)
-	}
-	if out.Conclusion != "已排除" {
-		t.Fatalf("全部排除应为已排除: %q", out.Conclusion)
-	}
-	if out.Round != 3 || out.ClaimID != "tc-r" {
-		t.Fatalf("轮次与判断不符: %+v", out)
-	}
-}
-
-func TestP464RoundHumanPipeline(t *testing.T) {
-	store := openStore(t)
-	ctx := context.Background()
-	seq := 0
-	mk := func(t *testing.T, script func(rr *recordedRequest) scriptedReply) (*Loop, *gatedScriptedModel) {
-		seq++
-		return p424Loop(t, store, p464Task(seq+1), script)
-	}
-	const clean = `{"rounds":[{"round":3,"doubt":"会不会是 /old-backup/ 的列举来自共享缓存,而不是目标真实文件?","how":"直接向该路径发起 8 次请求,每次都返回同样的备份文件列举","conclusion":"已排除"}]}`
-	const dirty = `{"rounds":[{"round":3,"doubt":"alt1 命中 tc-9a2b3c4d","how":"error EOF 重试 status=200","conclusion":"conclusion ok"}]}`
-
-	t.Run("生成覆盖拼句", func(t *testing.T) {
-		l, model := mk(t, func(rr *recordedRequest) scriptedReply {
-			if strings.Contains(rr.LastUser, "校对改写") {
-				return scriptedReply{Text: clean, Finish: "stop"}
-			}
-			return scriptedReply{Text: clean, Finish: "stop"}
-		})
-		defer model.Close()
-		p464SeedClaimWithAlts(t, l)
-		out := l.GenRoundHumanFor(ctx, "tc-r", p464FalsifyRec())
-		if !strings.Contains(out.Doubt, "共享缓存") || !strings.Contains(out.Conclusion, "已排除") {
-			t.Fatalf("模型稿应覆盖拼句: %+v", out)
-		}
-		if out.Unpolished {
-			t.Fatalf("干净稿不应标注 Unpolished")
-		}
-	})
-
-	t.Run("解析失败回退拼句", func(t *testing.T) {
-		l, _ := mk(t, func(rr *recordedRequest) scriptedReply {
-			return scriptedReply{Text: "这不是 JSON", Finish: "stop"}
-		})
-		p464SeedClaimWithAlts(t, l)
-		out := l.GenRoundHumanFor(ctx, "tc-r", p464FalsifyRec())
-		if !strings.Contains(out.Doubt, "会不会是") || !strings.Contains(out.How, "独立单位") {
-			t.Fatalf("解析失败应回退拼句: %+v", out)
-		}
-	})
-
-	t.Run("闸门重写一次仍脏如实标注", func(t *testing.T) {
-		l, _ := mk(t, func(rr *recordedRequest) scriptedReply {
-			return scriptedReply{Text: dirty, Finish: "stop"}
-		})
-		p464SeedClaimWithAlts(t, l)
-		out := l.GenRoundHumanFor(ctx, "tc-r", p464FalsifyRec())
-		if !out.Unpolished {
-			t.Fatalf("重写仍脏应如实标注 Unpolished: %+v", out)
-		}
-	})
-}
-
-func TestP464LaunchSummaryEvent(t *testing.T) {
-	store := openStore(t)
-	ctx := context.Background()
-	seq := 10
-	mk := func(t *testing.T, script func(rr *recordedRequest) scriptedReply) (*Loop, *gatedScriptedModel) {
-		seq++
-		return p424Loop(t, store, p464Task(seq+1), script)
-	}
-	const clean = `{"statement":"10.0.0.5 的管理接口没有登录校验,任何知道地址的人都能进入管理后台","impact":"无需任何账号口令,可查看全部 3,214 名用户的姓名与手机号","facts":[]}`
-
-	t.Run("立账摘要落账", func(t *testing.T) {
-		l, _ := mk(t, func(rr *recordedRequest) scriptedReply {
-			return scriptedReply{Text: clean, Finish: "stop"}
-		})
-		seedSummaryClaim(t, l, l.TaskID)
-		l.polishClaimLaunchSummaries(ctx, []string{"tc-x"})
-		digests, err := l.Store.ClaimDigests(ctx, l.TaskID)
-		if err != nil {
-			t.Fatalf("ClaimDigests: %v", err)
-		}
-		if !strings.HasPrefix(digests["tc-x"].Statement, "10.0.0.5 的管理接口") {
-			t.Fatalf("立账摘要应落账并透出: %+v", digests["tc-x"])
-		}
-	})
-
-	t.Run("坏回复不落事件", func(t *testing.T) {
-		l, _ := mk(t, func(rr *recordedRequest) scriptedReply {
-			return scriptedReply{Text: "坏回复", Finish: "stop"}
-		})
-		seedSummaryClaim(t, l, l.TaskID)
-		l.polishClaimLaunchSummaries(ctx, []string{"tc-x"})
-		digests, _ := l.Store.ClaimDigests(ctx, l.TaskID)
-		if digests["tc-x"].Statement != "" {
-			t.Fatalf("坏回复不应落账: %+v", digests["tc-x"])
-		}
-	})
-
-	t.Run("零 Provider 零外呼", func(t *testing.T) {
-		l := &Loop{TaskID: p464Task(30), Store: store}
-		l.polishClaimLaunchSummaries(ctx, []string{"tc-none"})
-	})
-}
+// (TestP464RoundHumanZeroProviderFallback 已随逐轮人话链路退役删除,P5-03③。)
+// (TestP464RoundHumanPipeline 已随逐轮人话链路退役删除,P5-03③。)
+// (TestP464LaunchSummaryEvent 已随立账摘要批次退役删除,P5-03③——
+// 声明摘要只留确认定稿批次。)
 
 func p464SeedFact(t *testing.T, l *Loop) {
 	t.Helper()
@@ -201,6 +76,27 @@ func TestP464FactTexts(t *testing.T) {
 	mk := func(t *testing.T, script func(rr *recordedRequest) scriptedReply) (*Loop, *gatedScriptedModel) {
 		seq++
 		return p424Loop(t, store, p464Task(seq+1), script)
+	}
+	for _, version := range []string{"2.4.1", "42", "3.0.0-rc.1"} {
+		t.Run("产品版本完整入库_"+version, func(t *testing.T) {
+			statement := "服务名称为 demo，版本 " + version + "。"
+			body, _ := json.Marshal(map[string]any{"facts": []map[string]string{{"fact_id": "f-1", "title": "服务公开提供版本信息", "statement": statement}}})
+			l, model := mk(t, func(rr *recordedRequest) scriptedReply {
+				return scriptedReply{Text: string(body), Finish: "stop"}
+			})
+			_, err := l.Store.Append(ctx, l.TaskID, rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm", Payload: rings.NodeAdded{NodeID: "f-1", NodeType: rings.NodeFact, Title: statement, Status: "confirmed"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			l.polishConfirmedFacts(ctx, []string{"f-1"})
+			polish, err := l.Store.NodePolish(ctx, l.TaskID)
+			if err != nil || polish["f-1"].Statement != statement || polish["f-1"].Unpolished {
+				t.Fatalf("产品版本不应被文风闸门丢弃: %+v %v", polish, err)
+			}
+			if len(model.requests()) != 1 {
+				t.Fatal("正常产品版本不应触发机器语重写")
+			}
+		})
 	}
 
 	t.Run("干净冻结且事件落账", func(t *testing.T) {
@@ -241,65 +137,6 @@ func TestP464FactTexts(t *testing.T) {
 		np, _ := l.Store.NodePolish(ctx, l.TaskID)
 		if len(np) != 0 {
 			t.Fatalf("零 Provider 不应落事件: %+v", np)
-		}
-	})
-}
-
-func p464SeedHypo(t *testing.T, l *Loop) {
-	t.Helper()
-	if _, err := l.Store.Append(context.Background(), l.TaskID, rings.Event{
-		Kind: rings.EventNodeAdded, Actor: "swarm:u1", Payload: rings.NodeAdded{
-			NodeID: "h-1", NodeType: rings.NodeHypothesis, Title: "管理后台可能有弱口令",
-			Status: rings.HypothesisCandidate,
-			Detail: map[string]any{"unit_id": "u1", "basis": "登录页无验证码"}}}); err != nil {
-		t.Fatalf("铺假设失败: %v", err)
-	}
-}
-
-func TestP464HypoTexts(t *testing.T) {
-	store := openStore(t)
-	ctx := context.Background()
-	seq := 60
-	mk := func(t *testing.T, script func(rr *recordedRequest) scriptedReply) (*Loop, *gatedScriptedModel) {
-		seq++
-		return p424Loop(t, store, p464Task(seq+1), script)
-	}
-
-	t.Run("干净冻结", func(t *testing.T) {
-		l, _ := mk(t, func(rr *recordedRequest) scriptedReply {
-			return scriptedReply{Text: `{"hypotheses":[{"hypothesis_id":"h-1","title":"example.com:8080 的管理后台可能有弱口令","basis":"登录页无验证码,口令策略宽松","reason":"值得跟:先验证弱口令是否真实可登录"}]}`, Finish: "stop"}
-		})
-		p464SeedHypo(t, l)
-		plans := []hypoEvalPlan{{HypothesisID: "h-1", Decision: rings.HypothesisVerify,
-			Reason: "值得跟:先验证", VerifyIntent: "验证弱口令", ActionLevel: "只读探测"}}
-		out := l.polishHypoTexts(ctx, plans)
-		if out["h-1"].Title == "" || out["h-1"].Basis == "" || out["h-1"].Reason == "" {
-			t.Fatalf("假设文本应冻结: %+v", out["h-1"])
-		}
-	})
-
-	t.Run("字段仍脏不冻结且未评估保持原文", func(t *testing.T) {
-		l, _ := mk(t, func(rr *recordedRequest) scriptedReply {
-			return scriptedReply{Text: `{"hypotheses":[{"hypothesis_id":"h-1","title":"h-1 猜测 alt2","basis":"basis ok","reason":"EOF error"}]}`, Finish: "stop"}
-		})
-		p464SeedHypo(t, l)
-		out := l.polishHypoTexts(ctx, []hypoEvalPlan{{HypothesisID: "h-1", Decision: "hold", Reason: "x"}})
-		p := out["h-1"]
-		if !p.Unpolished {
-			t.Fatalf("标题仍脏应 Unpolished: %+v", p)
-		}
-		if p.Reason != "" {
-			t.Fatalf("理由仍脏应不冻结: %+v", p)
-		}
-		if p.Basis == "" {
-			t.Fatalf("干净的依据应保留: %+v", p)
-		}
-	})
-
-	t.Run("零 Provider 空表", func(t *testing.T) {
-		l := &Loop{TaskID: p464Task(70), Store: store}
-		if out := l.polishHypoTexts(ctx, []hypoEvalPlan{{HypothesisID: "h-1"}}); len(out) != 0 {
-			t.Fatalf("零 Provider 应空表: %+v", out)
 		}
 	})
 }

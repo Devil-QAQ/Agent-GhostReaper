@@ -61,6 +61,11 @@
   --status-danger: #e5484d;
   --status-running: #8fae94;
   --status-paused: #7e7d78;
+  --pano-intent: #b4a1cc;
+
+  /* 未读条目小圆点(P5-08②,造物主定淡红——危险红降饱和提亮约一档,
+     hsl(358°,76%,59%)→hsl(356°,43%,68%),与严重级红/危险红同屏不刺眼) */
+  --unread-dot: #d08a8f;
 
   /* 徽标软底(全彩字的胶囊底,token 派生仍定义于此) */
   --severity-critical-soft: color-mix(in srgb, var(--severity-critical) 16%, transparent);
@@ -144,6 +149,10 @@
   --status-danger: #b23c34;
   --status-running: #3e6b4f;
   --status-paused: #6b6b73;
+  --pano-intent: #735c91;
+
+  /* 未读条目小圆点(亮色取灰玫瑰红,白底对比充裕、不刺眼) */
+  --unread-dot: #bf7076;
 
   --shadow-float: 0 8px 32px rgba(23, 23, 26, 0.12);
   --shadow-float-nested: 0 16px 48px rgba(23, 23, 26, 0.18);
@@ -162,6 +171,7 @@
   --color-popover-foreground: var(--foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
+  --color-pano-intent: var(--pano-intent);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
@@ -196,6 +206,8 @@
   --color-status-danger-soft: var(--status-danger-soft);
   --color-status-running-soft: var(--status-running-soft);
   --color-status-paused-soft: var(--status-paused-soft);
+
+  --color-unread-dot: var(--unread-dot);
 
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
@@ -359,121 +371,15 @@ body {
   animation: gr-breathe 1.6s ease-in-out infinite;
 }
 
-/* 进度图节点(P2-09,8.7 进度图视图):六类节点形状徽记——形状+类型色
-   承载节点视觉语言(圆角方/箭头/圆/盾/虚线圆/方块),色值全走 8.4 token。 */
-.gr-shape-goal {
-  clip-path: inset(0 round 4px);
-}
-.gr-shape-step {
-  clip-path: polygon(0 0, calc(100% - 6px) 0, 100% 50%, calc(100% - 6px) 100%, 0 100%);
-}
-.gr-shape-fact {
-  clip-path: inset(0 round 50%);
-}
-.gr-shape-claim {
-  clip-path: polygon(0 0, 100% 0, 100% 55%, 50% 100%, 0 55%);
-}
-.gr-shape-hypo {
-  clip-path: inset(0 round 50%);
-}
-.gr-shape-asset {
-  clip-path: inset(0 round 2px);
+/* 经任务页预览确认的共用页面壳；窄屏保留导航与退出图标。 */
+@media (max-width: 767px) {
+  .app-sidebar { width: 56px; }
+  .app-sidebar .sidebar-expanded { display: none; }
+  .app-sidebar > div:first-child { padding-inline: 8px; }
+  .app-sidebar nav { padding-inline: 8px; }
+  .app-sidebar nav button { justify-content: center; padding-inline: 8px; }
+  .app-sidebar .sidebar-footer { padding-inline: 20px; }
 }
 
-/* 新节点长出动画(8.7 生长可见):250ms 淡入+位移 + 主色描边渐隐 */
-@keyframes gr-node-grow {
-  from {
-    opacity: 0;
-    transform: translateY(-10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.gr-node-newborn {
-  animation: gr-node-grow var(--motion-page) var(--ease-smooth) both;
-}
-
-/* 年轮图(P2-11,8.7 全图视图)——Cytoscape 小地图:cytoscape-navigator
-   自带样式表为 fixed 400px 亮色,不自带的规则在此收敛为画布内暗色小窗
-   (面板/视口/覆盖层三类内部元素)。 */
-.gr-cy-nav {
-  position: absolute;
-  right: 12px;
-  bottom: 12px;
-  z-index: 16;
-  width: 176px;
-  height: 118px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--card);
-  box-shadow: var(--shadow-float, 0 8px 32px rgb(0 0 0 / 0.45));
-}
-
-.gr-cy-nav img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  opacity: 0.9;
-}
-
-.gr-cy-nav .cytoscape-navigatorView {
-  position: absolute;
-  border: 1px solid var(--primary);
-  background: color-mix(in srgb, var(--primary) 30%, transparent);
-}
-
-.gr-cy-nav .cytoscape-navigatorOverlay {
-  position: absolute;
-  inset: 0;
-  cursor: move;
-}
-
-/* 年轮图 Cytoscape HTML 卡片标签(cytoscape-node-html-label 注入的
-   浮层):不参与指针事件,点击落回画布节点命中区。 */
-.gr-cy-card {
-  pointer-events: none;
-}
-
-/* ReactFlow 缩放控件(进度图/年轮图·血缘与攻击链透镜,P2-14b④):
-   库默认亮色白底,收敛为 8.4 token 暗色——按钮浮层色、描边细线、
-   悬停提亮一档。 */
-.react-flow .react-flow__controls {
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--card);
-  box-shadow: var(--shadow-float);
-}
-
-.react-flow .react-flow__controls-button {
-  border-bottom: 1px solid var(--border);
-  background: var(--card);
-  color: var(--muted-foreground);
-}
-
-.react-flow .react-flow__controls-button:last-child {
-  border-bottom: none;
-}
-
-.react-flow .react-flow__controls-button:hover {
-  background: var(--popover);
-}
-
-.react-flow .react-flow__controls-button svg {
-  fill: currentColor;
-}
-
-/* 图库自带 light/dark 类只影响库自身，不参与全站主题变量切换。 */
-.react-flow {
-  --xy-node-color: var(--foreground);
-  --xy-minimap-background-color: var(--card);
-  --xy-controls-button-background-color: var(--popover);
-  --xy-controls-button-color: var(--muted-foreground);
-  --xy-controls-button-background-color-hover: var(--accent);
-  --xy-controls-button-border-color: var(--border);
-}
+.app-sidebar[data-collapsed="true"] nav { padding-inline: 8px; }
+.app-sidebar[data-collapsed="true"] nav button { justify-content: center; padding-inline: 8px; }

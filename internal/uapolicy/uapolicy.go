@@ -75,18 +75,6 @@ func NormalizeMode(s string) string {
 	}
 }
 
-// ModeLabel 模式的展示名(面板共用,操作者语言)。
-func ModeLabel(m string) string {
-	switch NormalizeMode(m) {
-	case ModeFixed:
-		return "固定自定义"
-	case ModeTools:
-		return "模拟常见工具"
-	default:
-		return "随机浏览器"
-	}
-}
-
 // Load 从设置表拼出生效策略。读失败/缺键按默认(random、无固定值)。
 func Load(ctx context.Context, store *rings.Store) Config {
 	cfg := Config{Mode: ModeRandom}

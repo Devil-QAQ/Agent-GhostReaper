@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"ghostreaper/internal/arbiter"
 	"ghostreaper/internal/mirror"
 	"ghostreaper/internal/rings"
 	"ghostreaper/internal/runlog"
@@ -19,9 +18,6 @@ import (
 // 随新定稿重新生成;报告导出与面板渲染零 LLM(R17 不破);生成失败回退
 // 确定性拼句,不阻塞机器裁决(R2:裁决与包装分离);叙述是包装不是
 // 证据,与机器字段矛盾时以原文为准。
-
-// narrativeClip 叙述的落账上限(超长截断;面板与报告同文)。
-const narrativeClip = 600
 
 // narrativeExchangeCap 发现步骤入包的目标流量上限(判定来源载体足够;
 // 取账本序最后 N 条——发现证据通常出自步骤靠后的交换)。
@@ -40,9 +36,10 @@ type narrativePack struct {
 	// Discoveries 发现环节:普通声明单环节(声明自身的发现血缘),组合
 	// 声明逐链上事实一环节。
 	Discoveries []narrativeDiscovery `json:"discoveries"`
-	// Falsify 当前战役的反证轮(重开前旧战役不混计,与复现步骤同口径)。
-	Falsify []narrativeRound `json:"falsify"`
-	// Confirm 仲裁确认的逐条件依据(词表与界面一致)。
+	// Submit 交卷单要素(当前战役最近一次交换单;确认时点的新素材源,
+	// P5-03③ 改挂——原逐轮反证素材已随三段流水线退役)。
+	Submit *narrativeSubmit `json:"submit,omitempty"`
+	// Confirm 机器核验的逐条件依据(词表与界面一致)。
 	Confirm []string `json:"confirm"`
 }
 
@@ -75,31 +72,24 @@ type narrativeExchange struct {
 	BodyHead  string `json:"body_head,omitempty"`
 }
 
-// narrativeRound 当前战役的一轮反证结论。
-type narrativeRound struct {
-	Round            int            `json:"round"`
-	UnitID           string         `json:"unit_id"`
-	ExistenceRefuted bool           `json:"existence_refuted,omitempty"`
-	ImpactSupported  bool           `json:"impact_supported,omitempty"`
-	Alternatives     []narrativeAlt `json:"alternatives,omitempty"`
+// narrativeSubmit 交卷单要素(来龙去脉"怎么验证的"素材:自查记录与
+// 证明物,全部照抄交换单原文)。
+type narrativeSubmit struct {
+	UnitID        string   `json:"unit_id,omitempty"`
+	ProvingMarker string   `json:"proving_marker,omitempty"`
+	Countercheck  string   `json:"countercheck,omitempty"`
+	EvidenceRefs  []string `json:"evidence_refs,omitempty"`
 }
 
-type narrativeAlt struct {
-	ID      string `json:"id"`
-	Label   string `json:"label,omitempty"`
-	Refuted bool   `json:"refuted"`
-}
-
-// narrativeCondWords 仲裁条件种类 → 界面词(术语对照表·分域扩充同词,
-// 面板 COND_LABELS 同源不另造)。
+// narrativeCondWords 机器核验条件种类 → 界面词(P5-02 三查词表;术语
+// 对照表同词,面板 COND_LABELS 同源不另造——"证据可追溯/自查有记录/
+// 标准未变"入术语清单)。
 var narrativeCondWords = map[string]string{
-	"falsify_completed":     "反证完成",
-	"existence_not_refuted": "存在性未推翻",
-	"alternatives_killed":   "竞争解释全排除",
-	"impact_supported":      "影响面有证据",
-	"verifier_independent":  "验证者独立",
-	"fact_confirmed":        "事实已确认",
-	"tool_observed":         "工具已观测",
+	"evidence_traceable": "证据可追溯",
+	"countercheck_done":  "自查有记录",
+	"standard_frozen":    "标准未变",
+	"fact_confirmed":     "事实已确认",
+	"tool_observed":      "工具已观测",
 }
 
 // genClaimNarrative 定稿来龙去脉叙述生成:组装链上事实包,先落确定性
@@ -107,8 +97,8 @@ var narrativeCondWords = map[string]string{
 // 叙述并冻结;失败如实 WARN 回退拼句,不阻塞确认裁决。零 Provider 保留
 // 拼句(单测与未配模型路径,零外呼)。
 // P4-24:生成后接定稿校对+模式闸门(同会话,见 proofread.go)。
-func (l *Loop) genClaimNarrative(ctx context.Context, claimID string, j *arbiter.ClaimJudgement, rec *rings.TestClaimRecord) {
-	pack, err := l.narrativePack(ctx, claimID, j)
+func (l *Loop) genClaimNarrative(ctx context.Context, claimID string, conds []rings.ArbiterConditionResult, rec *rings.TestClaimRecord) {
+	pack, err := l.narrativePack(ctx, claimID, conds)
 	if err != nil {
 		runlog.Warnf("来龙去脉生成失败: 任务 %s 判断 %s 原因 %s(链上事实包装配失败,无叙述)",
 			l.TaskID, claimID, clipEval(err.Error()))
@@ -127,15 +117,15 @@ func (l *Loop) genClaimNarrative(ctx context.Context, claimID string, j *arbiter
 		return
 	}
 	if t := strings.TrimSpace(text); t != "" {
-		rec.Narrative = clipLine(t, narrativeClip)
+		rec.Narrative = strings.TrimSpace(t)
 	}
 	l.polishNarrative(ctx, claimID, gs, rec)
 }
 
 // narrativePack 链上事实包装配(只读账本):声明两维与组合标记、发现
 // 环节(普通 = 声明自身血缘;组合 = 链上各事实及其发现步骤)、当前战役
-// 反证轮与竞争解释排除结论、仲裁确认条件。
-func (l *Loop) narrativePack(ctx context.Context, claimID string, j *arbiter.ClaimJudgement) (*narrativePack, error) {
+// 反证轮(存量)、机器核验条件。
+func (l *Loop) narrativePack(ctx context.Context, claimID string, conds []rings.ArbiterConditionResult) (*narrativePack, error) {
 	claim, err := l.Store.Node(ctx, l.TaskID, claimID)
 	if err != nil {
 		return nil, fmt.Errorf("查判断: %w", err)
@@ -202,37 +192,35 @@ func (l *Loop) narrativePack(ctx context.Context, claimID string, j *arbiter.Cla
 		pack.Discoveries = append(pack.Discoveries, d)
 	}
 
-	// 反证轮:当前战役(重开边界与复现步骤同口径),轮次升序;竞争解释
-	// 标签取声明冻结清单。
-	labels := altLabels(claim)
-	campaign := map[string]bool{}
-	if falsifySteps, err := ClaimFalsifySteps(ctx, l.Store, l.TaskID, claimID); err == nil {
-		for _, s := range falsifySteps {
-			campaign[s.ID] = true
-		}
-	}
+	// 交卷单要素:当前战役(重开边界)最近一次交换单(P5-03③ 改挂交卷
+	// 确认时点的新素材源——自查记录与证明物;旧账本无 submit 记录时
+	// 留空,叙述按缺项如实呈现)。
+	campaignRev := int64(0)
 	for _, ev := range evs {
 		if ev.Kind != rings.EventTestClaimRecord {
 			continue
 		}
 		var r rings.TestClaimRecord
-		if json.Unmarshal(ev.Payload, &r) != nil ||
-			r.ClaimID != claimID || r.Type != rings.TestClaimRecFalsify || !campaign[r.StepID] {
+		if json.Unmarshal(ev.Payload, &r) != nil || r.ClaimID != claimID {
 			continue
 		}
-		round := narrativeRound{
-			Round: r.Round, UnitID: r.UnitID,
-			ExistenceRefuted: r.ExistenceRefuted, ImpactSupported: r.ImpactSupported,
+		switch r.Type {
+		case rings.TestClaimRecReopen:
+			campaignRev = ev.Revision
+		case rings.TestClaimRecSubmit:
+			if ev.Revision > campaignRev {
+				pack.Submit = &narrativeSubmit{
+					UnitID:        r.UnitID,
+					ProvingMarker: clipLine(r.ProvingMarker, 120),
+					Countercheck:  clipLine(r.CountercheckNote, narrativeBodyClip),
+					EvidenceRefs:  r.EvidenceRefs,
+				}
+			}
 		}
-		for _, a := range r.Alternatives {
-			round.Alternatives = append(round.Alternatives,
-				narrativeAlt{ID: a.ID, Label: labels[a.ID], Refuted: a.Refuted})
-		}
-		pack.Falsify = append(pack.Falsify, round)
 	}
 
-	if j != nil {
-		for _, c := range j.Verdict.Conditions {
+	if conds != nil {
+		for _, c := range conds {
 			pack.Confirm = append(pack.Confirm, narrativeCondWords[c.Kind])
 		}
 	}
@@ -304,7 +292,7 @@ func (l *Loop) stepExchanges(evs []rings.RawEvent, stepID string) []narrativeExc
 			continue
 		}
 		if m.Type != rings.MirrorRecHTTP && m.Type != rings.MirrorRecHTTPS {
-			continue // 隧道无原文,来源载体不成立
+			continue // 隧道无原文,来源载体缺失
 		}
 		x := narrativeExchange{
 			Method: m.Method, URL: m.URL, Status: m.Status, RespBytes: m.RespBytes,
@@ -326,23 +314,7 @@ func (l *Loop) stepExchanges(evs []rings.RawEvent, stepID string) []narrativeExc
 	return all
 }
 
-// altLabels 声明冻结的竞争解释 id → 标签。
-func altLabels(claim *rings.NodeFull) map[string]string {
-	labels := map[string]string{}
-	raw, _ := claim.Detail["alternatives"].([]any)
-	for _, item := range raw {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		id, _ := m["id"].(string)
-		label, _ := m["label"].(string)
-		if id != "" {
-			labels[id] = label
-		}
-	}
-	return labels
-}
+// altLabels 声明冻结竞争解释的解析已随 v1.3.0 砍除清单删除(P5-02⑥)。
 
 // deterministicNarrative 拼句兜底(生成失败/未配模型时冻结的确定性
 // 陈述;只述链上可数事实,不猜来源载体)。
@@ -362,23 +334,7 @@ func deterministicNarrative(p *narrativePack) string {
 	default:
 		b.WriteString("链上无发现血缘")
 	}
-	if n := len(p.Falsify); n > 0 {
-		killed := 0
-		for _, r := range p.Falsify {
-			for _, a := range r.Alternatives {
-				if a.Refuted {
-					killed++
-				}
-			}
-		}
-		fmt.Fprintf(&b, ";经 %d 轮反证", n)
-		if killed > 0 {
-			fmt.Fprintf(&b, "(排除竞争解释 %d 条)", killed)
-		}
-	} else {
-		b.WriteString(";无反证轮")
-	}
-	b.WriteString(";仲裁者判定成立")
+	b.WriteString(";单位会话内自查后交卷;机器核验确认")
 	return b.String()
 }
 
@@ -425,11 +381,11 @@ func parseClaimNarrative(text string) (string, error) {
 
 // narrativeSystem 叙述生成的系统段(代码固定;稳定短段利于前缀缓存)。
 // 文风即面板文风(8.5):陈述事实、数字精确、无 emoji、无服务腔。
-const narrativeSystem = `为渗透测试发现写"来龙去脉"叙述。基于给出的链上事实与证据,写一段中文自然叙述(一段,不超过 150 字),依次说清四件事:在哪发现的(来源载体:从哪个页面 / JS 文件 / 接口响应发现,照抄证据或交换里的 URL 与载体特征)、谁发现的(虫群单位与步骤意图)、怎么验证的(反证轮次与竞争解释排除)、怎么确认的(仲裁者判定)。
+const narrativeSystem = `为渗透测试发现写"来龙去脉"叙述。基于给出的链上事实与证据,用简短中文讲清发现和验证的关键经过，按材料决定如何组织。不要复述每个步骤和报文，人员与编号由来源记录提供；必要的访问前提、验证结果与范围必须准确。
 
 规则:
 1. 只用给出的事实,不编造;链上没有的信息不写(如无来源载体线索就不猜载体)。
-2. 数字精确(轮次、状态码、字节数);无 emoji;不写工具名与实现细节;陈述事实不解说。
+2. 数字精确(状态码、字节数);无 emoji;不写工具名与实现细节;陈述事实不解说。
 3. 组合判断按链上各事实顺序叙述各环节的发现。
 
 只输出 JSON:{"narrative":"…"}。`

@@ -1,24 +1,5 @@
 package rings
 
-// P4-36 面板按需取数的读侧汇总投影(schema v10):applyEvent 在 nodes/
-// edges 等既有投影之外,同事务维护下列小字段投影——列表类接口与详情
-// 按条取数直读投影,不再触碰事件流全量扫描。增量维护与全量重放共用
-// applyEvent 写入路径(rebuildProjections 同一份代码,确定性同源)。
-//
-//	unit_sessions    swarm.record session_started/finished → 单位会话汇总
-//	session_labels   session.meta 末态 → 会话组织信息
-//	approval_records approval.record → 审批记录追加日志
-//	claim_cases      testclaim.record / 节点事件 → 判断卷宗摘要与时间线索引
-//	hyp_states       hypothesis.record → 假设最新评估/验证结论
-//	task_extras      created 描述 + creator 种子资产 → 任务摘要
-//	closure_states   收口信号状态机末态
-//	claim_qa         shepherd.record user_message → 成果追问计数
-//	mirror_briefs    mirror.record → 镜留痕摘要(证据装配用)
-//
-// 写入一律"读-改-写"(SQL 只做裸列赋值,表达式与算术在 Go 侧完成),
-// 单写者事务内无并发竞态。时刻列存 RFC3339Nano(UTC),读取侧解析呈现;
-// JSON 列用结构体序列化(map 键排序,重放字节一致)。
-
 import (
 	"database/sql"
 	"encoding/json"
@@ -240,41 +221,6 @@ func applyMirrorBrief(tx *sql.Tx, taskID string, p MirrorRecord) error {
 		taskID, p.ExchangeID, p.Type, p.Method, p.URL, p.Status, p.TLS, p.Error,
 	); err != nil {
 		return fmt.Errorf("rings: 投影写入镜留痕摘要: %w", err)
-	}
-	return nil
-}
-
-// ---- 假设结论(hyp_states) ----
-
-// applyHypState hypothesis.record → hyp_states(latest-wins:evaluation 更新
-// 评估裁决与验证步骤,result 更新验证步骤/单位/结论)。
-func applyHypState(tx *sql.Tx, taskID string, p HypothesisRecord) error {
-	var verifyStep, verifier, decision, reason, verdict string
-	err := tx.QueryRow(
-		`SELECT verify_step, verifier, decision, reason, verdict FROM hyp_states
-		 WHERE task_id = ? AND hypothesis_id = ?`, taskID, p.HypothesisID,
-	).Scan(&verifyStep, &verifier, &decision, &reason, &verdict)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("rings: 读假设状态: %w", err)
-	}
-	switch p.Type {
-	case HypothesisRecEvaluation:
-		decision, reason = p.Decision, p.Reason
-		if p.StepID != "" {
-			verifyStep = p.StepID
-		}
-	case HypothesisRecResult:
-		verifyStep, verifier, verdict = p.StepID, p.UnitID, p.Verdict
-	}
-	if _, err := tx.Exec(
-		`INSERT INTO hyp_states (task_id, hypothesis_id, verify_step, verifier, decision, reason, verdict)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(task_id, hypothesis_id) DO UPDATE SET
-		   verify_step = excluded.verify_step, verifier = excluded.verifier,
-		   decision = excluded.decision, reason = excluded.reason, verdict = excluded.verdict`,
-		taskID, p.HypothesisID, verifyStep, verifier, decision, reason, verdict,
-	); err != nil {
-		return fmt.Errorf("rings: 投影写入假设状态: %w", err)
 	}
 	return nil
 }

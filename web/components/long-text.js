@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { ReadableText } from "@/components/readable-text";
 
 import { iconOf } from "@/components/icons";
 import {
@@ -13,8 +14,8 @@ import {
 import { cn } from "@/lib/utils";
 
 // LongText 长文本呈现(P4-02 ③"长文本全站全文可查"的统一件):截断
-// 保留 + 悬停完整 tooltip + 点击查看全文。全文按等宽字体呈现(命令 /
-// 参数 / 状态行原文的审计价值在原文);variant:
+// 保留 + 悬停完整 tooltip + 点击查看全文。正文按阅读层次呈现，mono
+// 显式指定的命令与报文保留等宽原文；variant:
 //   inline —— 行内展开(卡片语境,展开区限高内滚)
 //   dialog —— 弹层查看原文(紧凑行语境,不打乱布局)
 // 短文本(≤max 字符)原样呈现,零交互噪音。
@@ -71,9 +72,9 @@ export function LongText({ text, max = 60, lines = 0, mono = false, variant = "i
       </button>
       {variant === "inline" ? (
         open && (
-          <pre className="mt-1 max-h-56 overflow-y-auto rounded-md border border-border/55 bg-input-surface px-2 py-1.5 num text-xs whitespace-pre-wrap break-all">
-            {s}
-          </pre>
+          <div className="mt-1 max-h-56 overflow-y-auto rounded-md bg-input-surface px-3 py-2">
+            {mono ? <pre className="num text-xs leading-relaxed whitespace-pre-wrap break-words">{s}</pre> : <ReadableText text={s} />}
+          </div>
         )
       ) : (
         <Dialog open={open} onOpenChange={setOpen}>
@@ -82,9 +83,9 @@ export function LongText({ text, max = 60, lines = 0, mono = false, variant = "i
               <DialogTitle>{label || "原文"}</DialogTitle>
               <DialogDescription>共 {s.length.toLocaleString("en-US")} 字</DialogDescription>
             </DialogHeader>
-            <pre className="max-h-[60vh] overflow-y-auto rounded-md bg-input-surface p-3 num text-xs whitespace-pre-wrap break-all">
-              {s}
-            </pre>
+            <div className="max-h-[60vh] overflow-y-auto rounded-md bg-input-surface p-3">
+              {mono ? <pre className="num text-xs leading-relaxed whitespace-pre-wrap break-words">{s}</pre> : <ReadableText text={s} />}
+            </div>
           </DialogContent>
         </Dialog>
       )}

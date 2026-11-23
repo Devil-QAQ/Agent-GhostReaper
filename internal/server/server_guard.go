@@ -31,8 +31,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Autumn-27/norma/llm"
-
 	"ghostreaper/internal/rings"
 	"ghostreaper/internal/runlog"
 	"ghostreaper/internal/swarm"
@@ -260,6 +258,13 @@ func (s *Server) handleRoEAssetScope(w http.ResponseWriter, r *http.Request) {
 			nextApproved = append(nextApproved, id)
 		}
 	}
+	// Removing an explicit exclusion is an explicit inventory rejoin, including
+	// legacy discoveries whose original frozen scope was outside the seed.
+	for _, id := range added {
+		if !idInList(nextApproved, id) {
+			nextApproved = append(nextApproved, id)
+		}
+	}
 	if len(revived) > 0 {
 		note = fmt.Sprintf("%s;复活 %s(退役转回测试范围)", note, strings.Join(revived, "、"))
 	}
@@ -283,16 +288,13 @@ func (s *Server) handleRoEAssetScope(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, fmt.Errorf("摘除已落账,在途止损失败: %w", err))
 			return
 		}
-		// 摘除连坐废弃(P4-55 审核迭代):摘除覆盖资产上的非终态声明/
-		// 假设批量转已废弃(理由"目标已摘除");幂等,失败如实跳过可重入。
-		if _, _, derr := rings.DiscardAnchoredFindings(ctx, s.Store, taskID, rings.DiscardReasonExcluded, "creator"); derr != nil {
+		if _, derr := rings.DiscardAnchoredFindings(ctx, s.Store, taskID, rings.DiscardReasonExcluded, "creator"); derr != nil {
 			runlog.Warnf("摘除连坐废弃失败(如实跳过,可重入): %s %v", taskID, derr)
 		}
 	}
 	// P4-51 ⑥ 通道联动:RoE 面板纳入(勾回/取消摘除)与卡"加入资产"
 	// 等效——挂等该目标的冻结单位对账唤醒(排除的对账收口由止损与下
 	// 方 resolveScopeWakes 一并覆盖)。
-	s.resolveScopeWakes(taskID)
 	s.wake(taskID)
 	v, err := s.currentRoE(taskID)
 	if err != nil {
@@ -355,7 +357,6 @@ type intentRuleOut struct {
 	AssetTitles []string `json:"asset_titles"`
 	Disposition string   `json:"disposition"`
 	Quota       int      `json:"quota"`
-	Used        int      `json:"used"`               // 允许 + 次数上限规则的已计数次数
 	Patterns    []string `json:"patterns,omitempty"` // 判定正则(空=按内置动作词判)
 	Note        string   `json:"note,omitempty"`
 }
@@ -374,18 +375,6 @@ func (s *Server) intentRuleViews(taskID string, rules []rings.IntentRule) []inte
 			titles[a.ID] = a.Title
 		}
 	}
-	var quotaEvents []rings.GuardRecord
-	if evs, err := s.Store.EventsByKinds(ctx, taskID, rings.EventGuardRecord); err == nil {
-		for _, ev := range evs {
-			if ev.Kind != rings.EventGuardRecord {
-				continue
-			}
-			var rec rings.GuardRecord
-			if json.Unmarshal(ev.Payload, &rec) == nil && rec.Type == rings.GuardRecQuotaCount {
-				quotaEvents = append(quotaEvents, rec)
-			}
-		}
-	}
 	for _, r := range rules {
 		v := intentRuleOut{
 			ID: r.ID, Action: r.Action, AssetIDs: r.AssetIDs,
@@ -398,11 +387,7 @@ func (s *Server) intentRuleViews(taskID string, rules []rings.IntentRule) []inte
 				v.AssetTitles = append(v.AssetTitles, id)
 			}
 		}
-		for _, rec := range quotaEvents {
-			if rec.RuleID == r.ID {
-				v.Used++
-			}
-		}
+
 		out = append(out, v)
 	}
 	return out
@@ -591,99 +576,6 @@ func affectedScopeNames(r rings.IntentRule, stepAssets map[string]bool) string {
 	return strings.Join(parts, "、")
 }
 
-// handleRoERuleAdd 新增一条任务级规则。
-func (s *Server) handleRoERuleAdd(w http.ResponseWriter, r *http.Request) {
-	taskID := r.PathValue("id")
-	if !s.taskExists(taskID) {
-		writeErr(w, http.StatusNotFound, fmt.Errorf("任务 %s 不存在", taskID))
-		return
-	}
-	var body roeRuleBody
-	if !readJSON(w, r, &body) {
-		return
-	}
-	rule := body.toRings(intentRuleID())
-	st, err := s.Store.CurrentRoE(r.Context(), taskID)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-	next := append(append([]rings.IntentRule{}, st.IntentRules...), rule)
-	if err := s.validateIntentRuleAssets(taskID, next); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	if err := validateRulePatterns(next); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	if err := s.commitRoERules(r.Context(), taskID, next,
-		fmt.Sprintf("任务级拦截规则新增 %s(%s·%s)", rule.ID, rule.Action, rule.Disposition),
-		"新增", []rings.IntentRule{rule}); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	v, err := s.currentRoE(taskID)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, v)
-}
-
-// handleRoERuleEdit 编辑一条任务级规则(同 ID 覆盖)。
-func (s *Server) handleRoERuleEdit(w http.ResponseWriter, r *http.Request) {
-	taskID := r.PathValue("id")
-	rid := r.PathValue("rid")
-	if !s.taskExists(taskID) {
-		writeErr(w, http.StatusNotFound, fmt.Errorf("任务 %s 不存在", taskID))
-		return
-	}
-	var body roeRuleBody
-	if !readJSON(w, r, &body) {
-		return
-	}
-	st, err := s.Store.CurrentRoE(r.Context(), taskID)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-	idx := -1
-	for i := range st.IntentRules {
-		if st.IntentRules[i].ID == rid {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		writeErr(w, http.StatusNotFound, fmt.Errorf("规则 %s 不存在", rid))
-		return
-	}
-	old := st.IntentRules[idx]
-	next := append([]rings.IntentRule{}, st.IntentRules...)
-	next[idx] = body.toRings(rid)
-	if err := s.validateIntentRuleAssets(taskID, next); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	if err := validateRulePatterns(next); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	if err := s.commitRoERules(r.Context(), taskID, next,
-		fmt.Sprintf("任务级拦截规则编辑 %s(%s·%s)", rid, next[idx].Action, next[idx].Disposition),
-		"变更", []rings.IntentRule{old, next[idx]}); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	v, err := s.currentRoE(taskID)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, v)
-}
-
 // handleRoERuleDelete 删除一条任务级规则。
 func (s *Server) handleRoERuleDelete(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
@@ -721,96 +613,4 @@ func (s *Server) handleRoERuleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, v)
-}
-
-// ---- 描述 → 判定正则的生成(录入辅助,判定保持确定性) ----
-//
-// 合并弹窗(审核迭代三轮)的唯一辅助:操作者写动作描述(自由文本),
-// 模型把描述转成命令参数匹配正则(RE2),面板回填可编辑——保存前
-// 操作者看得见、改得了(生成错不静默入账)。判定纯正则,零 LLM。
-// 反向规则:只覆盖描述明确提到的行为,生成不了就返回空清单(操作者
-// 手写或改用内置动作词)。单发短调用(60 秒上限,跑完即弃)。
-
-// handleRoERulePatterns 动作描述 → 匹配正则清单(不落库)。
-func (s *Server) handleRoERulePatterns(w http.ResponseWriter, r *http.Request) {
-	taskID := r.PathValue("id")
-	if !s.taskExists(taskID) {
-		writeErr(w, http.StatusNotFound, fmt.Errorf("任务 %s 不存在", taskID))
-		return
-	}
-	var body struct {
-		Text string `json:"text"`
-	}
-	if !readJSON(w, r, &body) {
-		return
-	}
-	text := strings.TrimSpace(body.Text)
-	if text == "" {
-		writeErr(w, http.StatusBadRequest, errors.New("动作描述不能为空"))
-		return
-	}
-	if s.Chain == nil {
-		writeErr(w, http.StatusServiceUnavailable, errors.New("模型未配置(LLM配置页激活模型后可生成);也可手写匹配模式,或描述直接用内置动作词(上传/爆破等)"))
-		return
-	}
-	prov := llm.Provider(s.Chain)
-	cctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-	defer cancel()
-	msg, _, _, err := prov.Complete(cctx, llm.CompletionRequest{
-		System: []string{patternsExtractSystem()},
-		Messages: []llm.Message{
-			{Role: "user", Content: []llm.ContentBlock{{Type: llm.BlockText, Text: text}}},
-		},
-		MaxTokens: 2048,
-	})
-	if err != nil {
-		writeErr(w, http.StatusBadGateway, fmt.Errorf("生成失败: %w", err))
-		return
-	}
-	patterns := parsePatternList(msg.Text())
-	// 编译不过的条目丢弃(面板回填的是可用正则;生成质量由操作者终审)。
-	okPatterns := make([]string, 0, len(patterns))
-	for _, p := range patterns {
-		if p = strings.TrimSpace(p); p == "" {
-			continue
-		}
-		if _, err := regexp.Compile(p); err != nil {
-			continue
-		}
-		okPatterns = append(okPatterns, p)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"patterns": okPatterns})
-}
-
-// patternsExtractSystem 生成提示词:描述 → 正则清单。
-func patternsExtractSystem() string {
-	return `你是渗透测试任务的动作规则编译器。把操作者对动作的自然语言描述转成命令参数匹配正则,输出且只输出一个 JSON 字符串数组(可为空 []),不要输出其他文字。
-要求:
-- 每个正则匹配"执行该动作的命令文本"的典型形态(动作可能经 bash 的 curl/wget/sqlmap/hydra/nmap 等工具执行)。
-- 只覆盖描述明确提到的行为,不扩展、不推测;同一动作的多种命令形态给多条。
-- 正则用 RE2 语法(无前后瞻),留意大小写时加 (?i)。
-- 描述含糊或生成不了就输出 []。
-示例:描述"上传文件" -> ["(?i)\bcurl\b[^|;&]*(\s-T\b|--upload-file|\s-F\b|--form\b)","(?i)\bwget\b[^|;&]*(--post-file|--post-data)"]`
-}
-
-// parsePatternList 从模型回复解析正则清单(容忍围栏与前后杂文;也接受
-// 逐行纯文本形态)。
-func parsePatternList(reply string) []string {
-	raw := strings.TrimSpace(reply)
-	start := strings.Index(raw, "[")
-	end := strings.LastIndex(raw, "]")
-	if start >= 0 && end > start {
-		var list []string
-		if err := json.Unmarshal([]byte(raw[start:end+1]), &list); err == nil {
-			return list
-		}
-	}
-	// 退化为逐行:非空行即候选正则。
-	var out []string
-	for _, line := range strings.Split(raw, "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			out = append(out, line)
-		}
-	}
-	return out
 }

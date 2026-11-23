@@ -479,7 +479,7 @@ func TestTaskOverrideRouting(t *testing.T) {
 	_ = SaveModelConfig(ctx, store, ModelConfig{Name: "g", Format: "openai", BaseURL: "http://127.0.0.1:1", APIKey: "k", Model: "global-m"}, "creator")
 	_ = SaveModelConfig(ctx, store, ModelConfig{Name: "t", Format: "openai", BaseURL: "http://127.0.0.1:2", APIKey: "k", Model: "task-m"}, "creator")
 	_ = SetActive(ctx, store, RolePrimary, "g", "creator")
-	_ = SetTaskOverride(ctx, store, "tk1", RolePrimary, "t", "creator")
+	_ = store.SetSetting(ctx, keyTaskPrefix+"tk1."+RolePrimary, "t", "creator")
 
 	c := NewChain(store, EnvConfig{})
 	c.mu.Lock()
@@ -532,7 +532,7 @@ func TestActiveModelFollowsSwitch(t *testing.T) {
 // TestServedModelPerSession 会话级记账精确归属(P4-41):轮转/换腿下,
 // 记账解析(ActiveModelFor 带会话键)返回该会话最近**实际服务**的模型,
 // 与轮转游标的当前位置无关;新会话无记录退当前路由;Reload 清记录
-//(切换后下一请求起记新配置的腿)。
+// (切换后下一请求起记新配置的腿)。
 func TestServedModelPerSession(t *testing.T) {
 	c, primary, backup, _ := newTestChain(t)
 	// 同优先级第二备,构造轮转组(b1/b2 轮流打头)。
@@ -609,7 +609,7 @@ func TestActiveModelForTaskBinding(t *testing.T) {
 		}
 	}
 	_ = SetActive(ctx, store, RolePrimary, "g", "creator")
-	_ = SetTaskOverride(ctx, store, "tk1", RolePrimary, "t", "creator")
+	_ = store.SetSetting(ctx, keyTaskPrefix+"tk1."+RolePrimary, "t", "creator")
 
 	c := NewChain(store, EnvConfig{})
 	if got := c.ActiveModel(); got != "global-m" {

@@ -12,8 +12,6 @@ import (
 
 // ---- P2-08b 会话页数据面:会话原文读 / 主宰研判轨迹 / 单位信息条 ----
 
-// seedSessionsTask 造一个带三轮研判的任务(含窗口内的派发步骤 / 事实
-// 转正 / 声明裁决 / 假设裁决),供 overmind rounds 派生断言。
 func seedSessionsTask(t *testing.T, srv *Server) string {
 	t.Helper()
 	task := "t-sessions"
@@ -42,13 +40,10 @@ func seedSessionsTask(t *testing.T, srv *Server) string {
 		rings.Event{Kind: rings.EventOvermindRecord, Actor: "overmind",
 			Payload: rings.OvermindRecord{Type: rings.OvermindRecAssessment, SessionID: "overmind-t-sessions-d2",
 				EvaluatedRev: 7, QUnlock: "新可达解锁 s2", Combined: []string{"tc-chain-9"}}},
-		// 窗口 2:派发 s2 + 假设 h-1 收割挂账。
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u2",
-			Payload: rings.NodeAdded{NodeID: "h-1", NodeType: rings.NodeHypothesis, Title: "直觉"}},
+
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind",
 			Payload: rings.NodeAdded{NodeID: "s2", NodeType: rings.NodeStep, Title: "验证假设", Status: "dispatched"}},
-		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "overmind",
-			Payload: rings.NodeStateChanged{NodeID: "h-1", Status: "held"}},
+
 		// 步骤终态(当前投影)。
 		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "overmind",
 			Payload: rings.NodeStateChanged{NodeID: "s1", Status: "done"}},
@@ -97,15 +92,10 @@ func TestOvermindRoundsDerivation(t *testing.T) {
 	if len(steps2) != 1 || steps2[0].(map[string]any)["id"] != "s2" {
 		t.Fatalf("第 2 轮派发步骤不符: %v", r2["steps"])
 	}
-	hypos2, _ := r2["hypotheses"].([]any)
-	if len(hypos2) != 1 || hypos2[0].(map[string]any)["status"] != "held" {
-		t.Fatalf("第 2 轮假设收割不符: %v", r2["hypotheses"])
-	}
 	combined, _ := r2["combined"].([]any)
 	if len(combined) != 1 || combined[0] != "tc-chain-9" {
 		t.Fatalf("第 2 轮组合声明不符: %v", r2["combined"])
 	}
-	// 第 1 轮不得吃到窗口 2 的内容(步骤 s2 / 假设 h-1)。
 	for _, s := range steps1 {
 		if s.(map[string]any)["id"] == "s2" {
 			t.Fatalf("s2 泄入第 1 轮窗口")

@@ -18,13 +18,16 @@ func TestSubmitCandidateFactNewAsset(t *testing.T) {
 	ctx := context.Background()
 	const task = "p412-entry"
 	seedGraph(t, store, task, "枚举关联资产")
+	if _, err := store.Append(ctx, task, rings.Event{Kind: rings.EventNodeAdded, Actor: "creator", Payload: rings.NodeAdded{NodeID: "parent-domain", NodeType: rings.NodeAsset, Title: "example.com", AssetClass: rings.AssetDomain, Status: "active"}}); err != nil {
+		t.Fatal(err)
+	}
 
 	ex := NewExecutor(store, nil, filepath.Join(dir, "tasks"), Budget{})
 	env := &unitEnv{Executor: ex, TaskID: task, StepID: "s1", UnitID: "u1", TranscriptID: "swarm-u1"}
 
 	// 合法声明:入 detail,事实本身不锚定资产(对象由收割入图)。
 	fid, err := env.SubmitCandidateFact(ctx, "发现管理后台子域", "DNS 应答原文",
-		"", &NewAssetDecl{Class: "subdomain", Title: "admin.example.com", Parent: "target"})
+		"", &NewAssetDecl{Class: "subdomain", Title: "admin.example.com", Parent: "parent-domain"})
 	if err != nil {
 		t.Fatalf("带新对象声明的候选提交失败: %v", err)
 	}
@@ -33,7 +36,7 @@ func TestSubmitCandidateFactNewAsset(t *testing.T) {
 		t.Fatalf("查候选失败: %v", err)
 	}
 	decl, ok := n.Detail["new_asset"].(map[string]any)
-	if !ok || decl["class"] != "subdomain" || decl["title"] != "admin.example.com" || decl["parent"] != "target" {
+	if !ok || decl["class"] != "domain" || decl["title"] != "admin.example.com" || decl["parent"] != "parent-domain" {
 		t.Fatalf("new_asset 声明应随事实入 detail: %+v", n.Detail)
 	}
 

@@ -43,6 +43,7 @@ const (
 	liveTopicTasks    = "tasks"     // 任务列表态(状态/受阻/目标进度/运行单位派生)
 	liveTopicApproval = "approval:" // + 任务 ID(低频重事件,携带待决载荷)
 	liveTopicClaims   = "claims:"   // + 任务 ID(发现面)
+	liveTopicPview    = "pview:"    // + 任务 ID(全景图节点、关系及显示稿更新)
 )
 
 const (
@@ -94,10 +95,37 @@ func newLiveHub(gate swarm.ApprovalGate) *liveHub {
 func (h *liveHub) onCommit(taskID string, events []rings.Event) {
 	var topics []string
 	claim := liveTopicClaims + taskID
+	pview := liveTopicPview + taskID
+	// pviewDirty 全景图骨架是否标脏:骨架四类节点(goal/asset/step/
+	// testclaim)的新增,或影响骨架口径的状态迁移(testclaim 显示键/
+	// goal 达成/asset 摘除退役)。步骤执行态迁移(running/done 等)不改
+	// 骨架(意图卡无状态),不标——运行期高频事件不驱动图页重拉。
+	pviewDirty := false
 	for _, ev := range events {
 		switch ev.Kind {
 		case rings.EventTaskLifecycle, rings.EventTaskMeta:
 			topics = append(topics, liveTopicTasks)
+		case rings.EventNodeAmended:
+			topics = append(topics, liveTopicTasks)
+			if p, ok := payloadAs[rings.NodeAmended](ev.Payload); ok {
+				if _, changed := p.Detail["result_types"]; changed {
+					topics = append(topics, claim)
+				}
+			}
+		case rings.EventShepherdRecord:
+			if p, ok := payloadAs[rings.ShepherdRecord](ev.Payload); ok {
+				if p.ClaimID == "" {
+					topics = append(topics, "shepherd:"+taskID)
+				} else {
+					topics = append(topics, "shepherd:"+taskID+":"+p.ClaimID)
+				}
+			}
+		case rings.EventInterjectRecord:
+			if p, ok := payloadAs[rings.InterjectRecord](ev.Payload); ok {
+				topics = append(topics, "interject:"+taskID+":"+p.Target+":"+p.SessionID)
+			}
+		case rings.EventSteerRecord:
+			topics = append(topics, "steers:"+taskID)
 		case rings.EventClosureRecord:
 			// 收口信号(P4-18):提醒到达与两键裁决都改任务列表的待决
 			// 投影,订阅方重拉即弹/即收。
@@ -106,12 +134,30 @@ func (h *liveHub) onCommit(taskID string, events []rings.Event) {
 			// RoE 变更改写图载荷的资产范围口径(P4-05 摘除 / P4-09
 			// 覆盖条分母)——tasks 主题订阅方(工作台图 / 任务列表)重拉。
 			topics = append(topics, liveTopicTasks)
+			pviewDirty = true // 资产摘除标记进骨架
 		case rings.EventApprovalRecord:
 			// 审批请求/裁决改动待决计数——除本任务的审批重事件外,
 			// 任务列表的 pending_approvals 投影(P4-23)随之标脏。
 			topics = append(topics, liveTopicApproval+taskID, liveTopicTasks)
+		case rings.EventStepTitle:
+			topics = append(topics, liveTopicTasks)
+			pviewDirty = true
+		case rings.EventFactText:
+			topics = append(topics, liveTopicTasks, claim)
+			pviewDirty = true
+		case rings.EventOvermindPolish:
+			topics = append(topics, liveTopicTasks)
+		case rings.EventClaimText:
+			topics = append(topics, claim, liveTopicTasks)
+			pviewDirty = true
+		case rings.EventClaimRetextNote:
+			topics = append(topics, claim)
 		case rings.EventTestClaimRecord:
 			topics = append(topics, claim)
+			// 交卷/定稿批改级别与摘要(骨架漏洞行小字段)。
+			if p, ok := payloadAs[rings.TestClaimRecord](ev.Payload); ok && p.Severity != "" {
+				pviewDirty = true
+			}
 		case rings.EventNodeAdded:
 			nt, ok := payloadAs[rings.NodeAdded](ev.Payload)
 			if ok {
@@ -124,16 +170,34 @@ func (h *liveHub) onCommit(taskID string, events []rings.Event) {
 				if nt.NodeType == rings.NodeTestClaim {
 					topics = append(topics, claim)
 				}
+				switch nt.NodeType {
+				case rings.NodeAsset, rings.NodeStep, rings.NodeTestClaim, rings.NodeGoal, rings.NodeFact:
+					pviewDirty = true
+				}
 			}
 			topics = append(topics, liveTopicTasks)
 		case rings.EventNodeStateChanged:
 			if p, ok := payloadAs[rings.NodeStateChanged](ev.Payload); ok {
-				if h.nodeTypes[taskID][p.NodeID] == rings.NodeTestClaim {
+				switch h.nodeTypes[taskID][p.NodeID] {
+				case rings.NodeTestClaim:
 					topics = append(topics, claim)
+					pviewDirty = true // 显示键迁移(确认/推翻/修复)
+				case rings.NodeGoal, rings.NodeAsset, rings.NodeFact:
+					pviewDirty = true // 横幅进度 / 资产摘除
 				}
 			}
 			topics = append(topics, liveTopicTasks)
+		case rings.EventEdgeAdded:
+			if e, ok := payloadAs[rings.EdgeAdded](ev.Payload); ok {
+				switch e.EdgeType {
+				case rings.EdgeCovers, rings.EdgeProduces, rings.EdgeDerivedFrom, rings.EdgeDependsOn, rings.EdgeSourcedFrom, rings.EdgeSubOf:
+					pviewDirty = true
+				}
+			}
 		}
+	}
+	if pviewDirty {
+		topics = append(topics, pview)
 	}
 	if len(topics) == 0 {
 		return

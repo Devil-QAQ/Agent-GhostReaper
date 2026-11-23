@@ -183,8 +183,8 @@ func TestHTTPSDecryptFullCaptureAndReplay(t *testing.T) {
 	if err != nil || len(exs) != 2 || exs[1].TLS == nil || exs[1].TLS.Validity != TLSValidSelfSigned {
 		t.Fatalf("回放全集不符: %v %+v", err, exs)
 	}
-	if sess.Lost() != 0 {
-		t.Fatalf("留痕失败计数应 0: %d", sess.Lost())
+	if sess.lost.Load() != 0 {
+		t.Fatalf("留痕失败计数应 0: %d", sess.lost.Load())
 	}
 }
 
@@ -530,8 +530,8 @@ func TestHTTPSConcurrentAllCaptured(t *testing.T) {
 			t.Fatalf("每痕须 https 且带 blob: %+v", rec)
 		}
 	}
-	if sess.Lost() != 0 {
-		t.Fatalf("留痕失败计数应 0: %d", sess.Lost())
+	if sess.lost.Load() != 0 {
+		t.Fatalf("留痕失败计数应 0: %d", sess.lost.Load())
 	}
 	exs, err := Exchanges(context.Background(), store, blobs, "t1")
 	if err != nil || len(exs) != 41 {

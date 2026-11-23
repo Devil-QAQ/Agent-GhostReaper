@@ -32,29 +32,14 @@ import (
 // 重写 ≈ 3 次请求的余量;到线放弃,读侧退原文)。
 const polishAsyncTimeout = 5 * time.Minute
 
-// assessPolishClip 研判单字段校对稿的落账上限(五问各一两句的量级)。
-const assessPolishClip = 240
-
-// detachCtx 脱离取消的派生 ctx(保留值、自带上限)。
-func detachCtx(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(parent), polishAsyncTimeout)
-}
-
-// WaitPolish 等待在途异步补写收口(单测直接调 cycle 的收拢锚点;生产
-// 路径由 Run 退出时的 polishWG.Wait 兜住)。
-func (l *Loop) WaitPolish() { l.polishWG.Wait() }
-
 // ---- ⑨ 研判叙述与五问行 ----
 
 // assessPolishSystem 研判叙述校对的系统段:五问逐问结论与五问之外研判
 // 的显示层改写口径(叙述锚,与四段锚/短句锚并列的第三形态——研判结论
 // 是"依据图上事实的一句话判断+理由",不套报告四段)。
-const assessPolishSystem = `校对改写主宰规划记录的叙述文本,写给不懂技术的读者也能读懂。输入是规划记录原文(五个问题逐问的结论与问题之外的规划结论)。任务:逐字段改写,只改文风,规划结论一字不动——事实、目标、数字、资产编号、状态、"无"这样的表态全照抄,不编造原文没有的信息,不改变任何判断。
-写法:平实书面白话,短句;先说结论再说理由;数字写精确的实际值(3 台、第 2 轮),不写"多个/大量";提到目标一律用完整标识(域名或 IP 起头、host:port 形态,如 jkysd.cn:9902),不用裸端口、裸路径指代目标;无 emoji;不写工具名与实现细节。
-正例:"10.0.0.5:8080 的管理接口凭 s2 拿到的口令可以登录,原判断"仅外网可达"不再成立;下一步验证该口令在 10.0.0.6 上的同一套后台是否通用。"
-反例:"经过综合评估,新权限或将对既有漏洞的威胁态势产生显著影响,建议持续关注"(无结论、无数字、空话)。
-禁这些机器语:内部编号解释、裸版本号数字、程序报错原文、英文状态词、无动词的压缩名词堆。
-只输出 JSON:{"q_access":"…","q_privilege":"…","q_combination":"…","q_unlock":"…","q_overturn":"…","note":"…"},输入为空的字段输出空字符串。`
+const assessPolishSystem = `把主宰本次规划整理成操作者能直接看懂的说明。各字段先说判断，再补一条必要依据；直接写完整短句，不加“判断／依据”等标签；没有新内容就保持原本的“无新入口／无新权限”等原意，不再补一句同义解释，不补造发现。名称、目标与证据由各自记录提供，正文不逐项复述内部编号或执行参数。规划方向、决定与尚未验证的边界必须保持准确。
+` + displayExplanationStandard + `
+只输出 JSON:{"q_access":"…","q_privilege":"…","q_combination":"…","q_unlock":"…","q_overturn":"…","note":"…"}，输入为空的字段保持空。`
 
 // polishAssessmentAsync 研判记录落账后异步补写校对稿(P4-65 ⑨):研判
 // 轮与派发不等校对;失败/仍含机器语的字段不冻结(读侧退研判记录原文)。
@@ -62,13 +47,7 @@ func (l *Loop) polishAssessmentAsync(parent context.Context, recRev int64, rec r
 	if l.Provider == nil || recRev <= 0 {
 		return
 	}
-	ctx, cancel := detachCtx(parent)
-	l.polishWG.Add(1)
-	go func() {
-		defer l.polishWG.Done()
-		defer cancel()
-		l.polishAssessment(ctx, recRev, rec)
-	}()
+	l.queueDisplay(parent, []string{displayKey("assessment", "", recRev)}, func(ctx context.Context, _ map[string]bool) { l.polishAssessment(ctx, recRev, rec) })
 }
 
 // assessPolishMaterial 研判叙述素材(仅非空字段进素材)。
@@ -137,15 +116,6 @@ func (l *Loop) polishAssessment(ctx context.Context, recRev int64, rec rings.Ove
 		runlog.Warnf("规划叙述校对解析失败: 任务 %s 记录版本 %d(读侧按原文呈现)", l.TaskID, recRev)
 		return
 	}
-	// 校对续问(同会话,模型可见自己刚写的全部字段)。
-	if text, err := gs.ask(ctx, assessPolishProofreadAsk); err == nil {
-		if re := parseAssessPolish(text); re != nil {
-			out = re
-		}
-	} else {
-		runlog.Warnf("规划叙述校对失败: 任务 %s 记录版本 %d 原因 %s(保留生成稿)",
-			l.TaskID, recRev, clipEval(err.Error()))
-	}
 	// 闸门:逐字段扫;命中 → 同会话重写一次 → 仍命中的字段置空不冻结。
 	if dirty := assessPolishHits(out); len(dirty) > 0 {
 		if err := l.rewriteAssessPolish(ctx, gs, out, dirty); err != nil {
@@ -159,7 +129,7 @@ func (l *Loop) polishAssessment(ctx context.Context, recRev int64, rec rings.Ove
 		if v == "" {
 			continue
 		}
-		if hits := ScanMachineTalk(v); len(hits) > 0 {
+		if hits := scanDisplayText(v); len(hits) > 0 {
 			runlog.Warnf("规划叙述未过文风校验,该字段按原文呈现: 任务 %s 记录版本 %d 字段 %s(%s)",
 				l.TaskID, recRev, key, strings.Join(talkHitLines(hits), ";"))
 			continue
@@ -170,7 +140,7 @@ func (l *Loop) polishAssessment(ctx context.Context, recRev int64, rec rings.Ove
 		pol.QUnlock == "" && pol.QOverturn == "" && pol.Note == "" {
 		return // 全部字段未过闸:不落空事件(物理校验拒空的生成侧保证)
 	}
-	if _, err := l.Store.Append(ctx, l.TaskID, rings.Event{
+	if _, err := l.Store.AppendDisplay(ctx, l.TaskID, rings.Event{
 		Kind: rings.EventOvermindPolish, Actor: ActorOvermind, Payload: pol,
 	}); err != nil {
 		runlog.Warnf("规划叙述校对稿写入失败: 任务 %s 记录版本 %d 原因 %s(读侧按原文呈现)",
@@ -178,16 +148,12 @@ func (l *Loop) polishAssessment(ctx context.Context, recRev int64, rec rings.Ove
 	}
 }
 
-// assessPolishProofreadAsk 校对续问。
-const assessPolishProofreadAsk = `校对改写你刚写的全部规划叙述:只改文风,规划结论一字不动(事实、目标、数字、资产编号、状态、"无"全照抄);仍是先结论后理由的平实短句,空字段保持空。
-只输出 JSON:{"q_access":"…","q_privilege":"…","q_combination":"…","q_unlock":"…","q_overturn":"…","note":"…"},覆盖全部字段。`
-
 // assessPolishHits 逐字段机器语扫描(键 → 命中)。
 func assessPolishHits(r *assessPolishReply) map[string][]talkHit {
 	dirty := map[string][]talkHit{}
 	for _, key := range assessFields {
 		if v := assessFieldOf(r, key); v != "" {
-			if hits := ScanMachineTalk(v); len(hits) > 0 {
+			if hits := scanDisplayText(v); len(hits) > 0 {
 				dirty[key] = hits
 			}
 		}
@@ -224,21 +190,21 @@ func (l *Loop) rewriteAssessPolish(ctx context.Context, gs *genSession, out *ass
 	return nil
 }
 
-// assessFieldOf 回复字段按键取值(统一截断 assessPolishClip)。
+// assessFieldOf 按键取完整显示说明，不裁断句子。
 func assessFieldOf(r *assessPolishReply, key string) string {
 	switch key {
 	case "q_access":
-		return clipRunes(strings.TrimSpace(r.QAccess), assessPolishClip)
+		return strings.TrimSpace(r.QAccess)
 	case "q_privilege":
-		return clipRunes(strings.TrimSpace(r.QPrivilege), assessPolishClip)
+		return strings.TrimSpace(r.QPrivilege)
 	case "q_combination":
-		return clipRunes(strings.TrimSpace(r.QCombination), assessPolishClip)
+		return strings.TrimSpace(r.QCombination)
 	case "q_unlock":
-		return clipRunes(strings.TrimSpace(r.QUnlock), assessPolishClip)
+		return strings.TrimSpace(r.QUnlock)
 	case "q_overturn":
-		return clipRunes(strings.TrimSpace(r.QOverturn), assessPolishClip)
+		return strings.TrimSpace(r.QOverturn)
 	case "note":
-		return clipRunes(strings.TrimSpace(r.Note), assessPolishClip)
+		return strings.TrimSpace(r.Note)
 	}
 	return ""
 }
@@ -298,23 +264,19 @@ func parseAssessPolish(text string) *assessPolishReply {
 
 // ---- ⑩ 意图/步骤标题 ----
 
-// intentTitleStandard 意图标题校对标准(P4-65 ⑩):意图是动作短句(资产
-// +手法+目标),与事实/假设标题的陈述短句(P4-64 ⑥ titleShortStandard)
-// 同为短句族、句式各异——不套报告级四段锚。与拆解契约 StructuredFieldStyle
-// (生成时收口)同口径:≤40 字、数字精确、完整标识。
-const intentTitleStandard = `意图标题标准(动作短句,不超过 40 字):资产+手法+目标一句说清;主语用完整标识(域名或 IP 起头、host:port 形态,如 jkysd.cn:9902),不用裸端口、裸路径;数字写实际值(20 个、第 2 轮);平实书面白话;无 emoji;不写工具名与实现细节;命令与参数留给执行,不进标题。
-正例:"对 10.0.0.5:8080 做目录枚举,找未授权入口""用 s2 拿到的口令登录 10.0.0.6 后台,验证是否通用"。
-反例:"针对目标 Web 应用开展全面深入的安全测试"(无定位、空话);"Get /backup 200 OK 高危漏洞探测"(机器语堆砌)。`
+const intentTitleStandard = `名称只概括这条意图要做的事，适合在列表中一眼辨认。说明讲清要检查什么、为什么检查；操作参数与命令留在完整意图，不重复罗列。资产地址由界面单列，名称不必塞入完整地址。意图只说明要做什么，不逐项列出完整的验证判据，也不预先讨论测试结果。详细方案留给完整意图。`
 
-// stepTitleSystem 意图标题校对的系统段。
-const stepTitleSystem = `校对改写渗透测试刚派发的意图标题,写给不懂技术的读者也能读懂。输入是每条意图的原文。任务:按意图标题的标准逐条改写——只改文风,意图内容一字不动(目标、路径、数字、动作全照抄),不编造原文没有的信息。
+// 只约束真实性与名称/说明分工，让模型组织面向人的内容。
+const stepTitleSystem = `为安全测试面板整理意图的名称和说明。读者要能迅速看懂这次准备做什么，不需要先读执行记录。
 ` + intentTitleStandard + `
-只输出 JSON:{"steps":[{"step_id":"…","title":"…"},…]},steps 只含输入里给出的条目。`
+` + displayExplanationStandard + `
+只输出 JSON:{"steps":[{"step_id":"…","title":"…","statement":"…"},…]}，条目标识与输入一致。`
 
 // stepTitleMaterial 单条意图标题素材。
 type stepTitleMaterial struct {
-	StepID string `json:"step_id"`
-	Intent string `json:"intent"`
+	StepID    string `json:"step_id"`
+	Intent    string `json:"intent"`
+	SourceRev int64  `json:"-"`
 }
 
 // stepTitleReply 模型回复契约与单条包装。
@@ -328,13 +290,33 @@ func (l *Loop) polishStepTitlesAsync(parent context.Context, plans []stepTitleMa
 	if l.Provider == nil || len(plans) == 0 {
 		return
 	}
-	ctx, cancel := detachCtx(parent)
-	l.polishWG.Add(1)
-	go func() {
-		defer l.polishWG.Done()
-		defer cancel()
-		l.polishStepTitles(ctx, plans)
-	}()
+	sources, err := l.Store.NodeTextSourceRevs(parent, l.TaskID)
+	if err != nil {
+		l.setErr(err)
+		return
+	}
+	l.queueStepTitles(parent, plans, sources)
+}
+
+func (l *Loop) queueStepTitles(parent context.Context, plans []stepTitleMaterial, sources map[string]int64) {
+	var keys []string
+	plans = append([]stepTitleMaterial(nil), plans...)
+	for i := range plans {
+		plans[i].SourceRev = sources[plans[i].StepID]
+		if n, err := l.Store.Node(parent, l.TaskID, plans[i].StepID); err == nil {
+			plans[i].Intent = n.Title
+		}
+		keys = append(keys, displayKey("step", plans[i].StepID, plans[i].SourceRev))
+	}
+	l.queueDisplay(parent, keys, func(ctx context.Context, accepted map[string]bool) {
+		var selected []stepTitleMaterial
+		for _, plan := range plans {
+			if accepted[displayKey("step", plan.StepID, plan.SourceRev)] {
+				selected = append(selected, plan)
+			}
+		}
+		l.polishStepTitles(ctx, selected)
+	})
 }
 
 // polishStepTitles 同步全链:生成 → 校对续问 → 闸门 → 重写一次 → 仍
@@ -361,18 +343,10 @@ func (l *Loop) polishStepTitles(ctx context.Context, plans []stepTitleMaterial) 
 		runlog.Warnf("意图标题校对解析失败: 任务 %s %d 条(读侧按原文呈现)", l.TaskID, len(plans))
 		return
 	}
-	// 校对续问(同会话,模型可见自己刚写的全部条目)。
-	if text, err := gs.ask(ctx, stepTitleProofreadAsk); err == nil {
-		if re := parseStepTitles(text, known); len(re) > 0 {
-			out = re
-		}
-	} else {
-		runlog.Warnf("意图标题校对失败: 任务 %s 原因 %s(保留生成稿)", l.TaskID, clipEval(err.Error()))
-	}
 	// 闸门:命中 → 同会话重写一次 → 仍命中的条目不冻结。
 	dirty := map[string][]talkHit{}
 	for id, t := range out {
-		if hits := ScanMachineTalk(t); len(hits) > 0 {
+		if hits := scanDisplayText(t.Title + "\n" + t.Statement); len(hits) > 0 {
 			dirty[id] = hits
 		}
 	}
@@ -384,35 +358,32 @@ func (l *Loop) polishStepTitles(ctx context.Context, plans []stepTitleMaterial) 
 	events := make([]rings.Event, 0, len(out))
 	for _, p := range plans {
 		t, ok := out[p.StepID]
-		if !ok || t == "" {
+		if !ok || t.Title == "" {
 			continue // 未生成或未过闸:读侧退节点标题
 		}
-		if hits := ScanMachineTalk(t); len(hits) > 0 {
+		if hits := scanDisplayText(t.Title + "\n" + t.Statement); len(hits) > 0 {
 			runlog.Warnf("意图标题未过文风校验,按原文呈现: 任务 %s 步骤 %s(%s)",
 				l.TaskID, p.StepID, strings.Join(talkHitLines(hits), ";"))
 			continue
 		}
+		t.SourceRev = p.SourceRev
 		events = append(events, rings.Event{
 			Kind: rings.EventStepTitle, Actor: ActorOvermind,
-			Payload: rings.StepTitlePolish{StepID: p.StepID, Title: t},
+			Payload: t,
 		})
 	}
 	if len(events) == 0 {
 		return
 	}
-	if _, err := l.Store.Append(ctx, l.TaskID, events...); err != nil {
-		runlog.Warnf("意图标题校对稿写入失败: 任务 %s %d 条 原因 %s(读侧按原文呈现)",
-			l.TaskID, len(events), clipEval(err.Error()))
+	for _, event := range events {
+		if _, err := l.Store.AppendDisplay(ctx, l.TaskID, event); err != nil {
+			l.setErr(err)
+		}
 	}
 }
 
-// stepTitleProofreadAsk 意图标题的校对续问。
-const stepTitleProofreadAsk = `校对改写你刚写的全部意图标题:只改文风,意图内容一字不动(目标、路径、数字、动作全照抄);仍是动作短句,step_id 与上一轮一致。
-` + intentTitleStandard + `
-只输出 JSON:{"steps":[{"step_id":"…","title":"…"},…]},覆盖全部条目。`
-
-// parseStepTitles 宽容解析意图标题回复(未知条目丢弃,标题按字符截断)。
-func parseStepTitles(text string, known map[string]bool) map[string]string {
+// parseStepTitles 丢弃未知条目，保留完整显示稿；旧版仅标题回复兼容。
+func parseStepTitles(text string, known map[string]bool) map[string]rings.StepTitlePolish {
 	body := strings.TrimSpace(text)
 	if m := jsonFenceRe.FindStringSubmatch(body); m != nil {
 		body = strings.TrimSpace(m[1])
@@ -426,30 +397,32 @@ func parseStepTitles(text string, known map[string]bool) map[string]string {
 	if json.Unmarshal([]byte(body), &r) != nil {
 		return nil
 	}
-	out := map[string]string{}
-	for _, s := range r.Steps {
-		if !known[s.StepID] {
+	out := map[string]rings.StepTitlePolish{}
+	for _, item := range r.Steps {
+		if !known[item.StepID] {
 			continue
 		}
-		if t := clipRunes(strings.TrimSpace(s.Title), 80); t != "" {
-			out[s.StepID] = t
+		item.Title = strings.TrimSpace(item.Title)
+		item.Statement = strings.TrimSpace(item.Statement)
+		if item.Title != "" {
+			out[item.StepID] = item
 		}
 	}
 	return out
 }
 
 // rewriteStepTitles 闸门退回重写(命中条目与特征喂回同会话)。
-func (l *Loop) rewriteStepTitles(ctx context.Context, gs *genSession, out map[string]string, dirty map[string][]talkHit) error {
+func (l *Loop) rewriteStepTitles(ctx context.Context, gs *genSession, out map[string]rings.StepTitlePolish, dirty map[string][]talkHit) error {
 	var b strings.Builder
 	b.WriteString("你改写的意图标题里有机器语,逐处改写掉,事实一字不动:\n")
 	for id, hits := range dirty {
-		fmt.Fprintf(&b, "步骤 %s(标题:%s):\n", id, clipLine(out[id], 60))
+		fmt.Fprintf(&b, "步骤 %s(标题:%s):\n", id, clipLine(out[id].Title+" / "+out[id].Statement, 120))
 		for _, line := range talkHitLines(hits) {
 			b.WriteString("- " + line + "\n")
 		}
 	}
-	b.WriteString(talkRewriteReferralNote + intentTitleStandard + "\n")
-	b.WriteString(`只输出 JSON:{"steps":[{"step_id":"…","title":"…"},…]},只含上面点名的条目。`)
+	b.WriteString(talkRewriteReferralNote + intentTitleStandard + "\n" + displayExplanationStandard + "\n")
+	b.WriteString(`只输出 JSON:{"steps":[{"step_id":"…","title":"…","statement":"…"},…]},只含上面点名的条目。`)
 	text, err := gs.ask(ctx, b.String())
 	if err != nil {
 		return err

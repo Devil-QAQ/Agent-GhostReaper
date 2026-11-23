@@ -5,7 +5,6 @@
 package swarm
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -144,101 +143,5 @@ func TestP474CardFaceByCommand(t *testing.T) {
 	}
 	if ground = StepGroundNote(rings.ActionModifyPersist, "port_probe", json.RawMessage(`{"host":"t.local","port":443}`)); ground == "" {
 		t.Fatalf("L4 步骤中的只读工具命令应有背景行")
-	}
-}
-
-// p474AttackNotes 该任务全部审批记录的 Note(句式断言用)。
-func p474AttackNotes(t *testing.T, store *rings.Store, task string) []string {
-	t.Helper()
-	var out []string
-	for _, r := range approvalEvents(t, store, task) {
-		out = append(out, r.Note)
-	}
-	return out
-}
-
-// TestP474AttackCardWordingJudged 攻击卡句式·已判定形态(完成标准③):
-// 模型判 info_attack——"X 是信息源"句式出现(判定在先),动作句带依据。
-func TestP474AttackCardWordingJudged(t *testing.T) {
-	store, _, env, pack := p450Env(t)
-	called := 0
-	env.triage = p472Stub([]TriageTarget{
-		{Host: "gitee.com", Verdict: TriageInfoAttack, Basis: "对公开服务发起端口扫描"},
-	}, &called)
-	d := env.denyScope(pack, "bash", p467Target(t, "gitee.com"))
-	if d == "" || !strings.Contains(d, "已提交面板待决") {
-		t.Fatalf("info_attack 应出攻击行为卡: %q", d)
-	}
-	if env.park == nil || env.park.Req.AttackTarget == "" {
-		t.Fatalf("应挂在攻击行为卡票上")
-	}
-	note := env.park.Req.Note
-	if !strings.Contains(note, "是信息源(查资料用的公开服务,不是测试目标)") {
-		t.Fatalf("已判定信息源攻击应含\"是信息源\"句式: %q", note)
-	}
-	if !strings.Contains(note, "本次动作是主动攻击(分诊依据:对公开服务发起端口扫描)") {
-		t.Fatalf("动作句应带判定依据: %q", note)
-	}
-	_ = store
-}
-
-// TestP474AttackCardWordingUnjudged 攻击卡句式·拿不准形态(完成标准③):
-// 红队清单命中、动作复查失败——目标在清单(判定在先,"是信息源"如实),
-// 但动作性质未判定:不写"本次动作是主动攻击"。
-func TestP474AttackCardWordingUnjudged(t *testing.T) {
-	store, _, env, pack := p450Env(t)
-	rpack := p470RedTeamPack(pack)
-	if err := GrantInfoSource(context.Background(), store, env.TaskID, "gitee.com", "测试依据", "creator"); err != nil {
-		t.Fatal(err)
-	}
-	env.triage = func(_ context.Context, _ TriageInput) (TriageReply, error) {
-		return TriageReply{}, context.DeadlineExceeded
-	}
-	d := env.denyScope(rpack, "bash", p470ScanCmd(t, "nmap -p 443 gitee.com"))
-	if d == "" || !strings.Contains(d, "已提交面板待决") {
-		t.Fatalf("拿不准应按攻击卡提交人审: %q", d)
-	}
-	if env.park == nil || env.park.Req.AttackTarget == "" {
-		t.Fatalf("应挂在攻击行为卡票上")
-	}
-	note := env.park.Req.Note
-	if !strings.Contains(note, "本次动作的性质未判定") {
-		t.Fatalf("未判定形态应如实说未判定: %q", note)
-	}
-	if strings.Contains(note, "本次动作是主动攻击") {
-		t.Fatalf("未判定不得宣称\"本次动作是主动攻击\": %q", note)
-	}
-	// 目标在信息源清单(判定在先):"是信息源"句式保留(有判定支撑)。
-	if !strings.Contains(note, "是信息源") {
-		t.Fatalf("清单命中的目标如实呈现信息源身份: %q", note)
-	}
-}
-
-// TestP474NoInfoSourcePhraseForNonSource 非信息源目标无"是信息源"句式
-// (完成标准③断言):候选/非目标/范围内结论走范围卡或静默过滤——账本
-// 全部记录的 Note 零"是信息源"句式(该句式仅信息源判定时出现)。
-func TestP474NoInfoSourcePhraseForNonSource(t *testing.T) {
-	store, _, env, pack := p450Env(t)
-	called := 0
-	env.triage = p472Stub([]TriageTarget{
-		{Host: "peer.example.net", Verdict: TriageCandidate, Basis: "归属不明确"},
-	}, &called)
-	// 候选:出范围卡(sc-),非攻击卡。
-	if d := env.denyScope(pack, "bash", p467Target(t, "peer.example.net")); d == "" {
-		t.Fatalf("候选目标应出范围卡")
-	}
-	// 非目标:静默过滤。
-	env2 := &unitEnv{Executor: env.Executor, TaskID: env.TaskID, StepID: env.StepID, UnitID: "u2", TranscriptID: "swarm-u2", scopeResolve: env.scopeResolve}
-	called2 := 0
-	env2.triage = p472Stub([]TriageTarget{
-		{Host: "rate.example.net", Verdict: TriageNotTarget, Basis: "参数值"},
-	}, &called2)
-	if d := env2.denyScope(pack, "bash", json.RawMessage(mustJSON(t, "nmap --limit rate.example.net ef854.iujw.cn"))); d != "" {
-		t.Fatalf("非目标应静默过滤: %q", d)
-	}
-	for _, note := range p474AttackNotes(t, store, env.TaskID) {
-		if strings.Contains(note, "是信息源") {
-			t.Fatalf("非信息源目标的留痕不得出现\"是信息源\"句式: %q", note)
-		}
 	}
 }

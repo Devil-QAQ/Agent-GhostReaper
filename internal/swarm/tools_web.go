@@ -50,6 +50,7 @@ func (env *unitEnv) readTool() tool.CoreTool {
 				"path":   map[string]any{"type": "string", "description": "文件路径(相对路径按当前工作目录解析)"},
 				"offset": map[string]any{"type": "integer", "description": "起始行号(从 1 起,默认 1)"},
 				"limit":  map[string]any{"type": "integer", "description": "本次读取的行数(默认 400,上限 1000)"},
+				"column": map[string]any{"type": "integer", "description": "起始行的起始字符(从 1 起,默认 1)，用于续读超长单行"},
 			},
 			"required": []string{"path"},
 		},
@@ -61,6 +62,7 @@ func (env *unitEnv) readTool() tool.CoreTool {
 				Path   string `json:"path"`
 				Offset int    `json:"offset"`
 				Limit  int    `json:"limit"`
+				Column int    `json:"column"`
 			}
 			if err := json.Unmarshal(in, &args); err != nil {
 				return tool.Errorf("bad input: " + err.Error()), nil
@@ -69,8 +71,8 @@ func (env *unitEnv) readTool() tool.CoreTool {
 			if p == "" {
 				return tool.Errorf("path 不能为空:填入要读的文件路径后重发"), nil
 			}
-			if args.Offset < 0 || args.Limit < 0 {
-				return tool.Errorf("offset/limit 须为非负整数,修正参数后重发"), nil
+			if args.Offset < 0 || args.Limit < 0 || args.Column < 0 {
+				return tool.Errorf("offset/limit/column 须为非负整数,修正参数后重发"), nil
 			}
 			offset := args.Offset
 			if offset == 0 {
@@ -132,6 +134,9 @@ func (env *unitEnv) readTool() tool.CoreTool {
 			// 逐行读取:跳到 offset,收 limit 行;行号与截断如实标注。
 			var b strings.Builder
 			fmt.Fprintf(&b, "%s 第 %d 行起", args.Path, offset)
+			if args.Column > 1 {
+				fmt.Fprintf(&b, "，第 %d 字符起", args.Column)
+			}
 			br := bufio.NewReader(f)
 			lineno := 0
 			collected := 0
@@ -153,8 +158,19 @@ func (env *unitEnv) readTool() tool.CoreTool {
 					more = true
 					break
 				}
-				clipped := clipTail(strings.TrimRight(line, "\n"), readLineClip)
-				fmt.Fprintf(&b, "\n%6d\t%s", lineno, clipped)
+				chars := []rune(strings.TrimSuffix(line, "\n"))
+				column := 1
+				if lineno == offset {
+					column = max(1, args.Column)
+				}
+				if column > 1 && column > len(chars) {
+					return tool.Errorf(fmt.Sprintf("第 %d 行共 %d 字符，column=%d 超出范围", lineno, len(chars), column)), nil
+				}
+				end := min(len(chars), column-1+readLineClip)
+				fmt.Fprintf(&b, "\n%6d\t%s", lineno, string(chars[column-1:end]))
+				if end < len(chars) {
+					fmt.Fprintf(&b, "\n(第 %d 行未读完，续读用 offset=%d,column=%d,limit=1)", lineno, lineno, end+1)
+				}
 				collected++
 				if rerr == io.EOF {
 					break
@@ -218,7 +234,7 @@ func (env *unitEnv) webSearchTool() tool.CoreTool {
 				return tool.Errorf("bad input: " + err.Error()), nil
 			}
 			cfg := websearch.Load(ctx, env.Executor.Store)
-			results, err := websearch.Search(ctx, cfg, args.Query)
+			results, err := env.Executor.search.Search(ctx, env.TaskID, cfg, args.Query)
 			if err != nil {
 				return tool.Errorf("搜索失败: " + err.Error()), nil
 			}
@@ -415,7 +431,7 @@ func replaceAllFold(s, old, new string) string {
 // ---- 工具目录条目(描述与 tools.go 的目录单一来源共用) ----
 
 const (
-	toolDescRead      = "只读文件工具:读取本机文本文件内容(带行号),用于分析执行中下载或落盘的产物(配置、源码、响应存档等)。一次最多 1000 行、每行截 2000 字符,大文件用 offset/limit 分段读;工具输出超长被存档时,把返回文本里的存档引用(sha256: 开头)原样作为 path 填入即可读回全文,同样支持 offset/limit 分段。本工具无任何写操作,二进制文件不归本工具(用 bash 的 file/strings/xxd 分析)。"
+	toolDescRead      = "只读文件工具:读取本机文本文件内容(带行号),用于分析执行中下载或落盘的产物(配置、源码、响应存档等)。一次最多 1000 行、每行最多 2000 字符，大文件用 offset/limit 分段读；单行未读完时按返回提示用 column 继续，column 为起始行的起始字符(从 1 起)。工具输出存档时，把 sha256: 开头的完整引用原样作为 path，不能拼成本地路径。本工具无任何写操作,二进制文件不归本工具(用 bash 的 file/strings/xxd 分析)。"
 	toolDescWebSearch = "外网搜索公开信息(CVE 详情、公开漏洞分析、报错原文查证),返回标题、链接与摘要。默认 DuckDuckGo 免 key;后端(Brave/Tavily 需 key)与独立出口代理在系统设置·搜索配置。结果不足时换关键词重搜,不要重复同一查询。"
 	toolDescWebFetch  = "取回外网 URL 的原文(网页返回正文文本而非 HTML 源码;JSON/XML 等文本原样;二进制只报类型与大小)。流量强制经镜留痕,可在流量页回放查证。正文超长会截断存档;查 CVE 详情、 advisory 原文、公开报告时用本工具。"
 )

@@ -19,10 +19,11 @@ import (
 // 墙钟——相同账本状态两次导出字节级一致;无中生有的字段按数据现实
 // 诚实省略,不造占位假数据。
 //
-// 章节:任务概要 → 聚合摘要(含级别分布)→ 资产覆盖统计 → Confirmed
-// 列表 → 证据不足清单(含理由,R4;P4-56 改词)→ 年轮审计摘要。每条发现含完整
-// 反证时间线与收割定稿的复现步骤(操作方法 + Burp 可验证原文),与
+// 章节:任务概要 → 聚合摘要(含级别分布)→ 资产覆盖统计 → 已确认发现
+// 列表 → 证据不足清单(理由直陈,R4)→ 年轮审计摘要。每条发现含完整
+// 时间线与收割定稿的复现步骤(操作方法 + Burp 可验证原文),与
 // 面板发现详情同源同一装配(claim.go,面板所见即报告所印)。
+// 被推翻的重验结论不进报告(账本留痕,P5-07⑦)。
 
 // taskStatusWords 任务状态 → 报告文案(P4-25 审核迭代:状态词 11→7,
 // 与面板徽标同口径——created 并入排队中、paused/checkpointed 并入
@@ -54,12 +55,18 @@ var goalStatusWords = map[string]string{
 
 // stepStatusWordsMap 步骤状态 → 报告文案(裸状态词不上报告;exhausted
 // 按术语对照表译"预算耗尽";blocked=受阻,P4-27 ② 与面板同口径;
-// dispatched=排队中,P4-46 ② 与面板/状态总表同口径)。
+// dispatched=排队中,P4-46 ② 与面板/状态总表同口径;P5-05 挂等让位
+// 停等态(scope_wait/gate_wait/pause_wait/model_wait)一律"排队中"
+// 不标原因,与面板同口径)。
 var stepStatusWordsMap = map[string]string{
 	"done": "已完成", "exhausted": "预算耗尽", "failed": "失败",
 	"cancelled": "已取消", "aborted": "已中止", "running": "执行中", "dispatched": "排队中",
 	"blocked":         "受阻",
 	"approval_denied": "审批拒绝终止",
+	"scope_wait":      "排队中",
+	"gate_wait":       "排队中",
+	"pause_wait":      "排队中",
+	"model_wait":      "排队中",
 }
 
 // severityOrder 级别固定序(报告与 csv 行序同源)。
@@ -205,9 +212,8 @@ func Render(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore, tas
 
 	// ---- 聚合摘要 ----
 	// fixed(已修复,P3-06)计入 Confirmed 口径——它是已确认发现之上的修复
-	// 标记,不是发现消失;另计已修复条数单列呈现。过程态计数按 P4-56
-	// 四页签显示词(等待反证/反证中/反证暂停,由步骤现值推导);证据
-	// 不足(原"待确认")与已废弃(refuted+discarded 合并档)单列。
+	// 标记,不是发现消失;另计已修复条数单列呈现。在途计数为瞬时候选
+	//(P5-02⑤ 待机器核验);证据不足与已废弃(目标摘除连坐)单列。
 	// P4-30 ③:复核标记不纳入报告的判断(信息性,无直接危害)整体退出
 	// 报告各计数与清单——账本不涂改,一条汇总行如实交代(判断保留可溯)。
 	var confirmed, fixedN, pending, forging, ungraded, excludedN, discardedN int
@@ -229,11 +235,11 @@ func Render(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore, tas
 			} else {
 				ungraded++
 			}
-		case rings.TestClaimPending:
+		case rings.TestClaimInsufficient:
 			pending++
-		case rings.TestClaimRefuted, rings.TestClaimDiscarded:
+		case rings.TestClaimDiscarded:
 			discardedN++
-		case rings.TestClaimCandidate, rings.TestClaimTesting, rings.TestClaimAwaitingRound:
+		case rings.TestClaimCandidate:
 			forging++
 		}
 	}
@@ -258,14 +264,13 @@ func Render(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore, tas
 		fmt.Fprintf(&b, "- 其中已修复(复测确认):%d 条\n", fixedN)
 	}
 	if discardedN > 0 {
-		fmt.Fprintf(&b, "- 已废弃:%d 条(被反证推翻或目标已摘除,理由留档)\n", discardedN)
+		fmt.Fprintf(&b, "- 已废弃:%d 条(关联目标摘除,理由留档)\n", discardedN)
 	}
 	if excludedN > 0 {
 		fmt.Fprintf(&b, "- 不纳入报告:%d 条判断经复核为信息性观察(无直接危害),不作为漏洞呈现;判断与证据保留在账本\n", excludedN)
 	}
 	if forging > 0 {
-		fmt.Fprintf(&b, "- 判断在途:%s(共 %d 条)\n",
-			inFlightWords(claims, steps, store.SteerKilledSteps(ctx, taskID), cases), forging)
+		fmt.Fprintf(&b, "- 判断在途:%s(共 %d 条)\n", inFlightWords(claims), forging)
 	}
 	var sevParts []string
 	for _, sev := range severityOrder {
@@ -328,16 +333,16 @@ func Render(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore, tas
 		writeClaim(&b, n, "C", c, assetTitle, abouts, cases[c.ID])
 	}
 	if n == 0 {
-		b.WriteString("本轮无经独立反证与机器判定确认的发现。\n")
+		b.WriteString("本轮无经机器核验确认的发现。\n")
 	}
 
 	// ---- 证据不足清单 ----
-	// P4-56 ②:原"待确认清单"改词——证据不足(锤炼完仍证不实,挂起
-	// 可复活),理由直陈(R4)。
+	// P4-56 ② 起"证据不足"词;P5-02⑤ 起为三查补考用尽后的终态
+	// (理由直陈,R4 精神)。
 	b.WriteString("\n## 证据不足清单\n\n")
 	n = 0
 	for _, c := range claims {
-		if c.Status != rings.TestClaimPending || !inScope(c.ID) {
+		if c.Status != rings.TestClaimInsufficient || !inScope(c.ID) {
 			continue
 		}
 		if cases[c.ID] != nil && cases[c.ID].ReportExcluded {
@@ -477,20 +482,26 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 	// 声明文本优先定稿校对稿(P4-59 ①:报告级文风——描述=一句话本质+
 	// 影响对象,危害=直接说结果+数字精确);未生成/未过闸退节点原文
 	//(机器判定与审计仍读节点,包装不是证据)。
-	statement, impact := c.Title, ""
+	title, statement, impact := c.Title, c.Title, ""
 	if impactRaw, ok := c.Detail["impact"].(string); ok {
 		impact = impactRaw
 	}
 	if cs != nil && cs.Summary != nil {
+		if cs.Summary.Title != "" {
+			title = cs.Summary.Title
+		}
 		if cs.Summary.Statement != "" {
 			statement = cs.Summary.Statement
+			if cs.Summary.Title == "" {
+				title = statement
+			}
 		}
 		if cs.Summary.Impact != "" {
 			impact = cs.Summary.Impact
 		}
 	}
 	// 标题是一句话人话(判断原文),tc-ID 进条目内详情行,不作标题。
-	head := fmt.Sprintf("### %s-%d %s", prefix, n, statement)
+	head := fmt.Sprintf("### %s-%d %s", prefix, n, title)
 	if vulnclass != "" {
 		head += " · " + vulnclass
 	}
@@ -502,6 +513,19 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 	fmt.Fprintf(b, "- 存在性判断:%s\n", statement)
 	if impact != "" {
 		fmt.Fprintf(b, "- 影响面判断:%s\n", impact)
+	}
+	// 影响(交卷申报)(P5-07⑦b):虫群交换单申报的影响列点,自由文本
+	// 如实呈现(单条一行,多条逐行列点);不进机器判定,包装不改原文。
+	if note := cs.ImpactNoteOf(); note != "" {
+		lines := strings.Split(strings.TrimRight(note, "\n"), "\n")
+		if len(lines) == 1 {
+			fmt.Fprintf(b, "- 影响(交卷申报):%s\n", lines[0])
+		} else {
+			b.WriteString("- 影响(交卷申报):\n")
+			for i, ln := range lines {
+				fmt.Fprintf(b, "  %d. %s\n", i+1, ln)
+			}
+		}
 	}
 	if cs != nil && cs.Retest != nil {
 		fmt.Fprintf(b, "- 复测:%s(第 %d 轮)\n", retestVerdictWord(cs.Retest.Verdict), cs.Retest.Round)
@@ -525,11 +549,6 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 		if step, _ := c.Detail["step_id"].(string); step != "" {
 			fmt.Fprintf(b, " · 发现步骤 `%s`", step)
 		}
-		if verifier := cs.Verifier(); verifier != "" {
-			fmt.Fprintf(b, ";验证单位 `%s`(验证者 ≠ 发现者)", verifier)
-		} else if step := cs.FalsifyStep(); step != "" {
-			fmt.Fprintf(b, ";反证步骤 `%s`", step)
-		}
 		b.WriteString("\n")
 	}
 	if prefix == "P" {
@@ -538,7 +557,7 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 		}
 	}
 	if prefix == "C" {
-		b.WriteString("- 判定:仲裁者机器判定已确认(条件求值全部通过)\n")
+		b.WriteString("- 判定:机器核验已确认(三查全部通过)\n")
 	}
 	// 来龙去脉(P4-13):定稿冻结的模型叙述,读定稿零 LLM(R17);旧定稿
 	// 无叙述如实标注,不编造。P4-24:文风校验未过的叙述带说明行。
@@ -553,60 +572,16 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 			b.WriteString("- 来龙去脉:定稿时未生成叙述\n")
 		}
 	}
-	// 反证记录:完整时间线(面板发现详情同源同一装配)。P4-56 ⑤:
-	// 定稿冻结的人话三段(疑点→怎么验的→结论)先于人话对应轮次的
-	// 机器行——报告与面板同口径(人话层默认可见,机器原文随后)。
-	// P4-64 ①:逐轮事件(claim.round_human)优先,存量旧定稿的
-	// repro.Rounds 照读(新事件覆盖同轮号)。
+	// 时间线:交卷/状态/核验/重开逐条(面板发现详情同源同一装配;
+	// P5-03③:旧逐轮反证人话三段已随反证流程退役删除,反证写回条目
+	// 不再呈现)。
 	if cs != nil && len(cs.Timeline) > 0 {
-		b.WriteString("- 反证记录:\n")
-		humanOf := map[int]rings.FalsifyRoundHuman{}
-		if cs.Repro != nil {
-			for _, rh := range cs.Repro.Rounds {
-				humanOf[rh.Round] = rh
-			}
-		}
-		for _, rh := range cs.RoundHumans {
-			humanOf[rh.Round] = rh
-		}
+		b.WriteString("- 时间线:\n")
 		for _, e := range cs.Timeline {
-			if e.Kind == "falsify" && e.Round > 0 {
-				if rh, ok := humanOf[e.Round]; ok && (rh.Doubt != "" || rh.How != "" || rh.Conclusion != "") {
-					fmt.Fprintf(b, "  - 第 %d 轮人话\n", e.Round)
-					if rh.Doubt != "" {
-						fmt.Fprintf(b, "    疑点:%s\n", rh.Doubt)
-					}
-					if rh.How != "" {
-						fmt.Fprintf(b, "    怎么验的:%s\n", rh.How)
-					}
-					if rh.Conclusion != "" {
-						fmt.Fprintf(b, "    结论:%s\n", rh.Conclusion)
-					}
-					if rh.Unpolished {
-						b.WriteString("    (文字未过文风校验,按原文保留)\n")
-					}
-				}
-			}
 			if line := caseEntryLine(e); line != "" {
 				fmt.Fprintf(b, "  - %s\n", line)
 			}
 		}
-	}
-	// 竞争性替代解释(创建时冻结 · 逐条排除状态)。
-	if cs != nil && len(cs.Alternatives) > 0 {
-		var alts []string
-		for _, a := range cs.Alternatives {
-			killed := "未排除"
-			if a.Killed {
-				killed = "已排除"
-			}
-			label := a.Label
-			if label == "" {
-				label = a.ID
-			}
-			alts = append(alts, fmt.Sprintf("%s(%s)", label, killed))
-		}
-		fmt.Fprintf(b, "- 其他可能原因(创建时冻结):%s\n", strings.Join(alts, ";"))
 	}
 	// 复现步骤(收割定稿,P4-35 最小集口径):每步三层(短名/做什么/
 	// 作用)+ Burp 可验证原文(与面板同口径)。P4-08 ⑤:操作方法(op
@@ -673,33 +648,8 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 	b.WriteString("\n")
 }
 
-// Verifier 卷宗时间线取最新验证单位(verdict 优先,次 falsify)。
-// 详情 API 与报告共用(面板所见即报告所印)。
-func (cs *ClaimCase) Verifier() string {
-	if cs == nil {
-		return ""
-	}
-	for i := len(cs.Timeline) - 1; i >= 0; i-- {
-		e := cs.Timeline[i]
-		if (e.Kind == "verdict" || e.Kind == "falsify") && e.UnitID != "" {
-			return e.UnitID
-		}
-	}
-	return ""
-}
-
-// FalsifyStep 最新反证 Step。
-func (cs *ClaimCase) FalsifyStep() string {
-	if cs == nil {
-		return ""
-	}
-	for i := len(cs.Timeline) - 1; i >= 0; i-- {
-		if cs.Timeline[i].Kind == "falsify" && cs.Timeline[i].StepID != "" {
-			return cs.Timeline[i].StepID
-		}
-	}
-	return ""
-}
+// Verifier/FalsifyStep 已随 P5-02⑥ 砍除(验证者独立条款退役,R12
+// v1.3.0 修订;验证单位/反证步骤不再呈现)。
 
 // PendingReason 最新非 confirm 裁决理由(R4)。
 func (cs *ClaimCase) PendingReason() string {
@@ -750,43 +700,21 @@ func (cs *ClaimCase) ReproSteps() int {
 func caseEntryLine(e CaseEntry) string {
 	switch e.Kind {
 	case "created":
-		return fmt.Sprintf("判断已记录，等待安排反证(发现单位 `%s`)", orDash(e.UnitID))
+		return fmt.Sprintf("漏洞已交卷，等待核验(单位 `%s`)", orDash(e.UnitID))
+	case "submit":
+		return fmt.Sprintf("交卷(单位 `%s`)，待机器核验", orDash(e.UnitID))
 	case "state":
 		return fmt.Sprintf("状态 → %s", rings.ClaimStatusWord(e.Status))
-	case "falsify":
-		exist := "存在性未推翻"
-		if e.ExistenceRefuted {
-			exist = "存在性被推翻"
-		}
-		round := ""
-		if e.Round > 0 {
-			round = fmt.Sprintf("第 %d 轮", e.Round)
-		}
-		line := fmt.Sprintf("%s反证(单位 `%s`):%s", round, e.UnitID, exist)
-		if e.ImpactSupported {
-			level := e.ImpactLevel
-			if level == "" {
-				level = "未定级"
-			}
-			line += " · 影响面:证据充分(" + level + ")"
-		} else {
-			line += " · 影响面:证据不足"
-		}
-		for _, a := range e.AltResults {
-			word := "未排除"
-			if a.Refuted {
-				word = "已排除"
-			}
-			line += fmt.Sprintf(" · 其他可能原因 %s %s", altWord(a), word)
-		}
-		if e.EvidenceHead != "" {
-			line += " · 证据:" + e.EvidenceHead
-		}
-		return line
 	case "verdict":
 		switch e.Decision {
 		case rings.VerdictConfirm:
-			return "机器判定:已确认"
+			return "机器核验:已确认"
+		case rings.VerdictRetake:
+			return fmt.Sprintf("机器核验未过,待补考(%s)", e.PendingReason)
+		case rings.VerdictRefuted:
+			return fmt.Sprintf("重验推翻(%s)", e.PendingReason)
+		case rings.VerdictInsufficient:
+			return fmt.Sprintf("机器核验:证据不足(%s)", e.PendingReason)
 		case rings.VerdictAdvanceRound:
 			return fmt.Sprintf("轮末评估:待下一轮反证(%s)", e.PendingReason)
 		default:
@@ -798,15 +726,6 @@ func caseEntryLine(e CaseEntry) string {
 		return fmt.Sprintf("检查归纳定稿(级别 %s)", orDash(e.Severity))
 	}
 	return ""
-}
-
-// altWord 时间线疑点内容(装配已按冻结清单回填 label;旧数据无
-// label 时退显 ID,如实不编造)。
-func altWord(a rings.AltResult) string {
-	if a.Label != "" {
-		return a.Label
-	}
-	return a.ID
 }
 
 func reopenWord(trigger string) string {
@@ -821,43 +740,20 @@ func reopenWord(trigger string) string {
 	return trigger
 }
 
-// inFlightWords 判断在途计数行(P4-56 四页签显示词,与面板同拍):按
-// 机器状态+反证步骤现值推导(等待反证/反证中/反证暂停),零计数段不
-// 输出;无在途判断返回空串(调用方不输出本行)。
-func inFlightWords(claims, steps []rings.NodeFull, steerKills map[string]bool, cases map[string]*ClaimCase) string {
-	falsifyOf := map[string][]rings.NodeFull{}
-	for _, s := range steps {
-		if kind, _ := s.Detail["kind"].(string); kind != "falsify" {
-			continue
-		}
-		if cid, _ := s.Detail["testclaim_id"].(string); cid != "" {
-			falsifyOf[cid] = append(falsifyOf[cid], s)
-		}
-	}
-	counts := map[string]int{}
+// inFlightWords 判断在途计数行(P5-02⑤ 三态口径):候选(交卷到机器
+// 三查之间,秒级——常态瞬时为零)计数,ClaimStatusWord 单源直出。
+// 零计数不输出;无在途判断返回空串(调用方不输出本行)。
+func inFlightWords(claims []rings.NodeFull) string {
+	n := 0
 	for _, c := range claims {
-		switch c.Status {
-		case rings.TestClaimCandidate, rings.TestClaimTesting, rings.TestClaimAwaitingRound:
-		default:
-			continue
-		}
-		var reason string
-		if cs := cases[c.ID]; cs != nil {
-			reason = cs.PendingReason()
-		}
-		key, _ := rings.ClaimDisplay(c.Status, rings.ClaimFlightOfSteps(falsifyOf[c.ID], steerKills), reason)
-		counts[key]++
-	}
-	var parts []string
-	for _, key := range []string{
-		rings.ClaimDisplayFalsifying, rings.ClaimDisplayWaitFalsify,
-		rings.ClaimDisplayFalsifyPaused,
-	} {
-		if n := counts[key]; n > 0 {
-			parts = append(parts, fmt.Sprintf("%s %d", rings.ClaimDisplayWord(key), n))
+		if c.Status == rings.TestClaimCandidate {
+			n++
 		}
 	}
-	return strings.Join(parts, " · ")
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s %d", rings.ClaimStatusWord(rings.TestClaimCandidate), n)
 }
 
 func orDash(s string) string {
@@ -920,6 +816,7 @@ func stepStatusWords(byStatus map[string]int) string {
 	for _, st := range []string{
 		"done", "exhausted", "failed", "blocked", "approval_denied",
 		"aborted", "cancelled", "running", "dispatched",
+		"scope_wait", "gate_wait", "pause_wait", "model_wait",
 	} {
 		if n := byStatus[st]; n > 0 {
 			words = append(words, fmt.Sprintf("%s %d", stepStatusWordsMap[st], n))

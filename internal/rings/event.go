@@ -7,63 +7,46 @@ import (
 	"time"
 )
 
-// NodeType 六类节点(第三章 §2;Hypothesis 由第四章 §5 扩入)。
 type NodeType string
 
 const (
-	NodeGoal       NodeType = "goal"       // 里程碑,带机器可判定的完成谓词(P1-06 起接仲裁者)
-	NodeStep       NodeType = "step"       // 意图/候选行动,不绑定具体工具
-	NodeFact       NodeType = "fact"       // 挂证据的已证命题
-	NodeAsset      NodeType = "asset"      // 资产节点族,共 12 类
-	NodeTestClaim  NodeType = "testclaim"  // 可证伪的漏洞声明,带状态机(P1-08)
-	NodeHypothesis NodeType = "hypothesis" // 虫群直觉候选回流
+	NodeGoal      NodeType = "goal"      // 里程碑,带机器可判定的完成谓词(P1-06 起接仲裁者)
+	NodeStep      NodeType = "step"      // 意图/候选行动,不绑定具体工具
+	NodeFact      NodeType = "fact"      // 挂证据的已证命题
+	NodeAsset     NodeType = "asset"     // 资产节点族,共 12 类
+	NodeTestClaim NodeType = "testclaim" // 可证伪的漏洞声明,带状态机(P1-08)
 )
 
-// TestClaim 状态机词汇(P1-08 基础版 + P2-02 完整版,第三章 §5):
-// 候选 → 反证中 → 轮末机器评估 → Confirmed / 不成立 / 待确认 / 待下轮反证;
-// 待下轮反证由收割派发下一轮回反证中;Confirmed/不成立/待确认可被重开
-// 回反证中(reopen 事件,历史不删,R1/§3.1)。归地基层与 NodeType 同惯例:
+// TestClaim 状态机词汇(P5-02⑤ v1.3.0 三态):候选 → 已确认 / 证据不足。
+// 交卷即查(机器三查,毫秒级纯函数,不经收割轮)取代旧收割侧反证轮判定;
+// 三查不过注入补考反馈(上限 1 次),仍不过落证据不足终态。已确认 +
+// 新反证经 reopen 重开回候选走新交卷重验(reopen 事件,历史不删,R1/§3.1);
+// 重验未再坐实记推翻终态。归地基层与 NodeType 同惯例:
 // swarm/overmind/arbiter/server 四方共用,避免各自拼字符串漂移。
-// Confirmed/不成立/待确认/待下轮反证均由仲裁者机器判定迁移(actor=arbiter,
-// R2/R3);待确认与待下轮反证是一等状态且必带搁置理由(R4,理由在
-// testclaim.record verdict 负载里,账本入口强制非空)。
-// 不成立(P4-55 ②,问题清单 #75):存在性被反证推翻的终态——反证独立
-// 单位 + 结构化结论,与确认同一质量保障,消除"未推翻即信、推翻却要
-// 复核"的双重标准;新证据仍可经 reopen 重开再证。
+// 状态迁移由机器判定触发(actor=arbiter,R2/R3);证据不足/推翻带
+// 机器生成理由(R4 精神,理由在 testclaim.record verdict 负载里,账本
+// 入口强制非空)。旧过程态(testing/awaiting_round/pending)常量已删,
+// 旧账本读侧按未知状态原样退回不崩。
+// P5-02⑤ 声明状态机 3 态(v1.3.0):候选(交卷到机器三查之间,秒级——
+// 含三查不过后的补考窗口)→ 已确认 / 证据不足;旧过程态(testing/
+// awaiting_round/pending)常量已物理删除,旧账本记录里的旧状态词读侧
+// 按未知状态原样退回不崩(升级删除路线 P5-03④,不做翻译不留兼容)。
 const (
-	TestClaimCandidate     = "candidate"      // 虫群经受控入口提交,待主宰收割派反证
-	TestClaimTesting       = "testing"        // 反证轮已派发,验证单位执行中
-	TestClaimAwaitingRound = "awaiting_round" // P2-02:轮末评估=再反证(解释未全灭且轮次未尽),待收割派下一轮
-	TestClaimConfirmed     = "confirmed"      // 仲裁者判定:反证未推翻且影响面证据充分
-	TestClaimRefuted       = "refuted"        // P4-55 ②:仲裁者判定不成立(存在性被反证推翻,理由"被反证推翻")
-	TestClaimPending       = "pending"        // 待确认:机器生成搁置理由(R4),诚实呈现
-	TestClaimFixed         = "fixed"          // P3-06:复测结论"已修复"(锤炼态保持已确认,修复态由复测记录承载;未修复复测回滚到修复前状态)
-	TestClaimDiscarded     = "discarded"      // P4-55 审核迭代:已废弃终态(摘除资产程序确定性批量废弃,理由"目标已摘除";勾回不自动复活,再验走操作者深入)
+	TestClaimCandidate    = "candidate"    // 交卷落账到机器三查判定之间(秒级);三查不过注入补考反馈后回本态等重交
+	TestClaimConfirmed    = "confirmed"    // 机器三查全过(交卷即查,毫秒级,不经收割轮)
+	TestClaimInsufficient = "insufficient" // 证据不足终态:三查不过且补考(上限 1 次)仍未过
+	TestClaimRefuted      = "refuted"      // 推翻终态(机器态保留):reopen 重验未再坐实,账本留痕;显示层从漏洞页移除("不是真的不展示",2026-11-16 造物主定)
+	TestClaimFixed        = "fixed"        // P3-06:复测结论"已修复"(确认态保持,修复态由复测记录承载;未修复复测回滚到修复前状态)
+	TestClaimDiscarded    = "discarded"    // P4-55 审核迭代:已废弃终态(摘除资产程序确定性批量废弃,理由"目标已摘除";勾回不自动复活,再验走操作者深入)
 )
 
 var nodeTypes = map[NodeType]bool{
-	NodeGoal:       true,
-	NodeStep:       true,
-	NodeFact:       true,
-	NodeAsset:      true,
-	NodeTestClaim:  true,
-	NodeHypothesis: true,
+	NodeGoal:      true,
+	NodeStep:      true,
+	NodeFact:      true,
+	NodeAsset:     true,
+	NodeTestClaim: true,
 }
-
-// Hypothesis 状态机词汇(P2-03,第四章 §5 虫群直觉回流)。候选 → 主宰
-// 收割评估三去向:验证中(值得跟,转 Step 派发验证,R12 不得派回原
-// 发现者)/ 挂账(存疑留在图上待唤醒,低排序 ≠ 拒绝)/ 已废弃(不成立,
-// 标记废弃 + 理由,永不删除,R10)。验证单位写回结构化结论后:成立 /
-// 已废弃(验证推翻,理由留痕)/ 未能定论(回候选,下次收割再评估)。
-// 归 rings 与 TestClaim 状态词汇同惯例:swarm/overmind/server 三方共用,
-// 避免各自拼字符串漂移。
-const (
-	HypothesisCandidate = "candidate" // 虫群经 submit_hypothesis 提交,待主宰收割评估
-	HypothesisTesting   = "testing"   // 验证 Step 已派发,验证单位执行中
-	HypothesisHeld      = "held"      // 主宰裁决存疑挂账,留在图上待唤醒(每次唤醒重估)
-	HypothesisConfirmed = "confirmed" // 验证单位结构化结论:成立(R11:假设成立 ≠ 漏洞已验证)
-	HypothesisDiscarded = "discarded" // 废弃:评估判不成立或验证推翻,理由留痕,永不删除(R10)
-)
 
 // AssetClass 资产 12 类(第三章 §2)。类型清单开放:未知资产一律落入
 // 其他类兜底,绝不因装不下而丢弃;其他类中反复出现的模式可晋升为正式类型。
@@ -122,24 +105,17 @@ func AssetSourceOf(detail map[string]any) string {
 	return AssetSourceSeed
 }
 
-// EdgeType 类型化边。第三章列明 about/covers/derived_from;
-// 其余依第四章定稿:资产层级关系为类型化边(sub_of,R5)、待办必须绑定在
-// 图上需 Step 依赖边(depends_on)、Hypothesis 须指向具体资产(复用 about);
-// produces 为进度图"意图→事实→漏洞"血缘链补边(Step 产出 Fact;P2-03 起
-// 虫群直觉候选同为 Step 产出物,Step → Hypothesis;P4-12 起收割入图的
-// 发现型资产同为 Step 产出物,Step → Asset——对象出生的血缘边);
-// verifies 为假设回流轨迹边(P2-03,第四章 §5):主宰裁决"值得跟"时
-// 派发的验证 Step 指回它验证的假设——回流轨迹全程类型化可查。
 type EdgeType string
 
 const (
-	EdgeSubOf       EdgeType = "sub_of"       // Asset → Asset(层级)
-	EdgeAbout       EdgeType = "about"        // Fact|Hypothesis|TestClaim → Asset
-	EdgeCovers      EdgeType = "covers"       // Step → Asset(覆盖)
-	EdgeProduces    EdgeType = "produces"     // Step → Fact|Hypothesis|Asset(血缘)
-	EdgeDerivedFrom EdgeType = "derived_from" // TestClaim → Step|Fact(血缘)
-	EdgeDependsOn   EdgeType = "depends_on"   // Step → Step(依赖)
-	EdgeVerifies    EdgeType = "verifies"     // Step → Hypothesis(验证步骤 → 被验证假设,P2-03)
+	EdgeSubOf         EdgeType = "sub_of"         // Asset → Asset(层级)
+	EdgeObservedAsset EdgeType = "observed_asset" // Fact → Asset，本条新对象申报最终绑定的稳定编号
+	EdgeAbout         EdgeType = "about"          // Fact|TestClaim → Asset
+	EdgeCovers        EdgeType = "covers"         // Step → Asset(覆盖)
+	EdgeProduces      EdgeType = "produces"       // Step → Fact|Asset(血缘)
+	EdgeDerivedFrom   EdgeType = "derived_from"   // TestClaim → Step|Fact(血缘)
+	EdgeDependsOn     EdgeType = "depends_on"     // Step → Step(依赖)
+	EdgeSourcedFrom   EdgeType = "sourced_from"   // Step|TestClaim → Asset|Step|Fact|TestClaim，来源引用，不参与调度
 )
 
 type nodeTypeSet map[NodeType]bool
@@ -150,15 +126,14 @@ type edgeRule struct {
 }
 
 var edgeRules = map[EdgeType]edgeRule{
-	EdgeSubOf: {nodeTypeSet{NodeAsset: true}, nodeTypeSet{NodeAsset: true}},
-	// P1-08 起 about 允许 TestClaim → Asset:漏洞声明的资产锚点必须挂到
-	// 具体资产(第五章 §1"资产锚点"),与 Fact/Hypothesis 同一边类型。
-	EdgeAbout:       {nodeTypeSet{NodeFact: true, NodeHypothesis: true, NodeTestClaim: true}, nodeTypeSet{NodeAsset: true}},
-	EdgeCovers:      {nodeTypeSet{NodeStep: true}, nodeTypeSet{NodeAsset: true}},
-	EdgeProduces:    {nodeTypeSet{NodeStep: true}, nodeTypeSet{NodeFact: true, NodeHypothesis: true, NodeAsset: true}},
-	EdgeDerivedFrom: {nodeTypeSet{NodeTestClaim: true}, nodeTypeSet{NodeStep: true, NodeFact: true}},
-	EdgeDependsOn:   {nodeTypeSet{NodeStep: true}, nodeTypeSet{NodeStep: true}},
-	EdgeVerifies:    {nodeTypeSet{NodeStep: true}, nodeTypeSet{NodeHypothesis: true}},
+	EdgeSubOf:         {nodeTypeSet{NodeAsset: true}, nodeTypeSet{NodeAsset: true}},
+	EdgeObservedAsset: {nodeTypeSet{NodeFact: true}, nodeTypeSet{NodeAsset: true}},
+	EdgeAbout:         {nodeTypeSet{NodeFact: true, NodeTestClaim: true}, nodeTypeSet{NodeAsset: true}},
+	EdgeCovers:        {nodeTypeSet{NodeStep: true}, nodeTypeSet{NodeAsset: true}},
+	EdgeProduces:      {nodeTypeSet{NodeStep: true}, nodeTypeSet{NodeFact: true, NodeAsset: true}},
+	EdgeDerivedFrom:   {nodeTypeSet{NodeTestClaim: true}, nodeTypeSet{NodeStep: true, NodeFact: true}},
+	EdgeDependsOn:     {nodeTypeSet{NodeStep: true}, nodeTypeSet{NodeStep: true}},
+	EdgeSourcedFrom:   {nodeTypeSet{NodeStep: true, NodeTestClaim: true}, nodeTypeSet{NodeAsset: true, NodeStep: true, NodeFact: true, NodeTestClaim: true}},
 }
 
 // ActionLevel 意图四级分类(第四章 §3,Q8 于 P1-07 落地):风险分档框架
@@ -219,18 +194,6 @@ const (
 	IntentPortScan   IntentAction = "端口扫描" // 端口与服务扫描(nmap、port_probe)
 )
 
-var intentActions = map[IntentAction]bool{
-	IntentDataRead:   true,
-	IntentInjectTest: true,
-	IntentUpload:     true,
-	IntentBruteForce: true,
-	IntentCrawl:      true,
-	IntentPortScan:   true,
-}
-
-// IsValidIntentAction 动作类型是否在词表内。
-func IsValidIntentAction(a IntentAction) bool { return intentActions[a] }
-
 // 任务级拦截处置词(第四章 §4:处置 = 禁止 / 允许 + 次数上限)。
 const (
 	IntentForbid = "forbid" // 禁止:命中直接拒绝留痕
@@ -289,33 +252,6 @@ func validateIntentRules(rules []IntentRule) error {
 	return nil
 }
 
-// EventKind 事件类型。事件流信封(task_id+revision+kind+payload)保持稳定,
-// 新 kind 只在 applyEvent 的 switch 中扩展受控入口,不改表结构(第三章 §7)。
-// P1-04 扩入三类:任务生命周期(第七章)、RoE 变更(R7 一切授权变更皆账本
-// 事件)、虫群原始执行记录(第四章 §2 受控入口;不进双图投影,走事件流审计)。
-// P1-06 扩入仲裁裁决(第三章 §6:Goal 完成判定的机器终审结果,审计流)。
-// P1-07 扩入审批记录(第四章 §3 审批门的弹门与裁决,审计流)。
-// P1-08 扩入 TestClaim 状态机记录(第三章 §5:反证写回与确认裁决,审计流)。
-// P2-01 扩入镜留痕(第一章"全程流量经镜":镜对工具流量每次交换记账)。
-// P2-02 扩入重开与收割定稿记录(testclaim.record 新类型 reopen/repro)。
-// P2-03 扩入假设回流记录(hypothesis.record:主宰收割评估裁决 + 验证
-// 单位结构化结论,第四章 §5 虫群直觉回流)。
-// P2-04 扩入黑匣子记录(第四章 §6 账本分工:预算状态变化与聚合里程碑等
-// 系统级事件入年轮黑匣子通道;逐次 token 用量走独立记账表,不进事件流)。
-// P2-05 扩入舵杆记录(第八章第 8 节纠偏纵深:steer_work / kill_work 指令
-// 走账本,排队与送达两级留痕;采纳/被拒/过时的回执状态机属 P2-08)。
-// P2-06 扩入主宰研判记录(第四章 §1 态势研判五问:每轮拆解会话的研判
-// 轨迹入账,五问驱动研判从账本可验证)。
-// P2-06h 扩入任务元数据(任务列表完整版:分类指派 / 置顶 / 墓碑删除,
-// 均为面板操作的任务级事实,走账本留痕)。
-// P2-07 扩入牧者会话记录(第四章 §1 牧者:总对话入口的完整对话流与
-// 纳谏轨迹,消息送达状态与建议裁决全程留痕)。
-// P2-08e 扩入拦截判定记录(guard.record:全局硬规则与任务级拦截的
-// 判定留痕与量化额度计数,审计流)。
-// P3-13b 扩入会话元数据(session.meta:会话重命名/备注/置顶的面板
-// 操作记账,列表组织信息流)。
-// P4-18 扩入收口信号记录(closure.record:连续零新发现的收口提醒与
-// 造物主的两键裁决,问题清单 #30)。
 type EventKind string
 
 const (
@@ -331,7 +267,6 @@ const (
 	EventApprovalRecord   EventKind = "approval.record"
 	EventTestClaimRecord  EventKind = "testclaim.record"
 	EventMirrorRecord     EventKind = "mirror.record"
-	EventHypothesisRecord EventKind = "hypothesis.record"
 	EventBlackboxRecord   EventKind = "blackbox.record"
 	EventSteerRecord      EventKind = "steer.record"
 	EventOvermindRecord   EventKind = "overmind.record"
@@ -347,10 +282,8 @@ const (
 	// P4-64(问题清单 #82)显示层包装族:模型文本的冻结时点＝校对时点,
 	// 包装稿独立事件冻结(R1:节点与机器记录原文一字不动,机器判定/
 	// 任务包/仲裁全走原文;投影 latest-wins,读侧优先链退原文)。
-	EventClaimRoundHuman EventKind = "claim.round_human" // 反证轮人话三段(逐轮,随 falsify 记录同批)
-	EventClaimSummaryPol EventKind = "claim.summary"     // 声明摘要(立判断批次生成;定稿随新定稿 repro 覆盖)
+	EventClaimText       EventKind = "claim.text"        // 漏洞独立显示稿，仅更新摘要
 	EventFactText        EventKind = "fact.text"         // 事实标题短句与描述(收割确认时)
-	EventHypoText        EventKind = "hypo.text"         // 假设标题/依据/评估理由(收割评估批次)
 	EventClaimRetextNote EventKind = "claim.retest_note" // 复测结论备注校对稿(随复测记录同批)
 
 	// P4-65(问题清单 #82 A⑨⑩)界面层包装族:研判记录与拆解派发落账后
@@ -396,7 +329,8 @@ type NodeStateChanged struct {
 // 合并进节点 detail(键白名单按节点类型见 amendableKeys:goal 的
 // predicate=完成条件重新冻结〔仲裁契约②判定标准变更走新事件,读侧取
 // 最新〕与 focus=方向聚焦标记;step 的 priority=优先级调整,队列比较
-// 器读投影立即生效)。变更依据随 Note 留痕;写入口(server 面板/牧者)
+// 器读投影立即生效）；fact 仅允许带依据修正 result_types，原始陈述与证据不可改。
+// 变更依据随 Note 留痕;写入口(server 面板/牧者)
 // 负责业务级校验(谓词受限结构、优先级词汇、目标状态前置)。
 type NodeAmended struct {
 	NodeID string         `json:"node_id"`
@@ -523,6 +457,7 @@ type RoeUpdated struct {
 const (
 	SwarmRecSessionStarted = "session_started"  // 虫群会话开始(绑定 transcript_id 与图版本)
 	SwarmRecToolCall       = "tool_call"        // 一次工具调用及其结果(R18:大输出只存 blob 引用)
+	SwarmRecToolStarted    = "tool_started"     // 通过调用守卫后，实际工具进入执行
 	SwarmRecSessionEnd     = "session_finished" // 会话结束(终因与去向)
 	SwarmRecStaleRefused   = "stale_refused"    // R14 复检失败,拒绝按过期计划执行
 )
@@ -530,6 +465,7 @@ const (
 var swarmRecordTypes = map[string]bool{
 	SwarmRecSessionStarted: true,
 	SwarmRecToolCall:       true,
+	SwarmRecToolStarted:    true,
 	SwarmRecSessionEnd:     true,
 	SwarmRecStaleRefused:   true,
 }
@@ -539,6 +475,7 @@ var swarmRecordTypes = map[string]bool{
 // nodes/edges 投影(双图只收业务节点),审计走事件流查询。
 // 大段工具输出入内容寻址文件,账本只存引用(R18:ResultRef 形如 "sha256:...")。
 type SwarmRecord struct {
+	ToolCallID   string          `json:"tool_call_id,omitempty"`
 	StepID       string          `json:"step_id"`
 	UnitID       string          `json:"unit_id"`
 	TranscriptID string          `json:"transcript_id,omitempty"` // Norma 转录 ID(第二章四类记录分工)
@@ -566,6 +503,27 @@ type SwarmRecord struct {
 	// 资产/禁止测试"裁决,会话冻结保留;批准后步骤回可领取(插队队首),
 	// 重领的单位经转录 Resume 原会话续跑。仅 session_finished 携带。
 	ScopeWait bool `json:"scope_wait,omitempty"`
+	// Yield session_finished 的挂等让位标记(P5-05):弹门卡/攻击卡/
+	// 人工暂停/模型故障挂等超宽限后冻结收场让位——步骤落对应停等态
+	// (gate_wait/pause_wait/model_wait),会话保留可续;解除唤醒回
+	// dispatched+队首档后重领的单位经转录 Resume 原会话续跑(续跑指令
+	// 按 Yield 携带的上下文与裁决记录组装)。仅 session_finished 携带;
+	// 范围卡让位沿用 ScopeWait 标记(既有对账唤醒通道)。
+	Yield *YieldNote `json:"yield,omitempty"`
+}
+
+// YieldNote 挂等让位的上下文(P5-05):让位收场时冻结的挂等来源与
+// (审批类)被拦命令上下文——重领续跑时据此组装续跑指令与放行配额;
+// 裁决结果不在此处(让位时未知),续跑侧按 Request 回查审批记录。
+type YieldNote struct {
+	PolicyRevision int64  `json:"policy_revision,omitempty"` // policy for the approved concrete action
+	Source         string `json:"source"`                    // approval|pause|model(范围卡让位不带 Yield,沿用 ScopeWait)
+	Request        string `json:"request,omitempty"`         // 弹门/攻击卡票号(裁决记录回查键)
+	ToolName       string `json:"tool_name,omitempty"`       // 被拦命令的工具名(批准续跑的放行配额)
+	ToolArgs       string `json:"tool_args,omitempty"`       // 被拦命令的原始参数
+	Intent         string `json:"intent,omitempty"`          // 意图声明(续跑指令上下文)
+	AttackTarget   string `json:"attack_target,omitempty"`   // 攻击行为卡的信息源目标(P4-67)
+	GateGroup      string `json:"gate_group,omitempty"`      // 弹门来源的拦截规则组(P4-17)
 }
 
 // ArbiterConditionResult 仲裁裁决中单个条件的求值结果:要求的结构化
@@ -582,31 +540,39 @@ type ArbiterConditionResult struct {
 
 // 审批记录类型白名单(受控入口)。
 const (
-	ApprovalRecRequested  = "requested"   // 弹门:审批请求已登记,等待面板裁决
-	ApprovalRecApproved   = "approved"    // 面板批准
-	ApprovalRecDenied     = "denied"      // 拒绝(面板拒绝/拒绝线自动拒绝/等待期间熔断,原因见 Reason 与 DenyLine)
-	ApprovalRecForced     = "forced"      // P2-06b:研判后放行(P4-51 起写路径废除,历史记录留档;批准/拒绝同 RequestID 收口新卡)
-	ApprovalRecGroupPass  = "group_pass"  // P4-17:同组放行(代理旁路组批准一次后,该单位同组命令直接执行的逐次留痕)
-	ApprovalRecStepPass   = "step_pass"   // P4-27 ⑧:同步骤放行(审批门槛批准一次后,该单位本步骤后续命令直接执行的逐次留痕)
-	ApprovalRecScopeWait  = "scope_wait"  // P4-51:范围待决卡(渗透拦截/红队可否决;同一目标一张卡,RequestID=sc-<目标>)
-	ApprovalRecAttackWait = "attack_wait" // P4-67:攻击行为待决卡(对信息源的主动攻击动作;批准=放行该次动作、host 仍非目标,拒绝=只杀动作单位换路)
-	ApprovalRecTriage     = "triage"      // P4-67:研判分诊留痕(结论与依据入账,RequestID=tg-<host>,可审计)
-	ApprovalRecAccess     = "access"      // P4-68:范围卡第三键"允许访问"已裁(host 入信息源清单,只授访问权不收编;撤销后可重出卡)
-	ApprovalRecReversed   = "reversed"    // P4-71:审批记录反向裁决(反加入/反禁止/攻击档双向/撤销信息源;落新事件含原记录引用,不改历史)
+	ApprovalRecRequested     = "requested"     // 弹门:审批请求已登记,等待面板裁决
+	ApprovalRecApproved      = "approved"      // 面板批准
+	ApprovalRecDenied        = "denied"        // 拒绝(面板拒绝/拒绝线自动拒绝/等待期间熔断,原因见 Reason 与 DenyLine)
+	ApprovalRecForced        = "forced"        // P2-06b:研判后放行(P4-51 起写路径废除,历史记录留档;批准/拒绝同 RequestID 收口新卡)
+	ApprovalRecGroupPass     = "group_pass"    // P4-17:同组放行(代理旁路组批准一次后,该单位同组命令直接执行的逐次留痕)
+	ApprovalRecStepPass      = "step_pass"     // P4-27 ⑧:同步骤放行(审批门槛批准一次后,该单位本步骤后续命令直接执行的逐次留痕)
+	ApprovalRecScopeWait     = "scope_wait"    // P4-51:范围待决卡(渗透拦截/红队可否决;同一目标一张卡,RequestID=sc-<目标>)
+	ApprovalRecAttackWait    = "attack_wait"   // P4-67:攻击行为待决卡(对信息源的主动攻击动作;批准=放行该次动作、host 仍非目标,拒绝=只杀动作单位换路)
+	ApprovalRecTriage        = "triage"        // P4-67:研判分诊留痕(结论与依据入账,RequestID=tg-<host>,可审计)
+	ApprovalRecActionReview  = "action_review" // one concrete action, no host-wide permission
+	ApprovalRecAssetWait     = "asset_wait"    // observation proposed for inventory, no execution gate
+	ApprovalRecAssetAdded    = "asset_added"
+	ApprovalRecAssetDeclined = "asset_declined"
+	ApprovalRecAccess        = "access"   // P4-68:范围卡第三键"允许访问"已裁(host 入信息源清单,只授访问权不收编;撤销后可重出卡)
+	ApprovalRecReversed      = "reversed" // P4-71:审批记录反向裁决(反加入/反禁止/攻击档双向/撤销信息源;落新事件含原记录引用,不改历史)
 )
 
 var approvalRecordTypes = map[string]bool{
-	ApprovalRecRequested:  true,
-	ApprovalRecApproved:   true,
-	ApprovalRecDenied:     true,
-	ApprovalRecForced:     true,
-	ApprovalRecGroupPass:  true,
-	ApprovalRecStepPass:   true,
-	ApprovalRecScopeWait:  true,
-	ApprovalRecAttackWait: true,
-	ApprovalRecTriage:     true,
-	ApprovalRecAccess:     true,
-	ApprovalRecReversed:   true,
+	ApprovalRecRequested:     true,
+	ApprovalRecApproved:      true,
+	ApprovalRecDenied:        true,
+	ApprovalRecForced:        true,
+	ApprovalRecGroupPass:     true,
+	ApprovalRecStepPass:      true,
+	ApprovalRecScopeWait:     true,
+	ApprovalRecAttackWait:    true,
+	ApprovalRecTriage:        true,
+	ApprovalRecActionReview:  true,
+	ApprovalRecAssetWait:     true,
+	ApprovalRecAssetAdded:    true,
+	ApprovalRecAssetDeclined: true,
+	ApprovalRecAccess:        true,
+	ApprovalRecReversed:      true,
 }
 
 // 拒绝线类别(DenyLine 词表,P2-06b):拒绝的来源分类,面板据此呈现
@@ -740,7 +706,12 @@ type ArbiterVerdict struct {
 
 // TestClaim 记录类型白名单(受控入口,P1-08 + P2-02 + P3-02 + P3-06)。
 const (
-	TestClaimRecFalsify      = "falsify_result" // 反证单位经 submit_falsify_result 写回的结构化反证结论
+	// TestClaimRecSubmit 交卷单(P5-01②,单会话连打交卷):虫群在同一会话
+	// 内完成探索→发现→证明→反证自查后,经 submit_claim 交出的六字段
+	// 交卷单。旧 falsify_result 的结构化反证字段已物理删除——旧账本
+	// 记录解码时被删字段自然丢弃、其余照读,缺字段按空处理不崩。
+	TestClaimRecSubmit       = "submit"
+	TestClaimRecFalsify      = "falsify_result" // 旧反证写回(写点已随三段流水线退役;类型词保留读旧账本,新账本不再产生)
 	TestClaimRecVerdict      = "verdict"        // 仲裁者对声明的轮末评估/终审裁决(机器纯函数求值)
 	TestClaimRecReopen       = "reopen"         // P2-02:重开(结论可反驳/过期;追加事件,历史不删)
 	TestClaimRecRepro        = "repro"          // P2-02:收割定稿(复现步骤 + 严重级别,确认裁决同批落)
@@ -753,6 +724,7 @@ const (
 )
 
 var testClaimRecordTypes = map[string]bool{
+	TestClaimRecSubmit:       true,
 	TestClaimRecFalsify:      true,
 	TestClaimRecVerdict:      true,
 	TestClaimRecReopen:       true,
@@ -768,7 +740,7 @@ var testClaimRecordTypes = map[string]bool{
 // 复测结论词表(P3-06,第三章 §5 复测语义):fixed=已修复(本轮真实重放
 // 显示漏洞不再可触发);unfixed=未修复(漏洞仍可触发或未取得已修复
 // 证据);inconclusive=未能定论(只入记录,不迁移状态——诚实呈现,
-// 与 R4 待确认同精神)。词汇表归 rings,写回入口与读侧共用。
+// 与 R4 证据不足同精神)。词汇表归 rings,写回入口与读侧共用。
 const (
 	RetestVerdictFixed        = "fixed"
 	RetestVerdictUnfixed      = "unfixed"
@@ -823,15 +795,18 @@ type ReplayResult struct {
 	Error         string `json:"error,omitempty"` // 重放请求失败原因(网络/超时)
 }
 
-// verdict 裁决 Decision 值域(P2-02;P1-08 旧数据无 Decision,按
-// Satisfied 推导:satisfied→confirm、否则→pending)。P4-55 ② 增
-// refuted:终审不成立(存在性被反证推翻;Satisfied 必为 false,理由
-// "被反证推翻"必填——非 confirm 裁决搁置理由必填的同一物理强制)。
+// verdict 裁决 Decision 值域(P5-02⑥ v1.3.0 三查口径):confirm=三查全过;
+// retake=三查不过待补考(失败原因必填,声明回候选);insufficient=证据
+// 不足终态(补考仍未过/补考未重交,理由必填);refuted=推翻终态(reopen
+// 重验未再坐实)。旧词 pending/advance_round 不再产生,校验词表保留
+// 解码(旧账本回放不崩,P5-03④ 口径)。
 const (
-	VerdictConfirm      = "confirm"       // 终审确认(Satisfied 必为 true)
-	VerdictRefuted      = "refuted"       // 终审不成立(P4-55 ②:存在性被反证推翻,理由"被反证推翻")
-	VerdictPending      = "pending"       // 终审待确认(R4 搁置理由必填)
-	VerdictAdvanceRound = "advance_round" // 轮末评估:解释未全灭且轮次未尽,待派下一轮反证
+	VerdictConfirm      = "confirm"       // 三查全过(Satisfied 必为 true)
+	VerdictRefuted      = "refuted"       // 推翻终态(reopen 重验未再坐实)
+	VerdictRetake       = "retake"        // 三查不过待补考(失败原因必填;声明回候选等重交)
+	VerdictInsufficient = "insufficient"  // 证据不足终态(补考上限 1 次用尽仍未过;理由必填)
+	VerdictPending      = "pending"       // 旧词(不再产生;校验保留解码防旧账本回放崩)
+	VerdictAdvanceRound = "advance_round" // 旧词(不再产生;校验保留解码防旧账本回放崩)
 )
 
 // reopen 触发词表(P2-02,重开机制三语义:结论可反驳/重开/过期)。
@@ -849,12 +824,19 @@ var reopenTriggers = map[string]bool{
 // 跟影响面证据走——只由反证轮的结构化影响面证据携带,发现者无级别通道)。
 var impactLevels = map[string]bool{"critical": true, "high": true, "medium": true, "low": true}
 
-// Alternative 竞争性替代解释(第三章 §5:逐条列出,作为待检验反面假设
-// 挂在声明下)。P2-02 在声明创建时冻结进 detail.alternatives;反证轮经
-// AltResult 逐条写回排除结论,仲裁者只认结构化 Refuted(契约④)。
+// 交卷自报级别词表(P5-01②,五值):critical|high|medium|low|none——
+// none=信息性不立(真实触发过但无直接危害的观察,交卷留痕不立漏洞;
+// 定级锚随虫群提示词下发,机器不校验级别高低,只校验词汇合法)。
+var submitSeverities = map[string]bool{"critical": true, "high": true, "medium": true, "low": true, "none": true}
+
+// IsValidSubmitSeverity 交卷自报级别是否在词表内。
+func IsValidSubmitSeverity(s string) bool { return submitSeverities[s] }
+
+// Alternative 旧反证流程的结构化解释清单条目(创建时冻结、逐条写回
+// 排除)。v1.3.0 砍除后新账本零产生;仅投影读旧账本容错保留。
 type Alternative struct {
 	ID    string `json:"id"`    // 稳定标识(alt1、alt2…),反证写回按 ID 引用
-	Label string `json:"label"` // 一句话反面假设(如"缓存污染:内容可能来自中间缓存")
+	Label string `json:"label"` // 一句话替代解释(如"缓存污染:内容可能来自中间缓存")
 }
 
 // AltResult 反证轮对单条竞争解释的结构化结论(Refuted=true 即本轮排除)。
@@ -924,26 +906,33 @@ type ReproProcessRef struct {
 // TestClaimRecord 是 EventTestClaimRecord 的负载(P1-08 + P2-02,第三章
 // §5/§6):TestClaim 状态机的审计流,不进 nodes/edges 投影(状态迁移本身
 // 走 node.state_changed;本事件承载状态机依据,同 arbiter.verdict 分工)。
-// 四类记录:
-//   - falsify_result(actor=swarm:<unit>):反证单位写回的单轮结构化结论。
-//     存在性与影响面分开反证(第三章 §5 定稿):两个布尔各自独立;
-//     P2-02 起每轮携带逐条竞争解释的排除结论(Alternatives)与影响面
-//     定级(ImpactLevel,impact_supported=true 时必填——级别跟影响面
-//     证据走)。证据经内容寻址落 blob(R18),账本只存引用与截头。
-//   - verdict(actor=arbiter):仲裁者按声明创建时冻结的判定标准求值的
-//     裁决。Decision=confirm 即 Confirmed(Satisfied 必真);pending 即
-//     待确认;advance_round 即待下轮反证(解释未全灭且轮次未尽)。
-//     非 confirm 的裁决 PendingReason 必填(R4:账本受控入口物理强制)。
-//   - reopen(P2-02):重开记录——Confirmed/待确认被新反证/人工/过期
+// 记录类型(P5-01 起交卷单替代反证写回):
+//   - submit(actor=swarm:<unit>,P5-01②):虫群单会话连打后的交卷单六
+//     字段——summary(声明一句话)/severity(自报级别,五值含 none=信息
+//     性不立)/evidence_refs(证明证据引用列表,镜交换 ID 或工具记录引用,
+//     多步组合链按复现顺序排列每环引用)/proving_marker(关键证明物,
+//     从证据原文里抄的关键值,机器三查验证它在主证据响应体中出现)/
+//     countercheck_note(反证自查结果自由文本)/impact_note(一句话影响,
+//     可空)。交卷即查(机器三查)由 P5-02 在本事件上触发。
+//   - falsify_result(旧):反证单位写回的单轮结构化结论——写点已随
+//     三段流水线退役(P5-01⑤),旧账本记录照存;其结构化结论字段
+//     (存在性推翻/影响面三态与定级/解释清单/交换引用清单)已物理
+//     删除,旧 JSON 解码时被删字段自然丢弃、读侧按空值处理不崩
+//     (P5-03④ 口径:不做翻译不留兼容层)。
+//   - verdict(actor=arbiter,P5-02 机器三查):交卷即查的裁决。confirm=
+//     三查全过即 Confirmed(Satisfied 必真);retake=三查不过待补考
+//     (失败原因必填,声明回候选);insufficient=证据不足终态(补考上限
+//     1 次用尽);refuted=推翻终态(reopen 重验未再坐实)。非 confirm
+//     裁决 PendingReason 必填(R4 物理强制)。
+//   - reopen(P2-02):重开记录——已确认/被推翻/证据不足经新证据/人工/过期
 //     重开回反证中;Trigger 与 Reason 必填,历史永不删除(R1)。
 //   - repro(P2-02,actor=overmind):收割定稿——确认裁决同批落库的
-//     复现步骤与严重级别(Severity=末轮反证影响面定级,发现者无级别
-//     通道);重开后再确认会落新 repro,旧记录自然过期(取代语义,
-//     读取侧取最新)。
+//     复现步骤与严重级别;重开后再确认会落新 repro,旧记录自然过期
+//     (取代语义,读取侧取最新)。
 //   - evidence(P3-02):流量证据绑定/补绑(见 evidence 侧字段注释)。
 //   - retest(P3-06,actor=swarm:rt-*):复测会话经受限工具写回的结论
 //     (fixed|unfixed|inconclusive)+ 本轮证据;fixed/unfixed 同批迁移
-//     声明状态(锤炼态与修复态正交:fixed 是已确认发现之上的修复标记,
+//     声明状态(修复态与已确认正交:fixed 是已确认发现之上的修复标记,
 //     未修复复测回滚到修复前状态,历史不删,R1)。
 //   - replay(P3-07,actor=swarm:rp-*):重放校验结论——对绑定流量证据
 //     做确定性原样重放(经镜新留痕、零 LLM),逐条交换的新旧对照事实
@@ -954,29 +943,28 @@ type ReproProcessRef struct {
 //     已确认且非信息性,读取侧按最新标记取舍(取代语义)。
 type TestClaimRecord struct {
 	ClaimID string `json:"claim_id"`
-	StepID  string `json:"step_id,omitempty"` // 所属/依据的反证 Step;retest = 本轮复测会话锚(伪步骤 ID,兼转录名)
-	UnitID  string `json:"unit_id,omitempty"` // 反证单位(falsify_result 必填);retest = 复测单位(rt-*)
+	StepID  string `json:"step_id,omitempty"` // 所属/依据的反证 Step;submit = 交卷单位执行的意图 Step;retest = 本轮复测会话锚(伪步骤 ID,兼转录名)
+	UnitID  string `json:"unit_id,omitempty"` // 交卷/反证/复测单位(submit/falsify_result/retest 必填;retest = rt-*)
 	Type    string `json:"type"`
 
-	// falsify_result 侧:结构化反证结论(契约④:仲裁者只读布尔、解释
-	// 排除结论与定级,Note/EvidenceHead 文本不进求值)。
-	Round            int         `json:"round,omitempty"` // 反证轮次(受控入口从 step.detail.round 机器填写)
-	ExistenceRefuted bool        `json:"existence_refuted,omitempty"`
-	ImpactSupported  bool        `json:"impact_supported,omitempty"`
-	ImpactLevel      string      `json:"impact_level,omitempty"` // critical|high|medium|low(impact_supported=true 时必填)
-	Alternatives     []AltResult `json:"alternatives,omitempty"` // 本轮逐条竞争解释排除结论(ID 引用冻结清单)
-	EvidenceRef      string      `json:"evidence_ref,omitempty"`
-	EvidenceHead     string      `json:"evidence_head,omitempty"`
-	Note             string      `json:"note,omitempty"`
-	// EvidenceExchanges 结论所依据的交换 ID 引用(P4-73 ①,问题清单
-	// #89):反证单位写回时携带确认依据的镜交换编号(工具结果 exchange=
-	// 行取得)。提交侧只收不拦;确认门槛校验(仲裁确认路径)按它解析
-	// 证明物种子——引用未命中时按证据文本 URL 回查兜底,仍追溯不到的
-	// 证据不得作为确认依据。旧记录无本字段(走回查兜底)。
-	EvidenceExchanges []string `json:"evidence_exchanges,omitempty"`
+	// submit 侧:交卷单六字段(P5-01②,字段全部必写清楚防猜;机器三查
+	// 的判定输入——查一验 evidence_refs 逐条命中与 proving_marker 在主
+	// 证据响应体中出现,查二验 countercheck_note 非空,查三验判定标准
+	// 冻结与自评不构成证据)。severity 落共用 Severity 字段(五值含
+	// none=信息性不立;repro 侧为定稿级别,四值)。
+	Summary          string   `json:"summary,omitempty"`           // 声明一句话(一句话本质+影响对象,报告级锚)
+	EvidenceRefs     []string `json:"evidence_refs,omitempty"`     // 证明证据引用(镜交换 ID 或工具记录引用;通常恰 1 条主证明;多步组合链按复现顺序)
+	ProvingMarker    string   `json:"proving_marker,omitempty"`    // 关键证明物字符串(证据原文里的关键值,机器按子串匹配验证)
+	CountercheckNote string   `json:"countercheck_note,omitempty"` // 反证自查结果自由文本(做了什么检查、为什么没翻车)
+	ImpactNote       string   `json:"impact_note,omitempty"`       // 影响列点(P5-07⑦b:自由文本可列 1~3 条,只写有依据的、有几条写几条、猜测要标明是猜测;如实进报告,机器不校验)
+
+	Round        int    `json:"round,omitempty"` // 反证/重放轮次(旧反证账本与 replay 记录用;submit 无轮次)
+	EvidenceRef  string `json:"evidence_ref,omitempty"`
+	EvidenceHead string `json:"evidence_head,omitempty"`
+	Note         string `json:"note,omitempty"`
 
 	// verdict 侧。
-	Decision      string                   `json:"decision,omitempty"` // confirm|refuted|pending|advance_round(P1-08 旧数据缺省,按 Satisfied 推导;refuted=P4-55 ② 不成立)
+	Decision      string                   `json:"decision,omitempty"` // confirm|refuted|pending|advance_round(P1-08 旧数据缺省,按 Satisfied 推导;refuted=重验推翻终态)
 	Satisfied     bool                     `json:"satisfied,omitempty"`
 	PendingReason string                   `json:"pending_reason,omitempty"` // 非 confirm 裁决的搁置/推翻/推进理由(R4,必填;refuted 为"被反证推翻")
 	Conditions    []ArbiterConditionResult `json:"conditions,omitempty"`     // 逐条件依据(R2 可审计)
@@ -1003,20 +991,18 @@ type TestClaimRecord struct {
 	// 节点原文一字不动(机器判定与审计仍读节点;包装不是证据,与机器
 	// 字段矛盾以原文为准)。空 = 未生成或未过闸(读侧退节点原文,即生成
 	// 失败的回退不阻塞);重开再确认随新定稿重新生成(取代语义同上)。
+	Title     string          `json:"title,omitempty"` // 显示名称，不作机器裁决
 	Statement string          `json:"statement,omitempty"`
 	Impact    string          `json:"impact,omitempty"`
 	Facts     []FactStatement `json:"facts,omitempty"`
-	// Rounds 反证时间线人话(P4-56 ⑤,问题清单 #80②):确认定稿时主宰
-	// 模型对当前战役每轮反证写的"疑点→怎么验的→结论"三段人话,随 repro
-	// 同批冻结;机器原文(替代解释标签/证据截头/结构化结论)由读侧折叠
-	// 呈现,默认只展示人话层。失败回退确定性拼句;重开再确认随新定稿
-	// 重新生成。旧定稿无本字段,读侧只呈现机器层(如实,不编造)。
-	Rounds []FalsifyRoundHuman `json:"rounds,omitempty"`
+	// (旧 Rounds 反证轮人话字段已随反证流程退役删除,P5-03③;旧账本
+	// repro 记录里的 rounds JSON 解码时按未知字段忽略,不崩。)
 	// NarrativeUnpolished 叙述未过文风校验(P4-24 ②,问题清单 #39):
 	// 定稿校对+模式闸门重写一次后仍含机器语特征,如实标注原文保留
 	// (读侧渲染一行说明,不阻塞定稿)。旧记录无本字段。
 	NarrativeUnpolished bool        `json:"narrative_unpolished,omitempty"`
 	Steps               []ReproStep `json:"steps,omitempty"`
+	ProofSeqs           []int       `json:"proof_seqs,omitempty"`
 	// NoReproReason 无复现包的原因(P4-62 A,问题清单 #83:兜底直出废除,
 	// 复现区只呈现模型挑选过的最小集):非空 = 本次定稿未生成复现步骤,
 	// 原因句冻结入账,面板与报告如实呈现(读侧零 LLM,R17)。两种来源:
@@ -1075,45 +1061,34 @@ type FactStatement struct {
 	Statement string `json:"statement,omitempty"`
 }
 
-// FalsifyRoundHuman 一轮反证的人话三段(P4-56 ⑤):疑点 = 该轮待排除
-// 的其他可能原因(疑问句形态)、怎么验的 = 验证过程人话、结论 = 该轮
-// 结论词(已排除/未排除/推翻)。定稿时模型生成冻结;Doubt/How/Conclusion
-// 为空表示该轮无人话(读侧退机器层如实呈现)。
-type FalsifyRoundHuman struct {
-	Round      int    `json:"round"`
-	Doubt      string `json:"doubt,omitempty"`
-	How        string `json:"how,omitempty"`
-	Conclusion string `json:"conclusion,omitempty"`
-	// Unpolished 该轮人话未过文风校验(P4-24 ② 同款如实标注,原文保留)。
-	Unpolished bool `json:"unpolished,omitempty"`
-}
+// (FalsifyRoundHuman/ClaimRoundHuman 反证轮人话三段类型已随反证流程
+// 退役删除,P5-03③——逐轮生成与冻结链路整体退役,旧账本相关事件在
+// 重放投影按未知种类忽略,读侧不崩。)
 
-// ClaimRoundHuman 是 EventClaimRoundHuman 的负载(P4-64 ①,问题清单
-// #82):反证轮人话三段的逐轮冻结——每轮反证结构化结论(testclaim.record
-// falsify_result)入账时同链生成,与机器记录同批落账(生成失败回退
-// 确定性拼句,不阻塞轮次入账);重开后新轮次增量补(轮号全局续号,
-// 投影按轮 upsert)。机器记录原文一字不动;三段空 = 未生成(读侧退
-// 机器层,存量旧账本无本事件同退)。
-type ClaimRoundHuman struct {
-	ClaimID    string `json:"claim_id"`
-	Round      int    `json:"round"`
-	Doubt      string `json:"doubt,omitempty"`
-	How        string `json:"how,omitempty"`
-	Conclusion string `json:"conclusion,omitempty"`
-	Unpolished bool   `json:"unpolished,omitempty"`
-}
-
-// ClaimSummaryPolish 是 EventClaimSummaryPol 的负载(P4-64 ②):声明
-// 摘要的立账即生成——收割立判断批次(候选声明派反证时)按报告级文风
-// 锚生成(同 genClaimSummary 管线:存在性描述/影响面/链上事实描述),
-// 锤炼中(未定稿)声明读侧即有摘要;确认定稿随新定稿重新生成(repro
-// 记录内嵌字段,投影同列覆盖,取代语义既有)。空字段 = 未生成,读侧
-// 退节点原文。
+// ClaimSummaryPolish 声明摘要的生成结果形态(P4-59 ①;P5-03③ 起仅
+// 确认定稿批次生成,随 repro 记录冻结进 summary 列——旧独立事件
+// claim.summary 已随立账批次退役删除,存量旧账本该类事件重放按未知
+// 种类忽略)。空字段 = 未生成,读侧退节点原文。
 type ClaimSummaryPolish struct {
 	ClaimID   string          `json:"claim_id"`
+	Title     string          `json:"title,omitempty"`
 	Statement string          `json:"statement,omitempty"`
 	Impact    string          `json:"impact,omitempty"`
 	Facts     []FactStatement `json:"facts,omitempty"`
+}
+
+// ClaimTextPolish 独立更新漏洞显示摘要，不覆盖复现、证据或判定。
+// SourceRev 必须匹配当前节点、裁决及复现的最新版本，过期生成稿拒收。
+type ClaimTextPolish struct {
+	ClaimID   string `json:"claim_id"`
+	SourceRev int64  `json:"source_rev"`
+	Title     string `json:"title"`
+	Statement string `json:"statement"`
+	Impact    string `json:"impact,omitempty"`
+	// Repro contains presentation only; selected steps must belong to the
+	// sealed package and retain every mandatory proof step.
+	Repro *ReproDigest    `json:"repro,omitempty"`
+	Facts []FactStatement `json:"facts,omitempty"`
 }
 
 // FactTextPolish 是 EventFactText 的负载(P4-64 ③⑥,问题清单 #82):
@@ -1123,23 +1098,9 @@ type ClaimSummaryPolish struct {
 // 原文一字不动;空字段 = 未生成(读侧退节点标题)。
 type FactTextPolish struct {
 	FactID    string `json:"fact_id"`
+	SourceRev int64  `json:"source_rev,omitempty"`
 	Title     string `json:"title,omitempty"`
 	Statement string `json:"statement,omitempty"`
-	// Unpolished 标题未过机器语闸门(P4-24 ② 同款如实标注,原文保留)。
-	Unpolished bool `json:"unpolished,omitempty"`
-}
-
-// HypoTextPolish 是 EventHypoText 的负载(P4-64 ④⑥⑧,问题清单 #82):
-// 假设的显示层包装——收割评估批次(evaluateHypotheses)对每条被评估
-// 假设同批改写冻结:Title 短句标准校对标题、Basis 依据改写、Reason
-// 本次评估理由校对。未评估(等待验证瞬时态)不生成,读侧保持节点与
-// 评估记录原文。Latest-wins:每次评估的新事件覆盖旧包装(随评估记录
-// 同批落账,不重复记账)。
-type HypoTextPolish struct {
-	HypothesisID string `json:"hypothesis_id"`
-	Title        string `json:"title,omitempty"`
-	Basis        string `json:"basis,omitempty"`
-	Reason       string `json:"reason,omitempty"`
 	// Unpolished 标题未过机器语闸门(P4-24 ② 同款如实标注,原文保留)。
 	Unpolished bool `json:"unpolished,omitempty"`
 }
@@ -1173,10 +1134,13 @@ type OvermindPolish struct {
 // StepTitlePolish 是 EventStepTitle 的负载(P4-65 ⑩,问题清单 #82):步骤
 // 意图标题的显示层校对稿——拆解派发落账后异步补写(派发不等校对;任务
 // 包与机器消费用节点原文,校对稿仅显示层,与声明摘要同款包装分离)。步
-// 骤节点 Title 一字不动;空 = 未生成(读侧退节点标题)。
+// 骤节点 Title 一字不动。Title 是名称，Statement 是独立显示说明；
+// 每次事件替换完整显示稿，旧标题事件缺说明时读侧退节点原文。
 type StepTitlePolish struct {
-	StepID string `json:"step_id"`
-	Title  string `json:"title"`
+	StepID    string `json:"step_id"`
+	SourceRev int64  `json:"source_rev,omitempty"`
+	Title     string `json:"title"`
+	Statement string `json:"statement,omitempty"` // 独立显示说明；省略时按旧标题稿处理
 }
 
 // 镜留痕记录类型白名单(受控入口,P2-01;P3-01 增 https)。
@@ -1217,72 +1181,6 @@ type MirrorRecord struct {
 	TLS       string `json:"tls,omitempty"`   // https 侧目标证书校验结论 token(trusted/self_signed/expired/hostname_mismatch/untrusted/invalid,标签见 mirror.TLSLabel)
 }
 
-// Hypothesis 记录类型白名单(受控入口,P2-03)。
-const (
-	HypothesisRecEvaluation = "evaluation" // 主宰收割评估的裁决(转验证/挂账/废弃 + 理由)
-	HypothesisRecResult     = "result"     // 验证单位经 submit_hypothesis_result 写回的结构化结论
-)
-
-var hypothesisRecordTypes = map[string]bool{
-	HypothesisRecEvaluation: true,
-	HypothesisRecResult:     true,
-}
-
-// 评估三去向(第四章 §5 定稿:值得跟 / 存疑 / 不成立)。
-const (
-	HypothesisVerify  = "verify"  // 值得跟:转 Step 派发验证(R12 不得派回原发现者)
-	HypothesisHold    = "hold"    // 存疑:留在图上待唤醒(低排序 ≠ 拒绝)
-	HypothesisDiscard = "discard" // 不成立:标记废弃 + 记录理由(不删除,R10)
-)
-
-var hypothesisDecisions = map[string]bool{
-	HypothesisVerify: true, HypothesisHold: true, HypothesisDiscard: true,
-}
-
-// 验证结论词汇(结构化写回;Note 文本不构成结论)。
-const (
-	HypothesisSupported    = "supported"    // 成立
-	HypothesisRefuted      = "refuted"      // 不成立(推翻)
-	HypothesisInconclusive = "inconclusive" // 未能定论(回候选再评估)
-)
-
-var hypothesisVerdicts = map[string]bool{
-	HypothesisSupported: true, HypothesisRefuted: true, HypothesisInconclusive: true,
-}
-
-// IsValidHypothesisVerdict 验证结论词汇判定(swarm/overmind/server 共用;
-// 与状态词汇同惯例:词汇表归 rings,消费方不得自拼字符串)。
-func IsValidHypothesisVerdict(v string) bool { return hypothesisVerdicts[v] }
-
-// HypothesisRecord 是 EventHypothesisRecord 的负载(P2-03,第四章 §5
-// 虫群直觉回流):假设回流轨迹的审计流,不进 nodes/edges 投影(状态迁移
-// 本身走 node.state_changed;本事件承载裁决与结论依据,同 testclaim.record
-// 分工)。两类记录:
-//   - evaluation(actor=overmind):主宰收割评估——三去向裁决与理由
-//     (挂账与废弃都是一等去向,理由必填:直觉有账、废案有理由,R10);
-//     verify 携带派发的验证意图,StepID 指向同批落账的验证 Step。
-//   - result(actor=swarm:<unit>):验证单位写回的单轮结构化结论
-//     (supported|refuted|inconclusive);R12 验证者 ≠ 发现者由写回入口
-//     校验;证据经内容寻址落 blob(R18),账本只存引用与截头;
-//     Note 文本不参与结论。
-type HypothesisRecord struct {
-	HypothesisID string `json:"hypothesis_id"`
-	StepID       string `json:"step_id,omitempty"` // evaluation=验证 Step;result=写回单位执行的验证 Step(必填)
-	UnitID       string `json:"unit_id,omitempty"` // result 必填:写回的验证单位
-	Type         string `json:"type"`
-
-	// evaluation 侧。
-	Decision     string `json:"decision,omitempty"`      // verify|hold|discard
-	Reason       string `json:"reason,omitempty"`        // 三去向均必填(可审计的"为何跟/为何不跟")
-	VerifyIntent string `json:"verify_intent,omitempty"` // verify:派发的验证意图(Step 标题)
-
-	// result 侧。
-	Verdict      string `json:"verdict,omitempty"` // supported|refuted|inconclusive
-	EvidenceRef  string `json:"evidence_ref,omitempty"`
-	EvidenceHead string `json:"evidence_head,omitempty"`
-	Note         string `json:"note,omitempty"`
-}
-
 // 黑匣子记录类型白名单(受控入口,P2-04,第四章 §6 账本分工:预算状态
 // 变化与聚合里程碑入年轮黑匣子通道)。系统崩了它还在——写入用独立 ctx,
 // 不随任务熔断断链(记录侧约定)。P2-05 扩入心跳巡检四类:巡检拍本身
@@ -1298,6 +1196,7 @@ const (
 	BlackboxHbStall          = "hb_stall"           // P2-05:预筛发现——进度停滞(超时无事件)
 	BlackboxHbRepeat         = "hb_repeat"          // P2-05:预筛发现——重复动作(连续相同调用)
 	BlackboxHbBurnAnomaly    = "hb_burn_anomaly"    // P2-05:预筛发现——预算消耗异常(单拍 token 超阈)
+	BlackboxHbControl        = "hb_control"         // 主宰复查现有执行后的决定与真实控制结果
 	BlackboxUnitApprovalDeny = "unit_approval_deny" // P2-06b:审批拒绝熔断单位(拒绝线自动拒绝/面板拒绝)
 	BlackboxUnitBlocked      = "unit_blocked"       // P2-06e:单位模型错误退避重跑耗尽,步骤受阻
 	BlackboxTaskBlocked      = "task_blocked"       // P2-06e:任务级 LLM 连续失败超阈值,任务受阻
@@ -1310,12 +1209,14 @@ const (
 	BlackboxMicroCompact     = "micro_compact"      // P4-39 ②:旧轮工具结果体清理(微压缩,清出条数与字节数)
 	BlackboxAssessTimeout    = "assess_timeout"     // P4-42 ②:主宰单轮研判墙钟超时中断(弃本轮,心跳/事件可再触发)
 	BlackboxLLMChainStreak   = "llm_chain_streak"   // P4-57 ④:同端点同错误连续命中(≥2 次,同类连环——不等肉眼发现)
+	BlackboxUnitYield        = "unit_yield"         // P5-05:单位挂等超宽限冻结收场让位(会话保留/名额释放,停等态等解除)
 )
 
 var blackboxRecordTypes = map[string]bool{
 	BlackboxBudgetHalf: true, BlackboxUnitExhausted: true, BlackboxBudgetRenewal: true,
 	BlackboxTaskSettling: true, BlackboxGraceHardStop: true, BlackboxTaskSettled: true,
 	BlackboxHeartbeat: true, BlackboxHbStall: true, BlackboxHbRepeat: true, BlackboxHbBurnAnomaly: true,
+	BlackboxHbControl:        true,
 	BlackboxUnitApprovalDeny: true,
 	BlackboxUnitBlocked:      true, BlackboxTaskBlocked: true, BlackboxTaskResumed: true,
 	BlackboxRestartAdoption: true, BlackboxEnvObservation: true,
@@ -1323,6 +1224,7 @@ var blackboxRecordTypes = map[string]bool{
 	BlackboxToolSpill: true, BlackboxMicroCompact: true,
 	BlackboxAssessTimeout:  true,
 	BlackboxLLMChainStreak: true,
+	BlackboxUnitYield:      true,
 }
 
 // BlackboxRecord 是 EventBlackboxRecord 的负载(P2-04,第四章 §6):系统级
@@ -1344,12 +1246,20 @@ type TokenUsage struct {
 	Agent            string // 记账归属:swarm:uN / overmind / …
 	Model            string
 	TranscriptID     string // 会话原文 JSONL 的文件名锚点
+	Purpose          string // 空=正常会话请求;interrupted=未完成;其余为辅助用途
+	UsageMissing     bool   // 请求未收到非零用量;零值不可当作实际零消耗
 	Turn             int    // 运行内模型轮次(自 1 起)
 	InputTokens      int
 	OutputTokens     int
 	CacheReadTokens  int
 	CacheWriteTokens int
 	OccurredAt       time.Time
+}
+
+// HasConversationInput 最近主会话请求的已知输入是上下文读数依据,
+// 包括已返回输入的失败请求;辅助调用、未返回或只返回输出的不覆盖它。
+func (r TokenUsage) HasConversationInput() bool {
+	return (r.Purpose == "" || r.Purpose == "interrupted") && !r.UsageMissing && r.InputTokens > 0
 }
 
 // 舵杆指令与回执状态词汇(P2-05 建立,P2-08 补全回执状态机,第八章
@@ -1415,14 +1325,6 @@ const OvermindRecPlanning = "planning"     // 真实规划调用前的触发依�
 
 var overmindRecordTypes = map[string]bool{OvermindRecAssessment: true, OvermindRecPlanning: true}
 
-// OvermindRecord 是 EventOvermindRecord 的负载(P2-06,第四章 §1 主宰
-// 职责"态势研判"的标准五问):每轮拆解会话的研判轨迹审计流,不进
-// nodes/edges 投影(同 hypothesis.record 分工——研判本身不是图上业务
-// 节点,但"研判发生过、研判了什么"必须可审计)。五问是启发式起点
-// (保证下限),不是封闭问题清单(不设上限)——五问之外的研判入 Note。
-// EvaluatedRev 是本轮研判所读的账本版本,兼作下一轮"自上轮研判以来
-// 的变化"计算锚点(态势快照据此 diff——五问全是"新 X 是否 Y"形式,
-// 没有变化集就没有研判输入)。
 type OvermindRecord struct {
 	TriggerRevisions []int64         `json:"trigger_revisions,omitempty"`
 	Bootstrap        bool            `json:"bootstrap,omitempty"`
@@ -1448,7 +1350,7 @@ const (
 	ShepherdRecUserMessage   = "user_message"   // 造物主发言(带送达状态机的锚点事件)
 	ShepherdRecMessageState  = "message_state"  // 送达状态迁移:delivered|failed
 	ShepherdRecReply         = "reply"          // 牧者回复正文(人话,文风条款约束)
-	ShepherdRecThinking      = "thinking"       // 牧者思考段截头(消息类型徽标的面板可见面)
+	ShepherdRecThinking      = "thinking"       // 牧者实际返回思考增量(完整留存)
 	ShepherdRecToolCall      = "tool_call"      // 牧者工具调用与结果(折叠卡的审计面)
 	ShepherdRecAdvice        = "advice"         // 对主宰的建议提交(纳谏语义:入账待裁决)
 	ShepherdRecAdviceVerdict = "advice_verdict" // 主宰裁决:adopted|rejected(裁决后改变)
@@ -1546,6 +1448,7 @@ type UnitControlRecord struct {
 const (
 	InterjectRecUserMessage   = "user_message"   // 造物主发言(问/改,绑定目标与提问时图版本)
 	InterjectRecMessageState  = "message_state"  // 送达状态迁移:delivered|failed
+	InterjectRecThinking      = "thinking"       // 实际返回的思考增量
 	InterjectRecReply         = "reply"          // "问"的回答(基于目标历史,文风条款约束)
 	InterjectRecSteer         = "steer"          // "改"对虫群:关联舵杆指令(回执状态机在 steer.record)
 	InterjectRecAdvice        = "advice"         // "改"对主宰:建议提交(纳谏语义,裁决后改)
@@ -1554,7 +1457,7 @@ const (
 
 var interjectRecordTypes = map[string]bool{
 	InterjectRecUserMessage: true, InterjectRecMessageState: true,
-	InterjectRecReply: true, InterjectRecSteer: true,
+	InterjectRecReply: true, InterjectRecThinking: true, InterjectRecSteer: true,
 	InterjectRecAdvice: true, InterjectRecAdviceVerdict: true,
 }
 
@@ -1668,10 +1571,14 @@ type ClosureRecord struct {
 }
 
 // QueueWatermark 同时用于规划审计与面板展示，排队只计可领取步骤。
+// Hold = 挂等让位停等态计数(scope_wait/gate_wait/pause_wait/model_wait
+// 四族,趴窝单位)——不计排队 N(可领取口径),面板"等待 N"的唯一数据面
+// (P5-06 ③;P5-05 注意事项 4 落点)。
 type QueueWatermark struct {
 	Running   int `json:"running"`
 	Queued    int `json:"queued"`
 	Waiting   int `json:"waiting"`
+	Hold      int `json:"hold"`
 	Available int `json:"available"`
 	Limit     int `json:"limit"`
 }

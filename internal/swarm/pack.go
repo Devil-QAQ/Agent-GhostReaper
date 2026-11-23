@@ -61,28 +61,6 @@ func (e *Executor) Claim(ctx context.Context, taskID, stepID string) (*TaskPack,
 	// 渗透任务冻结种子闭包(权限管线命令级硬拦的判定面)与待批清单
 	// (RoE 约束块渲染)。红队/未标任务两 nil——现状行为,不拦。
 	pack.TaskType = rings.TaskTypeOf(createdDetail)
-	if pack.TaskType == rings.TaskTypePentest {
-		if roe, err := e.Store.CurrentRoE(ctx, taskID); err != nil {
-			return nil, fmt.Errorf("swarm: 领取: 查 RoE 范围: %w", err)
-		} else {
-			approved := roe.ScopeApprovedSet()
-			if approved == nil {
-				approved = map[string]bool{}
-			}
-			// 摘除即去权(P4-54 修复):排除清单内的资产(含手动/种子)
-			// 不贡献闭包——摘除后新领的任务包不再含其主机,命令级范围
-			// 检查不会被"闭包内"短路。
-			excluded := roe.ExcludedAssetSet()
-			if assets, err := e.Store.NodesByType(ctx, taskID, rings.NodeAsset, ""); err != nil {
-				return nil, fmt.Errorf("swarm: 领取: 查资产(范围闭包): %w", err)
-			} else {
-				pack.ScopeClosure = rings.BuildScopeClosure(rings.ScopeSeedsOf(assets), approved, excluded)
-			}
-		}
-		if pending, err := e.Store.PendingScopeAssets(ctx, taskID); err == nil {
-			pack.PendingScope = pending
-		}
-	}
 
 	// ① 目标:step.detail.goal_id 指定,缺省取图上最新目标。
 	goalID, _ := step.Detail["goal_id"].(string)
@@ -112,11 +90,6 @@ func (e *Executor) Claim(ctx context.Context, taskID, stepID string) (*TaskPack,
 	}
 	if hc, ok := step.Detail["harm_class"].(string); ok {
 		pack.HarmClass = rings.HarmClass(hc)
-	}
-	// P4-67 ⑤ 外部服务声明(可选;意图拆解契约 → step.detail → 任务包,
-	// 分诊输入据此判 declared_source)。
-	if es, ok := step.Detail["external_services"].(string); ok {
-		pack.ExternalServices = es
 	}
 
 	// ④ 资产:本步骤 covers 的资产。
@@ -207,12 +180,9 @@ func (e *Executor) Claim(ctx context.Context, taskID, stepID string) (*TaskPack,
 		return nil, fmt.Errorf("swarm: 领取: 查 RoE: %w", err)
 	}
 	pack.Authorization = RoE{
-		AllowedTools:      roe.AllowedTools,
-		DeniedTools:       roe.DeniedTools,
-		ApprovalThreshold: roe.ApprovalThreshold,
-		IntentRules:       roe.IntentRules,
-		CreatorNotes:      roe.CreatorNotes,
-		InfoSources:       roe.InfoSources,
+		AllowedTools: roe.AllowedTools,
+		DeniedTools:  roe.DeniedTools,
+		CreatorNotes: rings.PolicyNotes(roe.CreatorNotes, roe.IntentRules),
 	}
 
 	// ⑦ 图版本。
@@ -228,88 +198,32 @@ func (e *Executor) Claim(ctx context.Context, taskID, stepID string) (*TaskPack,
 		pack.Credentials = creds
 	}
 
-	// 反证任务上下文(P1-08 + P2-02):本 Step 绑定了声明(detail.testclaim_id)
-	// 即为验证类意图,把声明冻结要素交给反证单位(R12:领到者必然是
-	// 与发现者不同的新单位,一 Step 一单位;入口另有同单位拒收兜底)。
-	// P2-02:轮次与本轮待检的存活竞争解释从 step.detail 读取(收割派发
-	// 时从账本算出冻结;缺省退化为全量冻结清单,兼容 P1-08 旧步骤)。
-	if tcID, _ := step.Detail["testclaim_id"].(string); tcID != "" {
-		claim, err := e.Store.Node(ctx, taskID, tcID)
-		if err != nil {
-			return nil, fmt.Errorf("swarm: 领取反证判断 %s: %w", tcID, err)
+	if kind, _ := step.Detail["kind"].(string); kind == retakeStepKind {
+		brief := &RetakeBrief{}
+		brief.ClaimID, _ = step.Detail["claim_id"].(string)
+		brief.OriginStep, _ = step.Detail["origin_step"].(string)
+		brief.Reason, _ = step.Detail["reason"].(string)
+		brief.Reverify, _ = step.Detail["reverify"].(bool)
+		if brief.ClaimID == "" {
+			return nil, fmt.Errorf("swarm: 领取补做步骤 %s: 缺 claim_id 绑定", stepID)
 		}
-		if claim.Type != rings.NodeTestClaim {
-			return nil, fmt.Errorf("swarm: 反证绑定节点 %s 是 %s 不是 testclaim", tcID, claim.Type)
-		}
-		brief := &FalsifyBrief{ClaimID: claim.ID, Statement: claim.Title}
-		brief.Impact, _ = claim.Detail["impact"].(string)
-		brief.Vulnclass, _ = claim.Detail["vulnclass"].(string)
-		brief.DiscovererUnit, _ = claim.Detail["unit_id"].(string)
-		if ev, ok := claim.Detail["evidence_head"].(string); ok {
-			brief.Evidence = ev
-		}
-		if ref, ok := claim.Detail["evidence_ref"].(string); ok {
-			brief.Evidence += " [" + ref + "]"
-		}
-		if r, ok := step.Detail["round"].(float64); ok {
-			brief.Round = int(r)
-		}
-		brief.Alternatives = altBriefsOf(step.Detail["alternatives"])
-		if brief.Alternatives == nil {
-			brief.Alternatives = altBriefsOf(claim.Detail["alternatives"])
-		}
-		// 攻击链环节(P2-06 组合发现):链式声明的血缘链条进任务包,
-		// 反证单位据此独立重放整条链的组合效果。
-		if combined, _ := claim.Detail["combined"].(bool); combined {
-			brief.Chain = chainBriefsOf(ctx, e.Store, taskID, claim.Detail["chain"])
-		}
-		pack.Falsify = brief
+		pack.Retake = brief
 	}
-	// 假设验证任务上下文(P2-03,第四章 §5):本 Step 为主宰收割评估
-	// "值得跟"派发的验证意图(detail.kind=verify)时,把假设冻结要素交给
-	// 验证单位(R12:领到者必然是与提出者不同的新单位,一 Step 一单位;
-	// 写回入口另有同单位拒收兜底)。
-	if kind, _ := step.Detail["kind"].(string); kind == "verify" {
-		hypID, _ := step.Detail["hypothesis_id"].(string)
-		if hypID == "" {
-			return nil, fmt.Errorf("swarm: 领取验证步骤 %s: 缺 hypothesis_id 绑定", stepID)
-		}
-		hyp, err := e.Store.Node(ctx, taskID, hypID)
-		if err != nil {
-			return nil, fmt.Errorf("swarm: 领取验证假设 %s: %w", hypID, err)
-		}
-		if hyp.Type != rings.NodeHypothesis {
-			return nil, fmt.Errorf("swarm: 验证绑定节点 %s 是 %s 不是 hypothesis", hypID, hyp.Type)
-		}
-		brief := &HypothesisBrief{HypothesisID: hyp.ID, Statement: hyp.Title}
-		brief.Basis, _ = hyp.Detail["basis"].(string)
-		brief.ProposerUnit, _ = hyp.Detail["unit_id"].(string)
-		pack.Verify = brief
-	}
+	// 任务简报(P5-04 虫群知情化):开工第一条消息注入的轻量概况;
+	// 装配失败静默降级(空串,不阻塞领取——与预算覆盖读失败同纪律)。
+	pack.Briefing = assembleBriefing(ctx, e.Store, taskID)
 	return pack, nil
 }
 
-// altBriefsOf detail 里的解释清单(派发冻结的存活清单或声明全量)转
-// 任务包条目;格式不符或为空返回 nil。
-func altBriefsOf(raw any) []AltBrief {
-	list, ok := raw.([]any)
-	if !ok {
-		return nil
-	}
-	var out []AltBrief
-	for _, item := range list {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		id, _ := m["id"].(string)
-		label, _ := m["label"].(string)
-		if id == "" {
-			continue
-		}
-		out = append(out, AltBrief{ID: id, Label: label})
-	}
-	return out
+// RetakeBrief 补做证据/重验步骤的冻结要素(P5-02):三查不过的失败
+// 原因(缺哪样)或 reopen 重开理由,与绑定声明/原交卷步骤一起交给
+// 补做单位——它接管原会话续跑,补做后经 submit_claim 带 claim_id 重交;
+// 重验单位坐实则重交,立不住则如实收尾不交。
+type RetakeBrief struct {
+	ClaimID    string
+	OriginStep string
+	Reason     string
+	Reverify   bool // true = reopen 重验步骤(终态无重交记推翻终态)
 }
 
 // ---- 全局预算覆盖(P2-06c) ----
@@ -350,34 +264,4 @@ func settingPositiveInt(ctx context.Context, store *rings.Store, key string) (in
 		return 0, false
 	}
 	return n, true
-}
-
-// chainBriefsOf detail 里的攻击链环节转任务包条目(P2-06 组合发现):
-// 每环节补事实陈述标题(环节引用的 fact 节点读侧下钻;查不到的环节
-// 如实带空标题,不猜)。
-func chainBriefsOf(ctx context.Context, store *rings.Store, taskID string, raw any) []ChainBrief {
-	list, ok := raw.([]any)
-	if !ok {
-		return nil
-	}
-	var out []ChainBrief
-	for _, item := range list {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		id, _ := m["fact_id"].(string)
-		if id == "" {
-			continue
-		}
-		b := ChainBrief{FactID: id}
-		if role, _ := m["role"].(string); role != "" {
-			b.Role = role
-		}
-		if f, err := store.Node(ctx, taskID, id); err == nil && f.Type == rings.NodeFact {
-			b.Title = f.Title
-		}
-		out = append(out, b)
-	}
-	return out
 }

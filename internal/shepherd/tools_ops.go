@@ -76,13 +76,12 @@ func (s *Service) updateGoalTool(taskID string) tool.CoreTool {
 
 // deleteGoalTool 删除目标(P4-54 ①;P4-55 审核迭代修订):该方向不要了
 // ——同停聚焦力度:该目标名下未领取排队步骤取消留痕、在跑单位立即
-// 终止(回执如实报数);目标转已删除,后续零新派。受影响的反证判断
-// 程序不动状态(禁止连坐):交主宰下轮裁决——资产仍被其他目标需要
-// 则继续锤炼,无人需要则挂起(理由"目标已删除")。
+// 终止(回执如实报数);目标转已删除,后续零新派。已交卷的发现与
+// 已确认事实程序不动状态(禁止连坐)。
 func (s *Service) deleteGoalTool(taskID string) tool.CoreTool {
 	return tool.Build(tool.Spec{
 		Name:        "delete_goal",
-		Description: "删除目标(该方向不要了):该方向的排队步骤取消、在跑单位立即终止、后续不再派发该方向;受影响的反证判断交主宰判定(继续锤炼或挂起),程序不改其状态。回执会如实报告终止与取消笔数。",
+		Description: "删除目标(该方向不要了):该方向的排队步骤取消、在跑单位立即终止、后续不再派发该方向;已交卷的发现与已确认事实程序不改其状态。回执会如实报告终止与取消笔数。",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -110,7 +109,7 @@ func (s *Service) deleteGoalTool(taskID string) tool.CoreTool {
 			s.wake(taskID)
 			var b strings.Builder
 			fmt.Fprintf(&b, "目标 %s 已删除:终止在途单位 %d 个,取消排队步骤 %d 个", args.GoalID, len(res.KilledUnits), len(res.AbortedSteps))
-			b.WriteString("。该方向后续零新派;受影响的判断交主宰下轮判定(资产仍被其他目标需要则继续锤炼,无人需要则挂起)。")
+			b.WriteString("。该方向后续零新派;已交卷的发现与已确认事实状态不变。")
 			return tool.Text(b.String()), nil
 		},
 	})
@@ -118,12 +117,11 @@ func (s *Service) deleteGoalTool(taskID string) tool.CoreTool {
 
 // setFocusTool 停方向聚焦(P4-54 ①):"其他都停掉只做 X"——非 X 方向
 // 排队步骤取消留痕、在跑单位立即终止、派发守卫不再派其他方向(回执
-// 如实报数);被取消反证的声明转挂起,不自动重派。goal_id 省略 = 解除
-// 聚焦(恢复各方向,挂起声明唤醒)。
+// 如实报数)。goal_id 省略 = 解除聚焦(恢复各方向)。
 func (s *Service) setFocusTool(taskID string) tool.CoreTool {
 	return tool.Build(tool.Spec{
 		Name:        "set_focus",
-		Description: "停方向聚焦(「其他都停掉只做 X」)或解除聚焦。聚焦后:只派发该方向的意图,其他方向的排队步骤取消、在跑单位立即终止,反证中的判断挂起;造物主后插的急活不受限。重新聚焦或解除聚焦时,挂起的判断恢复反证。goal_id 省略 = 解除聚焦恢复各方向。",
+		Description: "停方向聚焦(「其他都停掉只做 X」)或解除聚焦。聚焦后:只派发该方向的意图,其他方向的排队步骤取消、在跑单位立即终止;造物主后插的急活不受限。goal_id 省略 = 解除聚焦恢复各方向。",
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -140,12 +138,11 @@ func (s *Service) setFocusTool(taskID string) tool.CoreTool {
 			}
 			gid := strings.TrimSpace(args.GoalID)
 			if gid == "" {
-				n, err := overmind.UnfocusGoal(ctx, s.Store, taskID, ActorShepherd)
-				if err != nil {
+				if err := overmind.UnfocusGoal(ctx, s.Store, taskID, ActorShepherd); err != nil {
 					return tool.Errorf("解除聚焦被拒: " + err.Error()), nil
 				}
 				s.wake(taskID)
-				return tool.Text(fmt.Sprintf("方向聚焦已解除,恢复各方向派发;唤醒挂起判断 %d 个。", n)), nil
+				return tool.Text("方向聚焦已解除,恢复各方向派发。"), nil
 			}
 			res, err := overmind.FocusGoal(ctx, s.Store, s.helm(), taskID, gid, ActorShepherd)
 			if err != nil {
@@ -158,7 +155,7 @@ func (s *Service) setFocusTool(taskID string) tool.CoreTool {
 				title = g.Title
 			}
 			var b strings.Builder
-			fmt.Fprintf(&b, "已聚焦「%s」:终止在途单位 %d 个,取消排队步骤 %d 个,挂起判断 %d 个,唤醒属该方向的挂起判断 %d 个", title, len(res.KilledUnits), len(res.AbortedSteps), len(res.SuspendedClaims), res.ResumedClaims)
+			fmt.Fprintf(&b, "已聚焦「%s」:终止在途单位 %d 个,取消排队步骤 %d 个", title, len(res.KilledUnits), len(res.AbortedSteps))
 			b.WriteString("。此后只派发该方向,其他方向零新派。")
 			return tool.Text(b.String()), nil
 		},

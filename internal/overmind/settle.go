@@ -1,27 +1,5 @@
 package overmind
 
-// 任务级总闸:有序收尾时序(P2-04,第四章 §6)。设计定稿:
-//
-//	每个任务可设整体超时(绝对墙钟),到点依序收场:
-//	进入 settling → 虫群单位停止领取新意图 → 在跑单位优雅收尾
-//	(宽限 90 秒,超时硬停)→ 主宰终局判定 → 定终态。
-//
-// 机制分工(与单位级预算 R16 衔接):
-//   - 收尾线锚点:created 事件发生时刻 + 超时秒数(rings.TaskGate,
-//     事件流不可变;暂停时间照算——绝对墙钟)。
-//   - 停止派发:cycle 每轮迭代顶部查收尾线,过线即停止拆解/派发/调度
-//     (dispatched 步骤原样留在图上,如实呈现"已派发未执行")。
-//   - 在跑单位优雅收尾:单位墙钟预算 = min(运行预算, 距收尾线剩余)
-//     (swarm 侧推导)——到点单位就地进 Settlement 把发现写回图,
-//     终因 timeout、步骤落 exhausted(暂停接力语义,不硬杀)。
-//   - 宽限硬停:进入收尾即布防宽限定时器(SettleGraceSeconds,默认
-//     90 秒);收尾轮本身跑飞的单位被逐个 cancel(swarm.CancelRunningUnits,
-//     真中断 aborted——硬停丢的只是没写完的总结,进度早在账本里)。
-//   - 终局判定:收割(事实转正/声明裁决/假设结论)后 Goal 全量过
-//     仲裁者机器判定(R16:不得因超时静默标记失败)。
-//   - 定终态:全达成 → completed;未全达成 → stopped(整体超时有序
-//     收尾,终态可审计)。经 SettleCtl(Manager)记账。
-
 import (
 	"context"
 	"encoding/json"
@@ -103,12 +81,13 @@ func (l *Loop) armClosureGraceStop() {
 		return // 无执行器(直驱单测):无可硬停在飞单位
 	}
 	grace := time.Duration(l.graceSeconds()) * time.Second
+	done := l.doneCh()
 	go func() {
 		t := time.NewTimer(grace)
 		defer t.Stop()
 		select {
 		case <-t.C:
-		case <-l.doneCh():
+		case <-done:
 			return
 		}
 		if !l.isSettling() {
@@ -150,10 +129,8 @@ func (l *Loop) enterSettlingBy(ctx context.Context, by string) {
 	}
 	l.settling = true
 	l.settleBy = by
-	l.mu.Unlock()
-	if by == rings.SettleByClosurePrompt {
-		l.armClosureGraceStop()
-	}
+	// Publish the in-memory transition only when the manager has entered the
+	// same state. Scheduling and terminal checks share this short write lock.
 	detail := map[string]any{
 		"reason":        "任务整体超时,进入有序收尾(停止派发,在跑单位优雅收尾)",
 		"deadline":      l.deadline.Format(time.RFC3339),
@@ -169,13 +146,17 @@ func (l *Loop) enterSettlingBy(ctx context.Context, by string) {
 	}
 	if err := blackbox.Record(context.Background(), l.Store, l.TaskID, ActorOvermind,
 		rings.BlackboxRecord{Type: rings.BlackboxTaskSettling, Detail: detail}); err != nil {
-		l.setErr(err)
+		l.lastErr = err
 	}
 	if l.SettleCtl != nil {
 		if err := l.SettleCtl.MarkSettling(l.TaskID, detail); err != nil {
 			// 已熔断/已让位:收尾流程照走(账本如实),终态由他方已定。
-			l.setErr(err)
+			l.lastErr = err
 		}
+	}
+	l.mu.Unlock()
+	if by == rings.SettleByClosurePrompt {
+		l.armClosureGraceStop()
 	}
 	// 自唤醒:把可能在 select 里等待的循环带回 settle 流程(容量 1 合并)。
 	if l.settleKick != nil {
@@ -239,7 +220,6 @@ func (l *Loop) relayBriefs(ctx context.Context, steps []rings.NodeFull) []string
 			}
 		}
 	}
-	// produces 血缘产出(Step → Fact|Hypothesis)。
 	produces, err := l.Store.Edges(ctx, l.TaskID, rings.EdgeProduces)
 	if err != nil {
 		l.setErr(fmt.Errorf("overmind: 接力轨迹查血缘: %w", err))
@@ -282,9 +262,11 @@ func (l *Loop) relayBriefs(ctx context.Context, steps []rings.NodeFull) []string
 // ——硬停丢的只是没写完的总结,进度早已实时入账)。冬眠中到点不推进
 // (收尾预算冻结),唤醒后按顺延的收尾线重算。无单位在飞则无事发生
 // (零留痕,不打扰)。
-func (l *Loop) armHardStop(ctx context.Context) {
+func (l *Loop) armHardStop(ctx context.Context) <-chan struct{} {
 	grace := time.Duration(l.graceSeconds()) * time.Second
+	done, finished := l.doneCh(), make(chan struct{})
 	go func() {
+		defer close(finished)
 		for {
 			d := time.Until(l.currentDeadline().Add(grace))
 			if d < grace {
@@ -296,7 +278,7 @@ func (l *Loop) armHardStop(ctx context.Context) {
 			case <-ctx.Done():
 				t.Stop()
 				return
-			case <-l.runDone:
+			case <-done:
 				t.Stop()
 				return // 循环已收场(完成/熔断),硬停失义
 			}
@@ -308,7 +290,10 @@ func (l *Loop) armHardStop(ctx context.Context) {
 				l.extendDeadline()
 				continue
 			}
-			ids := l.Swarm.CancelRunningUnits()
+			if l.Swarm == nil {
+				return
+			}
+			ids := l.Swarm.CancelUnitsOf(l.TaskID)
 			if len(ids) == 0 {
 				return
 			}
@@ -323,6 +308,7 @@ func (l *Loop) armHardStop(ctx context.Context) {
 			return
 		}
 	}()
+	return finished
 }
 
 // settle 收尾收场:等在飞单位落地(各自优雅收尾/宽限硬停兜底)→
@@ -357,18 +343,12 @@ func (l *Loop) settle(ctx context.Context) {
 		return // 收尾中被熔断:终态已由 StopBy 记账
 	}
 
-	// ② 终局判定:收割(候选事实转正 + 声明裁决 + 假设结论迁移)后
-	// Goal 全量过仲裁者(R16:超时不是失败,达成与否由机器判定)。
-	if _, err := Harvest(ctx, l.Store, l.TaskID, l.triageFn()); err != nil {
+	// ② 终局判定:收割(候选事实转正 + 交卷声明兜底收口)后 Goal 全量
+	// 过仲裁者(R16:超时不是失败,达成与否由机器判定)。
+	if _, err := Harvest(ctx, l.Store, l.TaskID); err != nil {
 		l.setErr(err)
 	}
-	if _, err := HarvestClaims(ctx, l.Store, l.TaskID); err != nil {
-		l.setErr(err)
-	}
-	if _, err := l.harvestHypotheses(ctx); err != nil {
-		l.setErr(err)
-	}
-	if _, err := l.judgeClaims(ctx); err != nil {
+	if _, err := l.checkPendingClaims(ctx); err != nil {
 		l.setErr(err)
 	}
 	achieved, err := l.judgeGoals(ctx)

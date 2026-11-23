@@ -6,14 +6,15 @@ import (
 )
 
 // P4-30 ①②(问题清单 #51):立判危害门槛与定级校准锚的共用句纪律——
-// 工具说明、虫群铁律、反证任务包三处引用同一份常量,防漂移。
+// 工具说明与虫群铁律引用同一份常量,防漂移;P5-01① 起定级锚随交卷
+// 工具说明与铁律给虫群自报级别(反证任务包已退役)。
 
 func TestClaimHarmGateSharedClauses(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		body string
 	}{
-		{"submit_test_claim 工具说明", toolDescSubmitTestClaim},
+		{"submit_claim 工具说明", toolDescSubmitClaim},
 		{"虫群铁律 B 段", workerSafetyRules},
 	} {
 		if !strings.Contains(tc.body, ClaimHarmGate) {
@@ -31,8 +32,8 @@ func TestClaimHarmGateSharedClauses(t *testing.T) {
 }
 
 func TestSeverityAnchorSharedClauses(t *testing.T) {
-	if !strings.Contains(toolDescSubmitFalsifyResult, SeverityAnchor) {
-		t.Fatalf("submit_falsify_result 工具说明须逐字携带定级校准锚(P4-30 ②)")
+	if !strings.Contains(toolDescSubmitClaim, SeverityAnchor) {
+		t.Fatalf("submit_claim 工具说明须逐字携带定级校准锚(P4-30 ②,P5-01① 自报级别)")
 	}
 	for _, want := range []string{
 		"critical=系统级权限或大量敏感数据",
@@ -44,14 +45,5 @@ func TestSeverityAnchorSharedClauses(t *testing.T) {
 		if !strings.Contains(SeverityAnchor, want) {
 			t.Fatalf("定级校准锚缺档位定义 %q", want)
 		}
-	}
-	// 反证任务包(定稿与反证流程共用的呈现面)同样携带。
-	pack := &TaskPack{Falsify: &FalsifyBrief{
-		ClaimID: "tc-1", Statement: "存在性判断", Impact: "影响面判断",
-		Alternatives: []AltBrief{{ID: "alt1", Label: "缓存污染"}},
-	}}
-	rendered := pack.Render()
-	if !strings.Contains(rendered, SeverityAnchor) {
-		t.Fatalf("反证任务包须携带定级校准锚:\n%s", rendered)
 	}
 }

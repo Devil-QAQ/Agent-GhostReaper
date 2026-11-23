@@ -204,10 +204,10 @@ export function LLMPage() {
   const loading = !data && !error; // 首载骨架屏(8.9 #6:加载不用转圈)
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-3">
       <PageHeader
         title="LLM配置"
-        subtitle="模型卡片墙 · 主用始终第 1,备按优先级接替 · key 只存服务端,打码呈现"
+        subtitle="管理主用与备用模型，查看连接状态"
       >
         <Button variant="outline" size="sm" onClick={() => setDrawerOpen(true)}>
           主备轮询
@@ -222,10 +222,10 @@ export function LLMPage() {
       )}
 
       {loading ? (
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className="grid auto-rows-fr grid-cols-1 gap-3 lg:grid-cols-2">
           {[0, 1].map((i) => (
             <Card key={i}>
-              <CardContent className="flex flex-col gap-4 p-5">
+              <CardContent className="flex flex-col gap-3 p-4">
                 <div className="skeleton h-5 w-36" />
                 <div className="skeleton h-4 w-48" />
                 <div className="skeleton h-3 max-w-72 w-full" />
@@ -243,7 +243,7 @@ export function LLMPage() {
           action={{ label: "新增模型", onClick: openNew }}
         />
       ) : (
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className="grid auto-rows-fr grid-cols-1 gap-3 lg:grid-cols-2">
           {library.map((c, i) => (
             <div key={c.name} className="animate-rise" style={{ animationDelay: `${Math.min(i, 6) * 40}ms` }}>
               <ModelCard
@@ -307,10 +307,10 @@ function ModelCard({ cfg, active, member, busy, revealedKey, revealBusy, onRevea
   ].filter(Boolean);
 
   return (
-    <Card className="h-full transition-shadow duration-150 hover:shadow-card">
-      <CardContent className="flex h-full flex-col gap-4 p-5">
+    <Card data-card-kind="model" className="h-full min-w-0 transition-shadow duration-150 hover:shadow-card">
+      <CardContent className="flex h-full min-w-0 flex-col gap-3 p-4">
         <div className="flex items-center gap-3">
-          <span className="t-sec leading-none">{cfg.name}</span>
+          <span className="t-sec min-w-0 flex-1 truncate leading-none" title={cfg.name}>{cfg.name}</span>
           {active ? (
             <Badge variant="success">主用</Badge>
           ) : cfg.poll_disabled ? (
@@ -322,7 +322,7 @@ function ModelCard({ cfg, active, member, busy, revealedKey, revealBusy, onRevea
         </div>
 
         <div className="flex flex-col gap-1">
-          <div className="num text-[13px]">{cfg.model}</div>
+          <div className="num truncate text-[13px]" title={cfg.model}>{cfg.model}</div>
           <div className="truncate num text-xs text-muted-foreground" title={cfg.base_url}>{cfg.base_url}</div>
           <div className={cn("flex min-w-0 items-center gap-1 text-xs", !cfg.has_key ? "text-status-warning" : "text-muted-foreground")}>
             {cfg.has_key ? (
@@ -359,7 +359,7 @@ function ModelCard({ cfg, active, member, busy, revealedKey, revealBusy, onRevea
         )}
         {member && state === "probing" && <Badge variant="warning">冷却期满探测</Badge>}
 
-        <div className="mt-auto flex items-center gap-2 border-t pt-4">
+        <div className="mt-auto flex flex-wrap items-center gap-2 border-t pt-3">
           {!active && (
             <Button variant="outline" size="sm" disabled={busy} onClick={onActivate}>
               激活主用
@@ -736,7 +736,7 @@ function ModelDialog({ open, form, busy, presets, platforms, ocModes, passbackPr
                 <Select value={f.thinking || "default"} onValueChange={(v) => onForm({ ...f, thinking: v === "default" ? "" : v })}>
                   <SelectTrigger className={cn(INPUT, "w-24")}><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="default">随端点</SelectItem>
+                    <SelectItem value="default">默认开</SelectItem>
                     <SelectItem value="enabled">开</SelectItem>
                     <SelectItem value="disabled">关</SelectItem>
                   </SelectContent>

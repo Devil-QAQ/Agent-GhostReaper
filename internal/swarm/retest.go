@@ -15,7 +15,7 @@ import (
 )
 
 // 复测会话(P3-06,第八章 8.8 漏洞复测 / 第三章 §5 复测语义):对一条
-// 锤炼完成的发现(confirmed/pending/fixed)发起修复状态复核——会话由
+// 已确认的发现(confirmed/fixed)发起修复状态复核——会话由
 // 面板从发现列表/详情发起,执行侧走虫群执行器同款机制(drive 循环:
 // 审批门、镜留痕、门卫、模型重试、账本实时记账全套复用,零平行实现)。
 //
@@ -50,16 +50,16 @@ func RetestSID(claimID string, round int) string {
 var (
 	// ErrRetestInFlight 该声明已有活复测会话(同声明同时至多一轮)。
 	ErrRetestInFlight = errors.New("该判断复测进行中,等本轮结束再发起")
-	// ErrRetestNotRetestable 声明不在可复测状态(锤炼中态不可复测)。
+	// ErrRetestNotRetestable 声明不在可复测状态(瞬时候选不可复测)。
 	ErrRetestNotRetestable = errors.New("判断不在可复测状态(须为 已确认/证据不足/已修复)")
 	// ErrRetestUnavailable 复测依赖未装配(模型/镜)。
 	ErrRetestUnavailable = errors.New("swarm: 复测依赖未装配(模型或镜缺失,面板激活主用模型后自动装配)")
 )
 
-// Retestable 声明当前状态是否可复测。
+// Retestable 声明当前状态是否可复测(P5-02⑤:证据不足终态可复测)。
 func Retestable(status string) bool {
 	switch status {
-	case rings.TestClaimConfirmed, rings.TestClaimPending, rings.TestClaimFixed:
+	case rings.TestClaimConfirmed, rings.TestClaimInsufficient, rings.TestClaimFixed:
 		return true
 	}
 	return false
@@ -109,7 +109,7 @@ func (e *Executor) BeginRetest(ctx context.Context, taskID, claimID string) (*Re
 	if !Retestable(claim.Status) {
 		return nil, fmt.Errorf("%w(当前 %s)", ErrRetestNotRetestable, claim.Status)
 	}
-	// 依赖装配后置检查:锤炼中状态先拒(状态是声明自身事实,不依赖装配)。
+	// 依赖装配后置检查:不可复测状态先拒(状态是声明自身事实,不依赖装配)。
 	if e.Provider == nil || e.Mirror == nil {
 		return nil, ErrRetestUnavailable
 	}
@@ -275,7 +275,10 @@ func (e *Executor) DriveRetest(ctx context.Context, run *RetestRun) (*RunResult,
 		delete(e.liveRetests, key)
 		e.rtMu.Unlock()
 	}()
-	res, err := e.drive(failover.WithTask(ctx, env.TaskID), env, pack, run.budget)
+	unitCtx, cancel := context.WithCancel(failover.WithTask(ctx, env.TaskID))
+	res, err := e.drive(unitCtx, env, pack, run.budget)
+	cancel()
+	env.drainCallbacks(true)
 	_, serr := e.Store.Append(ledgerCtx, env.TaskID, rings.Event{
 		Kind: rings.EventSwarmRecord, Actor: "swarm:" + env.UnitID,
 		Payload: rings.SwarmRecord{
@@ -460,8 +463,8 @@ func (env *unitEnv) submitRetestResultTool() tool.CoreTool {
 // 状态迁移(fixed/unfixed;inconclusive 只入记录)。入口校验:绑定存在、
 // 结论词受限、证据非空、声明仍在可复测状态(并发重开防护)、本轮
 // (SID)未写过(每轮一次,R1)。unfixed 回滚目标 = 账本状态历史里最近
-// 一个非 fixed 态(锤炼态与修复态正交:fixed 是已确认发现之上的修复
-// 标记,回滚回到修复前的锤炼终态);与当前状态一致时不落空事件。
+// 一个非 fixed 态(修复态与已确认正交:fixed 是已确认发现之上的修复
+// 标记,回滚回到修复前的确认终态);与当前状态一致时不落空事件。
 // 程序化调用与工具调用走同一条路(R8)。
 func (env *unitEnv) SubmitRetestResult(ctx context.Context, verdict, evidence, note string) error {
 	if env.retest == nil {
@@ -557,9 +560,6 @@ func (env *unitEnv) SubmitRetestResult(ctx context.Context, verdict, evidence, n
 	return nil
 }
 
-// retestToolset 复测单位的受限工具集:bash(重放通道)+ 只读探测 + 本机
-// 读 + 复测结论写回。无候选回流/声明提交/假设通道——复测不是发现通道
-// (P3-06 专用受限)。RoE 过滤照常生效(结论工具恒可用,见 BeginRetest)。
 func (env *unitEnv) retestToolset() []tool.CoreTool {
 	return []tool.CoreTool{
 		env.bashTool(),
@@ -576,7 +576,7 @@ func (env *unitEnv) retestToolset() []tool.CoreTool {
 const SettingKeyPromptRetest = "prompt.retest.editable"
 
 // retestEditableDefault 复测基线 A 段默认正文(角色与视野;可编辑)。
-const retestEditableDefault = `你是渗透测试复测单位,对一条已锤炼完成的漏洞判断做修复状态复核:按复现步骤对授权目标真实重放,判定该漏洞当前是否已修复。你没有全局视野;你的世界是这份复测上下文与你的工具结果。`
+const retestEditableDefault = `你是渗透测试复测单位,对一条已确认的漏洞判断做修复状态复核:按复现步骤对授权目标真实重放,判定该漏洞当前是否已修复。你没有全局视野;你的世界是这份复测上下文与你的工具结果。`
 
 // retestSafetyRules 复测基线 B 段(代码固定,安全底线)。
 const retestSafetyRules = `铁律(代码固定,配置不可移除):
@@ -615,7 +615,7 @@ const retestWrapupPrompt = `运行预算即将耗尽。立即收尾:已取得可
 //	[6] 启动指令(最后一句)
 func RetestSystemSegments(ctx context.Context, store *rings.Store, roe RoE, rt *retestBinding) []string {
 	segs := []string{RenderRoEConstraint(
-		"你的复测手段受此框定。", roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, nil, nil, roe.CreatorNotes, roe.InfoSources)}
+		"你的复测手段受此框定。", roe.AllowedTools, roe.DeniedTools, nil, roe.CreatorNotes)}
 	segs = append(segs, RetestPromptSpec.Assemble(ctx, store)...)
 	segs = append(segs, retestIntentBlock(rt), retestStartupInstruction)
 	return segs

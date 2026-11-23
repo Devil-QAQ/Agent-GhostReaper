@@ -3,12 +3,14 @@ package swarm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
 	"ghostreaper/internal/rings"
+	"ghostreaper/internal/runlog"
 )
 
 // ---- 单位级暂停与任务冬眠的执行层落地(P2-08,第四章 §7 / 第七章;
@@ -79,43 +81,86 @@ func (e *Executor) PauseUnit(ctx context.Context, taskID, stepID, by, reason str
 		e.mu.Unlock()
 		return nil // 幂等:已在暂停中
 	}
-	e.unitLatches[key] = make(chan struct{})
 	unitID := e.stepUnits[key]
-	e.mu.Unlock()
 	if unitID == "" {
-		// 竞态:步骤 running 但单位刚落地(领取竞态)。清闩如实报错。
-		e.mu.Lock()
-		delete(e.unitLatches, key)
 		e.mu.Unlock()
-		return fmt.Errorf("swarm: 步骤 %s 无在跑单位(领取竞态:单位刚干完)", stepID)
+		return fmt.Errorf("步骤已无在跑单位")
 	}
-	return e.recordUnitControl(taskID, rings.UnitControlRecord{
-		Target: "unit", StepID: stepID, UnitID: unitID,
-		Action: rings.UnitCtlPause, By: by, Reason: reason,
-	})
+	err = e.recordUnitControl(taskID, rings.UnitControlRecord{Target: "unit", StepID: stepID, UnitID: unitID, Action: rings.UnitCtlPause, By: by, Reason: reason})
+	if err == nil {
+		e.unitLatches[key] = make(chan struct{})
+	}
+	e.mu.Unlock()
+	return err
 }
 
 // ResumeUnit 单位级继续(P2-08 三级控制·继续):开闩放行,单位原地
-// 接着干(继续前按 R14 复检由挂起等待路径执行)。
+// 接着干(继续前按 R14 复检由挂起等待路径执行)。P5-05:挂等让位后的
+// pause_wait 停等步骤无闩可开(单位已收场)——继续指令落账本唤醒通道
+// (步骤回 dispatched+队首档,重领单位原会话 Resume 续跑);与闩路径
+// 在 e.mu 同锁互斥,先到先处理。
 func (e *Executor) ResumeUnit(ctx context.Context, taskID, stepID, by string) error {
 	e.mu.Lock()
 	key := steerKey(taskID, stepID)
 	ch, ok := e.unitLatches[key]
 	if ok {
-		delete(e.unitLatches, key)
 		unitID := e.stepUnits[key]
-		e.mu.Unlock()
-		close(ch)
-		if unitID == "" {
-			return nil // 单位已落地(pause_lapse 已留痕),继续指令无事可做
+		if unitID != "" {
+			if err := e.recordUnitControl(taskID, rings.UnitControlRecord{Target: "unit", StepID: stepID, UnitID: unitID, Action: rings.UnitCtlResume, By: by}); err != nil {
+				e.mu.Unlock()
+				return err
+			}
 		}
-		return e.recordUnitControl(taskID, rings.UnitControlRecord{
-			Target: "unit", StepID: stepID, UnitID: unitID,
-			Action: rings.UnitCtlResume, By: by,
-		})
+		delete(e.unitLatches, key)
+		close(ch)
+		e.mu.Unlock()
+		return nil
 	}
+	unitID := e.stepUnits[key]
 	e.mu.Unlock()
-	return fmt.Errorf("swarm: 步骤 %s 不在暂停中", stepID)
+	if unitID != "" {
+		return fmt.Errorf("swarm: 步骤 %s 不在暂停中", stepID)
+	}
+	// P5-05 停等态唤醒:让位收场后的暂停步骤(pause_wait)——继续即
+	// 回可领取+队首档(已批准待上位语义:操作者解除,优先领取下一个
+	// 空位);停等中步骤的暂停已转移为步骤态,闩路径走不到这里。
+	for ctx.Err() == nil {
+		rev, err := e.Store.CurrentRevision(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		step, err := e.Store.Node(ctx, taskID, stepID)
+		if err != nil {
+			return err
+		}
+		if step.Status != rings.StepPauseWait {
+			return fmt.Errorf("该意图不在暂停中")
+		}
+		if task, err := e.Store.Task(ctx, taskID); err == nil {
+			switch task.Status {
+			case "hibernated", "checkpointed", "paused", "stopped", "completed", "settling":
+				return fmt.Errorf("任务当前不能继续该单位")
+			}
+		} else if !errors.Is(err, rings.ErrTaskNotFound) {
+			return err
+		}
+		unit, _, _, err := e.Store.StepLatestSession(ctx, taskID, stepID)
+		if err != nil {
+			return err
+		}
+		_, err = e.Store.AppendAtRevision(ctx, taskID, rev,
+			rings.Event{Kind: rings.EventNodeStateChanged, Actor: "creator", Payload: rings.NodeStateChanged{NodeID: stepID, Status: "dispatched", Note: "scope_head"}},
+			rings.Event{Kind: rings.EventUnitControl, Actor: "creator", Payload: rings.UnitControlRecord{Target: "unit", StepID: stepID, UnitID: unit, Action: rings.UnitCtlResume, By: by}})
+		if errors.Is(err, rings.ErrStaleRevision) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("暂停后继续未提交: %w", err)
+		}
+		runlog.Infof("暂停让位步骤继续: %s %s 回队首档", taskID, stepID)
+		return nil
+	}
+	return ctx.Err()
 }
 
 // UnitPaused 步骤当前是否挂着单位暂停闩(面板状态投影)。
@@ -181,6 +226,10 @@ func (e *Executor) recordUnitControl(taskID string, rec rings.UnitControlRecord)
 // P4-33:冬眠门等待带重查节拍(WaitTick)——收场武装与关门的夹缝
 // 等待者每秒回顶复查,见武装令即落地;复测单位不等冬眠门(侧会话
 // 跑完自然落地)。
+// P5-05:暂停挂等带宽限——闩上等满 5 分钟即冻结收场让位(步骤落
+// pause_wait 停等态、名额释放、计费停走,env.parkYielded 置位由 drive
+// 收场);让位与继续指令在 e.mu 同锁互斥(先到先处理),闩静默清除
+// (暂停转移到步骤停等态,不是失效)。
 func (e *Executor) waitUnpark(ctx context.Context, env *unitEnv) bool {
 	for {
 		if env.retest == nil && e.ckptArmed(env.TaskID) {
@@ -194,12 +243,35 @@ func (e *Executor) waitUnpark(ctx context.Context, env *unitEnv) bool {
 		}
 		latch := e.unitLatch(env.TaskID, env.StepID)
 		if latch == nil {
+			env.latchSince = time.Time{} // 上一轮暂停插曲已结束
 			return true
 		}
+		if env.latchSince.IsZero() {
+			env.latchSince = time.Now()
+		}
+		timer := time.NewTimer(e.graceYield() - time.Since(env.latchSince))
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return false
 		case <-latch: // 继续指令开闩 → 重查冬眠(暂停期间任务可能已冬眠)
+			timer.Stop()
+			env.latchSince = time.Time{}
+		case <-timer.C:
+			// 宽限边界互斥(同锁):继续指令先到(闩已被 ResumeUnit 摘除)
+			// 则原位继续;让位先到则静默清闩(暂停转移停等态)+置让位
+			// 标记,收场后操作者再点继续走停等态唤醒通道。
+			e.mu.Lock()
+			key := steerKey(env.TaskID, env.StepID)
+			if _, still := e.unitLatches[key]; !still {
+				e.mu.Unlock()
+				env.latchSince = time.Time{}
+				return true
+			}
+			delete(e.unitLatches, key)
+			e.mu.Unlock()
+			env.parkYielded = true
+			return true // true=回段循环顶,drive 见 parkYielded 落让位收场
 		}
 	}
 }
@@ -347,18 +419,25 @@ func scanSteerReceipts(text string, seen map[string]bool) []steerReceipt {
 	return out
 }
 
-// receiptVerdict 回执的账本状态词。
-func receiptVerdict(adopted bool) string {
-	if adopted {
-		return rings.SteerStateAdopted
-	}
-	return rings.SteerStateRejected
-}
-
 // markSteerStaleExpire 舵杆过期收尾的共用件:步骤落地/止损后,同步骤
 // 已排队未送达的指令全部落 stale 回执(生效点没了,如实闭环)。
-func (h *Helm) expirePending(taskID, stepID, reason string) {
-	dirs := h.take(taskID, stepID)
+func (h *Helm) expirePending(taskID, stepID, unitID, reason string) {
+	h.mu.Lock()
+	key := steerKey(taskID, stepID)
+	var dirs, left []rings.SteerRecord
+	for _, rec := range h.pending[key] {
+		if rec.UnitID == unitID {
+			dirs = append(dirs, rec)
+		} else {
+			left = append(left, rec)
+		}
+	}
+	if len(left) == 0 {
+		delete(h.pending, key)
+	} else {
+		h.pending[key] = left
+	}
+	h.mu.Unlock()
 	for _, d := range dirs {
 		d.State = rings.SteerStateStale
 		d.Note = reason

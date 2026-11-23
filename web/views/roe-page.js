@@ -38,7 +38,6 @@ import {
 } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import {
-  APPROVAL_THRESHOLD_OPTIONS,
   DENY_LINE_LABELS,
   GOAL_STATUS,
   HARM_CLASS_LABELS,
@@ -67,6 +66,10 @@ const APPROVAL_TYPE_LABELS = {
   step_pass: "同步骤放行",
   scope_wait: "等待批准",
   attack_wait: "攻击动作待决", // P4-67 攻击行为卡(信息源上的主动攻击)
+  action_review: "动作判断",
+  asset_wait: "待加入",
+  asset_added: "已加入",
+  asset_declined: "未加入",
   triage: "性质判定", // P4-67 分诊留痕(结论与依据)
   access: "允许访问", // 存量 access 记录的呈现词(P4-70 起卡上入口移除;RoE 标记通道照常)
   reversed: "反悔", // P4-71 反向裁决留痕(取消加入/恢复纳入/攻击档双向/撤销信息源)
@@ -75,6 +78,8 @@ const APPROVAL_TYPE_LABELS = {
 // 处理者 → 操作者语言(机器元数据零裸露;空=未处理的请求/等待记录)。
 function decidedByLabel(v, type) {
   if (v === "creator") return "造物主";
+  if (v === "model") return "模型";
+  if (v === "system") return "系统";
   // !v 兼容字段缺失:后端 decided_by 带 omitempty,机器产生的记录
   // (requested 登记/自动拒绝/scope_wait 挂起)无裁决人时字段整体不出现。
   if (!v) return type === "requested" || type === "scope_wait" || type === "attack_wait" ? "未处理" : "—";
@@ -92,14 +97,6 @@ function recordSubject(r) {
   return { mono: true, text: r.tool_name };
 }
 
-// 审批门槛的简短说明(操作约束区展示)。
-const APPROVAL_THRESHOLD_HINT = {
-  "修改与持久化": "仅增删改需批准",
-  "利用深入": "利用深入及以上需批准",
-  "主动测试": "主动测试及以上需批准",
-  "只读探测": "全部需批准",
-};
-
 // 区块卡头:标题 + 徽标/说明 + 右侧操作(全站统一卡形态)。
 function SectionHeader({ title, children, tail }) {
   return (
@@ -116,10 +113,10 @@ export function RoePage({ currentTask }) {
 
   if (!tid) {
     return (
-      <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-3">
         <PageHeader
           title="RoE · 授权面板"
-          subtitle="造物主画边界,虫群在边界内执行 · 增删改全部记账"
+          subtitle="设置目标范围、操作限制与审批要求"
         />
         <EmptyState
           icon="scale"
@@ -132,17 +129,16 @@ export function RoePage({ currentTask }) {
   }
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-3">
       <PageHeader
         title="RoE · 授权面板"
-        subtitle="造物主画边界,虫群在边界内执行 · 增删改全部记账"
+        subtitle="设置目标范围、操作限制与审批要求"
       />
 
       <ApprovalSection taskID={tid} />
       <ConstraintSection taskID={tid} />
       <IntentRulesCard taskID={tid} />
       <AssetScopeSection taskID={tid} />
-      <InfoSourceSection taskID={tid} />
       <GoalSection taskID={tid} />
     </div>
   );
@@ -164,7 +160,9 @@ function sameIDSet(a, b) {
 function AssetScopeSection({ taskID }) {
   const { data: roe, error } = usePolling(`/api/tasks/${taskID}/roe`, 2000);
   const { data: assetData } = usePolling(`/api/tasks/${taskID}/assets`, 5000);
-  const assets = Array.isArray(assetData?.assets) ? assetData.assets : [];
+  const currentAssets = Array.isArray(assetData?.assets) ? assetData.assets : [];
+  const excludedTargets = Array.isArray(roe?.excluded_targets) ? roe.excluded_targets : [];
+  const assets = [...new Map([...currentAssets, ...excludedTargets].map(asset => [asset.id, asset])).values()];
   const serverExcluded = new Set(roe?.excluded_assets || []);
   const [overlay, setOverlay] = React.useState(null); // Set|null;null=跟随服务端
   // 服务端已与本地说一致(轮询跟上)→ 交还服务端数据源。
@@ -338,16 +336,15 @@ function ApprovalSection({ taskID }) {
     live: [`approval:${taskID}`],
   });
   const approvals = Array.isArray(body?.pending) ? body.pending : [];
-  const scopeAssets = Array.isArray(body?.scope_assets) ? body.scope_assets : [];
   const records = Array.isArray(body?.records) ? body.records : [];
   // 待决卡统一混排(先到先决):弹门票 + 范围卡 + 待批资产卡。
-  const cards = [...approvals, ...scopeAssets].sort((a, b) =>
+  const cards = [...approvals].sort((a, b) =>
     (a.created_at || "").localeCompare(b.created_at || "")
   );
   const [checked, setChecked] = React.useState(() => new Set());
   const [batchBusy, setBatchBusy] = React.useState(false);
   // 有效勾选 = 与现存活卡求交(卡被其他通道处理后勾选自然失效)。
-  const scopeIDs = new Set(cards.filter((c) => c.kind === "scope").map((c) => c.id));
+  const scopeIDs = new Set(cards.filter((c) => c.kind === "asset").map((c) => c.id));
   const checkedIDs = [...checked].filter((id) => scopeIDs.has(id));
   const toggleCheck = (id, on) => {
     setChecked((prev) => {
@@ -371,7 +368,7 @@ function ApprovalSection({ taskID }) {
       toast.error(`批量处理失败:${resp.error || "原因未说明"}`);
       return;
     }
-    const verb = approved ? "加入资产" : "禁止测试";
+    const verb = approved ? "加入资产" : "不加入";
     const parts = [`${verb} ${resp.handled} 张`];
     if (resp.woken_units > 0) parts.push(`唤醒 ${resp.woken_units} 个单位`);
     if (resp.stopped_units > 0) parts.push(`终止 ${resp.stopped_units} 个单位`);
@@ -386,16 +383,15 @@ function ApprovalSection({ taskID }) {
     <Card>
       <CardContent className="flex flex-col gap-4 p-5">
         <SectionHeader title="审批">
-          <Badge variant={approvals.length + scopeAssets.length > 0 ? "danger" : "info"}>
-            待决 {approvals.length + scopeAssets.length}
+          <Badge variant={approvals.length > 0 ? "danger" : "info"}>
+            待决 {approvals.length}
           </Badge>
           <span className="ml-auto text-xs text-muted-foreground">
             对话内容不能代替这里的审批
           </span>
         </SectionHeader>
         <p className="text-xs text-muted-foreground">
-          达到审批门槛的动作逐次等批准;批准前不执行,等待期计时停走。
-          拒绝只终止该动作,单位换方向继续;同类连拒 3 次才终止这个单位。
+          动作待批时暂停计时；资产加入与动作批准分别处理。
         </p>
         {error && <div className="text-xs text-status-danger">读取失败:{error}</div>}
         {cards.length === 0 ? (
@@ -408,7 +404,7 @@ function ApprovalSection({ taskID }) {
               key={a.id}
               taskID={taskID}
               approval={a}
-              checkable={a.kind === "scope"}
+              checkable={a.kind === "asset"}
               checked={checked.has(a.id)}
               onCheck={toggleCheck}
             />
@@ -418,12 +414,12 @@ function ApprovalSection({ taskID }) {
             逐张点不过来;批量与单卡同通道,逐笔留痕 */}
         {checkedIDs.length > 0 && (
           <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border/55 bg-muted/40 px-3 py-2">
-            <span className="text-xs text-muted-foreground">已选 {checkedIDs.length} 张范围卡</span>
+            <span className="text-xs text-muted-foreground">已选 {checkedIDs.length} 张资产加入请求</span>
             <Button size="sm" variant="outline" disabled={batchBusy} onClick={() => runBatch(true)}>
               加入资产
             </Button>
-            <Button size="sm" variant="destructive" disabled={batchBusy} onClick={() => runBatch(false)}>
-              禁止测试
+            <Button size="sm" variant="outline" disabled={batchBusy} onClick={() => runBatch(false)}>
+              不加入
             </Button>
             <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={() => setChecked(new Set())}>
               取消勾选
@@ -557,30 +553,9 @@ function RecordField({ label, children }) {
 // 什么动作(命令原文等宽完整)·为什么(意图+拒绝原因或放行理由)·
 // 什么性质(类型按词表翻译)·归属(步骤、单位)·等待多久谁裁决;
 // 机器元数据零裸露(请求号不上面板,审计走账本)。
-// P4-71 ②:按记录类型带反向键(取消加入/恢复纳入/撤销允许/转为允许/
-// 撤销信息源)——已执行的一次性弹门动作无反向键(如实);反向落新账
-// 不改历史,点击后记录区自动跟随(live 推送既有通道)。
 function ApprovalRecordSheet({ record, onClose }) {
   const open = !!record;
   const deniedLike = record && (record.type === "denied" || record.deny_line);
-  const reverse = record?.reverse || null;
-  const [reverseBusy, setReverseBusy] = React.useState(false);
-
-  const runReverse = async () => {
-    if (!record || !reverse || reverseBusy || reverse.unavailable) return;
-    setReverseBusy(true);
-    const { ok, body: resp } = await postJSON(
-      `/api/tasks/${record.task_id}/approvals/${record.request_id}/reverse`,
-      { action: reverse.action }
-    );
-    setReverseBusy(false);
-    if (!ok) {
-      toast.error(`${reverse.label}失败:${resp.error || "原因未说明"}`);
-      return;
-    }
-    toast.success(resp.message || `已${reverse.label}`);
-    onClose();
-  };
 
   return (
     <Sheet open={open} onOpenChange={(v) => !v && onClose()}>
@@ -640,7 +615,7 @@ function ApprovalRecordSheet({ record, onClose }) {
               {record.reason && (
                 <div className="flex flex-col gap-1">
                   <span className="text-xs text-muted-foreground">
-                    {deniedLike ? "拒绝原因" : "放行理由"}
+                    依据
                   </span>
                   <span className="whitespace-pre-line [overflow-wrap:anywhere]">{record.reason}</span>
                 </div>
@@ -672,34 +647,7 @@ function ApprovalRecordSheet({ record, onClose }) {
                 <span>处理者:{decidedByLabel(record.decided_by, record.type)}</span>
               </div>
             </RecordField>
-            {record.type !== "reversed" && (
-              <RecordField label="反向">
-                {reverse ? (
-                  <div className="flex flex-col gap-1.5">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={reverseBusy || !!reverse.unavailable}
-                        onClick={runReverse}
-                      >
-                        {reverse.label}
-                        {reverse.target && <span className="num ml-1">{reverse.target}</span>}
-                      </Button>
-                      {reverse.unavailable ? (
-                        <span className="text-xs text-muted-foreground">{reverse.unavailable}</span>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">反悔落新记录,原记录不改动</span>
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  <span className="text-xs text-muted-foreground">
-                    这类记录是已执行的一次性动作,无反向操作
-                  </span>
-                )}
-              </RecordField>
-            )}
+
           </div>
         )}
       </SheetContent>
@@ -713,8 +661,7 @@ function ApprovalRecordSheet({ record, onClose }) {
 // 仅徽标与按钮组随类型不同(弹门=批准＋意见框/拒绝;范围卡=加入资产/
 // 禁止测试两键,P4-70 ① 第三键移除;攻击卡=批准/拒绝)。
 function ApprovalCard({ taskID, approval, checkable, checked, onCheck }) {
-  const scopeCard = approval.kind === "scope";
-  const attackCard = approval.kind === "attack";
+  const scopeCard = approval.kind === "asset";
   const [opinion, setOpinion] = React.useState("");
   const [busy, setBusy] = React.useState(false);
 
@@ -735,7 +682,7 @@ function ApprovalCard({ taskID, approval, checkable, checked, onCheck }) {
       return;
     }
     if (scopeCard) {
-      toast.success(approved ? `已加入资产:${body.target || approval.target}` : `已禁止测试:${body.target || approval.target}`);
+      toast.success(approved ? `已加入资产:${body.target || approval.target}` : `未加入资产:${body.target || approval.target}`);
       return;
     }
     toast.success(
@@ -768,38 +715,11 @@ function ApprovalCard({ taskID, approval, checkable, checked, onCheck }) {
             title="勾选后可批量处理"
           />
         )}
-        {scopeCard ? (
-          approval.mode === "pentest" ? (
-            <Badge variant="warning" title="目标在任务范围外,已拦下等批准或锁定未测">范围外</Badge>
-          ) : (
-            <Badge variant="warning" title="范围外新资产已直接开始测试,可随时禁止">红队</Badge>
-          )
-        ) : attackCard ? (
-          <Badge variant="warning" title="对信息源(查资料用的公开服务)的主动攻击动作,待批准或拒绝">信息源攻击</Badge>
-        ) : (
-          // P4-74 ①:徽标按命令实际内容分级(cmd_level,服务端确定性
-          // 判级);认不出回退步骤分级(既有审计字段)。
-          <Badge
-            variant={levelVariant(approval.cmd_level || approval.action_level)}
-            title="这条命令实际动作的分级"
-          >
-            {approval.cmd_level || approval.action_level}
-          </Badge>
-        )}
-        {(scopeCard || attackCard) && approval.target && <span className="num font-medium">{approval.target}</span>}
+        <Badge variant="warning">{scopeCard ? "待加入" : "动作待批"}</Badge>
+        {scopeCard && approval.target && <span className="num font-medium">{approval.target}</span>}
         {approval.tool_name && <span className="num">{approval.tool_name}</span>}
         {meta && <span className="text-xs text-muted-foreground">{meta}</span>}
       </div>
-      {/* 危害说明三段式(P4-27 ⑼,P4-74 ① 按命令实际内容拼装):
-          批准后果先说清,不用猜 */}
-      {approval.harm_note && (
-        <div className="text-sm leading-relaxed">{approval.harm_note}</div>
-      )}
-      {/* 步骤分级背景行(P4-74 ①):命令实际分级低于所属步骤分级时,
-          说明这张卡为什么弹——步骤含更高危动作、按步骤门槛过门 */}
-      {approval.step_ground && (
-        <div className="text-xs text-muted-foreground">{approval.step_ground}</div>
-      )}
       {/* 弹门上下文(拦截说明):为什么这条会弹门 */}
       {!scopeCard && approval.note && (
         <div className="text-xs text-status-warning">
@@ -834,9 +754,9 @@ function ApprovalCard({ taskID, approval, checkable, checked, onCheck }) {
       )}
       {/* 说明行(P4-70 ①):明示这张卡批的是什么——范围卡批"要不要把它
           当测试目标",攻击卡批"要不要放行这次攻击动作" */}
-      {(scopeCard || attackCard) && (
+      {scopeCard && (
         <div className="text-sm">
-          {scopeCard ? "是否把这个地址纳入测试范围" : "是否允许对这个信息源发起攻击动作"}
+          是否加入资产和后续规划
         </div>
       )}
       {/* 按钮区:仅按钮组随类型不同 */}
@@ -845,8 +765,8 @@ function ApprovalCard({ taskID, approval, checkable, checked, onCheck }) {
           <Button size="sm" variant="outline" disabled={busy} onClick={() => decide(true)}>
             加入资产
           </Button>
-          <Button size="sm" variant="destructive" disabled={busy} onClick={() => decide(false)}>
-            禁止测试
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => decide(false)}>
+            不加入
           </Button>
         </div>
       ) : (
@@ -875,19 +795,9 @@ function ApprovalCard({ taskID, approval, checkable, checked, onCheck }) {
 // approvalHint 卡尾一行辅助说明(按类型,平实陈述;P4-70 ①:范围卡两
 // 键、攻击卡会话档口径)。
 function approvalHint(approval) {
-  if (approval.kind === "attack") {
-    return "批准=该单位本会话内对这个信息源的攻击动作放行;拒绝=同类攻击本会话内自动拒绝,该动作终止单位继续,查资料不受影响";
-  }
-  if (approval.kind !== "scope") {
-    return "附言留空直接放行;拒绝只终止该动作,单位换方向继续";
-  }
-  if (approval.mode !== "pentest") {
-    return "已直接开始测试;加入资产=确认纳入范围;禁止测试=立即止损";
-  }
-  if (approval.tool_name) {
-    return "加入资产:目标转范围内,挂等单位继续;禁止测试:目标排除,挂等单位终止";
-  }
-  return "加入资产后可测;禁止测试后不再测";
+  return approval.kind === "asset"
+    ? "不加入仅影响资产和后续规划，不禁止访问"
+    : "批准仅适用于本次调用；拒绝不终止单位";
 }
 
 // ---- 操作约束 ----
@@ -908,18 +818,7 @@ function ConstraintSection({ taskID }) {
           <div className="text-sm text-muted-foreground">读取中…</div>
         ) : (
           <div className="flex flex-col gap-2 text-sm">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-muted-foreground">审批门槛</span>
-              <Badge variant={levelVariant(roe.approval_threshold)}>
-                {roe.approval_threshold}
-              </Badge>
-              <span className="text-xs text-muted-foreground">
-                {APPROVAL_THRESHOLD_HINT[roe.approval_threshold] || "该级及以上需批准"}
-              </span>
-            </div>
-            <div className="text-xs text-muted-foreground">
-              数据销毁与拒绝服务类动作不进审批等待,直接拒绝并留在审批记录。
-            </div>
+            <div className="text-xs text-muted-foreground">硬规则命中拒绝；其余按实际动作判断，需要人工决定时审批。</div>
             <ConstraintRow label="禁止工具" values={roe.denied_tools} empty="无" />
             <ConstraintRow label="仅允许工具" values={roe.allowed_tools} empty="不设白名单" />
             {/* 注意事项(P4-49):对做法的软要求,建后在变更约束弹窗改,
@@ -949,95 +848,23 @@ function ConstraintSection({ taskID }) {
 // 自然语言录入;保存即生效并定向告知受影响的在跑单位。
 function IntentRulesCard({ taskID }) {
   const { data: roe, error } = usePolling(`/api/tasks/${taskID}/roe`, 2000);
-  const { data: assetData } = usePolling(`/api/tasks/${taskID}/assets`, 10000);
-  const assets = Array.isArray(assetData?.assets) ? assetData.assets : [];
-  const [editRule, setEditRule] = React.useState(null); // null=关闭;{}=新建;rule=编辑
   const [deleteRule, setDeleteRule] = React.useState(null);
-  const list = (roe && roe.intent_rules) || [];
-
+  const list = Array.isArray(roe?.intent_rules) ? roe.intent_rules : [];
+  if (list.length === 0 && !error) return null;
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-4 p-5">
-        <SectionHeader
-          title="任务级拦截"
-          tail={
-            <Button size="sm" variant="outline" onClick={() => setEditRule({})}>
-              新增规则
-            </Button>
-          }
-        >
-          <span className="text-xs text-muted-foreground">
-            按资产与动作拦,变更即生效并告知受影响的在跑单位
-          </span>
-        </SectionHeader>
-        {error && <div className="text-xs text-status-danger">读取失败:{error}</div>}
-        {!roe ? (
-          <div className="text-sm text-muted-foreground">读取中…</div>
-        ) : list.length === 0 ? (
-          <div className="rounded-lg border border-dashed py-5 text-center text-sm text-muted-foreground">
-            无规则 · 对指定资产禁止或放行某类动作,次数不填即不限
-          </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {list.map((r) => (
-              <div
-                key={r.id}
-                className="flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors duration-150 hover:bg-hover-lift"
-              >
-                <Badge variant={r.disposition === "forbid" ? "danger" : "success"}>
-                  {r.disposition === "forbid" ? "禁止" : "允许"}
-                </Badge>
-                <span className="min-w-0 max-w-72 truncate font-medium" title={r.action}>
-                  {r.action}
-                </span>
-                <span className="text-muted-foreground">
-                  {r.asset_titles?.length > 0
-                    ? r.asset_titles?.join("、")
-                    : "全部资产"}
-                </span>
-                <span className="text-xs text-muted-foreground">
-                  {r.disposition === "allow"
-                    ? r.quota > 0
-                      ? `次数上限 ${r.quota},已用 ${r.used}`
-                      : "不限次数"
-                    : ""}
-                </span>
-                {r.note && (
-                  <span
-                    className="hidden truncate text-xs text-muted-foreground md:inline md:max-w-48"
-                    title={r.note}
-                  >
-                    {r.note}
-                  </span>
-                )}
-                <div className="ml-auto flex items-center gap-1">
-                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={() => setEditRule(r)}>
-                    编辑
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-8 px-2 text-xs text-status-danger"
-                    onClick={() => setDeleteRule(r)}
-                  >
-                    删除
-                  </Button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-        {editRule !== null && (
-          <RoERuleDialog
-            taskID={taskID}
-            assets={assets}
-            rule={editRule.id ? editRule : null}
-            onClose={() => setEditRule(null)}
-          />
-        )}
-        <ConfirmRuleDeleteDialog taskID={taskID} rule={deleteRule} onClose={() => setDeleteRule(null)} />
-      </CardContent>
-    </Card>
+    <Card><CardContent className="flex flex-col gap-3 p-5">
+      <SectionHeader title="已有约束" />
+      {error && <div className="text-xs text-status-danger">读取失败:{error}</div>}
+      {list.map((r) => (
+        <div key={r.id} className="flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-sm">
+          <span>{r.disposition === "forbid" ? "禁止" : "允许"} {r.action}</span>
+          <span className="text-xs text-muted-foreground">{r.asset_titles?.join("、") || "全任务"}{r.quota > 0 ? ` · 次数要求 ${r.quota}` : ""}</span>
+          {r.note && <LongText text={r.note} max={120} label="约束说明" />}
+          <Button size="sm" variant="ghost" className="ml-auto" onClick={() => setDeleteRule(r)}>删除</Button>
+        </div>
+      ))}
+      <ConfirmRuleDeleteDialog taskID={taskID} rule={deleteRule} onClose={() => setDeleteRule(null)} />
+    </CardContent></Card>
   );
 }
 
@@ -1072,7 +899,6 @@ function ConstraintDialog({ taskID, roe }) {
       setForm({
         denied: (roe.denied_tools || []).join(", "),
         allowed: (roe.allowed_tools || []).join(", "),
-        threshold: roe.approval_threshold || "修改与持久化",
         notes: roe.creator_notes || "",
         note: "",
       });
@@ -1085,7 +911,6 @@ function ConstraintDialog({ taskID, roe }) {
     return (
       form.denied !== (roe.denied_tools || []).join(", ") ||
       form.allowed !== (roe.allowed_tools || []).join(", ") ||
-      form.threshold !== roe.approval_threshold ||
       form.notes.trim() !== (roe.creator_notes || "") ||
       form.note.trim() !== ""
     );
@@ -1098,7 +923,6 @@ function ConstraintDialog({ taskID, roe }) {
     const { ok, body } = await postJSON(`/api/tasks/${taskID}/roe`, {
       denied_tools: csv(form.denied),
       allowed_tools: csv(form.allowed),
-      approval_threshold: form.threshold,
       // 注意事项显式提交(空 = 清空);任务级规则有独立端点(逐条增删改),
       // 快照提交时透传当前值不动它。
       creator_notes: form.notes.trim(),
@@ -1155,24 +979,6 @@ function ConstraintDialog({ taskID, roe }) {
                   onChange={(e) => setForm({ ...form, allowed: e.target.value })}
                 />
               </Field>
-              <Field label="审批门槛">
-                <Select
-                  value={form.threshold}
-                  onValueChange={(v) => setForm({ ...form, threshold: v })}
-                >
-                  <SelectTrigger className={INPUT}>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {APPROVAL_THRESHOLD_OPTIONS.map((o) => (
-                      <SelectItem key={o.value} value={o.value}>
-                        {o.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <span className="text-xs text-muted-foreground">该级及以上需批准</span>
-              </Field>
               <Field label="注意事项" className="items-start" labelClassName="mt-2">
                 <div className="flex min-w-0 flex-1 flex-col gap-1">
                   <Textarea
@@ -1211,222 +1017,6 @@ function ConstraintDialog({ taskID, roe }) {
   );
 }
 
-// RoERuleDialog 单条任务级规则弹窗(08e 挂账①:处置/范围/动作描述首屏
-// 一眼可填,匹配正则与说明收「高级选项」;自然语言与表单合并、动作
-// 不限词表)。
-function RoERuleDialog({ taskID, assets, rule, onClose }) {
-  const editing = !!rule?.id;
-  const [form, setForm] = React.useState(null);
-  const [busy, setBusy] = React.useState(false);
-  const [advanced, setAdvanced] = React.useState(false);
-
-  React.useEffect(() => {
-    setForm({
-      action: rule?.action || "",
-      asset_ids: rule?.asset_ids || [],
-      disposition: rule?.disposition || "forbid",
-      quota: rule?.quota || 0,
-      patterns: (rule?.patterns || []).join("\n"),
-      note: rule?.note || "",
-    });
-    setAdvanced(false);
-  }, [rule]);
-
-  const dirty = (() => {
-    if (!form) return false;
-    if (!rule) return form.action.trim() !== "";
-    return (
-      form.action !== rule.action ||
-      form.disposition !== rule.disposition ||
-      form.quota !== (rule.quota || 0) ||
-      form.asset_ids.join(",") !== (rule.asset_ids || []).join(",") ||
-      form.patterns !== (rule.patterns || []).join("\n") ||
-      form.note !== (rule.note || "")
-    );
-  })();
-
-  const generate = async () => {
-    if (!form.action.trim()) {
-      toast.error("先写动作描述,再生成匹配模式");
-      return;
-    }
-    setBusy(true);
-    const { ok, body } = await postJSON(`/api/tasks/${taskID}/roe/rules/patterns`, {
-      text: form.action.trim(),
-    });
-    setBusy(false);
-    if (!ok) {
-      toast.error(body.error || "原因未说明");
-      return;
-    }
-    const got = Array.isArray(body.patterns) ? body.patterns : [];
-    if (got.length === 0) {
-      toast.success("没生成出可用的模式;可手写,或把描述改成内置动作词(上传/爆破等)");
-      return;
-    }
-    setForm({ ...form, patterns: got.join("\n") });
-    toast.success(`生成 ${got.length} 条,可直接改`);
-  };
-
-  const submit = async () => {
-    setBusy(true);
-    const url = editing
-      ? `/api/tasks/${taskID}/roe/rules/${rule.id}`
-      : `/api/tasks/${taskID}/roe/rules`;
-    const patterns = form.patterns
-      .split("\n")
-      .map((x) => x.trim())
-      .filter(Boolean);
-    const { ok, body } = await postJSON(url, {
-      action: form.action.trim(),
-      asset_ids: form.asset_ids,
-      disposition: form.disposition,
-      quota: form.disposition === "allow" ? form.quota || 0 : 0,
-      patterns,
-      note: form.note,
-    });
-    setBusy(false);
-    if (!ok) {
-      toast.error(`被拒:${body.error || "原因未说明"}`);
-      return;
-    }
-    onClose();
-    toast.success(editing ? "规则已变更,即刻生效并告知受影响单位" : "规则已新增,即刻生效并告知受影响单位");
-  };
-
-  return (
-    <Dialog open onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-h-[88vh] w-[min(620px,94vw)] max-w-none gap-4 overflow-y-auto p-6">
-        <DialogHeader>
-          <DialogTitle>
-            {editing ? "编辑任务级规则" : "新增任务级规则"}
-          </DialogTitle>
-          <DialogDescription>
-            保存即生效;只对范围内资产的单位起作用,受影响的在跑单位会收到告知
-          </DialogDescription>
-        </DialogHeader>
-        {!form ? (
-          <div className="text-sm text-muted-foreground">读取中…</div>
-        ) : (
-          <div className="flex flex-col gap-4">
-            <Field label="处置">
-              <Select
-                value={form.disposition}
-                onValueChange={(v) => setForm({ ...form, disposition: v, quota: v === "forbid" ? 0 : form.quota })}
-              >
-                <SelectTrigger className="w-28">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="forbid">禁止</SelectItem>
-                  <SelectItem value="allow">允许</SelectItem>
-                </SelectContent>
-              </Select>
-              {form.disposition === "allow" && (
-                <>
-                  <Input
-                    className="h-9 w-28 text-right num text-xs"
-                    inputMode="numeric"
-                    value={form.quota}
-                    onChange={(e) => {
-                      const n = Number(e.target.value.replace(/[^0-9]/g, ""));
-                      setForm({ ...form, quota: Number.isFinite(n) ? n : 0 });
-                    }}
-                    placeholder="0"
-                  />
-                  <span className="text-xs text-muted-foreground">次数上限,0 不限</span>
-                </>
-              )}
-            </Field>
-            <Field label="范围" className="items-start" labelClassName="mt-2">
-              <div className="flex min-w-0 flex-1 flex-wrap gap-2">
-                <span className="w-full text-xs text-muted-foreground">不勾 = 全部资产</span>
-                {assets.map((a) => (
-                  <label
-                    key={a.id}
-                    className="flex items-center gap-2 rounded-md border px-2 py-1 text-xs transition-colors duration-150 hover:bg-hover-lift"
-                  >
-                    <Checkbox
-                      checked={form.asset_ids.includes(a.id)}
-                      onCheckedChange={(v) => {
-                        const ids = v
-                          ? [...form.asset_ids, a.id]
-                          : form.asset_ids.filter((x) => x !== a.id);
-                        setForm({ ...form, asset_ids: ids });
-                      }}
-                    />
-                    {a.title}
-                  </label>
-                ))}
-              </div>
-            </Field>
-            <Field label="动作描述" className="items-start" labelClassName="mt-2">
-              <Textarea
-                rows={2}
-                className="min-w-0 flex-1 resize-none bg-input-surface"
-                value={form.action}
-                onChange={(e) => setForm({ ...form, action: e.target.value })}
-                placeholder="如:上传文件到目标;对后台登录口做暴力破解;修改配置文件"
-              />
-            </Field>
-
-            {/* 高级选项折叠:横线 — 箭头 — 文字 — 横线 */}
-            <Fold open={advanced} onToggle={() => setAdvanced((v) => !v)}>
-              高级选项
-            </Fold>
-            {advanced && (
-              <div className="flex animate-rise flex-col gap-4">
-                <Field label="匹配模式" className="items-start" labelClassName="mt-2">
-                  <div className="flex min-w-0 flex-1 flex-col gap-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-8 px-2 text-xs"
-                        onClick={generate}
-                        disabled={busy}
-                      >
-                        从描述生成
-                      </Button>
-                      <span className="text-xs text-muted-foreground">
-                        判定按这些正则;不填且描述是内置动作词(上传/爆破等)时按词判
-                      </span>
-                    </div>
-                    <Textarea
-                      rows={4}
-                      className="resize-none bg-input-surface num text-xs"
-                      value={form.patterns}
-                      onChange={(e) => setForm({ ...form, patterns: e.target.value })}
-                      placeholder={"每行一条正则,如:\\bcurl\\b[^|;&]*(\\s-T\\b|--upload-file)"}
-                    />
-                  </div>
-                </Field>
-                <Field label="说明">
-                  <Input
-                    className={INPUT}
-                    value={form.note}
-                    onChange={(e) => setForm({ ...form, note: e.target.value })}
-                    placeholder="一句话备注,随规则留痕"
-                  />
-                </Field>
-              </div>
-            )}
-          </div>
-        )}
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
-            取消
-          </Button>
-          <Button onClick={submit} disabled={busy || !dirty || !form?.action?.trim()}>
-            保存
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-
 // ConfirmRuleDeleteDialog 删除确认(逐条端点)。
 function ConfirmRuleDeleteDialog({ taskID, rule, onClose }) {
   const [busy, setBusy] = React.useState(false);
@@ -1442,18 +1032,18 @@ function ConfirmRuleDeleteDialog({ taskID, rule, onClose }) {
       return;
     }
     onClose();
-    toast.success("规则已解除,即刻生效并告知受影响单位");
+    toast.success("约束已删除");
   };
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>删除任务级规则</DialogTitle>
+          <DialogTitle>删除约束</DialogTitle>
           <DialogDescription>
             删除「{rule?.action} · {rule?.asset_titles?.join("、") || "全部资产"}
             {rule?.disposition === "forbid" ? " · 禁止" : rule?.quota ? ` · 允许 ≤${rule.quota} 次` : " · 允许"}
-            」后不再拦截,受影响的在跑单位会收到解除告知。
+            」后，后续动作按更新后的要求判断。
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
@@ -1469,108 +1059,6 @@ function ConfirmRuleDeleteDialog({ taskID, rule, onClose }) {
   );
 }
 
-
-// ---- 信息源清单(P4-67:研判分诊第二层) ----
-
-// InfoSourceSection 任务信息源清单:经研判分诊判定"方法性访问"或经
-// 操作者标记的公开信息服务地址——只做获取使用,不是测试目标(不入
-// 资产图、不算覆盖);撤销后恢复拦截,后续访问重新研判。P4-68:标记
-// 行＝"允许访问"的 RoE 面板入口(P4-70 起为卡外唯一手授入口,与牧者
-// 标记同一账本动作)。
-function InfoSourceSection({ taskID }) {
-  const { data: roe, error } = usePolling(`/api/tasks/${taskID}/roe`, 4000);
-  const sources = Array.isArray(roe?.info_sources) ? roe.info_sources : [];
-  const [busy, setBusy] = React.useState("");
-  const [marking, setMarking] = React.useState(false);
-  const [markHost, setMarkHost] = React.useState("");
-
-  const revoke = async (host) => {
-    setBusy(host);
-    const { ok, body } = await postJSON(
-      `/api/tasks/${taskID}/roe/infosources/revoke`,
-      { host }
-    );
-    setBusy("");
-    if (!ok) {
-      toast.error(`撤销失败:${body.error || "原因未说明"}`);
-      return;
-    }
-    toast.success(`已撤销:${host}(后续访问恢复拦截)`);
-  };
-
-  // 允许访问(RoE 面板入口):只授访问权,不是测试目标;挂等单位继续。
-  const mark = async () => {
-    const host = markHost.trim();
-    if (!host || marking) return;
-    setMarking(true);
-    const { ok, body } = await postJSON(
-      `/api/tasks/${taskID}/roe/infosources/mark`,
-      { host }
-    );
-    setMarking(false);
-    if (!ok) {
-      toast.error(`允许访问失败:${body.error || "原因未说明"}`);
-      return;
-    }
-    const parts = [`已允许访问:${host}`];
-    if (body.woken_units > 0) parts.push(`唤醒 ${body.woken_units} 个单位`);
-    toast.success(parts.join(","));
-    setMarkHost("");
-  };
-
-  return (
-    <Card>
-      <CardContent className="flex flex-col gap-3 p-5">
-        <SectionHeader title="信息源">
-          <Badge variant={sources.length > 0 ? "info" : "outline"}>{sources.length}</Badge>
-        </SectionHeader>
-        <p className="text-xs text-muted-foreground">
-          查资料用的公开信息服务,不是测试目标:访问直接放行,观察不算发现;对它的主动攻击动作单独拦下问一次。
-        </p>
-        {error && <div className="text-xs text-status-danger">读取失败:{error}</div>}
-        <div className="flex flex-wrap items-center gap-2">
-          <Input
-            className="w-64"
-            placeholder="允许访问:域名或 IP(可带端口)"
-            value={markHost}
-            onChange={(e) => setMarkHost(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && mark()}
-          />
-          <Button size="sm" variant="outline" disabled={marking || !markHost.trim()} onClick={mark}>
-            允许访问
-          </Button>
-        </div>
-        {sources.length === 0 ? (
-          <div className="text-xs text-muted-foreground">暂无(虫群访问查资料类地址时,系统会自动判定)</div>
-        ) : (
-          <div className="flex flex-col gap-1.5">
-            {sources.map((src) => (
-              <div
-                key={src.host}
-                className="flex flex-wrap items-center gap-2 rounded-lg border border-border/55 px-3 py-2"
-              >
-                <span className="num text-sm">{src.host}</span>
-                {src.at && <span className="num text-xs text-muted-foreground">{src.at}</span>}
-                <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={src.basis}>
-                  {src.basis}
-                </span>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={busy === src.host}
-                  title="撤销后恢复拦截,再次访问会拦下问一次"
-                  onClick={() => revoke(src.host)}
-                >
-                  撤销
-                </Button>
-              </div>
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
 
 // ---- 目标管理 ----
 
@@ -1695,7 +1183,6 @@ function GoalDeleteDialog({ taskID, goal, onClose }) {
           <DialogTitle>删除目标</DialogTitle>
           <DialogDescription>
             该方向不要了:排队步骤取消、在途单位终止、后续不再派发该方向。
-            受影响的判断由主宰处理去留（继续锤炼或挂起）。
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3 text-sm">

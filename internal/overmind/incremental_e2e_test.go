@@ -210,7 +210,7 @@ func TestLandingWakesIncrementalRoundE2E(t *testing.T) {
 	if facts := countNodes(t, store, task, rings.NodeFact, "confirmed"); facts != 3 {
 		t.Fatalf("应确认 3 条事实(快线/慢线/增量),实际 %d", facts)
 	}
-	if err := loop.LastErr(); err != nil {
+	if err := loopErr(loop); err != nil {
 		t.Fatalf("干净运行不应残留错误: %v", err)
 	}
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -119,11 +120,11 @@ func TestPlatformPresets(t *testing.T) {
 		{"GLM", "Anthropic", "https://open.bigmodel.cn/api/anthropic"}, // 归一
 	}
 	for _, c := range cases {
-		if got := PlatformDefaultURL(c.platform, c.format); got != c.want {
+		if got := PlatformPresetURLs()[strings.ToLower(strings.TrimSpace(c.platform))][NormalizeFormat(c.format)]; got != c.want {
 			t.Errorf("PlatformDefaultURL(%q,%q) = %q, want %q", c.platform, c.format, got, c.want)
 		}
 	}
-	if !IsKnownPlatform("glm") || IsKnownPlatform("") || IsKnownPlatform("x") || !IsKnownPlatform("openai") {
+	if PlatformPresetURLs()["glm"] == nil || PlatformPresetURLs()[""] != nil || PlatformPresetURLs()["x"] != nil || PlatformPresetURLs()["openai"] == nil {
 		t.Fatal("IsKnownPlatform 词表判定异常")
 	}
 	// 平台清单含自定义项且顺序稳定(P4-57 ① 起含 OpenAI 官方)。

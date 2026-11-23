@@ -152,9 +152,9 @@ func TestRunSecondsBudgetRenewsInPlace(t *testing.T) {
 	if res.Reason != "completed" || res.StepStatus != "done" {
 		t.Fatalf("到线续跑后应完成而非切段: %+v", res)
 	}
-	pg, _ := store.ProgressGraph(ctx, task)
-	if len(pg.Facts) != 1 || pg.Steps[0].Status != "done" {
-		t.Fatalf("收尾应写回候选且 step 落 done: facts=%+v steps=%+v", pg.Facts, pg.Steps)
+	pg, _ := store.Graph(ctx, task)
+	if len(graphNodes(pg, rings.NodeFact)) != 1 || graphNodes(pg, rings.NodeStep)[0].Status != "done" {
+		t.Fatalf("收尾应写回候选且 step 落 done: facts=%+v steps=%+v", graphNodes(pg, rings.NodeFact), graphNodes(pg, rings.NodeStep))
 	}
 	// 黑匣子:预算到线续跑留痕(unit_budget_renew),无 exhausted 落地。
 	var renew, exhausted int
@@ -348,16 +348,32 @@ func TestUnitTokenUsageAndBlackbox(t *testing.T) {
 		t.Fatalf("查 token 表失败: %v", err)
 	}
 	reqs := model.requests()
-	if len(rows) == 0 || len(rows) != len(reqs) {
-		t.Fatalf("token 行数应等于模型调用次数: rows=%d calls=%d", len(rows), len(reqs))
+	policyReqs := model.policyRequests()
+	if len(rows) == 0 || len(rows) != len(reqs)+len(policyReqs) {
+		t.Fatalf("token 行数应等于主会话及动作判断调用总数: rows=%d main=%d review=%d", len(rows), len(reqs), len(policyReqs))
 	}
 	var inSum, outSum int
+	mainIndex, reviewIndex := 0, 0
 	for i, r := range rows {
-		if r.Turn != i+1 || r.Agent != "swarm:u1" || r.Model != "scripted-swarm-model" {
+		var request recordedRequest
+		if r.Purpose == "action_review" {
+			if r.Turn != 0 {
+				t.Fatal("auxiliary review consumed main-session turn numbering")
+			}
+			request = policyReqs[reviewIndex]
+			reviewIndex++
+		} else {
+			if r.Purpose != "" || r.Turn != mainIndex+1 {
+				t.Fatalf("invalid main purpose/turn: %+v", r)
+			}
+			request = reqs[mainIndex]
+			mainIndex++
+		}
+		if r.Agent != "swarm:u1" || r.Model != "scripted-swarm-model" {
 			t.Fatalf("第 %d 行归属/轮次不符: %+v", i, r)
 		}
-		if r.InputTokens != reqs[i].BodyChars/4 {
-			t.Fatalf("第 %d 行输入用量与脚本上报不符: row=%+v 请求体 %d 字符", i, r, reqs[i].BodyChars)
+		if r.InputTokens != request.BodyChars/4 {
+			t.Fatalf("第 %d 行输入用量与脚本上报不符: row=%+v 请求体 %d 字符", i, r, request.BodyChars)
 		}
 		if r.TranscriptID != res.TranscriptID {
 			t.Fatalf("第 %d 行应归因原会话 %s: %+v", i, res.TranscriptID, r)
@@ -366,7 +382,7 @@ func TestUnitTokenUsageAndBlackbox(t *testing.T) {
 		outSum += r.OutputTokens
 	}
 	expectIn := 0
-	for _, rr := range reqs {
+	for _, rr := range append(reqs, policyReqs...) {
 		expectIn += rr.BodyChars / 4
 	}
 	if inSum != expectIn || outSum == 0 {
@@ -513,9 +529,9 @@ func TestTaskGateStopsDespiteUnlimitedBudget(t *testing.T) {
 	if res.Reason != "timeout" || res.StepStatus != "exhausted" {
 		t.Fatalf("总闸到点应硬收 exhausted: %+v", res)
 	}
-	pg, _ := store.ProgressGraph(ctx, task)
-	if len(pg.Facts) != 1 || pg.Steps[0].Status != "exhausted" {
-		t.Fatalf("硬收应写回候选且 step 落 exhausted: facts=%+v steps=%+v", pg.Facts, pg.Steps)
+	pg, _ := store.Graph(ctx, task)
+	if len(graphNodes(pg, rings.NodeFact)) != 1 || graphNodes(pg, rings.NodeStep)[0].Status != "exhausted" {
+		t.Fatalf("硬收应写回候选且 step 落 exhausted: facts=%+v steps=%+v", graphNodes(pg, rings.NodeFact), graphNodes(pg, rings.NodeStep))
 	}
 	for _, rec := range blackboxRecsOf(t, store, task) {
 		if rec.Type == rings.BlackboxBudgetRenewal {
@@ -585,9 +601,9 @@ func TestCancelRunningUnitsHardStops(t *testing.T) {
 		t.Fatalf("硬停应落 aborted: %+v", res)
 	}
 	// 终态照常入账(审计闭环)。
-	pg, _ := store.ProgressGraph(ctx, task)
-	if len(pg.Steps) != 1 || pg.Steps[0].Status != "aborted" {
-		t.Fatalf("step 应落 aborted: %+v", pg.Steps)
+	pg, _ := store.Graph(ctx, task)
+	if len(graphNodes(pg, rings.NodeStep)) != 1 || graphNodes(pg, rings.NodeStep)[0].Status != "aborted" {
+		t.Fatalf("step 应落 aborted: %+v", graphNodes(pg, rings.NodeStep))
 	}
 }
 

@@ -12,7 +12,7 @@ import (
 //     字段级优先(未生成字段退研判记录原文),无校对稿的轮退原文;
 //   - ⑩ 意图/步骤标题:node_polish 优先于节点标题——研判卡派发 chip、
 //     在途全景(历史快照与实时视图同装配)、虫群列表与排队条目、图
-//     节点卡(年轮图/进度图/链路图共用端点);
+//     节点卡(全景图/任务投影/链路图共用端点);
 //   - 机器消费对账:节点原文与任务包不受显示稿影响。
 
 func p465Setup(t *testing.T) (*Server, *http.ServeMux, string) {
@@ -152,7 +152,7 @@ func TestP465UnitsAndGraphPreferTitlePolish(t *testing.T) {
 	if !found {
 		t.Fatalf("s1 行应在单位列表(无会话时以排队条目形态,标题同字段): %v", units)
 	}
-	// 图节点卡(年轮图/进度图/链路图共用端点):step 节点标题优先。
+	// 图节点卡(全景图/任务投影/链路图共用端点):step 节点标题优先。
 	code, out = callJSON(t, mux, "GET", "/api/tasks/"+task+"/graph", "")
 	if code != 200 {
 		t.Fatalf("GET /graph = %d: %v", code, out)

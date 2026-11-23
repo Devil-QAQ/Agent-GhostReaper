@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Autumn-27/norma/tool"
@@ -21,6 +22,43 @@ import (
 	"ghostreaper/internal/mocktarget"
 	"ghostreaper/internal/websearch"
 )
+
+func TestWebSearchUnitsShareOnlyUnavailableService(t *testing.T) {
+	env := webEnv(t)
+	other := &unitEnv{Executor: env.Executor, TaskID: env.TaskID, StepID: env.StepID, UnitID: "second-unit"}
+	var calls atomic.Int64
+	var healthy atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if !healthy.Load() {
+			w.WriteHeader(503)
+			return
+		}
+		_, _ = io.WriteString(w, `{"web":{"results":[]}}`)
+	}))
+	defer srv.Close()
+	old := websearch.BraveEndpoint
+	websearch.BraveEndpoint = srv.URL
+	t.Cleanup(func() { websearch.BraveEndpoint = old })
+	cfg := websearch.Config{Backend: websearch.BackendBrave, BraveKey: "fixture-one"}
+	if err := websearch.Save(t.Context(), env.Executor.Store, cfg, "test"); err != nil {
+		t.Fatal(err)
+	}
+	first := callTool(t, env.webSearchTool(), `{"query":"first fixture"}`)
+	second := callTool(t, other.webSearchTool(), `{"query":"different fixture"}`)
+	if !first.IsError || !second.IsError || !strings.Contains(second.Flatten(), "不重复请求") || calls.Load() != 1 {
+		t.Fatal("another unit repeated the same unavailable service")
+	}
+	healthy.Store(true)
+	cfg.BraveKey = "fixture-two"
+	if err := websearch.Save(t.Context(), env.Executor.Store, cfg, "test"); err != nil {
+		t.Fatal(err)
+	}
+	res := callTool(t, other.webSearchTool(), `{"query":"after configuration change"}`)
+	if res.IsError || !strings.Contains(res.Flatten(), "0 条") || calls.Load() != 2 {
+		t.Fatal("changed configuration or a valid empty result remained blocked")
+	}
+}
 
 // webEnv 带 store 的单位环境(直调工具用,完整 e2e 见 webtools_e2e_test)。
 func webEnv(t *testing.T) *unitEnv {

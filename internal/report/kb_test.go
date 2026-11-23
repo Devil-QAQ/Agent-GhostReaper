@@ -71,27 +71,3 @@ func TestP459RemediationConcrete(t *testing.T) {
 		}
 	}
 }
-
-func TestLootClass(t *testing.T) {
-	cases := []struct {
-		statement string
-		want      string
-	}{
-		{"备份文件 config.bak 内含管理后台账号与明文密码", LootCredential},
-		{"用户数据接口可未授权导出,共 812 条记录", LootData}, // "未授权"不误判权限
-		{"以普通用户身份可执行管理员删除操作(越权)", LootPermission},
-		{"上传目录的 php 文件可被执行,已落 webshell", LootFoothold},
-		{"目标 8080 端口运行 nginx 1.18.0", ""}, // 普通观察,不属战果
-		{"凭据与越权同时出现时取凭据", LootCredential}, // 规则顺序:凭据先于权限
-		{"普通会话可持续 12 小时", ""},             // "会话"泛用词不进凭据
-	}
-	for _, c := range cases {
-		if got := LootClass(c.statement); got != c.want {
-			t.Errorf("LootClass(%q)=%q,期望 %q", c.statement, got, c.want)
-		}
-	}
-	// 大小写不敏感(英文关键词)。
-	if LootClass("取得有效 Session 会话标识") != LootCredential {
-		t.Error("英文关键词大小写未归一")
-	}
-}

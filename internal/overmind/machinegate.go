@@ -3,7 +3,7 @@ package overmind
 // P4-24 ②(问题清单 #39):模式闸门——机器语"特征"扫描,替代词表维护。
 // 作用域 = 定稿冻结的模型文本(复现步骤描述 P4-08 ④ / 来龙去脉叙述
 // P4-13),词表管不住模型新写的句子,特征制管得住:内部 ID、解释编号、
-// 裸版本号数字、程序报错原文、英文状态词、无动词压缩名词堆。只判定
+// 内部版本字段、程序报错原文、英文状态词、无动词压缩名词堆。只判定
 // 不改文;不合格由调用方退回同会话重写一次,再不合格如实标注
 // (Unpolished / NarrativeUnpolished)不阻塞定稿。确定性、零 LLM、
 // 可单测;静态界面串的同类特征由构建闸门(web/scripts/check-ui-words)
@@ -24,7 +24,7 @@ type talkHit struct {
 }
 
 // machineTalkPatterns 特征模式一:带形状的 token(内部 ID / 解释编号 /
-// 裸版本号数字 / 程序报错串)。纯 ASCII 模式与 CJK 模式混排;英文状态
+// 内部版本字段 / 程序报错串)。纯 ASCII 模式与 CJK 模式混排;英文状态
 // 词单独扫(machineTalkStatusWords,先掩掉 URL 与路径再判,防
 // "?status=…"、"/api/status" 类误伤)。
 var machineTalkPatterns = []struct {
@@ -33,7 +33,8 @@ var machineTalkPatterns = []struct {
 }{
 	{regexp.MustCompile(`\btc-(?:chain-)?[0-9a-z]{6,}`), "内部编号"},
 	{regexp.MustCompile(`\balt\d+\b`), "解释编号"},
-	{regexp.MustCompile(`版本\s*\d`), "裸版本号数字"},
+	// 版本数值本身是业务事实，不能凭“版本+数字”猜它是账本元数据。
+	{regexp.MustCompile(`(?i)\brevision(?:_id)?\s*[:=]\s*\d+`), "内部版本字段"},
 	{regexp.MustCompile(`\bEOF\b`), "程序报错原文"},
 	{regexp.MustCompile(`Get "|Post "`), "程序报错原文"},
 	{regexp.MustCompile(`(?i)context deadline exceeded|connection refused|dial tcp|no such host|panic:`), "程序报错原文"},
@@ -47,7 +48,7 @@ var machineTalkURLRe = regexp.MustCompile(`[A-Za-z0-9_.?=&%:@~+-]*\/[A-Za-z0-9_.
 // 界面词表已有人话对照,叙述里出现即机器语)。active/done 这类高误伤
 // 词不入表(URL / 产品名常撞);先掩 URL 与路径再判。
 var machineTalkStatusRe = regexp.MustCompile(
-	`(?i)\b(status|running|dispatched|confirmed|pending|exhausted|blocked|denied|failed|success|error|timeout|completed|awaiting_round|testing)\b`)
+	`(?i)\b(status|running|dispatched|confirmed|pending|exhausted|blocked|denied|failed|success|error|timeout|completed)\b`)
 
 // barePortSubjectRe 句首裸端口数字(P4-27 ③,问题清单 #44):2–5 位
 // 数字直接落在主语位置(句首/分句首),脱离上下文读不出说的是哪个
@@ -151,6 +152,20 @@ func talkHitLines(hits []talkHit) []string {
 	out := make([]string, 0, len(hits))
 	for _, h := range hits {
 		out = append(out, h.Kind+": "+h.Sample)
+	}
+	return out
+}
+
+// scanDisplayText 用于已单列资产上下文的意图/事实显示稿。
+// 报告级裸端口与功能字启发式不能用于这里：前者脱离读侧上下文，后者
+// 会将“同时允许携带凭据”等正常中文误判。只保留可辨认的机器内容特征。
+func scanDisplayText(text string) []talkHit {
+	hits := ScanMachineTalk(text)
+	out := make([]talkHit, 0, len(hits))
+	for _, hit := range hits {
+		if hit.Kind != "句首裸端口数字" && hit.Kind != "无动词压缩名词堆" {
+			out = append(out, hit)
+		}
 	}
 	return out
 }

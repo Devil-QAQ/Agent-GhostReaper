@@ -119,20 +119,18 @@ func ResolveEvidenceSeeds(ctx context.Context, store *rings.Store, blobs *swarm.
 	if err != nil {
 		return nil, err
 	}
-	falsifySteps, err := ClaimFalsifySteps(ctx, store, taskID, claimID)
+	stepIDs, err := claimEvidenceSteps(ctx, store, taskID, claimID)
 	if err != nil {
 		return nil, err
-	}
-	stepIDs := map[string]bool{}
-	for _, s := range falsifySteps {
-		stepIDs[s.ID] = true
 	}
 	evs, err := store.Events(ctx, taskID, 0, 0)
 	if err != nil {
 		return nil, fmt.Errorf("overmind: 种子解析读事件流: %w", err)
 	}
 
-	// 战役内反证结论(引用清单 + 证据文本)。
+	// 战役内交卷单引用与旧反证证据文本:交换单 evidence_refs 是种子
+	// 引用来源(P5-01②;旧 falsify 记录的交换引用字段已删,只留证据
+	// 文本作回查兜底);确认路径的种子装配由 P5-02③ 收口。
 	var refs []string
 	var evidenceTexts []string
 	seenRef := map[string]bool{}
@@ -144,7 +142,19 @@ func ResolveEvidenceSeeds(ctx context.Context, store *rings.Store, blobs *swarm.
 		if json.Unmarshal(ev.Payload, &r) != nil {
 			continue
 		}
-		if r.Type != rings.TestClaimRecFalsify || r.ClaimID != claimID {
+		if r.ClaimID != claimID {
+			continue
+		}
+		if r.Type == rings.TestClaimRecSubmit {
+			for _, id := range r.EvidenceRefs {
+				if id = strings.TrimSpace(id); id != "" && !seenRef[id] {
+					seenRef[id] = true
+					refs = append(refs, id)
+				}
+			}
+			continue
+		}
+		if r.Type != rings.TestClaimRecFalsify {
 			continue
 		}
 		text := r.EvidenceHead
@@ -155,12 +165,6 @@ func ResolveEvidenceSeeds(ctx context.Context, store *rings.Store, blobs *swarm.
 		}
 		if strings.TrimSpace(text) != "" {
 			evidenceTexts = append(evidenceTexts, text)
-		}
-		for _, id := range r.EvidenceExchanges {
-			if id = strings.TrimSpace(id); id != "" && !seenRef[id] {
-				seenRef[id] = true
-				refs = append(refs, id)
-			}
 		}
 	}
 
@@ -184,7 +188,7 @@ func ResolveEvidenceSeeds(ctx context.Context, store *rings.Store, blobs *swarm.
 			if json.Unmarshal(ev.Payload, &m) != nil {
 				continue
 			}
-			if !stepIDs[m.StepID] || (m.Type != rings.MirrorRecHTTP && m.Type != rings.MirrorRecHTTPS) {
+			if stepIDs[m.StepID].ID == "" || (m.Type != rings.MirrorRecHTTP && m.Type != rings.MirrorRecHTTPS) {
 				continue
 			}
 			byExchange[m.ExchangeID] = len(mirrors)
@@ -194,7 +198,7 @@ func ResolveEvidenceSeeds(ctx context.Context, store *rings.Store, blobs *swarm.
 			if json.Unmarshal(ev.Payload, &r) != nil {
 				continue
 			}
-			if r.Type != rings.SwarmRecToolCall || r.IsError || !stepIDs[r.StepID] {
+			if r.Type != rings.SwarmRecToolCall || r.IsError || stepIDs[r.StepID].ID == "" {
 				continue
 			}
 			if (r.ToolName != "http_probe" && r.ToolName != "bash") || !toolProducible(taskID, r) {
@@ -209,35 +213,32 @@ func ResolveEvidenceSeeds(ctx context.Context, store *rings.Store, blobs *swarm.
 		seeds = append(seeds, EvidenceSeed{Mirror: &mirrors[idx].rec, Origin: mirrors[idx].origin, Via: via})
 	}
 
-	// 引用命中:单位点名的交换照收(error 过滤不适用于种子——证明物直进);
-	// 同一 URL 的重复引用按地址去重保最近(活体实锤:单位常把同一证明的
-	// 多次重放逐条引用,同一证明不重复进包;不同地址的引用各自保留——
-	// 多步链的各环节证明不受影响)。这不是池过滤,是同一证明物的归并。
-	urlLatest := map[string]int{} // 引用命中的交换 URL → mirrors 下标(最近)
+	// Exact exchange IDs identify evidence, not URLs. Two observations at the
+	// same URL can differ in identity, request body or result; retain both.
 	for _, id := range refs {
-		idx, ok := byExchange[id]
-		if !ok {
+		if idx, ok := byExchange[id]; ok {
+			addMirror(idx, seedViaReference)
+		}
+	}
+	// 直连 URL 引用层:引用是 URL 字符串时按 C(b) 工具记录回查(可组包,
+	// 取最近一条;引用 URL 不入 evidenceTexts 的回查兜底——那层只吃
+	// 旧 falsify 证据文本)。
+	for _, id := range refs {
+		if !strings.HasPrefix(id, "http://") && !strings.HasPrefix(id, "https://") {
 			continue
 		}
-		urlLatest[mirrors[idx].rec.URL] = idx
-	}
-	seenURL := map[string]bool{}
-	var refOrder []string
-	for _, id := range refs { // 按引用次序输出去重后的种子(保序可读)
-		idx, ok := byExchange[id]
-		if !ok {
-			continue
+		for i := len(tools) - 1; i >= 0; i-- {
+			if !toolReferencesURL(tools[i].rec, id) {
+				continue
+			}
+			if toolProducible(taskID, tools[i].rec) {
+				th := tools[i]
+				seeds = append(seeds, EvidenceSeed{ToolRec: &th.rec, Origin: th.origin, Via: seedViaReference})
+				break
+			}
 		}
-		u := mirrors[idx].rec.URL
-		if seenURL[u] {
-			continue
-		}
-		seenURL[u] = true
-		refOrder = append(refOrder, u)
 	}
-	for _, u := range refOrder {
-		addMirror(urlLatest[u], seedViaReference)
-	}
+
 	if len(seeds) > 0 {
 		return seeds, nil
 	}

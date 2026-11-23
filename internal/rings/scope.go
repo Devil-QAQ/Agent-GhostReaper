@@ -67,12 +67,30 @@ func AssetScopeOf(detail map[string]any) string {
 // 规划测试、不进资产树分组),与 P4-67 信息源"不入资产图"同一语义。
 const AssetStatusRetired = "retired"
 
-// StepScopeWait 步骤的"等待批准"态(P4-51 ①,问题清单 #73②):渗透
-// 任务的命令命中范围外,单位冻结收场让位名额后步骤挂此态——不可领
-// 取,等"加入资产"裁决回 dispatched(插队队首)或"禁止测试"裁决落
-// aborted。swarm(写入)/overmind(对账唤醒)/manager(终局清点)/
-// server(显示)共用;界面词"等待批准"。
+// StepScopeWait 步骤的范围等待停等态(P4-51 ① 起,P5-05 改宽限让位):
+// 渗透任务的命令命中范围外,单位原位宽限等待超时后冻结收场让位名额,
+// 步骤挂此态——不可领取,等"加入资产"裁决回 dispatched(插队队首)
+// 或"禁止测试"裁决落 aborted。swarm(写入)/overmind(对账唤醒)/
+// manager(终局清点)/server(显示)共用;显示层一律"排队中"不标原因
+// (2026-11-16 造物主定)。
 const StepScopeWait = "scope_wait"
+
+// P5-05 挂等让位的停等态族:宽限超时冻结收场让位后步骤挂起——不可
+// 领取(不执行命令就出不了卡/不会重复挂等),各自的解除通道唤醒回
+// dispatched+队首档(已批准待上位,原会话 Resume 续跑+R14 复检)。
+// 显示层一律"排队中"不标原因;上位优先级为内部调度不上界面。
+const (
+	// StepGateWait 弹门卡/攻击行为卡让位后的停等态:票留在待决表可
+	// 裁决,Decide 裁决(批准/动作类拒绝)即唤醒步骤回队首档。
+	StepGateWait = "gate_wait"
+	// StepPauseWait 人工暂停让位后的停等态:无自动解除时刻,操作者
+	// 点继续(ResumeUnit)即唤醒回队首档。
+	StepPauseWait = "pause_wait"
+	// StepModelWait 模型故障退避让位后的停等态:模型链恢复可用(不
+	// 再全员冷却)由主宰循环轮对账唤醒回队首档——冷却自动恢复无配置
+	// 事件可触发重开,不走 blocked(等配置保存才重开会卡死)。
+	StepModelWait = "model_wait"
+)
 
 // ScopeCardIDPrefix 范围待决卡请求号前缀(P4-51:同一目标一张卡的
 // RequestID = "sc-"+host[+":"+port],裁决记录同号收口;与弹门 ap- 号
@@ -117,6 +135,9 @@ func InfoSourceKey(host, port string) string {
 // (ac- 前缀)同族豁免;P4-67 研判分诊留痕(tg- 前缀/triage 类型)锚定
 // 的是目标不是一次命令,同族豁免)。
 func IsScopeCardRecord(p ApprovalRecord) bool {
+	if strings.HasPrefix(p.RequestID, "ad-") && (p.Type == ApprovalRecAssetWait || p.Type == ApprovalRecAssetAdded || p.Type == ApprovalRecAssetDeclined) {
+		return true
+	}
 	return p.Type == ApprovalRecScopeWait || p.Type == ApprovalRecTriage ||
 		(p.RequestID != "" && len(p.RequestID) > len(ScopeCardIDPrefix) &&
 			p.RequestID[:len(ScopeCardIDPrefix)] == ScopeCardIDPrefix) ||

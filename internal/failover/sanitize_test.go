@@ -3,6 +3,9 @@ package failover
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -96,12 +99,56 @@ func TestSanitizeReqFullFlow(t *testing.T) {
 		System:   []string{"sys"},
 		Messages: []llm.Message{llm.UserText("hi"), {Role: llm.RoleUser, Content: nil}},
 	}
-	got := sanitizeReq(context.Background(), req)
+	got := (&Chain{}).sanitizeReq(context.Background(), req)
 	if len(got.Messages) != 1 || got.Messages[0].Text() != "hi" {
 		t.Fatalf("清洗后应只剩正常消息: %+v", got.Messages)
 	}
 	if len(req.Messages) != 2 {
 		t.Fatal("入参请求不应被就地改动")
+	}
+}
+
+func TestSanitizeHistoryWarnsOnceWithoutChangingRawMessages(t *testing.T) {
+	c := &Chain{}
+	ctx := WithLLMSession(WithTask(t.Context(), "task"), "session")
+	var msgs []llm.Message
+	for i := 0; i < 5; i++ {
+		msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Type: llm.BlockToolResult, ToolUseID: fmt.Sprintf("empty-%d", i)}}})
+	}
+	var newly atomic.Int64
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, n := c.newSanitizeEntries(ctx, msgs)
+			newly.Add(int64(n))
+			req := c.sanitizeReq(ctx, llm.CompletionRequest{Messages: msgs})
+			for _, m := range req.Messages {
+				if flattenBlocksText(m.Content[0].Content) != emptyResultPlaceholder {
+					t.Error("repeated sanitation lost protocol pairing")
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if newly.Load() != 5 {
+		t.Fatalf("historical empty results counted as %d new failures", newly.Load())
+	}
+	for _, m := range msgs {
+		if len(m.Content[0].Content) != 0 {
+			t.Fatal("raw empty result was overwritten")
+		}
+	}
+	if _, n := c.newSanitizeEntries(WithLLMSession(WithTask(t.Context(), "task"), "other"), msgs); n != 5 {
+		t.Fatal("another session's failures merged")
+	}
+	if _, n := c.newSanitizeEntries(WithLLMSession(WithTask(t.Context(), "other"), "session"), msgs); n != 5 {
+		t.Fatal("another task's failures merged")
+	}
+	msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Type: llm.BlockToolResult, ToolUseID: "new-empty"}}})
+	if _, n := c.newSanitizeEntries(ctx, msgs); n != 1 {
+		t.Fatal("a newly empty result was hidden as history")
 	}
 }
 

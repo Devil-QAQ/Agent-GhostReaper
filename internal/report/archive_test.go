@@ -202,8 +202,5 @@ func TestClaimCaseReproWithoutStandard(t *testing.T) {
 	if cs.Repro.Severity != "high" {
 		t.Fatalf("定稿级别错误: %s", cs.Repro.Severity)
 	}
-	// 解释区如实为空(降级不造数据)。
-	if len(cs.Alternatives) != 0 {
-		t.Fatalf("解释区应为空: %+v", cs.Alternatives)
-	}
+	// 冻结解释区已随 P5-02⑥ 砍除(判定收口机器三查)——卷宗不再呈现。
 }

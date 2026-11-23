@@ -26,31 +26,13 @@ import (
 //     重写一次 → 仍命中的字段不冻结(读侧退原文,无需标注——原文本就
 //     在位且受生成时约束)。成本有界:至多 3 次请求。
 
-// summaryClip 摘要各字段的落账上限(按字符计——描述/危害带原理句与
-// 数字,约百字量级;单条事实描述一句话。活体实锤:既有按字节的截断
-// 220 字节仅约 73 个汉字且可截裂多字节字符,报告级句子普遍超限)。
-const (
-	summaryStatementClip = 200
-	summaryImpactClip    = 200
-	summaryFactClip      = 200
-)
-
-// clipRunes 按字符数截取(多字节安全,超长以 … 截断)。
-func clipRunes(s string, n int) string {
-	s = strings.TrimSpace(s)
-	r := []rune(s)
-	if len(r) > n {
-		return string(r[:n]) + "…"
-	}
-	return s
-}
-
 // summaryFactCap 喂给模型的事实条数上限(链上事实 + 发现步骤产出事实;
 // 组合链环节与同步骤多观察并存时取账本次序前 N 条)。
 const summaryFactCap = 8
 
 // summaryPack 声明摘要的事实包(全部读账本确定性装配,零编造)。
 type summaryPack struct {
+	Status    string                `json:"status"`
 	Statement string                `json:"statement"`
 	Impact    string                `json:"impact,omitempty"`
 	Facts     []summaryFactMaterial `json:"facts,omitempty"`
@@ -64,6 +46,7 @@ type summaryFactMaterial struct {
 
 // summaryReply 模型回复契约。
 type summaryReply struct {
+	Title     string                `json:"title"`
 	Statement string                `json:"statement"`
 	Impact    string                `json:"impact"`
 	Facts     []rings.FactStatement `json:"facts"`
@@ -74,7 +57,7 @@ type summaryReply struct {
 // (Statement/Impact/Facts),重开再确认随新定稿重新生成(取代语义)。
 func (l *Loop) genClaimSummary(ctx context.Context, claimID string, rec *rings.TestClaimRecord) {
 	s := l.genClaimSummaryText(ctx, claimID)
-	rec.Statement, rec.Impact, rec.Facts = s.Statement, s.Impact, s.Facts
+	rec.Title, rec.Statement, rec.Impact, rec.Facts = s.Title, s.Statement, s.Impact, s.Facts
 }
 
 // summaryPack 事实包装配(只读账本):声明两维原文 + 链上事实(组合声明
@@ -89,15 +72,25 @@ func (l *Loop) summaryPack(ctx context.Context, claimID string) (*summaryPack, e
 	if err != nil {
 		return nil, fmt.Errorf("查血缘: %w", err)
 	}
-	pack := &summaryPack{Statement: claim.Title}
+	pack := &summaryPack{Status: claim.Status, Statement: claim.Title}
 	pack.Impact, _ = claim.Detail["impact"].(string)
+	submissions, err := l.Store.EventsByKinds(ctx, l.TaskID, rings.EventTestClaimRecord)
+	if err != nil {
+		return nil, err
+	}
+	for _, event := range submissions {
+		var sub rings.TestClaimRecord
+		if json.Unmarshal(event.Payload, &sub) == nil && sub.ClaimID == claimID && sub.Type == rings.TestClaimRecSubmit {
+			pack.Statement, pack.Impact = sub.Summary, sub.ImpactNote
+		}
+	}
 	seen := map[string]bool{}
 	addFact := func(id string) {
 		if len(pack.Facts) >= summaryFactCap || seen[id] {
 			return
 		}
 		n, err := l.Store.Node(ctx, l.TaskID, id)
-		if err != nil || n.Type != rings.NodeFact {
+		if err != nil || n.Type != rings.NodeFact || n.Status != "confirmed" {
 			return
 		}
 		seen[id] = true
@@ -140,6 +133,19 @@ func (l *Loop) summaryPack(ctx context.Context, claimID string) (*summaryPack, e
 			addFact(e.ToNode)
 		}
 	}
+	sources, err := l.Store.Edges(ctx, l.TaskID, rings.EdgeSourcedFrom)
+	if err != nil {
+		return nil, err
+	}
+	owners := map[string]bool{claimID: true}
+	for _, step := range steps {
+		owners[step] = true
+	}
+	for _, edge := range sources {
+		if owners[edge.From] {
+			addFact(edge.To)
+		}
+	}
 	return pack, nil
 }
 
@@ -174,14 +180,15 @@ func parseSummary(text string, pack *summaryPack) summaryReply {
 		known[f.FactID] = true
 	}
 	out := summaryReply{
-		Statement: clipRunes(r.Statement, summaryStatementClip),
-		Impact:    clipRunes(r.Impact, summaryImpactClip),
+		Title:     strings.TrimSpace(r.Title),
+		Statement: strings.TrimSpace(r.Statement),
+		Impact:    strings.TrimSpace(r.Impact),
 	}
 	for _, f := range r.Facts {
 		if !known[f.FactID] {
 			continue
 		}
-		if s := clipRunes(f.Statement, summaryFactClip); s != "" {
+		if s := strings.TrimSpace(f.Statement); s != "" {
 			out.Facts = append(out.Facts, rings.FactStatement{FactID: f.FactID, Statement: s})
 		}
 	}
@@ -191,6 +198,9 @@ func parseSummary(text string, pack *summaryPack) summaryReply {
 // applySummary 应用一稿(生成/校对/重写共用):非空字段覆盖,空字段保留
 // 上一稿;返回是否有任何内容(全空 = 无效稿)。
 func applySummary(rec *rings.TestClaimRecord, r summaryReply) bool {
+	if r.Title != "" {
+		rec.Title = r.Title
+	}
 	if r.Statement != "" {
 		rec.Statement = r.Statement
 	}
@@ -200,21 +210,13 @@ func applySummary(rec *rings.TestClaimRecord, r summaryReply) bool {
 	if len(r.Facts) > 0 {
 		rec.Facts = r.Facts
 	}
-	return rec.Statement != "" || rec.Impact != "" || len(rec.Facts) > 0
+	return rec.Title != "" || rec.Statement != "" || rec.Impact != "" || len(rec.Facts) > 0
 }
 
 // polishSummary 校对+闸门链:同会话校对改写(失败保留生成稿);逐字段
 // 特征扫描,命中 → 同会话重写一次 → 复扫,仍命中的字段不冻结(置空,
 // 读侧退节点原文)——原文在位且受生成时约束,无需标注行。
 func (l *Loop) polishSummary(ctx context.Context, claimID string, gs *genSession, rec *rings.TestClaimRecord, pack *summaryPack) {
-	if text, err := gs.ask(ctx, summaryProofreadAsk); err != nil {
-		runlog.Warnf("判断摘要校对失败: 任务 %s 判断 %s 原因 %s(保留生成稿)",
-			l.TaskID, claimID, clipEval(err.Error()))
-	} else if r := parseSummary(text, pack); applySummary(rec, r) {
-		// 校对稿已应用;全空回复保留生成稿。
-	} else {
-		runlog.Warnf("判断摘要校对解析失败: 任务 %s 判断 %s(保留生成稿)", l.TaskID, claimID)
-	}
 	dirty := summaryHits(rec)
 	if len(dirty) == 0 {
 		return
@@ -225,6 +227,8 @@ func (l *Loop) polishSummary(ctx context.Context, claimID string, gs *genSession
 	}
 	for field, hits := range summaryHits(rec) {
 		switch field {
+		case "名称":
+			rec.Title = ""
 		case "存在性描述":
 			rec.Statement = ""
 		case "影响面":
@@ -246,18 +250,21 @@ func (l *Loop) polishSummary(ctx context.Context, claimID string, gs *genSession
 // 改写点名与日志措辞;事实按"事实 <ID>"逐条)。
 func summaryHits(rec *rings.TestClaimRecord) map[string][]talkHit {
 	out := map[string][]talkHit{}
+	if hits := scanDisplayText(rec.Title); len(hits) > 0 {
+		out["名称"] = hits
+	}
 	if rec.Statement != "" {
-		if hits := ScanMachineTalk(rec.Statement); len(hits) > 0 {
+		if hits := scanDisplayText(rec.Statement); len(hits) > 0 {
 			out["存在性描述"] = hits
 		}
 	}
 	if rec.Impact != "" {
-		if hits := ScanMachineTalk(rec.Impact); len(hits) > 0 {
+		if hits := scanDisplayText(rec.Impact); len(hits) > 0 {
 			out["影响面"] = hits
 		}
 	}
 	for _, f := range rec.Facts {
-		if hits := ScanMachineTalk(f.Statement); len(hits) > 0 {
+		if hits := scanDisplayText(f.Statement); len(hits) > 0 {
 			out["事实 "+f.FactID] = hits
 		}
 	}
@@ -269,6 +276,12 @@ func summaryHits(rec *rings.TestClaimRecord) map[string][]talkHit {
 func (l *Loop) rewriteSummary(ctx context.Context, gs *genSession, rec *rings.TestClaimRecord, pack *summaryPack, dirty map[string][]talkHit) error {
 	var b strings.Builder
 	b.WriteString("你写的判断文本里有机器语,逐处改写掉,事实一字不动:\n")
+	if hits, ok := dirty["名称"]; ok && rec.Title != "" {
+		fmt.Fprintf(&b, "名称(原文:%s):\n", rec.Title)
+		for _, line := range talkHitLines(hits) {
+			b.WriteString("- " + line + "\n")
+		}
+	}
 	if hits, ok := dirty["存在性描述"]; ok && rec.Statement != "" {
 		fmt.Fprintf(&b, "存在性描述(原文:%s):\n", clipLine(rec.Statement, 60))
 		for _, line := range talkHitLines(hits) {
@@ -291,8 +304,8 @@ func (l *Loop) rewriteSummary(ctx context.Context, gs *genSession, rec *rings.Te
 			b.WriteString("- " + line + "\n")
 		}
 	}
-	b.WriteString(talkRewriteReferralNote + proofreadHumanStandard + "\n")
-	b.WriteString(`只输出 JSON:{"statement":"…","impact":"…","facts":[{"fact_id":"…","statement":"…"},…]},只含上面点名的字段与条目。`)
+	b.WriteString(talkRewriteReferralNote + displayExplanationStandard + "\n")
+	b.WriteString(`只输出 JSON:{"title":"…","statement":"…","impact":"…","facts":[{"fact_id":"…","statement":"…"},…]},只含上面点名的字段与条目。`)
 	text, err := gs.ask(ctx, b.String())
 	if err != nil {
 		return err
@@ -303,21 +316,7 @@ func (l *Loop) rewriteSummary(ctx context.Context, gs *genSession, rec *rings.Te
 
 // summarySystem 声明摘要生成的系统段(代码固定;稳定短段利于前缀缓存)。
 // 文风即报告级锚的描述/危害口径(P4-59 ①,问题清单 #80①③)。
-const summarySystem = `为渗透测试发现改写三段判断文本,写给不懂技术的读者也能读懂。输入是判断的存在性描述、影响面与相关事实的原文。任务:
-
-1. statement(存在性描述):说清这是什么问题——一句话本质+影响对象;问题本身不好懂时补一句通俗原理,用"就是…从而…"句式。正例:"10.0.0.5 的管理接口没有登录校验,任何知道地址的人都能进入管理后台";带原理句:"服务器把访客提交的内容原样存进了页面文件,就是任何人都能把一段脚本存进去,从而其他用户打开该页面时会在自己浏览器里执行这段脚本"。
-2. impact(影响面):直接说能拿到什么、能干什么;数字精确,写实际值(如 3,214 条、8 次),不写"大量/部分/若干";批量验证过的写明"仅获取 N 条展示"。正例:"无需任何账号口令,可下载全部 3,214 名用户的姓名、手机号和证件号"。
-3. facts:把每条给出的事实改写成 statement 同款口径(一句话本质+影响对象);fact_id 原样返回。
-
-规则:
-1. 只改文风,事实一字不动:目标、路径、数字、状态码、凭据有无全照抄;不编造原文没有的信息。
-2. 平实书面白话,短句;无 emoji;不写工具名与实现细节;提到目标一律用完整标识(域名或 IP 起头,host:port 形态)。
-3. 反例(不合格):"存在未授权访问漏洞,风险较高"(哪个目标、能拿到什么都没说);"获取了大量敏感数据"(数字不清)。
-
-只输出 JSON:{"statement":"…","impact":"…","facts":[{"fact_id":"…","statement":"…"},…]},facts 只含输入里给出的条目。`
-
-// summaryProofreadAsk 声明摘要的校对续问(同会话,模型可见自己刚写的
-// 全部字段)。
-const summaryProofreadAsk = `校对改写你刚写的判断文本:只改文风,事实一字不动(目标、数字、结论全照抄);描述仍是一句话本质+影响对象(需要原理句保持"就是…从而…"式),危害仍是直接说结果、数字精确,fact_id 与上一轮一致。
-` + proofreadHumanStandard + `
-只输出 JSON:{"statement":"…","impact":"…","facts":[{"fact_id":"…","statement":"…"},…]},覆盖全部字段与条目。`
+const summarySystem = `为安全测试面板整理漏洞的名称、说明和影响。名称是一小句，供列表辨认；说明让人直接看懂实际问题；影响只写证据支持的后果与范围。资产在页面单列，正文不重复堆放完整地址、状态码和参数，详细请求与响应由证据和复现提供。
+` + displayExplanationStandard + `
+输入中的当前状态决定措辞：尚未确认时不得写成漏洞已成立；证据不足须保留未验证的边界。不能改变级别、确认状态或报告纳入决定，不补造影响。事实条目标识原样返回。
+只输出 JSON:{"title":"…","statement":"…","impact":"…","facts":[{"fact_id":"…","statement":"…"},…]}。`

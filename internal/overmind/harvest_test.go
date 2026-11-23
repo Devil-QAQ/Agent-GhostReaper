@@ -46,7 +46,7 @@ func TestHarvestRules(t *testing.T) {
 		}
 	}
 
-	hv, err := Harvest(ctx, store, task, nil)
+	hv, err := Harvest(ctx, store, task)
 	if err != nil {
 		t.Fatalf("收割失败: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestHarvestRules(t *testing.T) {
 		t.Fatalf("转正事件应记在主宰名下,实际 %d 条", confirmedByOvermind)
 	}
 	// 幂等:再次收割无新转正;无证据候选仍在图上、每轮如实跳过
-	hv2, err := Harvest(ctx, store, task, nil)
+	hv2, err := Harvest(ctx, store, task)
 	if err != nil || len(hv2.Confirmed) != 0 || len(hv2.Skipped) != 1 || hv2.Skipped[0].FactID != "f-bare" {
 		t.Fatalf("二次收割应无新转正且如实跳过: %+v err=%v", hv2, err)
 	}
@@ -88,6 +88,9 @@ func TestDispatchStepBindsGraph(t *testing.T) {
 	store := openStore(t)
 	ctx := context.Background()
 	const task = "dispatch-task"
+	if err := SeedGoal(ctx, store, task, "g0", "核对靶标", nil); err != nil {
+		t.Fatal(err)
+	}
 	// 资产先行(covers 边端点必须存在)
 	if _, err := store.Append(ctx, task, rings.Event{
 		Kind: rings.EventNodeAdded, Actor: "creator",

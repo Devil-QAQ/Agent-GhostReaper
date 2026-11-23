@@ -12,10 +12,6 @@ import (
 	"time"
 )
 
-// p436Seed 构造一个覆盖全部新投影面的任务:单位会话(含续跑链 billable
-// 累加)、会话标记、审批记录、判断卷宗(创建/反证/裁决/定稿/复测/重放/
-// 复核/重开/证据绑定)、假设结论、任务摘要、收口状态机、成果追问、
-// 镜留痕摘要、节点时刻列。
 func p436Seed(t *testing.T, s *Store, task string) (claimID string, reproRev int64) {
 	t.Helper()
 	ctx := context.Background()
@@ -77,16 +73,16 @@ func p436Seed(t *testing.T, s *Store, task string) (claimID string, reproRev int
 		NodeID: "s-f1", Status: "running"}}))
 	must(s.Append(ctx, task, Event{Kind: EventTestClaimRecord, Actor: "swarm:u2", Payload: TestClaimRecord{
 		ClaimID: claimID, Type: TestClaimRecFalsify, StepID: "s-f1", UnitID: "u2", Round: 1,
-		Alternatives: []AltResult{{ID: "alt1", Refuted: true}}}}))
+		EvidenceHead: "旧格式记录(结构化结论字段已删,投影按空值处理)"}}))
 	must(s.Append(ctx, task,
 		Event{Kind: EventNodeStateChanged, Actor: "overmind", Payload: NodeStateChanged{NodeID: "s-f1", Status: "done"}},
 		Event{Kind: EventTestClaimRecord, Actor: "arbiter", Payload: TestClaimRecord{
 			ClaimID: claimID, Type: TestClaimRecVerdict, Decision: VerdictPending,
 			PendingReason: "证据不足", Conditions: []ArbiterConditionResult{{Kind: "falsify_completed", Satisfied: true}}}},
-		Event{Kind: EventNodeStateChanged, Actor: "arbiter", Payload: NodeStateChanged{NodeID: claimID, Status: TestClaimPending}},
+		Event{Kind: EventNodeStateChanged, Actor: "arbiter", Payload: NodeStateChanged{NodeID: claimID, Status: "pending"}},
 		Event{Kind: EventTestClaimRecord, Actor: "creator", Payload: TestClaimRecord{
 			ClaimID: claimID, Type: TestClaimRecReopen, Trigger: ReopenManual, Reason: "复核"}},
-		Event{Kind: EventNodeStateChanged, Actor: "arbiter", Payload: NodeStateChanged{NodeID: claimID, Status: TestClaimTesting}},
+		Event{Kind: EventNodeStateChanged, Actor: "arbiter", Payload: NodeStateChanged{NodeID: claimID, Status: "testing"}},
 	))
 	// 新战役步骤(reopen 后)与反证。
 	must(s.Append(ctx, task, Event{Kind: EventNodeAdded, Actor: "overmind", Payload: NodeAdded{
@@ -98,8 +94,7 @@ func p436Seed(t *testing.T, s *Store, task string) (claimID string, reproRev int
 			StepID: "s-f2", UnitID: "u2", TranscriptID: "swarm-u2", Type: SwarmRecSessionStarted}},
 		Event{Kind: EventTestClaimRecord, Actor: "swarm:u2", Payload: TestClaimRecord{
 			ClaimID: claimID, Type: TestClaimRecFalsify, StepID: "s-f2", UnitID: "u2", Round: 2,
-			ExistenceRefuted: false, ImpactSupported: true, ImpactLevel: "high",
-			Alternatives: []AltResult{{ID: "alt1", Refuted: true}, {ID: "alt2", Refuted: true}}}},
+			EvidenceHead: "旧格式记录(结构化结论字段已删)"}},
 		Event{Kind: EventNodeStateChanged, Actor: "overmind", Payload: NodeStateChanged{NodeID: "s-f2", Status: "done"}},
 		Event{Kind: EventTestClaimRecord, Actor: "arbiter", Payload: TestClaimRecord{
 			ClaimID: claimID, Type: TestClaimRecVerdict, Decision: VerdictConfirm, Satisfied: true,
@@ -138,15 +133,6 @@ func p436Seed(t *testing.T, s *Store, task string) (claimID string, reproRev int
 			ReplayResults: []ReplayResult{{ExchangeID: "ex-1", NewExchangeID: "ex-3", Method: "GET", URL: "http://t/api", OldStatus: 200, NewStatus: 200, BodySame: true}}}},
 		Event{Kind: EventTestClaimRecord, Actor: "overmind", Payload: TestClaimRecord{
 			ClaimID: claimID, Type: TestClaimRecReportReview, Reason: "纯信息性观察"}},
-	))
-	// 假设评估与结论。
-	must(s.Append(ctx, task,
-		Event{Kind: EventNodeAdded, Actor: "swarm:u1", Payload: NodeAdded{
-			NodeID: "h-1", NodeType: NodeHypothesis, Title: "猜测:存在旧备份", Status: "candidate"}},
-		Event{Kind: EventHypothesisRecord, Actor: "overmind", Payload: HypothesisRecord{
-			HypothesisID: "h-1", Type: HypothesisRecEvaluation, Decision: HypothesisVerify, Reason: "值得跟"}},
-		Event{Kind: EventHypothesisRecord, Actor: "swarm:u3", Payload: HypothesisRecord{
-			HypothesisID: "h-1", Type: HypothesisRecResult, StepID: "s-h", UnitID: "u3", Verdict: HypothesisSupported}},
 	))
 	// 事实(确认时刻列;收口锚点先于研判轮)。
 	must(s.Append(ctx, task,
@@ -189,7 +175,6 @@ type p436Snapshot struct {
 	approvals []ApprovalRow
 	claims    map[string]ClaimDigest
 	caseJSON  map[string]string
-	hyps      map[string]HypStateRow
 	qa        []ClaimQARow
 	briefs    map[string]MirrorBriefRow
 }
@@ -199,7 +184,7 @@ func p436Snap(t *testing.T, s *Store, task, claimID string) p436Snapshot {
 	ctx := context.Background()
 	snap := p436Snapshot{tasks: map[string]TaskExtrasRow{}, labels: map[string]SessionLabel{},
 		claims: map[string]ClaimDigest{}, caseJSON: map[string]string{},
-		hyps: map[string]HypStateRow{}, briefs: map[string]MirrorBriefRow{}}
+		briefs: map[string]MirrorBriefRow{}}
 	var err error
 	if snap.tasks[task], _, err = s.TaskExtras(ctx, task); err != nil {
 		t.Fatalf("读任务摘要: %v", err)
@@ -224,9 +209,6 @@ func p436Snap(t *testing.T, s *Store, task, claimID string) p436Snapshot {
 	} else {
 		b, _ := json.Marshal(proj)
 		snap.caseJSON[claimID] = string(b)
-	}
-	if snap.hyps, err = s.HypStates(ctx, task); err != nil {
-		t.Fatalf("读假设结论: %v", err)
 	}
 	if snap.qa, err = s.ClaimQAs(ctx, task); err != nil {
 		t.Fatalf("读成果追问: %v", err)
@@ -273,9 +255,6 @@ func TestP436RebuildParity(t *testing.T) {
 	}
 	if bs, as := mustJSON(before.caseJSON), mustJSON(after.caseJSON); bs != as {
 		t.Fatalf("判断卷宗重建不一致:\n%s\n%s", bs, as)
-	}
-	if bs, as := mustJSON(before.hyps), mustJSON(after.hyps); bs != as {
-		t.Fatalf("假设结论重建不一致:\n%s\n%s", bs, as)
 	}
 	if bs, as := mustJSON(before.qa), mustJSON(after.qa); bs != as {
 		t.Fatalf("成果追问重建不一致:\n%s\n%s", bs, as)
@@ -350,13 +329,11 @@ func TestP436ProjectionSemantics(t *testing.T) {
 		t.Fatalf("证据版本计数不符: %+v", d)
 	}
 
-	// 卷宗:reopen 后旧战役步骤不计轮次;定稿计数;证据首绑次序。
+	// 卷宗:定稿计数;证据首绑次序(旧轮次耗时拆解已随反证轮链路退役
+	// 删除,P5-03③)。
 	proj, ok, err := s.ClaimCaseOf(ctx, task, claimID)
 	if err != nil || !ok {
 		t.Fatalf("读卷宗: %v %v", err, ok)
-	}
-	if proj.Timing.Rounds != 1 {
-		t.Fatalf("reopen 后应只计新战役 1 轮: %+v", proj.Timing)
 	}
 	if proj.Repro == nil || proj.Repro.Rev != reproRev || proj.Repro.ProcessCount != 2 || proj.Repro.VariantsCount != 1 {
 		t.Fatalf("定稿计数不符: %+v", proj.Repro)
@@ -397,15 +374,6 @@ func TestP436ProjectionSemantics(t *testing.T) {
 	}
 	if closure.Pending == nil || !closure.Parked || closure.Rounds != 1 {
 		t.Fatalf("收口状态不符: %+v", closure)
-	}
-
-	// 假设结论。
-	hyps, err := s.HypStates(ctx, task)
-	if err != nil {
-		t.Fatalf("读假设结论: %v", err)
-	}
-	if h := hyps["h-1"]; h.Decision != HypothesisVerify || h.Verifier != "u3" || h.Verdict != HypothesisSupported || h.VerifyStep != "s-h" {
-		t.Fatalf("假设结论不符: %+v", h)
 	}
 
 	// 成果追问:两轮,第 1 轮 2 问。
@@ -485,6 +453,7 @@ func downgradeForP436Test(path string) error {
 	}
 	defer s.Close()
 	for _, stmt := range []string{
+		`DROP INDEX idx_events_execution`,
 		`DROP TABLE unit_sessions`,
 		`DROP TABLE session_labels`,
 		`DROP TABLE approval_records`,
@@ -525,6 +494,12 @@ func downgradeForP436Test(path string) error {
 	// v16(P4-67)信息源清单列同款剥除;升级重放路径随新增迁移同步。
 	if _, err := s.db.Exec(`ALTER TABLE roe_state DROP COLUMN info_sources`); err != nil {
 		return err
+	}
+	// v17 的独立记账列也须剥除,以真实旧库结构验证升级。
+	for _, column := range []string{"purpose", "usage_missing"} {
+		if _, err := s.db.Exec(`ALTER TABLE token_usage DROP COLUMN ` + column); err != nil {
+			return err
+		}
 	}
 	_, err = s.db.Exec(`PRAGMA user_version = 9`)
 	return err

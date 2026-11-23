@@ -11,7 +11,7 @@ function Table({ className, appearance = "grid", ...props }) {
       <table
         data-slot="table"
         data-appearance={appearance}
-        className={cn("w-full caption-bottom text-sm", appearance === "cards" && "border-separate border-spacing-x-0 border-spacing-y-4", className)}
+        className={cn("w-full caption-bottom text-sm", appearance === "cards" && "border-separate border-spacing-x-0 border-spacing-y-3", className)}
         {...props}
       />
     </div>

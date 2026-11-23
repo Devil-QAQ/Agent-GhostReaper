@@ -1,6 +1,9 @@
 "use client";
 
+import { ReadableText } from "@/components/readable-text";
 import * as React from "react";
+import { PageHeader } from "@/components/page-header";
+import { useViewportHeight } from "@/lib/use-viewport-height";
 import { toast } from "sonner";
 
 import { iconOf } from "@/components/icons";
@@ -36,7 +39,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { CLAIM_STATUS, HYP_STATUS, STEP_STATUS, denyStatusLabel, postJSON, usePolling } from "@/lib/api";
+import { CLAIM_STATUS, STEP_STATUS, WAIT_KINDS, denyStatusLabel, postJSON, usePolling } from "@/lib/api";
+import { swarmSegments, waitKindOf, segmentOf } from "@/lib/swarm-segments.mjs";
 import { NodeSheetHost } from "@/views/node-sheets";
 import { cn } from "@/lib/utils";
 
@@ -74,6 +78,7 @@ const BLACKBOX_LABELS = {
   hb_stall: "进度停滞标记",
   hb_repeat: "重复动作标记",
   hb_burn_anomaly: "预算消耗异常",
+  hb_control: "巡检处置",
   unit_approval_deny: "审批拒绝终止单位",
   unit_blocked: "单位受阻",
   task_blocked: "任务受阻",
@@ -110,17 +115,13 @@ export function SessionsPage({ currentTask, unitFocus }) {
       setGroup("swarm");
     }
   }, [unitFocus]);
+  const viewportRef = useViewportHeight(480);
   return (
-    <div className="flex h-[calc(100vh-168px)] min-h-[480px] flex-col gap-3">
-      <div className="flex items-baseline gap-3 border-b pb-2">
-        <h1 className="t-sec">会话</h1>
-        <span className="truncate text-xs text-muted-foreground">
-          对话与执行轨迹按任务隔离
-        </span>
-      </div>
-      <div className="grid min-h-0 flex-1 grid-cols-[176px_minmax(0,1fr)] items-stretch gap-3">
+    <div ref={viewportRef} className="flex min-h-[480px] flex-col gap-3" data-viewport-panel="sessions">
+      <PageHeader title="会话" subtitle="对话与执行轨迹按任务隔离" />
+      <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[auto_minmax(0,1fr)] items-stretch gap-3 sm:grid-cols-[176px_minmax(0,1fr)] sm:grid-rows-1">
         {/* 左栏:会话分组(每任务自家四组) */}
-        <nav className="flex min-h-0 flex-col gap-1 overflow-y-auto rounded-xl border border-border/55 bg-card p-2">
+        <nav className="flex min-h-0 gap-1 overflow-x-auto rounded-xl border border-border/55 bg-card p-2 sm:flex-col sm:overflow-y-auto">
           {GROUPS.map((g) => {
             const Icon = iconOf(g.icon);
             const active = group === g.id;
@@ -129,7 +130,7 @@ export function SessionsPage({ currentTask, unitFocus }) {
                 key={g.id}
                 disabled={!g.enabled}
                 className={cn(
-                  "flex flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left text-[13px] transition-colors",
+                  "flex shrink-0 flex-col items-start gap-0.5 rounded-md px-3 py-2 text-left text-[13px] transition-colors",
                   g.enabled && "cursor-pointer",
                   active && "bg-primary/15 text-primary",
                   !active && g.enabled && "text-foreground hover:bg-hover-lift",
@@ -209,7 +210,7 @@ function OvermindPane({ task, onInterject }) {
   );
   const chatURL = taskID ? `/api/tasks/${taskID}/interject?target=overmind` : null;
   const { data: chat, setData: setChat } = usePolling(chatURL || "/api/healthz", 2000, {
-    immediate: Boolean(chatURL),
+    immediate: Boolean(chatURL), live: taskID ? [`interject:${taskID}:overmind:`, `steers:${taskID}`] : null,
   });
   const [node, setNode] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
@@ -330,11 +331,6 @@ function OvermindPane({ task, onInterject }) {
   );
 }
 
-// RoundCard 一轮研判:五问结论(逐问一行,无 = 本轮该问无可研判项)+
-// 五问外研判 + 派发决策(本轮窗口内新增步骤,状态取当前)+ 收割
-// (事实转正 / 声明裁决 / 假设裁决)+ 会话原文下钻(态势快照与研判
-// 回复的原文)。在途全景(P4-46 ①):最新轮卡呈实时视图(live,与
-// 虫群列表/水位同源同拍),历史轮次卡保留按轮回放快照并标定格时刻。
 function RoundCard({ round, taskID, onNode, latest, live, liveError }) {
   const [openRaw, setOpenRaw] = React.useState(false);
   // 在途全景自适应折叠(P4-25 ③,问题清单 #41):每卡默认收着,>5 条
@@ -347,8 +343,7 @@ function RoundCard({ round, taskID, onNode, latest, live, liveError }) {
   const pano = latest ? live || [] : round.panorama || [];
   const hasHarvest =
     (round.facts_confirmed || []).length > 0 ||
-    (round.claims_judged || []).length > 0 ||
-    (round.hypotheses || []).length > 0;
+    (round.claims_judged || []).length > 0;
   return (
     <div className="rounded-lg border border-border/55 bg-background px-3 py-3 text-xs">
       <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
@@ -403,9 +398,6 @@ function RoundCard({ round, taskID, onNode, latest, live, liveError }) {
           ))}
           {(round.claims_judged || []).map((c) => (
             <NodeChip key={c.id} id={c.id} label="判断" status={c.status} taskID={taskID} onNode={onNode} />
-          ))}
-          {(round.hypotheses || []).map((h) => (
-            <NodeChip key={h.id} id={h.id} label="假设" status={h.status} taskID={taskID} onNode={onNode} />
           ))}
         </div>
       )}
@@ -489,12 +481,9 @@ function RoundCard({ round, taskID, onNode, latest, live, liveError }) {
   );
 }
 
-// NodeChip 研判轮内的图上节点(步骤/事实/声明/假设):点击开节点核对面
-//(P4-06 ④ 并入全站节点抽屉宿主,与进度图/发现页同一呈现)。声明/假设
-// 状态词走 api.js 全站词表(P4-28 ⑥ 合并口径),不另立表。
 function NodeChip({ id, label, status, taskID, onNode }) {
   const st =
-    UNIT_STATUS[status] || CLAIM_STATUS[status] || HYP_STATUS[status] || { label: STEP_STATUS[status] || status, variant: "info" };
+    UNIT_STATUS[status] || CLAIM_STATUS[status] || { label: STEP_STATUS[status] || status, variant: "info" };
   return (
     <button
       className="flex max-w-full items-center gap-1 rounded-md border border-border/55 bg-card px-2 py-0.5 cursor-pointer hover:bg-hover-lift"
@@ -559,24 +548,35 @@ const UNIT_STATUS = {
   running: { label: "执行中", variant: "running" },
   dispatched: { label: STEP_STATUS.dispatched, variant: "info" },
   cancelled: { label: STEP_STATUS.cancelled, variant: "info" },
-  paused: { label: "冬眠中", variant: "paused" },
+  // P5-06 等待段内词(词表 v1.3.0:挂等宽限期·人工暂停=已暂停;控制
+  // 按钮仍是冬眠/唤醒一对控制词)。
+  paused: { label: "已暂停", variant: "paused" },
   done: { label: "已完成", variant: "success" },
   exhausted: { label: "预算耗尽", variant: "warning" },
   failed: { label: "失败", variant: "danger" },
   aborted: { label: STEP_STATUS.aborted, variant: "info" },
   approval_denied: { label: "审批拒绝终止", variant: "danger" },
   blocked: { label: "受阻", variant: "warning" },
-  scope_wait: { label: "等待批准", variant: "warning", hint: "命令目标在任务范围外,已拦下等批准;批准后继续,禁止即终止" },
+  // P5-05 挂等让位停等态:一律"排队中"不标原因(2026-11-16 造物主定);
+  // 上位优先级为内部调度不上界面。
+  scope_wait: { label: "排队中", variant: "info" },
+  gate_wait: { label: "排队中", variant: "info" },
+  pause_wait: { label: "排队中", variant: "info" },
+  model_wait: { label: "排队中", variant: "info" },
 };
 
 // unitStatusMeta 单位行状态(P4-02:排队中条目 + 拒绝来源区分——
 // approval_denied 按拒绝线呈现"内置拦截规则拒绝(规则名)/危害声明
 // 拒绝/审批拒绝终止"等,见 lib/api.js denyStatusLabel)。
+// P5-05/P5-06:挂等宽限期的等待词(等待审批/等待模型/已暂停)优先于
+// "执行中"——归类与词面同源 swarm-segments.waitKindOf,段与徽标不漂移。
 function unitStatusMeta(u) {
   if (u.queued) return { label: "排队中", variant: "info" };
-  if (u.paused) return UNIT_STATUS.paused;
+  const wk = waitKindOf(u);
+  if (wk === "paused") return UNIT_STATUS.paused;
   if (u.status === "approval_denied")
     return { label: denyStatusLabel(u), variant: "danger", deny: true };
+  if (wk) return { label: WAIT_KINDS[wk] || "等待", variant: "warning" };
   return UNIT_STATUS[u.status] || { label: u.status, variant: "info" };
 }
 
@@ -605,8 +605,12 @@ const FINISH_WORDS = {
   image_error: "失败(不支持的媒体)",
   stop_hook_prevented: "失败(停止被拦)",
   hook_stopped: "失败(被拦停)",
-  scope_wait: "等待批准",
+  // P5-05 挂等让位收场:排队中不标原因(词表 v1.3.0;去向细节在
+  // 转录/账本可查)。
+  scope_wait: "排队中",
   scope_reclaim: "范围已批准",
+  gate_yield: "排队中",
+  pause_yield: "排队中",
 };
 
 // finishLineOf 收场人话状态行(P4-06 ②:时间账 note 原文不进界面,此为
@@ -639,14 +643,18 @@ function SwarmPane({ task, unitFocus, onInterject }) {
   });
   const [selected, setSelected] = React.useState(null); // session_id
   const [node, setNode] = React.useState(null); // 节点详情抽屉({type,id},点击下钻)
-  // 最新在先;置顶会话(P3-13b ②)再提至最前(置顶内部保持原相对次序)。
-  // P4-02 ① 排队中条目(dispatched 步骤)排在会话行之后。
+  // P5-06 单列排序(2026-11-17 造物主定,分区呈现取消):执行中在前 →
+  // 等待(等待审批/等待模型/已暂停)→ 排队中 → 已完成沉底;同类内——
+  // 执行中/等待/已完成按最近活动时间倒序(活跃在上,置顶提最前)、
+  // 排队中按上位顺序(队首在上,后端 StepLaunchLess 同源保序)。
+  // 无分区栏、已完成不折叠。
   const rows = data?.units || [];
-  const sessions = rows.filter((u) => !u.queued).reverse();
+  const segments = swarmSegments(rows);
   const units = [
-    ...sessions.filter((u) => u.meta?.pinned),
-    ...sessions.filter((u) => !u.meta?.pinned),
-    ...rows.filter((u) => u.queued),
+    ...segments.running,
+    ...segments.waiting,
+    ...segments.queued,
+    ...segments.done,
   ];
   const unit = units.find((u) => u.session_id === selected) || null;
 
@@ -678,81 +686,38 @@ function SwarmPane({ task, unitFocus, onInterject }) {
         </div>
       )}
       <div className="flex min-h-0 flex-1 gap-2">
-        {/* 单位列表(会话锚去重,跨进程稳定)+ 排队中条目(派发即可见) */}
+        {/* 单位列表单列(会话锚去重,跨进程稳定)+ 排队条目(派发即可见) */}
         <div className="w-[232px] shrink-0 overflow-y-auto rounded-xl border border-border/55 bg-card">
           {units.length === 0 && (
             <div className="px-3 py-8 text-center text-[13px] text-muted-foreground">
               尚无虫群单位。主宰派发意图后,排队与执行在此列示。
             </div>
           )}
-          {units.map((u) => {
-            const st = unitStatusMeta(u);
-            if (u.queued) {
-              return (
-                <button
-                  key={`q-${u.step_id}`}
-                  className="flex w-full flex-col gap-0.5 border-b border-dashed px-3 py-1 text-left text-xs cursor-pointer last:border-b-0 hover:bg-hover-lift"
-                  title={`等待虫群领取 · ${u.step_title || u.step_id}`}
-                  onClick={() => openStep(u.step_id)}
-                >
-                  <span className="flex items-center gap-2">
-                    <Badge variant={st.variant}>{st.label}</Badge>
-                  </span>
-                  <span className="truncate text-[11px] text-muted-foreground" title={u.step_title}>
-                    {u.step_title || ""}
-                  </span>
-                </button>
-              );
-            }
-            return (
-              <div
-                key={u.session_id}
-                role="button"
-                tabIndex={0}
-                className={cn(
-                  "flex w-full flex-col gap-0.5 border-b px-3 py-1 text-left text-xs cursor-pointer last:border-b-0 hover:bg-hover-lift",
-                  selected === u.session_id && "bg-primary/15"
-                )}
-                onClick={() => setSelected(u.session_id)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") setSelected(u.session_id);
-                }}
+          {units.map((u) =>
+            u.queued ? (
+              <button
+                key={`q-${u.step_id}`}
+                className="flex w-full flex-col gap-0.5 border-b border-dashed px-3 py-1 text-left text-xs cursor-pointer last:border-b-0 hover:bg-hover-lift"
+                title={`等待虫群领取 · ${u.step_title || u.step_id}`}
+                onClick={() => openStep(u.step_id)}
               >
                 <span className="flex items-center gap-2">
-                  {st.deny ? (
-                    <Badge variant={st.variant} className="max-w-40 shrink-0" title={st.label}>
-                      <span className="truncate">{st.label}</span>
-                    </Badge>
-                  ) : (
-                    <Badge variant={st.variant}>{st.label}</Badge>
-                  )}
-                  {u.meta?.pinned &&
-                    React.createElement(iconOf("pin"), { className: "size-3 shrink-0 text-primary" })}
-                  {/* P4-06 审核迭代:单位·步骤号只在会话头部展示(精确
-                      落点);列表行只呈状态 + 该单位在做什么(意图/名称)。 */}
-                  {u.meta?.title && (
-                    <span className="max-w-[9.5rem] truncate font-medium" title={u.meta.title}>
-                      {u.meta.title}
-                    </span>
-                  )}
-                  <span className="ml-auto num text-[11px] text-muted-foreground">
-                    {u.started_at?.slice(11)}
-                  </span>
-                  <SessionMarkMenu
-                    taskID={taskID}
-                    sessionID={u.session_id}
-                    defaultName={u.step_title || u.step_id}
-                    meta={u.meta}
-                    pinnable
-                    iconOnly
-                  />
+                  <Badge variant="info">排队中</Badge>
                 </span>
-                <span className="truncate text-[11px] text-muted-foreground" title={u.meta?.note ? `${u.step_title}\n${u.meta.note}` : u.step_title}>
-                  {u.meta?.note ? `${u.step_title || ""} · ${u.meta.note}` : u.step_title || ""}
+                <span className="truncate text-[11px] text-muted-foreground" title={u.step_title}>
+                  {u.step_title || ""}
                 </span>
-              </div>
-            );
-          })}
+              </button>
+            ) : (
+              <UnitListRow
+                key={u.session_id}
+                u={u}
+                selected={selected}
+                onSelect={setSelected}
+                taskID={taskID}
+              />
+            )
+          )}
         </div>
         {/* 单位会话页 */}
         {unit ? (
@@ -764,6 +729,68 @@ function SwarmPane({ task, unitFocus, onInterject }) {
         )}
       </div>
       <NodeSheetHost tid={taskID} value={node} onChange={setNode} />
+    </div>
+  );
+}
+
+// UnitListRow 会话锚单位行(单列各状态同款:状态徽标 + 名称/意图 +
+// 活动时刻 + 会话标记菜单;点击进该单位会话页)。
+async function controlUnit(taskID, stepID, action) {
+  const {ok,body}=await postJSON(`/api/tasks/${taskID}/units/${stepID}/${action}`,{});
+  if(!ok){toast.error(body?.error||"操作失败");return false;}
+  toast.success(action==="pause"?"已暂停":"已继续");
+  return true;
+}
+
+function UnitListRow({ u, selected, onSelect, taskID }) {
+  const st = unitStatusMeta(u);
+  const [resuming,setResuming]=React.useState(false);
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      className={cn(
+        "flex w-full flex-col gap-0.5 border-b px-3 py-1 text-left text-xs cursor-pointer last:border-b-0 hover:bg-hover-lift",
+        selected === u.session_id && "bg-primary/15"
+      )}
+      onClick={() => onSelect(u.session_id)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") onSelect(u.session_id);
+      }}
+    >
+      <span className="flex items-center gap-2">
+        {st.deny ? (
+          <Badge variant={st.variant} className="max-w-40 shrink-0" title={st.label}>
+            <span className="truncate">{st.label}</span>
+          </Badge>
+        ) : (
+          <Badge variant={st.variant}>{st.label}</Badge>
+        )}
+        {u.meta?.pinned &&
+          React.createElement(iconOf("pin"), { className: "size-3 shrink-0 text-primary" })}
+        {/* P4-06 审核迭代:单位·步骤号只在会话头部展示(精确
+            落点);列表行只呈状态 + 该单位在做什么(意图/名称)。 */}
+        {u.meta?.title && (
+          <span className="max-w-[9.5rem] truncate font-medium" title={u.meta.title}>
+            {u.meta.title}
+          </span>
+        )}
+        <span className="ml-auto num text-[11px] text-muted-foreground">
+          {u.started_at?.slice(11)}
+        </span>
+        {u.can_resume && <Button size="sm" variant="outline" className="h-6 px-2 text-xs" disabled={resuming} onClick={async e=>{e.stopPropagation();setResuming(true);try{await controlUnit(taskID,u.step_id,"resume");}finally{setResuming(false);}}}>继续</Button>}
+        <SessionMarkMenu
+          taskID={taskID}
+          sessionID={u.session_id}
+          defaultName={u.step_title || u.step_id}
+          meta={u.meta}
+          pinnable
+          iconOnly
+        />
+      </span>
+      <span className="truncate text-[11px] text-muted-foreground" title={u.meta?.note ? `${u.step_title}\n${u.meta.note}` : u.step_title}>
+        {u.meta?.note ? `${u.step_title || ""} · ${u.meta.note}` : u.step_title || ""}
+      </span>
     </div>
   );
 }
@@ -972,7 +999,7 @@ function UnitSessionPane({ task, unit, onInterject }) {
     running ? 700 : 2000
   );
   const chatURL = `/api/tasks/${taskID}/interject?target=unit&session=${encodeURIComponent(unit.session_id)}`;
-  const { data: chat, setData: setChat } = usePolling(chatURL, running ? 700 : 2000);
+  const { data: chat, setData: setChat } = usePolling(chatURL, running ? 700 : 2000, { live: [`interject:${taskID}:unit:${unit.session_id}`, `steers:${taskID}`] });
   const [busy, setBusy] = React.useState(false);
   const [confirmStop, setConfirmStop] = React.useState(false);
 
@@ -982,6 +1009,7 @@ function UnitSessionPane({ task, unit, onInterject }) {
   const steers = chat?.steers || [];
   const frozen = Boolean(chat?.frozen);
   const controllable = unit.running && !frozen;
+  const resumable = unit.can_resume && !frozen;
   // 流内容签名(P4-22):转录条数 + 对话条数 + 末条内容量,贴底跟滚判据。
   const sig = `${(raw?.entries || []).length}|${messages.length}|${tailGrowSig(messages[messages.length - 1])}`;
 
@@ -990,13 +1018,7 @@ function UnitSessionPane({ task, unit, onInterject }) {
 
   const ctl = async (action) => {
     setBusy(true);
-    const { ok, body } = await postJSON(`/api/tasks/${taskID}/units/${unit.step_id}/${action}`, {});
-    setBusy(false);
-    if (!ok) {
-      toast.error(body?.error || "操作失败");
-      return;
-    }
-    toast.success(action === "pause" ? "已冬眠" : "已唤醒");
+    try { await controlUnit(taskID,unit.step_id,action); } finally {setBusy(false);}
   };
 
   const stopUnit = async () => {
@@ -1094,6 +1116,7 @@ function UnitSessionPane({ task, unit, onInterject }) {
         }}
         frozen={frozen}
         finished={!unit.running}
+        waiting={segmentOf(unit)==="queued"}
         busy={busy}
         onInterject={() => onInterject({
           kind: "unit",
@@ -1108,22 +1131,22 @@ function UnitSessionPane({ task, unit, onInterject }) {
         setConfirmStop={setConfirmStop}
         onStop={stopUnit}
         buttons={
-          controllable ? (
+          controllable || resumable ? (
             <>
-              {unit.paused ? (
-                <Button size="sm" variant="outline" title="原地接着干" disabled={busy} onClick={() => ctl("resume")}>
+              {unit.paused || resumable ? (
+                <Button size="sm" variant="outline" title="继续原会话" disabled={busy} onClick={() => ctl("resume")}>
                   {React.createElement(iconOf("sun"), { className: "size-3.5" })}
-                  唤醒
+                  继续
                 </Button>
               ) : (
                 <Button size="sm" variant="outline" title="当前工具调用完成后挂起" disabled={busy} onClick={() => ctl("pause")}>
                   {React.createElement(iconOf("moon"), { className: "size-3.5" })}
-                  冬眠
+                  暂停
                 </Button>
               )}
-              <Button size="sm" variant="outline" title="终止该单位(不可恢复)" onClick={() => setConfirmStop(true)}>
+              {controllable && <Button size="sm" variant="outline" title="终止该单位(不可恢复)" onClick={() => setConfirmStop(true)}>
                 终止
-              </Button>
+              </Button>}
             </>
           ) : null
         }
@@ -1138,7 +1161,7 @@ function UnitSessionPane({ task, unit, onInterject }) {
 // 历史回答)与改(对虫群 = 舵杆注入带回执;对主宰 = 建议进正式规划)
 // 两模式;按钮组挂输入框右上(插话窗 + 冬眠/唤醒/熔断)。发言走插话
 // 通道(interject.record 审计流,全记账)。
-function DirectInput({ taskID, chat, setChat, target, frozen, finished, busy, onInterject, buttons, confirmStop, setConfirmStop, onStop }) {
+function DirectInput({ taskID, chat, setChat, target, frozen, finished, waiting, busy, onInterject, buttons, confirmStop, setConfirmStop, onStop }) {
   const [text, setText] = React.useState("");
   const [mode, setMode] = React.useState("ask");
   const [sending, setSending] = React.useState(false);
@@ -1146,7 +1169,7 @@ function DirectInput({ taskID, chat, setChat, target, frozen, finished, busy, on
 
   const send = async () => {
     const body = text.trim();
-    if (!body || !taskID) return;
+    if (!body || !taskID || sending || frozen || (finished && mode === "steer")) return;
     setSending(true);
     const payload = { target: target.kind, mode, text: body };
     if (isUnit) {
@@ -1226,12 +1249,12 @@ function DirectInput({ taskID, chat, setChat, target, frozen, finished, busy, on
               : mode === "ask"
                 ? isUnit
                   ? finished
-                    ? "该单位已结束,问话基于其历史记录回答"
+                    ? waiting ? "单位等待恢复，可问会话记录" : "该单位已结束,问话基于其历史记录回答"
                     : "问这只单位相关问题(基于其会话历史回答)"
                   : "问主宰当前规划相关问题"
                 : isUnit
                   ? finished
-                    ? "该单位已结束,改向不可用"
+                    ? waiting ? "单位等待恢复，改向暂不可用" : "该单位已结束,改向不可用"
                     : "给这只单位改方向(下一次工具调用前生效)"
                   : "给主宰提方向建议(判定后改变规划)"
           }
@@ -1322,7 +1345,7 @@ function BodyText({ text, compact }) {
   if (text.length <= bodyFoldThreshold) {
     return (
       <div className="max-w-[90%] rounded-lg border border-border/55 bg-background px-3 py-2 text-[13px] whitespace-pre-wrap [overflow-wrap:anywhere]">
-        {text}
+        <ReadableText text={text} />
       </div>
     );
   }
@@ -1340,14 +1363,14 @@ function BodyText({ text, compact }) {
         })}
       </button>
       {open && (
-        <pre
+        <div
           className={cn(
-            "overflow-y-auto rounded-b-lg border-t bg-input-surface px-3 py-2 text-xs whitespace-pre-wrap break-all",
+            "overflow-y-auto rounded-b-lg bg-input-surface px-3 py-2",
             compact ? "max-h-56" : "max-h-64"
           )}
         >
-          {text}
-        </pre>
+          <ReadableText text={text} />
+        </div>
       )}
     </div>
   );
@@ -1440,8 +1463,8 @@ function ResultCard({ res }) {
 // ---- 牧者会话 ----
 
 // ShepherdPane 牧者组容器(P4-14,审核迭代 1):追问列表可侧拉、默认收起
-//——收起时牧者组与原单栏窗口一致;标记行旁"成果追问 N"小按钮展开列表
-//(每 (成果 × 轮) 一条,点击开追问大窗回看),列头收起钮折回。无追问
+//——收起时牧者组与原单栏窗口一致;标记行旁"追问 N"小按钮展开列表
+//(每 (发现 × 轮) 一条,点击开追问大窗回看),列头收起钮折回。无追问
 // 条目时不占位。
 function ShepherdPane({ task }) {
   const taskID = task?.id;
@@ -1451,7 +1474,7 @@ function ShepherdPane({ task }) {
   const { data, error, setData } = usePolling(
     url || "/api/healthz",
     (d) => (d?.busy ? 700 : 2000),
-    { immediate: Boolean(url) }
+    { immediate: Boolean(url), live: taskID ? [`shepherd:${taskID}`] : null }
   );
   const [openClaim, setOpenClaim] = React.useState(null); // 追问大窗目标({claim_id, round})
   const [listOpen, setListOpen] = React.useState(false); // 追问列表默认收起(牧者组保持原窗口形态)
@@ -1470,7 +1493,7 @@ function ShepherdPane({ task }) {
                 size="sm"
                 variant="ghost"
                 className="size-6 shrink-0 p-0"
-                title="收起成果追问列表"
+                title="收起追问列表"
                 onClick={() => setListOpen(false)}
               >
                 {React.createElement(iconOf("chevronsLeft"), { className: "size-4" })}
@@ -1482,8 +1505,8 @@ function ShepherdPane({ task }) {
             <button
               key={`${f.claim_id}-${f.round}`}
               className="flex flex-col gap-0.5 border-b px-3 py-1 text-left text-xs cursor-pointer last:border-b-0 hover:bg-hover-lift"
-              title={`成果追问 · ${f.statement || f.claim_id}`}
-              onClick={() => setOpenClaim({ claim_id: f.claim_id, round: f.round })}
+              title={`追问 · ${f.statement || f.claim_id}`}
+              onClick={() => setOpenClaim({ claim_id: f.claim_id, kind: f.kind || "claim", round: f.round })}
             >
               <span className="flex items-center gap-1.5">
                 {React.createElement(iconOf("arrowRight"), { className: "size-3 shrink-0 text-muted-foreground" })}
@@ -1508,18 +1531,18 @@ function ShepherdPane({ task }) {
               size="sm"
               variant="outline"
               className="h-8 shrink-0 px-2 text-xs"
-              title="本任务的成果追问会话"
+              title="本任务的追问会话"
               onClick={() => setListOpen(true)}
             >
               {React.createElement(iconOf("chevronsRight"), { className: "size-3.5" })}
-              成果追问 {followups.length}
+              追问 {followups.length}
             </Button>
           ) : null
         }
       />
       <ClaimFollowupDialog
         tid={taskID}
-        claimID={openClaim?.claim_id}
+        anchor={openClaim ? { kind: openClaim.kind, id: openClaim.claim_id } : undefined}
         round={openClaim?.round}
         open={Boolean(openClaim)}
         onClose={() => setOpenClaim(null)}
@@ -1745,7 +1768,7 @@ function ShepherdMainPane({ task, data, error, setData, headerExtra }) {
 }
 
 // MessageBlock / ThinkingCard / ToolCallCard / InlineAdvice / RefText 等
-// 牧者侧对话块自本文件抽出为共用组件(P4-14:成果追问大窗同款呈现,
+// 牧者侧对话块自本文件抽出为共用组件(P4-14:追问大窗同款呈现,
 // 单一实现防平行)——见 web/components/chat-blocks.js。
 
 // ---- 系统事件(黑匣子) ----

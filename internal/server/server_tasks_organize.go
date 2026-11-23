@@ -73,7 +73,6 @@ func (s *Server) handleAssetsOrganize(w http.ResponseWriter, r *http.Request) {
 		Messages: []llm.Message{
 			{Role: "user", Content: []llm.ContentBlock{{Type: llm.BlockText, Text: strings.Join(lines, "\n")}}},
 		},
-		MaxTokens: 4096,
 	})
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, fmt.Errorf("整理失败: %w", err))

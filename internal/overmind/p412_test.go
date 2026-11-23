@@ -62,13 +62,19 @@ func TestHarvestDiscoveredAsset(t *testing.T) {
 	submitDiscoveryFact(t, store, task, "f-disc", "u5", &swarm.NewAssetDecl{
 		Class: "subdomain", Title: "admin.example.com", Parent: "a-seed"})
 
-	hv, err := Harvest(ctx, store, task, nil)
+	hv, err := Harvest(ctx, store, task)
 	if err != nil {
 		t.Fatalf("收割失败: %v", err)
 	}
 	if len(hv.Confirmed) != 1 {
 		t.Fatalf("应转正 1 条: %+v", hv)
 	}
+	// Confirmation preserves evidence; adoption alone creates inventory.
+	before, _ := store.NodesByType(ctx, task, rings.NodeAsset, "")
+	if len(before) != 1 {
+		t.Fatal("observation automatically entered inventory")
+	}
+	adoptPendingAssets(t, store, task)
 	// 发现型资产入图:来源点亮 + 出生血缘冻结。
 	var born *rings.NodeFull
 	assets, _ := store.NodesByType(ctx, task, rings.NodeAsset, "")
@@ -80,7 +86,7 @@ func TestHarvestDiscoveredAsset(t *testing.T) {
 	if born == nil {
 		t.Fatalf("收割应入图新对象 admin.example.com: %+v", assets)
 	}
-	if born.AssetClass != rings.AssetSubdomain || born.Status != "active" {
+	if born.AssetClass != rings.AssetDomain || born.Status != "active" {
 		t.Fatalf("新对象类与状态不符: %+v", born)
 	}
 	if rings.AssetSourceOf(born.Detail) != rings.AssetSourceDiscovered {
@@ -114,8 +120,8 @@ func TestHarvestDiscoveredAsset(t *testing.T) {
 
 	// 同标识重复发现:不重复入图,发现事实锚定既有对象。
 	submitDiscoveryFact(t, store, task, "f-dup", "u6", &swarm.NewAssetDecl{
-		Class: "host", Title: "admin.example.com"})
-	if _, err := Harvest(ctx, store, task, nil); err != nil {
+		Class: "domain", Title: "ADMIN.example.com."})
+	if _, err := Harvest(ctx, store, task); err != nil {
 		t.Fatalf("二次收割失败: %v", err)
 	}
 	assets2, _ := store.NodesByType(ctx, task, rings.NodeAsset, "")
@@ -134,7 +140,7 @@ func TestHarvestDiscoveredAsset(t *testing.T) {
 			NodeID: "f-bare", NodeType: rings.NodeFact, Title: "无证据发现", Status: "candidate", Detail: noEv}}); err != nil {
 		t.Fatalf("种无证据候选失败: %v", err)
 	}
-	hv3, err := Harvest(ctx, store, task, nil)
+	hv3, err := Harvest(ctx, store, task)
 	if err != nil || len(hv3.Skipped) != 1 || hv3.Skipped[0].FactID != "f-bare" {
 		t.Fatalf("无证据候选应如实跳过: %+v err=%v", hv3, err)
 	}
@@ -142,5 +148,22 @@ func TestHarvestDiscoveredAsset(t *testing.T) {
 		if a.Title == "ghost.example.com" {
 			t.Fatalf("无证据声明不得入图: %+v", a)
 		}
+	}
+}
+
+func TestAdoptingHistoricalObservationDoesNotInventParentFromUnrelatedAsset(t *testing.T) {
+	store := openStore(t)
+	const task = "adopt-invalid-parent"
+	seedDiscoveredGraph(t, store, task)
+	submitDiscoveryFact(t, store, task, "fact-parent", "unit", &swarm.NewAssetDecl{Class: "domain", Title: "other.example.test", Parent: "a-seed"})
+	if _, err := Harvest(t.Context(), store, task); err != nil {
+		t.Fatal(err)
+	}
+	adoptPendingAssets(t, store, task)
+	assets, _ := store.NodesByType(t.Context(), task, rings.NodeAsset, "")
+	parents, _ := store.Edges(t.Context(), task, rings.EdgeSubOf)
+	fact, _ := store.Node(t.Context(), task, "fact-parent")
+	if len(assets) != 2 || len(parents) != 0 || fact.Detail["new_asset"].(map[string]any)["parent"] != "a-seed" {
+		t.Fatal("adoption lost the real observation or promoted an unrelated parent declaration")
 	}
 }

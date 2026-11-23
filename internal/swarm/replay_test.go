@@ -6,6 +6,7 @@ package swarm
 // 与账本侧物理校验(重放只许绑定证据,串号入口即拒)。
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -395,7 +396,19 @@ func TestReplayTransportFidelity(t *testing.T) {
 		t.Fatalf("连镜: %v", err)
 	}
 	_, _ = fmt.Fprintf(conn, "GET %s/api/plain HTTP/1.1\r\nHost: %s\r\n\r\n", gzTarget.URL, u.Host)
-	_, _ = io.Copy(io.Discard, conn)
+	// Read the complete HTTP response, rather than waiting for a reusable
+	// keep-alive connection to close after its idle timeout.
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		_ = conn.Close()
+		t.Fatalf("读镜响应: %v", err)
+	}
+	_, readErr := io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || readErr != nil {
+		_ = conn.Close()
+		t.Fatalf("证据响应未完整返回: status=%d error=%v", resp.StatusCode, readErr)
+	}
 	_ = conn.Close()
 	_ = sess.Close()
 

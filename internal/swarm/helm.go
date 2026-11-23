@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -30,15 +31,11 @@ type Helm struct {
 	mu      sync.Mutex
 	pending map[string][]rings.SteerRecord // key: taskID+"\x00"+stepID,已排队未送达
 	kills   map[string]killHook            // taskID → 止损钩子(执行器自登记)
-	// verdicts 已落回执的指令(adopted/rejected 去重,P2-08):同一指令
-	// 至多迁移一次,重复标记静默忽略。进程内状态,重启后凭账本最新态
-	// 重建视图(重复回执在重启后至多多一条,读面取最新态不受影响)。
-	verdicts map[string]bool
 }
 
 // killHook 按任务的止损钩子:cancel 该任务在跑单位(一 Step 一单位),
 // 返回被停单位 ID 与是否命中。
-type killHook func(taskID, stepID string) (unitID string, ok bool)
+type killHook func(taskID, stepID, expectedUnit string) (unitID string, ok bool)
 
 // NewHelm 构建舵杆。
 func NewHelm(store *rings.Store) *Helm {
@@ -79,8 +76,17 @@ func (h *Helm) attachTask(taskID string, hook killHook) {
 
 // SteerWork 下达 steer_work:校验步骤在跑 → 排队 + 账本(queued)。
 // 生效点在单位下一次工具调用边界(guard 消费并落 delivered 记录);
-// 单位在生效前自然落地时指令停在已排队(过时语义属 P2-08 回执机制)。
+// 单位在生效前自然落地时，未送达指令按所属单位落过时回执。
 func (h *Helm) SteerWork(ctx context.Context, taskID, stepID, message, by string) (string, error) {
+	owner, err := h.Store.CurrentExecutionOwner(ctx, taskID, stepID)
+	if err != nil {
+		return "", fmt.Errorf("步骤%s不在执行中或执行已更换: %w", stepID, err)
+	}
+	return h.SteerWorkForExecution(ctx, taskID, owner, message, by)
+}
+
+func (h *Helm) SteerWorkForExecution(ctx context.Context, taskID string, owner rings.ExecutionOwner, message, by string) (string, error) {
+	stepID := owner.StepID
 	if strings.TrimSpace(message) == "" {
 		return "", fmt.Errorf("swarm: steer 指令必须携带纠偏消息")
 	}
@@ -98,22 +104,32 @@ func (h *Helm) SteerWork(ctx context.Context, taskID, stepID, message, by string
 		SteerID: steerID(), StepID: stepID, Command: rings.SteerCommandSteer,
 		State: rings.SteerStateQueued, Message: strings.TrimSpace(message), By: by,
 	}
-	if _, err := h.Store.Append(steerCtx, taskID, rings.Event{
+	rec.UnitID = owner.UnitID
+	event := rings.Event{
 		Kind: rings.EventSteerRecord, Actor: actorOf(by), Payload: rec,
-	}); err != nil {
-		return "", fmt.Errorf("swarm: 纠偏排队记账: %w", err)
 	}
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, err = h.Store.AppendForExecution(ctx, taskID, owner, event)
+	if err != nil {
+		return "", fmt.Errorf("swarm: 纠偏排队记账: %w", err)
+	}
 	h.pending[steerKey(taskID, stepID)] = append(h.pending[steerKey(taskID, stepID)], rec)
-	h.mu.Unlock()
 	return rec.SteerID, nil
 }
 
-// KillWork 下达 kill_work:校验钩子与在跑单位 → cancel 单位 ctx(引擎
-// 真中断)→ 送达记账。同步骤未送达的 steer 指令一并落 stale 回执
-// (工作已止损,后续无生效点;P2-08 回执状态机闭环)。找不到在跑单位
-// 时如实报错,账本零残留。
+// KillWork 将面板请求绑定到当前实际单位：排队入账后按该单位取消，
+// 再记录送达或过时。未送达的纠偏只清理同一单位，不影响后继执行。
 func (h *Helm) KillWork(ctx context.Context, taskID, stepID, reason, by string) (string, error) {
+	owner, err := h.Store.CurrentExecutionOwner(ctx, taskID, stepID)
+	if err != nil {
+		return "", fmt.Errorf("步骤%s不在执行中或执行已更换: %w", stepID, err)
+	}
+	return h.KillWorkForExecution(ctx, taskID, owner, reason, by)
+}
+
+func (h *Helm) KillWorkForExecution(ctx context.Context, taskID string, owner rings.ExecutionOwner, reason, by string) (string, error) {
+	stepID := owner.StepID
 	step, err := h.Store.Node(ctx, taskID, stepID)
 	if err != nil {
 		return "", fmt.Errorf("swarm: 纠偏指向步骤 %s: %w", stepID, err)
@@ -130,38 +146,36 @@ func (h *Helm) KillWork(ctx context.Context, taskID, stepID, reason, by string) 
 	if hook == nil {
 		return "", fmt.Errorf("swarm: 任务 %s 未接执行器,无在跑单位可停", taskID)
 	}
-	unitID, ok := hook(taskID, stepID)
+	rec := rings.SteerRecord{SteerID: steerID(), StepID: stepID, Command: rings.SteerCommandKill,
+		State: rings.SteerStateQueued, Reason: strings.TrimSpace(reason), By: by}
+	rec.UnitID = owner.UnitID
+	if _, err := h.Store.AppendForExecution(ctx, taskID, owner, rings.Event{Kind: rings.EventSteerRecord, Actor: actorOf(by), Payload: rec}); err != nil {
+		return "", err
+	}
+	unitID, ok := hook(taskID, stepID, owner.UnitID)
 	if !ok {
-		return "", fmt.Errorf("swarm: 步骤 %s 无在跑单位(领取竞态:单位刚干完)", stepID)
+		rec.State, rec.Note = rings.SteerStateStale, "原执行已结束或更换，本次止损未执行"
+		if _, err := h.Store.Append(steerCtx, taskID, rings.Event{Kind: rings.EventSteerRecord, Actor: actorOf(by), Payload: rec}); err != nil {
+			return rec.SteerID, err
+		}
+		return rec.SteerID, fmt.Errorf("swarm: 步骤 %s 无在跑单位(领取竞态:单位刚干完)", stepID)
 	}
-	rec := rings.SteerRecord{
-		SteerID: steerID(), StepID: stepID, UnitID: unitID, Command: rings.SteerCommandKill,
-		State: rings.SteerStateDelivered, Reason: strings.TrimSpace(reason), By: by,
-		Note: "止损终止:单位 ctx 已 cancel,引擎真中断(不进收尾),步骤落 aborted",
-	}
+	rec.UnitID, rec.State, rec.Note = unitID, rings.SteerStateDelivered, "止损终止:单位 ctx 已 cancel,引擎真中断(不进收尾),步骤落 aborted"
 	if _, err := h.Store.Append(steerCtx, taskID, rings.Event{
 		Kind: rings.EventSteerRecord, Actor: actorOf(by), Payload: rec,
 	}); err != nil {
-		return "", fmt.Errorf("swarm: 纠偏止损记账: %w", err)
+		return rec.SteerID, fmt.Errorf("swarm: 单位ctx已取消，但止损送达记账失败: %w", err)
 	}
-	h.expirePending(taskID, stepID, "止损终止:单位已停,指令失去生效点(已过时)")
+	h.expirePending(taskID, stepID, owner.UnitID, "止损终止:单位已停,指令失去生效点(已过时)")
 	return rec.SteerID, nil
 }
 
 // RecordVerdict 落一条回执(P2-08 回执状态机:已采纳/被拒):单位消化
 // 纠偏指令后经助手文本中的回执标记触发。同一条指令至多一条回执
-// (进程内去重;重复标记静默忽略——回执是状态迁移不是流水)。
-func (h *Helm) RecordVerdict(taskID, stepID, unitID string, r steerReceipt) {
+// (按账本最新态去重，重建与并发提交不重复迁移)。
+func (h *Helm) RecordVerdict(taskID, stepID, unitID string, r steerReceipt) error {
 	h.mu.Lock()
-	if h.verdicts == nil {
-		h.verdicts = map[string]bool{}
-	}
-	if h.verdicts[r.SteerID] {
-		h.mu.Unlock()
-		return
-	}
-	h.verdicts[r.SteerID] = true
-	h.mu.Unlock()
+	defer h.mu.Unlock()
 	state := rings.SteerStateRejected
 	note := "单位明示不采纳"
 	if r.Adopted {
@@ -171,23 +185,70 @@ func (h *Helm) RecordVerdict(taskID, stepID, unitID string, r steerReceipt) {
 	if r.Reason != "" {
 		note += ":" + r.Reason
 	}
-	_, _ = h.Store.Append(steerCtx, taskID, rings.Event{
-		Kind: rings.EventSteerRecord, Actor: "swarm:" + unitID,
-		Payload: rings.SteerRecord{
-			SteerID: r.SteerID, StepID: stepID, UnitID: unitID,
-			Command: rings.SteerCommandSteer, State: state, Note: note,
-		},
-	})
+	for attempt := 0; attempt < 8; attempt++ {
+		rev, err := h.Store.CurrentRevision(steerCtx, taskID)
+		if err != nil {
+			return err
+		}
+		previous, err := h.Store.LatestSteerRecord(steerCtx, taskID, r.SteerID)
+		if err != nil {
+			return fmt.Errorf("纠偏回执无对应指令: %w", err)
+		}
+		if previous.StepID != stepID || previous.UnitID != unitID || previous.Command != rings.SteerCommandSteer {
+			return fmt.Errorf("纠偏回执不属于该执行收到的指令")
+		}
+		if previous.State == rings.SteerStateAdopted || previous.State == rings.SteerStateRejected {
+			return nil
+		}
+		if previous.State != rings.SteerStateDelivered {
+			return fmt.Errorf("纠偏指令未送达或已过时，不接受采纳回执")
+		}
+		_, err = h.Store.AppendAtRevision(steerCtx, taskID, rev, rings.Event{Kind: rings.EventSteerRecord, Actor: "swarm:" + unitID, Payload: rings.SteerRecord{
+			SteerID: r.SteerID, StepID: stepID, UnitID: unitID, Command: rings.SteerCommandSteer, State: state, Note: note,
+		}})
+		if errors.Is(err, rings.ErrStaleRevision) {
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("纠偏回执落账时状态持续变化，本次未确认")
 }
 
-// take 取走并清空该步骤已排队的 steer 指令(工具门卫在调用边界消费;
-// 同一时刻只有一个边界能取到——指令一次性送达,不重复注入)。
-func (h *Helm) take(taskID, stepID string) []rings.SteerRecord {
+// Bound instructions never move to a replacement execution of the same step.
+func (h *Helm) takeForUnit(taskID, stepID, unitID string) ([]rings.SteerRecord, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	dirs := h.pending[steerKey(taskID, stepID)]
-	delete(h.pending, steerKey(taskID, stepID))
-	return dirs
+	key := steerKey(taskID, stepID)
+	if len(h.pending[key]) == 0 {
+		return nil, nil
+	}
+	owner, err := h.Store.CurrentExecutionOwner(steerCtx, taskID, stepID)
+	if err != nil {
+		return nil, err
+	}
+	if owner.UnitID != unitID {
+		return nil, rings.ErrExecutionEnded
+	}
+	var active []rings.SteerRecord
+	for _, d := range h.pending[key] {
+		if d.UnitID == unitID {
+			active = append(active, d)
+			continue
+		}
+		d.State, d.Note = rings.SteerStateStale, "原执行已结束或更换，纠偏不转交后继单位"
+		if _, err := h.Store.Append(steerCtx, taskID, rings.Event{Kind: rings.EventSteerRecord, Actor: "swarm", Payload: d}); err != nil {
+			return nil, err
+		}
+	}
+	delete(h.pending, key)
+	return active, nil
+}
+
+func (h *Helm) returnPending(taskID, stepID string, dirs []rings.SteerRecord) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	key := steerKey(taskID, stepID)
+	h.pending[key] = append(dirs, h.pending[key]...)
 }
 
 // actorOf 下达者 → 账本 actor(creator 面板 / overmind 心跳纠偏)。

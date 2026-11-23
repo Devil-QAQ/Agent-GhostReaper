@@ -56,8 +56,6 @@ func TestServerConfigAPI(t *testing.T) {
 	}
 }
 
-// TestServerAssetDetail 资产详情:节点字段 + about 边反查挂载的
-// 事实/假设/发现;错误路径(节点不存在 404、非资产节点 400)。
 func TestServerAssetDetail(t *testing.T) {
 	dir := t.TempDir()
 	store := openSStore(t, dir)
@@ -84,7 +82,7 @@ func TestServerAssetDetail(t *testing.T) {
 		"id":"detail-t","title":"资产详情验证",
 		"assets":[
 			{"class":"service","title":"http://10.10.0.5:8080"},
-			{"class":"host","title":"web-01"}
+			{"class":"host","title":"192.0.2.1"}
 		]}`, http.StatusOK, &created)
 
 	// 资产 node_id 面板侧生成,先从资产树取回。
@@ -100,21 +98,17 @@ func TestServerAssetDetail(t *testing.T) {
 		byTitle[a.Title] = a.ID
 	}
 	svcID := byTitle["http://10.10.0.5:8080"]
-	hostID := byTitle["web-01"]
+	hostID := byTitle["192.0.2.1"]
 	if svcID == "" || hostID == "" {
 		t.Fatalf("资产树应含两个种子资产: %+v", rawTree.Assets)
 	}
 
-	// 图上手工挂:confirmed 事实 + 候选假设(另一资产)+ TestClaim 到 svc。
 	_, err = store.Append(ctx, "detail-t",
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
 			NodeID: "f1", NodeType: rings.NodeFact, Title: "8080 端口运行 HTTP 服务", Status: "confirmed"}},
 		rings.Event{Kind: rings.EventEdgeAdded, Actor: "overmind", Payload: rings.EdgeAdded{
 			EdgeType: rings.EdgeAbout, FromNode: "f1", ToNode: svcID}},
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm", Payload: rings.NodeAdded{
-			NodeID: "h1", NodeType: rings.NodeHypothesis, Title: "可能存在备份目录", Status: "candidate"}},
-		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm", Payload: rings.EdgeAdded{
-			EdgeType: rings.EdgeAbout, FromNode: "h1", ToNode: hostID}},
+
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm", Payload: rings.NodeAdded{
 			NodeID: "tc1", NodeType: rings.NodeTestClaim, Title: "/old-backup/ 目录可列举", Status: "candidate"}},
 		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm", Payload: rings.EdgeAdded{
@@ -133,22 +127,20 @@ func TestServerAssetDetail(t *testing.T) {
 	}
 	var detail struct {
 		Asset struct {
-			ID              string `json:"id"`
-			Title           string `json:"title"`
-			Class           string `json:"class"`
-			Covered         bool   `json:"covered"`
-			FactCount       int    `json:"fact_count"`
-			HypothesisCount int    `json:"hypothesis_count"`
+			ID        string `json:"id"`
+			Title     string `json:"title"`
+			Class     string `json:"class"`
+			Covered   bool   `json:"covered"`
+			FactCount int    `json:"fact_count"`
 		} `json:"asset"`
-		Facts      []item `json:"facts"`
-		Hypotheses []item `json:"hypotheses"`
-		Claims     []item `json:"claims"`
+		Facts  []item `json:"facts"`
+		Claims []item `json:"claims"`
 	}
 	get(t, h, "/api/tasks/detail-t/assets/"+svcID, http.StatusOK, &detail)
 	if detail.Asset.ID != svcID || detail.Asset.Class != "service" || detail.Asset.Title != "http://10.10.0.5:8080" {
 		t.Fatalf("资产字段不符: %+v", detail.Asset)
 	}
-	if detail.Asset.FactCount != 1 || detail.Asset.HypothesisCount != 0 {
+	if detail.Asset.FactCount != 1 {
 		t.Fatalf("svc 资产计数不符: %+v", detail.Asset)
 	}
 	if len(detail.Facts) != 1 || detail.Facts[0].ID != "f1" || detail.Facts[0].Status != "confirmed" {
@@ -157,15 +149,7 @@ func TestServerAssetDetail(t *testing.T) {
 	if len(detail.Claims) != 1 || detail.Claims[0].ID != "tc1" {
 		t.Fatalf("svc 挂载发现不符: %+v", detail.Claims)
 	}
-	if len(detail.Hypotheses) != 0 {
-		t.Fatalf("svc 不应挂假设: %+v", detail.Hypotheses)
-	}
-
-	// host 资产:假设挂载面。
 	get(t, h, "/api/tasks/detail-t/assets/"+hostID, http.StatusOK, &detail)
-	if len(detail.Hypotheses) != 1 || detail.Hypotheses[0].ID != "h1" || detail.Hypotheses[0].Status != "candidate" {
-		t.Fatalf("host 挂载假设不符: %+v", detail.Hypotheses)
-	}
 	if len(detail.Facts) != 0 || len(detail.Claims) != 0 {
 		t.Fatalf("host 不应挂事实/发现: %+v %+v", detail.Facts, detail.Claims)
 	}

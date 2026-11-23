@@ -127,7 +127,7 @@ func assertCheckpointLedger(t *testing.T, store *rings.Store, task, wantTID stri
 		t.Fatalf("断点后步骤应回可领取(dispatched),得到 %s", step.Status)
 	}
 	ex := NewExecutor(store, nil, t.TempDir(), Budget{})
-	tid, kind := ex.pendingSession(context.Background(), task, "s1")
+	tid, kind, _ := ex.pendingSession(context.Background(), task, "s1")
 	if tid != wantTID || kind != resumeCheckpoint {
 		t.Fatalf("断点会话应可续(checkpoint 态): got (%q,%v) want (%q,%v)",
 			tid, kind, wantTID, resumeCheckpoint)

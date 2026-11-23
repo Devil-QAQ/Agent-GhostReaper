@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"ghostreaper/internal/arbiter"
 	"ghostreaper/internal/rings"
 )
 
@@ -14,100 +13,21 @@ import (
 // (保留规则 + 变体全量入账);④ 描述生成的解析/回退(scripted 模型
 // 走真实 agentcore 会话)。
 
-// TestDispatchFalsifyPriorityHigh ①:首轮收割与重开轮派发的反证步骤
-// priority 都落 high(P4-08 前缺省 normal,模型标 high 的探索会插队)。
-func TestDispatchFalsifyPriorityHigh(t *testing.T) {
-	store := openStore(t)
-	ctx := context.Background()
-	const task = "p408-prio"
-	mkTask(t, store, task)
+// (TestDispatchFalsifyPriorityHigh 已随反证优先级提档退役删除,
+// P5-03②——反证步骤不再产生,提档无对象;重开派重验步骤的断言由
+// claim_e2e_test 的 reopen 阶段与 p502_check_test 覆盖。)
 
-	seed := func(claimID, status string) {
-		t.Helper()
-		if _, err := store.Append(ctx, task,
-			rings.Event{Kind: rings.EventNodeAdded, Actor: "creator", Payload: rings.NodeAdded{
-				NodeID: "web1", NodeType: rings.NodeAsset, Title: "http://mock", Status: "active", AssetClass: rings.AssetService}},
-			rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
-				NodeID: "s1", NodeType: rings.NodeStep, Title: "发现步骤", Status: "done",
-				Detail: map[string]any{"goal_id": "g1", "action_level": "只读探测"}}},
-			rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u1", Payload: rings.NodeAdded{
-				NodeID: claimID, NodeType: rings.NodeTestClaim, Title: "声明 " + claimID, Status: status,
-				Detail: map[string]any{"unit_id": "u1", "step_id": "s1",
-					"standard": arbiter.DefaultClaimStandard()}}},
-			rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
-				EdgeType: rings.EdgeAbout, FromNode: claimID, ToNode: "web1"}},
-			rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
-				EdgeType: rings.EdgeDerivedFrom, FromNode: claimID, ToNode: "s1"}},
-		); err != nil {
-			t.Fatalf("铺声明 %s 失败: %v", claimID, err)
-		}
-	}
-
-	// 首轮:候选收割派发。
-	seed("tc-a", rings.TestClaimCandidate)
-	if _, err := HarvestClaims(ctx, store, task); err != nil {
-		t.Fatalf("收割声明失败: %v", err)
-	}
-	steps, err := store.NodesByType(ctx, task, rings.NodeStep, "")
-	if err != nil {
-		t.Fatalf("查步骤失败: %v", err)
-	}
-	found := false
-	for _, s := range steps {
-		if s.Detail["kind"] != "falsify" || s.Detail["testclaim_id"] != "tc-a" {
-			continue
-		}
-		found = true
-		if s.Detail["priority"] != PriorityHigh {
-			t.Fatalf("① 首轮反证步骤 priority 应为 high: %+v", s.Detail)
-		}
-	}
-	if !found {
-		t.Fatalf("应派出 tc-a 的反证步骤: %+v", steps)
-	}
-
-	// 重开轮:Confirmed 声明重开后的反证步骤同样 high。
-	if _, err := store.Append(ctx, task,
-		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "arbiter", Payload: rings.NodeStateChanged{
-			NodeID: "tc-a", Status: rings.TestClaimConfirmed}}); err != nil {
-		t.Fatalf("置 confirmed 失败: %v", err)
-	}
-	if err := ReopenClaim(ctx, store, task, "tc-a", "manual", "面板反驳复验", "creator"); err != nil {
-		t.Fatalf("重开失败: %v", err)
-	}
-	steps, err = store.NodesByType(ctx, task, rings.NodeStep, "")
-	if err != nil {
-		t.Fatalf("查步骤失败: %v", err)
-	}
-	found = false
-	for _, s := range steps {
-		if s.Detail["kind"] != "falsify" || !strings.Contains(s.Title, "重开") {
-			continue
-		}
-		found = true
-		if s.Detail["priority"] != PriorityHigh {
-			t.Fatalf("① 重开轮反证步骤 priority 应为 high: %+v", s.Detail)
-		}
-	}
-	if !found {
-		t.Fatalf("应派出重开轮反证步骤: %+v", steps)
-	}
-}
-
-// TestStepLaunchLess ①:领取次序全序——优先级降序;同级急活 > 反证 >
-// 其余(探索稍让位是预期取舍);再按创建版本;ID 兜底全序。
+// TestStepLaunchLess ①:领取次序全序——优先级降序;同级急活 > 其余
+// (P5-03②:反证档位已删,同级只剩急活一档);再按创建版本;ID 兜底
+// 全序。
 func TestStepLaunchLess(t *testing.T) {
 	mk := func(id string, rev int64, priority, kind string) rings.NodeFull {
 		d := map[string]any{}
 		if priority != "" && priority != PriorityNormal {
 			d["priority"] = priority
 		}
-		if kind != "" {
-			if kind == "falsify" {
-				d["kind"] = "falsify"
-			} else if kind == "urgent" {
-				d["urgent"] = true
-			}
+		if kind == "urgent" {
+			d["urgent"] = true
 		}
 		return rings.NodeFull{NodeView: rings.NodeView{ID: id, CreatedRev: rev}, Detail: d}
 	}
@@ -116,10 +36,9 @@ func TestStepLaunchLess(t *testing.T) {
 		a, b   rings.NodeFull
 		aFirst bool // 期望 a 先领
 	}{
-		{"high 反证 先于 更早创建的 high 探索", mk("s-f", 9, "high", "falsify"), mk("s-e", 5, "high", ""), true},
-		{"high 急活 先于 high 反证", mk("s-u", 9, "high", "urgent"), mk("s-f", 5, "high", "falsify"), true},
-		{"high 探索 先于 normal 反证", mk("s-e", 9, "high", ""), mk("s-f", 5, "normal", "falsify"), true},
-		{"normal 反证 先于 normal 探索", mk("s-f", 9, "normal", "falsify"), mk("s-e", 5, "normal", ""), true},
+		{"high 急活 先于 更早创建的 high 探索", mk("s-u", 9, "high", "urgent"), mk("s-e", 5, "high", ""), true},
+		{"normal 急活 先于 更早创建的 normal 探索", mk("s-u", 9, "normal", "urgent"), mk("s-e", 5, "normal", ""), true},
+		{"high 探索 先于 normal 急活(优先级先于类别)", mk("s-e", 9, "high", ""), mk("s-u", 5, "normal", "urgent"), true},
 		{"low 沉底", mk("s-n", 9, "normal", ""), mk("s-l", 5, "low", ""), true},
 		{"同级同类按创建版本", mk("s-a", 3, "high", ""), mk("s-b", 7, "high", ""), true},
 	}

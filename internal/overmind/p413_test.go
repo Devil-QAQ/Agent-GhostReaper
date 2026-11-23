@@ -17,7 +17,7 @@ import (
 // 目标交换)/反证轮战役口径/仲裁条件词)、拼句兜底与叙述生成(scripted
 // 模型走真实 agentcore 会话)。
 
-// seedNarrativeClaim 铺一个"发现型资产 → 发现步骤 → 声明 → 反证"的最小
+// seedNarrativeClaim 铺一个"发现型资产 → 发现步骤 → 声明 → 交卷"的最小
 // 链(声明 detail 带发现单位/证据截头/冻结竞争解释)。
 func seedNarrativeClaim(t *testing.T, l *Loop, task string) {
 	t.Helper()
@@ -42,15 +42,17 @@ func seedNarrativeClaim(t *testing.T, l *Loop, task string) {
 			EdgeType: rings.EdgeAbout, FromNode: "tc-x", ToNode: "a-disc"}},
 		{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
 			EdgeType: rings.EdgeDerivedFrom, FromNode: "tc-x", ToNode: "s1"}},
-		// 反证步骤(当前战役)与写回结论。
-		{Kind: rings.EventNodeAdded, Actor: "arbiter", Payload: rings.NodeAdded{
-			NodeID: "s-f1", NodeType: rings.NodeStep, Title: "反证(第 1 轮): tc-x", Status: "done",
-			Detail: map[string]any{"kind": "falsify", "testclaim_id": "tc-x", "round": 1}}},
-		{Kind: rings.EventTestClaimRecord, Actor: "swarm:u2", Payload: rings.TestClaimRecord{
-			ClaimID: "tc-x", Type: rings.TestClaimRecFalsify, Round: 1, StepID: "s-f1", UnitID: "u2",
-			ExistenceRefuted: false, ImpactSupported: true, ImpactLevel: "high",
-			Alternatives: []rings.AltResult{{ID: "alt1", Refuted: true}, {ID: "alt2", Refuted: true}}}},
+		// 交卷单(P5-01② 六字段;来龙去脉的新素材源,P5-03③ 改挂)。
+		{Kind: rings.EventTestClaimRecord, Actor: "swarm:u1", Payload: rings.TestClaimRecord{
+			ClaimID: "tc-x", Type: rings.TestClaimRecSubmit, StepID: "s1", UnitID: "u1",
+			Summary:          "127.0.0.1:4461 的 /static/app.js 暴露硬编码凭据",
+			Severity:         "high",
+			EvidenceRefs:     []string{"ms-001"},
+			ProvingMarker:    "sk-live-abcdef",
+			CountercheckNote: "排除缓存假象:加随机参数重取两次,凭据仍在;权限路径直连可复现"},
+		},
 	}
+
 	if _, err := l.Store.Append(context.Background(), task, seed...); err != nil {
 		t.Fatalf("铺链失败: %v", err)
 	}
@@ -112,12 +114,11 @@ func TestNarrativePack(t *testing.T) {
 		t.Fatalf("铺幽灵反证失败: %v", err)
 	}
 
-	j := &arbiter.ClaimJudgement{Verdict: rings.TestClaimRecord{
-		Conditions: []rings.ArbiterConditionResult{
-			{Kind: "falsify_completed", Satisfied: true},
-			{Kind: "alternatives_killed", Satisfied: true},
-		}}}
-	pack, err := l.narrativePack(ctx, "tc-x", j)
+	conds := []rings.ArbiterConditionResult{
+		{Kind: "evidence_traceable", Satisfied: true},
+		{Kind: "countercheck_done", Satisfied: true},
+	}
+	pack, err := l.narrativePack(ctx, "tc-x", conds)
 	if err != nil {
 		t.Fatalf("事实包装配失败: %v", err)
 	}
@@ -147,19 +148,15 @@ func TestNarrativePack(t *testing.T) {
 		!strings.Contains(last.BodyHead, "sk-live-abcdef") {
 		t.Fatalf("末条交换应带载体正文截头: %+v", last)
 	}
-	if len(pack.Falsify) != 1 || pack.Falsify[0].Round != 1 || pack.Falsify[0].UnitID != "u2" {
-		t.Fatalf("反证轮应只含当前战役: %+v", pack.Falsify)
+	if pack.Submit == nil {
+		t.Fatalf("交卷单要素应入包(当前战役 submit 记录): %+v", pack)
 	}
-	if len(pack.Falsify[0].Alternatives) != 2 || pack.Falsify[0].Alternatives[0].Label != "缓存污染" ||
-		!pack.Falsify[0].Alternatives[0].Refuted {
-		t.Fatalf("竞争解释应带冻结标签与排除结论: %+v", pack.Falsify[0].Alternatives)
-	}
-	if len(pack.Confirm) != 2 || pack.Confirm[0] != "反证完成" || pack.Confirm[1] != "竞争解释全排除" {
-		t.Fatalf("仲裁条件应译为界面词: %+v", pack.Confirm)
+	if len(pack.Confirm) != 2 || pack.Confirm[0] != "证据可追溯" || pack.Confirm[1] != "自查有记录" {
+		t.Fatalf("三查条件应译为界面词: %+v", pack.Confirm)
 	}
 
 	base := deterministicNarrative(pack)
-	for _, want := range []string{"单位 u1", "执行「", "1 轮反证", "排除竞争解释 2 条", "仲裁者判定成立"} {
+	for _, want := range []string{"单位 u1", "执行「", "会话内自查后交卷", "机器核验确认"} {
 		if !strings.Contains(base, want) {
 			t.Fatalf("拼句兜底应含 %q: %s", want, base)
 		}
@@ -222,7 +219,7 @@ func TestNarrativePackCombined(t *testing.T) {
 		t.Fatalf("第二环节血缘错误: %+v", pack.Discoveries[1])
 	}
 	base := deterministicNarrative(pack)
-	if !strings.Contains(base, "主宰组合链上 2 条事实") || !strings.Contains(base, "无反证轮") {
+	if !strings.Contains(base, "主宰组合链上 2 条事实") || !strings.Contains(base, "机器核验确认") {
 		t.Fatalf("组合拼句口径错误: %s", base)
 	}
 }
@@ -286,7 +283,7 @@ func TestGenClaimNarrative(t *testing.T) {
 			l.Provider = prov
 			rec := &rings.TestClaimRecord{ClaimID: "tc-x", Type: rings.TestClaimRecRepro}
 			l.genClaimNarrative(ctx, "tc-x", nil, rec)
-			if !strings.Contains(rec.Narrative, "单位 u1") || !strings.Contains(rec.Narrative, "仲裁者判定成立") {
+			if !strings.Contains(rec.Narrative, "单位 u1") || !strings.Contains(rec.Narrative, "机器核验确认") {
 				t.Fatalf("失败应回退确定性拼句(回复 %q): %q", reply, rec.Narrative)
 			}
 		}
@@ -301,9 +298,9 @@ func TestGenClaimNarrative(t *testing.T) {
 		}
 	})
 
-	t.Run("超长截断", func(t *testing.T) {
+	t.Run("完整叙述不裁句", func(t *testing.T) {
 		l, _ := mkLoop(t)
-		long := strings.Repeat("叙述", 400) // 800 字节 > narrativeClip
+		long := strings.Repeat("完整说明保留条件。", 100) + "仅适用于本次验证范围。"
 		model := newGatedScriptedModel(func(rr *recordedRequest) scriptedReply {
 			return scriptedReply{Text: `{"narrative":"` + long + `"}`, Finish: "stop"}
 		})
@@ -315,8 +312,8 @@ func TestGenClaimNarrative(t *testing.T) {
 		l.Provider = prov
 		rec := &rings.TestClaimRecord{ClaimID: "tc-x", Type: rings.TestClaimRecRepro}
 		l.genClaimNarrative(ctx, "tc-x", nil, rec)
-		if len(rec.Narrative) > narrativeClip+3 || !strings.HasSuffix(rec.Narrative, "…") {
-			t.Fatalf("超长应按落账上限截断(len=%d): %q", len(rec.Narrative), rec.Narrative)
+		if rec.Narrative != long {
+			t.Fatalf("完整说明与末尾范围不应裁断: %q", rec.Narrative)
 		}
 	})
 }

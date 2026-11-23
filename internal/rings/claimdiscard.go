@@ -6,23 +6,14 @@ import (
 	"strings"
 )
 
-// 摘除连坐废弃(P4-55 审核迭代,造物主 2026-11-08 定案:动"对象"摘资产
-// → 锚定其上的声明/假设程序确定性全废弃,不问主宰、不挂起;系统故障
-// 才自动重派,动"意图"/动"人"交主宰裁决——程序禁止连坐)。
-
 // DiscardReasonExcluded 摘除连坐废弃的固定理由(逐字入账)。
 const DiscardReasonExcluded = "目标已摘除"
 
-// claimDiscardable 锚定摘除覆盖资产后仍可废弃的声明状态(锤炼管线内;
-// 终态——已确认/不成立/待确认/已修复——不是悬在途工作,不动)。
+// claimDiscardable 锚定摘除覆盖资产后仍可废弃的声明状态(P5-02⑤
+// 状态集缩小:只剩候选——交卷到机器三查之间的秒级窗口与补考窗口;
+// 终态——已确认/证据不足/被推翻/已修复——不是悬在途工作,不动)。
 var claimDiscardable = map[string]bool{
-	TestClaimCandidate: true, TestClaimTesting: true, TestClaimAwaitingRound: true,
-}
-
-// hypoDiscardable 同上,假设侧(挂账是休眠不是悬空,同废——摘除资产上
-// 的假设已无验证通道,留着只会是永久死重)。
-var hypoDiscardable = map[string]bool{
-	HypothesisCandidate: true, HypothesisTesting: true, HypothesisHeld: true,
+	TestClaimCandidate: true,
 }
 
 // ExcludedCoveredAssetIDs 摘除清单当前覆盖的资产 ID 集:精确命中 +
@@ -76,29 +67,25 @@ func excludedAnchorInTitle(assets []NodeFull, excluded map[string]bool, title st
 	return false
 }
 
-// DiscardAnchoredFindings 摘除连坐废弃本体:锚定在摘除覆盖资产上的
-// 非终态声明与假设批量转已废弃——testclaim.record(discard,理由) +
-// node.state_changed(discarded)/假设评估记录(discard) 同批一事务落账。
-// 幂等(可重入:终态跳过、零命中零落笔);终态只追加、历史不涂改
-// (R1);勾回资产不自动复活(再验走操作者深入)。返回本次废弃的声明
-// 与假设 ID(调用方回执与留痕用)。
-func DiscardAnchoredFindings(ctx context.Context, store *Store, taskID, reason, actor string) ([]string, []string, error) {
+// DiscardAnchoredFindings atomically discards nonterminal claims on excluded assets.
+// Repeated calls are idempotent; confirmed findings and historical evidence remain.
+func DiscardAnchoredFindings(ctx context.Context, store *Store, taskID, reason, actor string) ([]string, error) {
 	roe, err := store.CurrentRoE(ctx, taskID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("rings: 摘除废弃读范围: %w", err)
+		return nil, fmt.Errorf("rings: 摘除废弃读范围: %w", err)
 	}
 	excluded := roe.ExcludedAssetSet()
 	if len(excluded) == 0 {
-		return nil, nil, nil
+		return nil, nil
 	}
 	assets, err := store.NodesByType(ctx, taskID, NodeAsset, "")
 	if err != nil {
-		return nil, nil, fmt.Errorf("rings: 摘除废弃查资产: %w", err)
+		return nil, fmt.Errorf("rings: 摘除废弃查资产: %w", err)
 	}
 	covered := ExcludedCoveredAssetIDs(assets, excluded)
 	abouts, err := store.Edges(ctx, taskID, EdgeAbout)
 	if err != nil {
-		return nil, nil, fmt.Errorf("rings: 摘除废弃查锚点: %w", err)
+		return nil, fmt.Errorf("rings: 摘除废弃查锚点: %w", err)
 	}
 	anchored := func(id string) bool {
 		for _, e := range abouts {
@@ -111,7 +98,7 @@ func DiscardAnchoredFindings(ctx context.Context, store *Store, taskID, reason, 
 
 	claims, err := store.NodesByType(ctx, taskID, NodeTestClaim, "")
 	if err != nil {
-		return nil, nil, fmt.Errorf("rings: 摘除废弃查判断: %w", err)
+		return nil, fmt.Errorf("rings: 摘除废弃查判断: %w", err)
 	}
 	var claimIDs []string
 	for _, c := range claims {
@@ -119,20 +106,9 @@ func DiscardAnchoredFindings(ctx context.Context, store *Store, taskID, reason, 
 			claimIDs = append(claimIDs, c.ID)
 		}
 	}
-	hypos, err := store.NodesByType(ctx, taskID, NodeHypothesis, "")
-	if err != nil {
-		return nil, nil, fmt.Errorf("rings: 摘除废弃查假设: %w", err)
+	if len(claimIDs) == 0 {
+		return nil, nil
 	}
-	var hypoIDs []string
-	for _, h := range hypos {
-		if hypoDiscardable[h.Status] && anchored(h.ID) {
-			hypoIDs = append(hypoIDs, h.ID)
-		}
-	}
-	if len(claimIDs) == 0 && len(hypoIDs) == 0 {
-		return nil, nil, nil
-	}
-
 	var events []Event
 	for _, id := range claimIDs {
 		events = append(events,
@@ -142,17 +118,8 @@ func DiscardAnchoredFindings(ctx context.Context, store *Store, taskID, reason, 
 				Payload: NodeStateChanged{NodeID: id, Status: TestClaimDiscarded, Note: reason}},
 		)
 	}
-	for _, id := range hypoIDs {
-		events = append(events,
-			Event{Kind: EventHypothesisRecord, Actor: actor,
-				Payload: HypothesisRecord{HypothesisID: id, Type: HypothesisRecEvaluation,
-					Decision: HypothesisDiscard, Reason: reason}},
-			Event{Kind: EventNodeStateChanged, Actor: actor,
-				Payload: NodeStateChanged{NodeID: id, Status: HypothesisDiscarded, Note: reason}},
-		)
-	}
 	if _, err := store.Append(ctx, taskID, events...); err != nil {
-		return claimIDs, hypoIDs, fmt.Errorf("rings: 摘除废弃落账: %w", err)
+		return claimIDs, fmt.Errorf("rings: 摘除废弃落账: %w", err)
 	}
-	return claimIDs, hypoIDs, nil
+	return claimIDs, nil
 }

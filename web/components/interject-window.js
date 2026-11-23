@@ -1,10 +1,11 @@
 "use client";
 
+import { ReadableText } from "@/components/readable-text";
 import * as React from "react";
 import { toast } from "sonner";
 
 import { iconOf } from "@/components/icons";
-import { ChatStream, tailGrowSig } from "@/components/chat-blocks";
+import { ChatStream, tailGrowSig, ThinkingCard } from "@/components/chat-blocks";
 import { SessionInfoBar } from "@/components/session-info-bar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -60,6 +61,7 @@ export function InterjectWindow({ open, target, task, onClose }) {
   const url = open && taskID ? `/api/tasks/${taskID}/interject?${query}` : null;
   const { data, error, setData } = usePolling(url || "/api/healthz", 2000, {
     immediate: Boolean(url),
+    live: url ? [`interject:${taskID}:${isUnit ? "unit" : "overmind"}:${isUnit ? target.sessionID : ""}`, `steers:${taskID}`] : null,
   });
 
   const [text, setText] = React.useState("");
@@ -325,10 +327,11 @@ export function InterjectBlock({ msg, steerStateOf }) {
           <div className="max-w-[85%] text-xs text-status-danger">{msg.note}</div>
         )}
       </div>
+      {msg.thinking && <ThinkingCard text={msg.thinking} active={msg.thinking_active && msg.state === "delivered"} />}
       {msg.reply && (
         <div className="flex flex-col items-start gap-0.5">
           <div className="t-body max-w-[90%] rounded-lg border border-border/55 bg-background px-3 py-2 whitespace-pre-wrap [overflow-wrap:anywhere]">
-            {msg.reply}
+            <ReadableText text={msg.reply} />
           </div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Badge variant="outline">回答</Badge>

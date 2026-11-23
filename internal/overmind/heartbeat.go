@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -98,7 +99,7 @@ func (l *Loop) heartbeatLoop(ctx context.Context) {
 		findings, err := l.prescreen(context.Background())
 		if err != nil {
 			l.setErr(err)
-			continue // 本拍失败如实留 LastErr,下拍再查
+			continue // 本拍失败如实留 lastErr,下拍再查
 		}
 		runlog.Debugf("心跳巡检: 任务 %s 本拍发现 %d 项", l.TaskID, len(findings))
 		if berr := blackbox.Record(context.Background(), l.Store, l.TaskID, ActorOvermind,
@@ -122,17 +123,12 @@ func (l *Loop) heartbeatLoop(ctx context.Context) {
 		// 到点必醒机器循环(P3-14a B):预筛只做标记不承担唤醒判定。
 		// P4-42 ⑤:无新触发事件时循环由空闲硬底线接手(idleFloorDue——
 		// 图上无在跑/待执行步骤且目标未达成即给一轮拆解),findings=0
-		// 照样踢达;有在跑工作时拆解仍按 P4-29 触发收紧跳过。
+		// 照样踢达；有告警则由同一循环复查当前执行，普通心跳不额外规划。
 		select {
 		case l.hbKick <- struct{}{}:
 		default:
 		}
 	}
-}
-
-// hbFinding 预筛发现(落黑匣子前的中间态)。
-type hbFinding struct {
-	rec rings.BlackboxRecord
 }
 
 // prescreen 一拍机器预筛(确定性,零 LLM):对图上每个在跑步骤查三类
@@ -162,8 +158,8 @@ func (l *Loop) prescreen(ctx context.Context) ([]rings.BlackboxRecord, error) {
 
 	// 按步骤归拢执行事件(工具调用/会话起止),按单位归拢窗口内 token。
 	type stepTrace struct {
-		startedAt     time.Time
 		unitID        string
+		transcript    string
 		toolCalls     []rings.SwarmRecord
 		lastUpdatedAt time.Time
 	}
@@ -183,12 +179,18 @@ func (l *Loop) prescreen(ctx context.Context) ([]rings.BlackboxRecord, error) {
 		}
 		switch rec.Type {
 		case rings.SwarmRecSessionStarted:
-			tr.startedAt = ev.OccurredAt
 			tr.unitID = rec.UnitID
-			if tr.lastUpdatedAt.IsZero() {
+			tr.transcript = rec.TranscriptID
+			tr.lastUpdatedAt = ev.OccurredAt
+			tr.toolCalls = nil
+		case rings.SwarmRecToolStarted:
+			if rec.UnitID == tr.unitID {
 				tr.lastUpdatedAt = ev.OccurredAt
 			}
 		case rings.SwarmRecToolCall:
+			if rec.UnitID != tr.unitID {
+				continue
+			}
 			tr.toolCalls = append(tr.toolCalls, rec)
 			tr.lastUpdatedAt = ev.OccurredAt
 		}
@@ -210,8 +212,12 @@ func (l *Loop) prescreen(ctx context.Context) ([]rings.BlackboxRecord, error) {
 		if tr == nil || tr.unitID == "" {
 			continue // 投影在跑但无执行记录:领取竞态,留待下一拍
 		}
+		waiting := false
+		if l.Swarm != nil {
+			waiting = l.Swarm.ClockWait(l.TaskID, tr.transcript) != "" || l.Swarm.UnitPaused(l.TaskID, s.ID)
+		}
 		// ① 进度停滞:上次账本活动(会话起或末次工具调用)距今超窗。
-		if !tr.lastUpdatedAt.IsZero() && now.Sub(tr.lastUpdatedAt) > stallAfter {
+		if !waiting && !tr.lastUpdatedAt.IsZero() && now.Sub(tr.lastUpdatedAt) > stallAfter {
 			findings = append(findings, rings.BlackboxRecord{
 				Type: rings.BlackboxHbStall, StepID: s.ID, UnitID: tr.unitID,
 				Detail: map[string]any{
@@ -269,14 +275,38 @@ func trailingRepeat(calls []rings.SwarmRecord) int {
 
 // heartbeatMarks 快照的"心跳标记"节素材:近两个心跳窗口内的预筛发现
 // (确定性读黑匣子,主宰被唤醒后据此复查在跑意图;过旧标记自然滚出)。
-func (l *Loop) heartbeatMarks(ctx context.Context) []string {
+func heartbeatAlert(kind string) bool {
+	return kind == rings.BlackboxHbStall || kind == rings.BlackboxHbRepeat || kind == rings.BlackboxHbBurnAnomaly
+}
+
+func (l *Loop) heartbeatMarks(ctx context.Context, steps []rings.NodeFull, owners map[string]rings.ExecutionOwner) []string {
 	evs, err := l.Store.Events(ctx, l.TaskID, 0, 0)
 	if err != nil {
 		return nil
 	}
 	since := time.Now().Add(-2 * l.hbInterval())
-	var out []string
+	status := map[string]string{}
+	for _, step := range steps {
+		status[step.ID] = step.Status
+	}
+	latest := map[string]rings.RawEvent{}
 	for _, ev := range evs {
+		if ev.Kind != rings.EventBlackboxRecord || !ev.OccurredAt.After(since) {
+			continue
+		}
+		var rec rings.BlackboxRecord
+		if json.Unmarshal(ev.Payload, &rec) != nil || !heartbeatAlert(rec.Type) {
+			continue
+		}
+		latest[rec.StepID+"\x00"+rec.UnitID+"\x00"+rec.Type] = ev
+	}
+	selected := make([]rings.RawEvent, 0, len(latest))
+	for _, ev := range latest {
+		selected = append(selected, ev)
+	}
+	sort.Slice(selected, func(i, j int) bool { return selected[i].Revision < selected[j].Revision })
+	var out []string
+	for _, ev := range selected {
 		if ev.Kind != rings.EventBlackboxRecord || !ev.OccurredAt.After(since) {
 			continue
 		}
@@ -288,20 +318,22 @@ func (l *Loop) heartbeatMarks(ctx context.Context) []string {
 		switch rec.Type {
 		case rings.BlackboxHbStall:
 			line = fmt.Sprintf("%s [%s] 进度停滞: %v 秒无工具调用记录",
-				rec.StepID, markRunning, rec.Detail["silent_seconds"])
+				rec.StepID, status[rec.StepID], rec.Detail["silent_seconds"])
 		case rings.BlackboxHbRepeat:
 			line = fmt.Sprintf("%s [%s] 重复动作: 连续 %v 次相同调用 %v%v",
-				rec.StepID, markRunning, rec.Detail["repeat"], rec.Detail["tool"], rec.Detail["args"])
+				rec.StepID, status[rec.StepID], rec.Detail["repeat"], rec.Detail["tool"], rec.Detail["args"])
 		case rings.BlackboxHbBurnAnomaly:
 			line = fmt.Sprintf("%s [%s] 预算消耗异常: 一拍消耗 %v tokens(阈 %v)",
-				rec.StepID, markRunning, rec.Detail["burned_tokens"], rec.Detail["threshold"])
+				rec.StepID, status[rec.StepID], rec.Detail["burned_tokens"], rec.Detail["threshold"])
 		default:
 			continue
 		}
-		out = append(out, line)
+		current := owners[rec.StepID].UnitID
+		binding := "对应当前执行"
+		if current != rec.UnitID || status[rec.StepID] != "running" {
+			binding = "历史执行标记，不控制原单位；当前单位=" + current
+		}
+		out = append(out, fmt.Sprintf("%s；告警单位=%s，发生于%s；%s。高Token本身不等于无进展", line, rec.UnitID, ev.OccurredAt.Format(time.RFC3339), binding))
 	}
 	return out
 }
-
-// markRunning 快照里标记节的固定状态词(在跑意图)。
-const markRunning = "running"

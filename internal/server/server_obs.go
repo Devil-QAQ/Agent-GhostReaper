@@ -80,12 +80,13 @@ func (s *Server) handleObsTokens(w http.ResponseWriter, r *http.Request) {
 	}
 
 	totals := struct {
-		Calls      int `json:"calls"`
-		Tasks      int `json:"tasks"`
-		Input      int `json:"input"`
-		Output     int `json:"output"`
-		CacheRead  int `json:"cache_read"`
-		CacheWrite int `json:"cache_write"`
+		Calls        int `json:"calls"`
+		Tasks        int `json:"tasks"`
+		Input        int `json:"input"`
+		Output       int `json:"output"`
+		CacheRead    int `json:"cache_read"`
+		CacheWrite   int `json:"cache_write"`
+		UsageMissing int `json:"usage_missing"`
 	}{}
 	byTask := map[string]*obsTokenDim{}
 	byModel := map[string]*obsTokenDim{}
@@ -95,6 +96,9 @@ func (s *Server) handleObsTokens(w http.ResponseWriter, r *http.Request) {
 	var firstAt, lastAt time.Time
 	for _, x := range rows {
 		totals.Calls++
+		if x.UsageMissing {
+			totals.UsageMissing++
+		}
 		totals.Input += x.InputTokens
 		totals.Output += x.OutputTokens
 		totals.CacheRead += x.CacheReadTokens

@@ -296,7 +296,7 @@ func TestHeartbeatWakesDeadWait(t *testing.T) {
 		// P3-14 死等形态的第三要素:声明停在 awaiting_round 待派下一轮反证。
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u0", Payload: rings.NodeAdded{
 			NodeID: "tc-1", NodeType: rings.NodeTestClaim, Title: "待下轮反证声明",
-			Status: rings.TestClaimAwaitingRound,
+			Status: "awaiting_round",
 			Detail: map[string]any{"unit_id": "u0", "step_id": "s0"}}},
 	); err != nil {
 		t.Fatalf("种死等形态失败: %v", err)

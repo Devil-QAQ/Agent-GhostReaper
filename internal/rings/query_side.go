@@ -168,6 +168,39 @@ func (s *Store) StepLatestSession(ctx context.Context, taskID, stepID string) (u
 	return unitID, transcriptID, true, nil
 }
 
+// PanoUnitSession 全景图链路的单位卡行(P5-09⑥ 意图出链"单位"):单位
+// 号 + 会话锚(点击跳会话页)+ 收场状态(词面由 UnitFinishWord 统一)。
+type PanoUnitSession struct {
+	UnitID       string
+	TranscriptID string
+	EndStatus    string
+}
+
+// UnitSessionsByStep 步骤的全部单位会话(start_rev 升序;unit_sessions
+// 投影直查)。一 Step 一单位,让位重领/重派轮次各有会话时全列出。
+func (s *Store) UnitSessionsByStep(ctx context.Context, taskID, stepID string) ([]PanoUnitSession, error) {
+	if taskID == "" {
+		return nil, ErrEmptyTaskID
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT unit_id, transcript_id, end_status FROM unit_sessions
+		 WHERE task_id = ? AND step_id = ? ORDER BY start_rev`, taskID, stepID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("rings: 查步骤单位会话: %w", err)
+	}
+	defer rows.Close()
+	var out []PanoUnitSession
+	for rows.Next() {
+		var r PanoUnitSession
+		if err := rows.Scan(&r.UnitID, &r.TranscriptID, &r.EndStatus); err != nil {
+			return nil, fmt.Errorf("rings: 扫描步骤单位会话: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // ---- 会话组织信息(session_labels) ----
 
 // SessionLabels 会话组织信息投影(替代事件流扫描;无行返回空表)。
@@ -328,6 +361,14 @@ func (s *Store) ScopePendingCount(ctx context.Context, taskID string) (int, erro
 // scopePendingViews 的"最新记录"口径同源,红队可否决卡/渗透拦截卡/
 // 经其他通道裁决过的卡各归各)。投影表小查询,零事件流扫描。
 func (s *Store) PendingScopeCards(ctx context.Context, taskID string) ([]ApprovalRow, error) {
+	return s.pendingCardsOfType(ctx, taskID, ApprovalRecScopeWait)
+}
+
+func (s *Store) PendingAssetProposals(ctx context.Context, taskID string) ([]ApprovalRow, error) {
+	return s.pendingCardsOfType(ctx, taskID, ApprovalRecAssetWait)
+}
+
+func (s *Store) pendingCardsOfType(ctx context.Context, taskID, kind string) ([]ApprovalRow, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT a.rev, a.request_id, a.step_id, a.unit_id, a.type, a.action_level, a.harm_class,
 		   a.intent, a.tool_name, a.tool_args, a.note, a.deny_line, a.decided_by, a.reason,
@@ -338,7 +379,7 @@ func (s *Store) PendingScopeCards(ctx context.Context, taskID string) ([]Approva
 		     SELECT 1 FROM approval_records b
 		      WHERE b.task_id = a.task_id AND b.request_id = a.request_id AND b.rev > a.rev
 		   )`,
-		taskID, ApprovalRecScopeWait,
+		taskID, kind,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("rings: 查询待决范围卡: %w", err)
@@ -355,39 +396,6 @@ func (s *Store) PendingScopeCards(ctx context.Context, taskID string) ([]Approva
 		}
 		r.OccurredAt = FmtLocal(occurred)
 		out = append(out, r)
-	}
-	return out, rows.Err()
-}
-
-// ---- 假设结论(hyp_states) ----
-
-// HypStateRow 假设最新评估/验证结论。
-type HypStateRow struct {
-	VerifyStep string
-	Verifier   string
-	Decision   string
-	Reason     string
-	Verdict    string
-}
-
-// HypStates 列任务全部假设结论(hypothesis_id → 行)。
-func (s *Store) HypStates(ctx context.Context, taskID string) (map[string]HypStateRow, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT hypothesis_id, verify_step, verifier, decision, reason, verdict
-		 FROM hyp_states WHERE task_id = ?`, taskID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("rings: 查询假设结论: %w", err)
-	}
-	defer rows.Close()
-	out := map[string]HypStateRow{}
-	for rows.Next() {
-		var hypID string
-		var r HypStateRow
-		if err := rows.Scan(&hypID, &r.VerifyStep, &r.Verifier, &r.Decision, &r.Reason, &r.Verdict); err != nil {
-			return nil, fmt.Errorf("rings: 扫描假设结论: %w", err)
-		}
-		out[hypID] = r
 	}
 	return out, rows.Err()
 }
@@ -509,14 +517,16 @@ type ClaimDigest struct {
 	ReportExcludedReason string
 	EvidenceBinds        int
 	ReproEvents          int
+	Title                string          // 独立显示名称
+	SummaryRev           int64           // 显示摘要自身的账本版本，来自现有 summary.rev
 	Statement            string          // 校对后存在性描述(空 = 未生成)
 	Impact               string          // 校对后影响面(空 = 未生成)
 	Facts                []FactStatement // 校对后事实描述(空 = 未生成)
 }
 
 // ClaimCaseProjection 判断卷宗投影(全列;详情与报告装配的数据面)。
-// Timeline 的 At 为 RFC3339Nano 存储态(消费侧 FmtLocal 呈现);
-// TimingView 由增量态换算(Rounds = 当前战役步骤数)。
+// Timeline 的 At 为 RFC3339Nano 存储态(消费侧 FmtLocal 呈现)。
+// (旧 Timing 耗时拆解呈现视图已随反证轮耗时链路退役删除,P5-03③。)
 type ClaimCaseProjection struct {
 	ClaimDigest
 	Timeline     []CaseTimelineEntry
@@ -528,22 +538,9 @@ type ClaimCaseProjection struct {
 	Discoverer   string
 	DiscoverStep string
 	DiscoverSess string
-	Timing       TimingView
-	// RoundHumans 逐轮反证人话三段(P4-64 ①:每轮随 falsify 记录同批
-	// 冻结,按轮 upsert;读侧与存量 repro.Rounds 合并,新事件优先)。
-	RoundHumans map[int]FalsifyRoundHuman
 	// RetestNotes 复测备注校对稿(P4-64 ⑦:按轮匹配,空 = 该轮无校对
 	// 稿,读侧退机器记录 Note 原文)。
 	RetestNotes map[int]string
-}
-
-// TimingView 耗时拆解呈现视图。
-type TimingView struct {
-	LandedAt   string
-	TerminalAt string
-	QueueSec   float64
-	ExecSec    float64
-	Rounds     int
 }
 
 // claimDigestCols 摘要列清单(列表读只取小字段,不触 JSON 大列)。
@@ -567,6 +564,7 @@ func scanDigest(scan func(...any) error) (ClaimDigest, error) {
 	if rawSummary != "" {
 		var s SummaryDigest
 		if json.Unmarshal([]byte(rawSummary), &s) == nil {
+			d.SummaryRev, d.Title = s.Rev, s.Title
 			d.Statement, d.Impact, d.Facts = s.Statement, s.Impact, s.Facts
 		}
 	}
@@ -599,8 +597,8 @@ func (s *Store) ClaimDigests(ctx context.Context, taskID string) (map[string]Cla
 func (s *Store) ClaimCaseOf(ctx context.Context, taskID, claimID string) (*ClaimCaseProjection, bool, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+claimDigestCols+`, timeline, alternatives, alt_killed, repro,
-		   evidence, discoverer, discover_step, discover_session, timing, summary,
-		   round_humans, retest_notes
+		   evidence, discoverer, discover_step, discover_session, summary,
+		   retest_notes
 		 FROM claim_cases WHERE task_id = ? AND claim_id = ?`, taskID, claimID,
 	)
 	if err != nil {
@@ -621,8 +619,8 @@ func (s *Store) ClaimCaseOf(ctx context.Context, taskID, claimID string) (*Claim
 func (s *Store) ClaimCases(ctx context.Context, taskID string) ([]*ClaimCaseProjection, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+claimDigestCols+`, timeline, alternatives, alt_killed, repro,
-		   evidence, discoverer, discover_step, discover_session, timing, summary,
-		   round_humans, retest_notes
+		   evidence, discoverer, discover_step, discover_session, summary,
+		   retest_notes
 		 FROM claim_cases WHERE task_id = ? ORDER BY claim_id`, taskID,
 	)
 	if err != nil {
@@ -643,8 +641,8 @@ func (s *Store) ClaimCases(ctx context.Context, taskID string) ([]*ClaimCaseProj
 // scanClaimCase 全列单行扫描:摘要小字段 + JSON 列解码 + 耗时态换算。
 func scanClaimCase(scan func(...any) error) (*ClaimCaseProjection, error) {
 	var p ClaimCaseProjection
-	var rawTimeline, rawAlts, rawKilled, rawRepro, rawEvidence, rawTiming, rawSummary string
-	var rawRounds, rawNotes string
+	var rawTimeline, rawAlts, rawKilled, rawRepro, rawEvidence, rawSummary string
+	var rawNotes string
 	var hasEvidence, reportExcluded int
 	err := scan(&p.ClaimID, &p.FalsifyStep, &p.Verifier, &p.PendingReason, &p.VerdictRev,
 		&p.Severity, &p.ReproSteps, &p.RetestVerdict, &p.RetestRound, &p.RetestAt,
@@ -652,8 +650,8 @@ func scanClaimCase(scan func(...any) error) (*ClaimCaseProjection, error) {
 		&hasEvidence, &reportExcluded, &p.ReportExcludedReason,
 		&p.EvidenceBinds, &p.ReproEvents,
 		&rawTimeline, &rawAlts, &rawKilled, &rawRepro, &rawEvidence,
-		&p.Discoverer, &p.DiscoverStep, &p.DiscoverSess, &rawTiming, &rawSummary,
-		&rawRounds, &rawNotes)
+		&p.Discoverer, &p.DiscoverStep, &p.DiscoverSess, &rawSummary,
+		&rawNotes)
 	if err != nil {
 		return nil, err
 	}
@@ -688,18 +686,6 @@ func scanClaimCase(scan func(...any) error) (*ClaimCaseProjection, error) {
 	if rawEvidence != "" {
 		_ = json.Unmarshal([]byte(rawEvidence), &p.Evidence)
 	}
-	if rawRounds != "" {
-		var m map[string]FalsifyRoundHuman
-		if json.Unmarshal([]byte(rawRounds), &m) == nil {
-			p.RoundHumans = map[int]FalsifyRoundHuman{}
-			for k, v := range m {
-				if n, cerr := strconv.Atoi(k); cerr == nil {
-					v.Round = n
-					p.RoundHumans[n] = v
-				}
-			}
-		}
-	}
 	if rawNotes != "" {
 		var m map[string]string
 		if json.Unmarshal([]byte(rawNotes), &m) == nil {
@@ -711,38 +697,28 @@ func scanClaimCase(scan func(...any) error) (*ClaimCaseProjection, error) {
 			}
 		}
 	}
-	if rawTiming != "" {
-		var t TimingDigest
-		if json.Unmarshal([]byte(rawTiming), &t) == nil {
-			p.Timing = TimingView{
-				LandedAt: FmtLocal(t.LandedAt), TerminalAt: FmtLocal(t.TerminalAt),
-				QueueSec: t.QueueSec, ExecSec: t.ExecSec, Rounds: len(t.Steps),
-			}
-		}
-	}
 	return &p, nil
 }
 
-// NodePolishRow 节点显示层包装(node_polish 投影行):事实取 Title/
-// Statement,假设取 Title/Basis/Reason;空字段 = 未生成,读侧退原文。
-// Unpolished 为标题未过机器语闸门的如实标注(P4-24 ② 同款,读侧渲染
-// 一行说明)。
+// NodePolishRow holds the latest display text without changing the original node.
 type NodePolishRow struct {
 	NodeID     string
 	Title      string
 	Statement  string
-	Basis      string
-	Reason     string
 	Unpolished bool
 	Rev        int64
+	SourceRev  int64
 }
 
-// NodePolish 列任务全部节点显示层包装(node_id → 行)。事实/假设标题
-// 与文本的读侧优先表:一次小查询,列表与图装配共用(空表 = 全退原文)。
+// NodePolish provides shared display text for facts and intents.
 func (s *Store) NodePolish(ctx context.Context, taskID string) (map[string]NodePolishRow, error) {
+	sources, err := s.NodeTextSourceRevs(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT node_id, title, statement, basis, reason, unpolished, rev
-		 FROM node_polish WHERE task_id = ?`, taskID,
+		`SELECT p.node_id, p.title, p.statement, p.unpolished, p.rev, COALESCE(json_extract(e.payload,'$.source_rev'),0)
+		 FROM node_polish p LEFT JOIN events e ON e.task_id=p.task_id AND e.revision=p.rev WHERE p.task_id = ?`, taskID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("rings: 查询节点文本包装: %w", err)
@@ -752,10 +728,13 @@ func (s *Store) NodePolish(ctx context.Context, taskID string) (map[string]NodeP
 	for rows.Next() {
 		var r NodePolishRow
 		var unpolished int
-		if err := rows.Scan(&r.NodeID, &r.Title, &r.Statement, &r.Basis, &r.Reason, &unpolished, &r.Rev); err != nil {
+		if err := rows.Scan(&r.NodeID, &r.Title, &r.Statement, &unpolished, &r.Rev, &r.SourceRev); err != nil {
 			return nil, fmt.Errorf("rings: 扫描节点文本包装: %w", err)
 		}
 		r.Unpolished = unpolished != 0
+		if r.SourceRev > 0 && sources[r.NodeID] != r.SourceRev {
+			continue
+		}
 		out[r.NodeID] = r
 	}
 	return out, rows.Err()

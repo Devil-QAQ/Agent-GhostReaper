@@ -13,11 +13,10 @@ import (
 
 // seedSweepGraph 铺垫终局残留形态(确定性):无主排队步骤(s1 可领取 /
 // s3 等前置 s2)、在跑步骤 s2(中止记账归单位,清点不动)、判断四态各一
-// (testing / candidate / confirmed / pending——清点只收 testing)。
-// c1 带冻结标准与反证步骤绑定,与真实 testing 判断同构。
+// (candidate / insufficient / confirmed / 存量 testing——P5-02⑤ 起清点
+// 只收候选:三查未完成的候选判断落证据不足;存量旧过程态不动)。
 func seedSweepGraph(t *testing.T, store *rings.Store, task string) {
 	t.Helper()
-	altList := []any{map[string]any{"id": "alt1", "label": "缓存污染"}}
 	events := []rings.Event{
 		{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
 			NodeID: "s1", NodeType: rings.NodeStep, Title: "排队中", Status: "dispatched"}},
@@ -29,20 +28,20 @@ func seedSweepGraph(t *testing.T, store *rings.Store, task string) {
 		{Kind: rings.EventEdgeAdded, Actor: "overmind", Payload: rings.EdgeAdded{
 			EdgeType: rings.EdgeDependsOn, FromNode: "s3", ToNode: "s2"}},
 		{Kind: rings.EventNodeAdded, Actor: "swarm:u1", Payload: rings.NodeAdded{
-			NodeID: "c1", NodeType: rings.NodeTestClaim, Title: "反证中判断", Status: rings.TestClaimTesting,
+			NodeID: "c1", NodeType: rings.NodeTestClaim, Title: "候选判断(三查未完成)", Status: rings.TestClaimCandidate,
 			Detail: map[string]any{"unit_id": "u1", "impact": "影响",
-				"standard": arbiter.DefaultClaimStandard(), "alternatives": altList}}},
+				"standard": arbiter.DefaultClaimStandard()}}},
 		{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
-			NodeID: "sf1", NodeType: rings.NodeStep, Title: "反证(第 1 轮)", Status: "dispatched",
-			Detail: map[string]any{"kind": "falsify", "testclaim_id": "c1", "round": 1}}},
+			NodeID: "sf1", NodeType: rings.NodeStep, Title: "补做步骤", Status: "dispatched",
+			Detail: map[string]any{"kind": "retake", "claim_id": "c1", "reason": "证据不可追溯"}}},
 		{Kind: rings.EventNodeAdded, Actor: "swarm:u1", Payload: rings.NodeAdded{
-			NodeID: "c2", NodeType: rings.NodeTestClaim, Title: "候选判断", Status: rings.TestClaimCandidate,
+			NodeID: "c2", NodeType: rings.NodeTestClaim, Title: "既有证据不足", Status: rings.TestClaimInsufficient,
 			Detail: map[string]any{"unit_id": "u1", "standard": arbiter.DefaultClaimStandard()}}},
 		{Kind: rings.EventNodeAdded, Actor: "swarm:u1", Payload: rings.NodeAdded{
 			NodeID: "c3", NodeType: rings.NodeTestClaim, Title: "已确认判断", Status: rings.TestClaimConfirmed,
 			Detail: map[string]any{"unit_id": "u1", "standard": arbiter.DefaultClaimStandard()}}},
 		{Kind: rings.EventNodeAdded, Actor: "swarm:u1", Payload: rings.NodeAdded{
-			NodeID: "c4", NodeType: rings.NodeTestClaim, Title: "既有待确认", Status: rings.TestClaimPending,
+			NodeID: "c4", NodeType: rings.NodeTestClaim, Title: "存量 testing(不动)", Status: "testing",
 			Detail: map[string]any{"unit_id": "u1", "standard": arbiter.DefaultClaimStandard()}}},
 	}
 	if _, err := store.Append(context.Background(), task, events...); err != nil {
@@ -51,8 +50,8 @@ func seedSweepGraph(t *testing.T, store *rings.Store, task string) {
 }
 
 // sweepAssertCommon 断言清点后的共同形态:无主排队步骤全部中止(留痕
-// "任务收场")、testing 判断回挂起带理由(c1 的 falsify 步骤 sf1 同为
-// dispatched 一并中止)、其余判断原态、在跑步骤不动。
+// "任务收场")、候选判断(c1)落证据不足带理由(c1 的补做步骤 sf1
+// 同为 dispatched 一并中止)、其余判断原态、在跑步骤不动。
 func sweepAssertCommon(t *testing.T, store *rings.Store, task, wantReason string) {
 	t.Helper()
 	ctx := context.Background()
@@ -75,16 +74,16 @@ func sweepAssertCommon(t *testing.T, store *rings.Store, task, wantReason string
 		}
 		switch id {
 		case "c2":
-			if n.Status != rings.TestClaimCandidate {
-				t.Fatalf("候选判断不应被清点(仍锤炼中),现 %s", n.Status)
+			if n.Status != rings.TestClaimInsufficient {
+				t.Fatalf("既有证据不足不动,现 %s", n.Status)
 			}
 		case "c3":
 			if n.Status != rings.TestClaimConfirmed {
 				t.Fatalf("已确认判断不动,现 %s", n.Status)
 			}
 		case "c4":
-			if n.Status != rings.TestClaimPending {
-				t.Fatalf("既有待确认不动,现 %s", n.Status)
+			if n.Status != "testing" {
+				t.Fatalf("存量 testing 判断清点不动(升级删除路线),现 %s", n.Status)
 			}
 		}
 	}
@@ -92,8 +91,8 @@ func sweepAssertCommon(t *testing.T, store *rings.Store, task, wantReason string
 	if err != nil {
 		t.Fatalf("查判断 c1: %v", err)
 	}
-	if c1.Status != rings.TestClaimPending {
-		t.Fatalf("testing 判断应回挂起,现 %s", c1.Status)
+	if c1.Status != rings.TestClaimInsufficient {
+		t.Fatalf("候选判断应落证据不足,现 %s", c1.Status)
 	}
 	digests, err := store.ClaimDigests(ctx, task)
 	if err != nil {
@@ -103,7 +102,7 @@ func sweepAssertCommon(t *testing.T, store *rings.Store, task, wantReason string
 		t.Fatalf("c1 搁置理由不符: %q", got)
 	}
 	if got := digests["c4"].PendingReason; got != "" {
-		t.Fatalf("既有待确认 c4 的旧理由不应被清点改写,现 %q", got)
+		t.Fatalf("存量 testing c4 不被清点触碰,现理由 %q", got)
 	}
 	// 留痕可查:中止事件带原因"任务收场",verdict 记录带中断理由。
 	evs, err := store.Events(ctx, task, 0, 0)
@@ -132,7 +131,7 @@ func sweepAssertCommon(t *testing.T, store *rings.Store, task, wantReason string
 				continue
 			}
 			verdicts++
-			if r.Decision != rings.VerdictPending || r.PendingReason != wantReason {
+			if r.Decision != rings.VerdictInsufficient || r.PendingReason != wantReason {
 				t.Fatalf("c1 收场裁决不符: %+v", r)
 			}
 			if len(r.Conditions) == 0 {
@@ -161,7 +160,7 @@ func TestP443SweepOnStop(t *testing.T) {
 	if err := mgr.StopBy("sw-1", map[string]any{"reason": "测试熔断"}); err != nil {
 		t.Fatalf("熔断失败: %v", err)
 	}
-	sweepAssertCommon(t, store, "sw-1", "任务终止中断反证，可被唤醒")
+	sweepAssertCommon(t, store, "sw-1", "任务终止时中断，证据未立，可被唤醒")
 
 	// 紧邻:终态生命周期事件的下一笔即清点事件。
 	evs, err := store.Events(context.Background(), "sw-1", 0, 0)
@@ -218,7 +217,7 @@ func TestP443SweepOnFinishSettling(t *testing.T) {
 	if st := mgr.Task("sw-2").Status(); st != StatusCompleted {
 		t.Fatalf("应落 completed: %s", st)
 	}
-	sweepAssertCommon(t, store, "sw-2", "任务完成中断反证，可被唤醒")
+	sweepAssertCommon(t, store, "sw-2", "任务完成时中断，证据未立，可被唤醒")
 }
 
 // TestP443SweepNotOnNonTerminal 非终态一律不清:冬眠/暂停(在途状态保留
@@ -238,8 +237,8 @@ func TestP443SweepNotOnNonTerminal(t *testing.T) {
 				t.Fatalf("非终态下 %s 应保持 dispatched: %v %+v", id, err, n)
 			}
 		}
-		if n, _ := store.Node(ctx, "sw-3", "c1"); n.Status != rings.TestClaimTesting {
-			t.Fatalf("非终态下 c1 应保持 testing: %s", n.Status)
+		if n, _ := store.Node(ctx, "sw-3", "c1"); n.Status != rings.TestClaimCandidate {
+			t.Fatalf("非终态下 c1 应保持候选: %s", n.Status)
 		}
 	}
 
@@ -265,5 +264,5 @@ func TestP443SweepNotOnNonTerminal(t *testing.T) {
 	if err := mgr.StopBy("sw-3", nil); err != nil {
 		t.Fatalf("冬眠中熔断失败: %v", err)
 	}
-	sweepAssertCommon(t, store, "sw-3", "任务终止中断反证，可被唤醒")
+	sweepAssertCommon(t, store, "sw-3", "任务终止时中断，证据未立，可被唤醒")
 }

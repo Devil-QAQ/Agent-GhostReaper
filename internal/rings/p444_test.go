@@ -297,16 +297,13 @@ func TestP444AssetGraphScopeOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
 	for _, a := range ag.Assets {
 		if a.ID == "a-o1" {
-			found = true
-			if !a.ScopeOut || a.Source != AssetSourceDiscovered {
-				t.Fatalf("范围外标记应随资产图读出: %+v", a)
-			}
+			t.Fatal("unjoined legacy discovery entered current inventory")
 		}
 	}
-	if !found {
-		t.Fatal("资产图应含发现资产")
+	n, err := s.Node(t.Context(), "t-1", "a-o1")
+	if err != nil || AssetScopeOf(n.Detail) != AssetScopeOut {
+		t.Fatal("historical observation was changed", err)
 	}
 }

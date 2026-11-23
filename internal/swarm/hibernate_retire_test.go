@@ -128,6 +128,7 @@ func TestHibernateRetireLandsTicketUnitAndResume(t *testing.T) {
 			return scriptedReply{Text: "写入完成。", Finish: "stop"}
 		}
 	})
+	model.requireBashApproval()
 	defer model.Close()
 	prov, err := model.provider()
 	if err != nil {
@@ -179,7 +180,7 @@ func TestHibernateRetireLandsTicketUnitAndResume(t *testing.T) {
 	if len(ledgerGate.Pending(task)) != 1 || ledgerGate.Pending(task)[0].ID != ticket.ID {
 		t.Fatalf("收场后票面应保持原票待决: %+v", ledgerGate.Pending(task))
 	}
-	recs := approvalEvents(t, store, task)
+	recs := approvalEventsForGate(t, store, task)
 	if len(recs) != 1 || recs[0].Type != rings.ApprovalRecRequested {
 		t.Fatalf("收场零裁决记录: %+v", recs)
 	}
@@ -193,7 +194,7 @@ func TestHibernateRetireLandsTicketUnitAndResume(t *testing.T) {
 	if len(ledgerGate.Pending(task)) != 0 {
 		t.Fatalf("唤醒后无主票应已清出")
 	}
-	if recs := approvalEvents(t, store, task); len(recs) != 1 {
+	if recs := approvalEventsForGate(t, store, task); len(recs) != 1 {
 		t.Fatalf("唤醒清出零新增记录: %+v", recs)
 	}
 	ckptGate.Clear(task)
@@ -228,7 +229,7 @@ func TestHibernateRetireLandsTicketUnitAndResume(t *testing.T) {
 		t.Fatalf("续跑应沿用原会话转录 %s,得到 %s", res1.TranscriptID, res2.TranscriptID)
 	}
 	// 账本:requested(旧票,悬而未决=崩溃等价)→ requested(新票)→ approved。
-	recs = approvalEvents(t, store, task)
+	recs = approvalEventsForGate(t, store, task)
 	if len(recs) != 3 || recs[0].Type != rings.ApprovalRecRequested ||
 		recs[1].Type != rings.ApprovalRecRequested || recs[2].Type != rings.ApprovalRecApproved {
 		t.Fatalf("审批记录应为 旧requested/新requested/approved: %+v", recs)

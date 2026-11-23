@@ -380,8 +380,8 @@ func TestConcurrentAndAttribution(t *testing.T) {
 			t.Fatalf("记录 %s 缺 blob", rec.ExchangeID)
 		}
 	}
-	if sess.Lost() != 0 {
-		t.Fatalf("留痕失败计数应恒 0,得到 %d", sess.Lost())
+	if sess.lost.Load() != 0 {
+		t.Fatalf("留痕失败计数应恒 0,得到 %d", sess.lost.Load())
 	}
 
 	// 回放全集:40 条全可还原、内容保真。

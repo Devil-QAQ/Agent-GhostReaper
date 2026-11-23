@@ -54,7 +54,7 @@ func TestManualAssetCreate(t *testing.T) {
 	post(t, h, http.MethodPost, "/api/tasks/p405-a/assets", `{
 		"assets":[
 			{"class":"subdomain","title":"api.example.com","parent":"example.com"},
-			{"class":"service","title":"http://10.10.0.9:8080","parent":"api.example.com"},
+			{"class":"service","title":"http://api.example.com:8080","parent":"api.example.com"},
 			{"class":"host","title":"10.10.0.10"}
 		]}`, http.StatusOK, &added)
 	if added["added"] != float64(3) || added["edges"] != float64(2) {
@@ -83,7 +83,7 @@ func TestManualAssetCreate(t *testing.T) {
 			if a.Source != rings.AssetSourceSeed {
 				t.Fatalf("种子资产来源应为 seed: %+v", a)
 			}
-		case "api.example.com", "http://10.10.0.9:8080", "10.10.0.10":
+		case "api.example.com", "http://api.example.com:8080", "10.10.0.10":
 			if a.Source != rings.AssetSourceManual {
 				t.Fatalf("手动资产来源应为 manual: %+v", a)
 			}
@@ -262,9 +262,9 @@ func TestRoEUpdateKeepsExcluded(t *testing.T) {
 	if len(roeView.ExcludedAssets) != 1 || roeView.ExcludedAssets[0] != hostID {
 		t.Fatalf("约束变更不应清空摘除清单: %+v", roeView.ExcludedAssets)
 	}
-	// 规则逐条端点(新增一条)同样保持。
-	post(t, h, http.MethodPost, "/api/tasks/p405-c/roe/rules",
-		`{"action":"上传文件","disposition":"forbid"}`, http.StatusOK, &roeView)
+	// Appending a textual requirement also preserves explicit exclusions.
+	post(t, h, http.MethodPost, "/api/tasks/p405-c/roe",
+		`{"creator_notes":"不得上传文件"}`, http.StatusOK, &roeView)
 	if len(roeView.ExcludedAssets) != 1 || roeView.ExcludedAssets[0] != hostID {
 		t.Fatalf("规则变更不应清空摘除清单: %+v", roeView.ExcludedAssets)
 	}

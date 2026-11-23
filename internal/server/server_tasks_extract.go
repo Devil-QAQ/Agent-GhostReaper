@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
@@ -34,24 +33,14 @@ type extractGoalIn struct {
 	Pred  string `json:"pred,omitempty"`
 }
 
-type extractConstraintIn struct {
-	Action      string   `json:"action"`
-	Disposition string   `json:"disposition"` // forbid|allow
-	Quota       int      `json:"quota,omitempty"`
-	Assets      []string `json:"assets,omitempty"` // 范围(资产标识;空 = 全部)
-	Patterns    []string `json:"patterns,omitempty"`
-	Basis       string   `json:"basis,omitempty"` // 描述原文依据(人工核对用)
-}
-
 type extractReply struct {
-	Title          string                `json:"title,omitempty"`
-	TaskType       string                `json:"task_type,omitempty"` // 任务类型预选(P4-44:按描述倾向,可改)
-	Assets         []extractAssetIn      `json:"assets"`
-	ExcludedAssets []extractAssetIn      `json:"excluded_assets"` // 初始摘除候选(P4-53 ③;仅预填,确认才落库)
-	Goals          []extractGoalIn       `json:"goals"`
-	CreatorNotes   []string              `json:"creator_notes"` // 注意事项候选(P4-49;仅预填,确认才落库)
-	Constraints    []extractConstraintIn `json:"constraints"`
-	Issues         []string              `json:"issues"` // 带问题被丢弃/修正的条目(如实呈现,不静默丢)
+	Title          string           `json:"title,omitempty"`
+	TaskType       string           `json:"task_type,omitempty"` // 任务类型预选(P4-44:按描述倾向,可改)
+	Assets         []extractAssetIn `json:"assets"`
+	ExcludedAssets []extractAssetIn `json:"excluded_assets"` // 初始摘除候选(P4-53 ③;仅预填,确认才落库)
+	Goals          []extractGoalIn  `json:"goals"`
+	CreatorNotes   []string         `json:"creator_notes"` // 注意事项候选(P4-49;仅预填,确认才落库)
+	Issues         []string         `json:"issues"`        // 带问题被丢弃/修正的条目(如实呈现,不静默丢)
 }
 
 // handleTaskExtract 建任务前的描述提取(单发短调用;跑完即弃)。
@@ -84,7 +73,6 @@ func (s *Server) handleTaskExtract(w http.ResponseWriter, r *http.Request) {
 		Messages: []llm.Message{
 			{Role: "user", Content: []llm.ContentBlock{{Type: llm.BlockText, Text: text}}},
 		},
-		MaxTokens: 4096,
 	})
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, fmt.Errorf("提取失败: %w", err))
@@ -100,37 +88,14 @@ func (s *Server) handleTaskExtract(w http.ResponseWriter, r *http.Request) {
 // (P4-44);反向规则(不编造)逐条钉死。注意事项(P4-49 ②)与范围分流
 // (P4-53 ③)均凭语义辨认不靠标志词,正反例定口径。
 func taskExtractSystem() string {
-	return `你是渗透测试任务建单的提取器。操作者粘贴一段授权描述,你从中提取建任务表单的候选内容,输出且只输出一个 JSON 对象(不要围栏、不要解释):
-{"title":"推断的任务标题(15字内)","task_type":"pentest|redteam","assets":[{"class":"资产类","title":"资产标识"}],"excluded_assets":[{"class":"资产类","title":"资产标识"}],"goals":[{"title":"目标","pred":"判定口径"}],"creator_notes":["注意事项"],"constraints":[{"action":"动作描述","disposition":"forbid|allow","quota":N,"assets":["资产标识"],"patterns":["RE2正则"],"basis":"描述里的原句"}]}
-提取纪律(违反即失职):
-- 只提取描述明确表达的内容,一律不编造、不推测、不补全:描述没写的约束、目标、次数上限一律不出现。
-- task_type 按描述倾向二选一:只针对单个站点/网址/域名("对这个网站""测这个系统")→ pentest(渗透任务:范围外发现的相邻资产待批准才可测);全面评估/整站/内网横向/多目标/给 IP 段或一批 IP("全面""整站""这些 IP""内网")→ redteam(红队任务:发现的相邻资产直接可测)。倾向不明默认 pentest。
-- 资产类 12 词:domain 域名 / subdomain 子域名 / host 主机 / service 服务 / api 接口 / organization 组织 / miniprogram 小程序 / app 应用 / wechat_account 公众号 / person 人员 / leak_info 泄露信息 / other 其他。URL、IP:端口 → service;纯 IP → host;点分域名 → subdomain 或 domain。
-- 范围语句分流(assets 与 excluded_assets 的取舍,凭语义辨认):
-  肯定范围("只测 X""就测 X""目标只有 X")→ X 进 assets;
-  否定范围("X 不要测""X 不许动""除 X 外都测"语义里被排除的 X)→ X 进 excluded_assets;
-  泛指排除转写为通配写法:"其他子域不要测"(配 aaa.x.com 类目标)→ "*.x.com" 进 excluded_assets;
-  同一目标既被肯定又被否定时以肯定为准(进 assets),不进 excluded_assets;
-  边界只认主机目标(域名/IP/网址),"不要改数据"这类打法要求不进 excluded_assets(归 creator_notes 或 constraints);
-  范围语句不再重复提取为 constraints——范围归范围(assets/excluded_assets),动作约束归 constraints("只测 X""X 不要测"不是动作描述)。
-  正例:"只测 aaa.x.com,其他子域不要测" → assets=[aaa.x.com]、excluded_assets=["*.x.com"],constraints 不收这两句;
-  正例:"bbb.x.com 和 10.0.0.8 不要测" → excluded_assets=[bbb.x.com, 10.0.0.8];
-  正例:"不允许上传,爆破最多 20 次" → constraints(动作约束,与范围无关);
-  反例:"不要修改任何数据" → 不进 excluded_assets(进 creator_notes);
-  描述没有否定范围就给空数组,不硬凑。
-- goals = 可核验的最终目标(描述里的任务目的),不是步骤。每条目标尽量写成可判定的完成条件:给出明确的完成判据(拿到什么产出、达到什么数量或状态算完成,如"提取 users 表全部账号与口令哈希"),不用"评估/了解/摸清"这类说不清何时算完成的表述。
-- pred 用一句话写清该目标怎样算完成(判定口径,面向证据:产出物、数量、可观察状态);判据只能来自描述里的任务目的,描述没给就留空,不编造。
-- creator_notes = 注意事项(对做法的软要求:怎么测的要求与偏好),凭语义辨认,不靠"不要/禁止"这类标志词——只要句子在对做法提要求或表达偏好就提取,每条一句话、贴描述原意转写、不添义:
-  正例:"用小字典就行" → 提取(如"爆破用小字典"——无标志词的做法偏好照样认);
-  正例:"站很脆弱,温柔点" → 提取(转写为"目标脆弱,动作放轻");
-  正例:"先只读探测,别改任何数据" → 提取(可拆"先只读探测""不要修改任何数据"两条);
-  反例:"拿下管理权限"(说要拿到什么 = 目标) → 只进 goals,不进 creator_notes;
-  反例:"测试 example.com 这个站点"(背景陈述,不对做法提要求) → 两者都不进;
-  描述没表达做法要求就留空数组,不硬凑。
-- 约束 = 授权边界(只许/不许做什么):disposition 用 forbid(禁止)或 allow(允许);quota 只在描述明确给了次数数字时填,否则不填;范围 assets 引用提取出的资产标识,描述未限定到具体资产的留空(= 全部)。
-- patterns 是该动作的命令参数匹配正则(RE2 语法,无前后瞻,留意大小写加 (?i)),匹配"执行该动作的命令文本"的典型形态(bash 的 curl/sqlmap/hydra 等);生成不了就不填。
-- 每条约束带 basis(描述原句截取),供操作者核对是不是真的写了。
-- 描述含糊或没有可提取项的数组就留空,不要硬凑。`
+	return `从操作者的任务描述提取可编辑的建任务内容，只输出JSON对象：
+{"title":"任务标题","task_type":"pentest|redteam","assets":[{"class":"domain|host|service|app|miniprogram","title":"对象标识"}],"excluded_assets":[{"class":"domain|host|service","title":"不要测试的地址"}],"goals":[{"title":"目标","pred":"原文明确的完成判据"}],"creator_notes":["操作者的要求"]}
+只提取原文明确表达的目标、对象和要求，不补造授权、动作、目标、次数或完成条件。没有内容的数组留空。
+域名和子域名均为domain，IP为host，完整URL或地址:端口为service，API路径归所属服务。组织、人员、登记资料、文件及泄露内容是背景，不自动加入资产；明确作为任务对象的独立应用或小程序保留其标识。
+原文明确不要测试的域名、IP或网址放excluded_assets；同一对象既肯定又否定时保留在assets，并在注意事项中如实指出原文冲突，不代操作者扩权。
+做法偏好、允许或禁止的动作、次数要求全部保留为creator_notes中的普通文字，注明原文中的对象和数字；不生成正则、程序规则或额外审批门槛。
+目标描述最终要取得的产出，pred只记录原文明示的可核验完成条件，没有则留空，不把执行步骤当目标。
+根据原文预选task_type：单个明确站点或对象为pentest，明确要求全面或多个目标为redteam，含糊时pentest。两类都走相同的动作判断和新资产加入流程。`
 }
 
 // parseTaskExtract 解析并校验模型回复(容忍围栏与前后杂文);非法条目
@@ -139,20 +104,19 @@ func taskExtractSystem() string {
 // 裸串按无判定口径建议收)。
 func parseTaskExtract(reply string) (*extractReply, []string) {
 	var issues []string
-	out := &extractReply{Assets: []extractAssetIn{}, ExcludedAssets: []extractAssetIn{}, Goals: []extractGoalIn{}, CreatorNotes: []string{}, Constraints: []extractConstraintIn{}}
+	out := &extractReply{Assets: []extractAssetIn{}, ExcludedAssets: []extractAssetIn{}, Goals: []extractGoalIn{}, CreatorNotes: []string{}}
 	raw := strings.TrimSpace(reply)
 	start, end := strings.Index(raw, "{"), strings.LastIndex(raw, "}")
 	if start < 0 || end <= start {
 		return out, []string{"回复里没有 JSON 对象,提取为空(可重试或手填)"}
 	}
 	var parsed struct {
-		Title          string                `json:"title"`
-		TaskType       string                `json:"task_type"`
-		Assets         []extractAssetIn      `json:"assets"`
-		ExcludedAssets []extractAssetIn      `json:"excluded_assets"`
-		Goals          []json.RawMessage     `json:"goals"`
-		CreatorNotes   json.RawMessage       `json:"creator_notes"`
-		Constraints    []extractConstraintIn `json:"constraints"`
+		Title          string            `json:"title"`
+		TaskType       string            `json:"task_type"`
+		Assets         []extractAssetIn  `json:"assets"`
+		ExcludedAssets []extractAssetIn  `json:"excluded_assets"`
+		Goals          []json.RawMessage `json:"goals"`
+		CreatorNotes   json.RawMessage   `json:"creator_notes"`
 	}
 	if err := json.Unmarshal([]byte(raw[start:end+1]), &parsed); err != nil {
 		return out, []string{"JSON 解析失败,提取为空(可重试或手填): " + err.Error()}
@@ -262,42 +226,7 @@ func parseTaskExtract(reply string) (*extractReply, []string) {
 			out.CreatorNotes = append(out.CreatorNotes, n)
 		}
 	}
-	for _, c := range parsed.Constraints {
-		action := strings.TrimSpace(c.Action)
-		disp := strings.TrimSpace(c.Disposition)
-		if action == "" || (disp != "forbid" && disp != "allow") {
-			issues = append(issues, fmt.Sprintf("拦截规则 %q 处置 %q 非法(须 forbid|allow),已丢弃", c.Action, c.Disposition))
-			continue
-		}
-		quota := c.Quota
-		if quota < 0 || (disp == "forbid" && quota > 0) {
-			if quota != 0 {
-				issues = append(issues, fmt.Sprintf("拦截规则 %q 的次数上限不适用于禁止,已去除", action))
-			}
-			quota = 0
-		}
-		var patterns []string
-		for _, p := range c.Patterns {
-			if p = strings.TrimSpace(p); p == "" {
-				continue
-			}
-			if _, err := regexp.Compile(p); err != nil {
-				issues = append(issues, fmt.Sprintf("拦截规则 %q 的匹配模式 %q 编译不过,已丢弃", action, p))
-				continue
-			}
-			patterns = append(patterns, p)
-		}
-		var assets []string
-		for _, a := range c.Assets {
-			if a = strings.TrimSpace(a); a != "" {
-				assets = append(assets, a)
-			}
-		}
-		out.Constraints = append(out.Constraints, extractConstraintIn{
-			Action: action, Disposition: disp, Quota: quota,
-			Assets: assets, Patterns: patterns, Basis: strings.TrimSpace(c.Basis),
-		})
-	}
+
 	return out, issues
 }
 

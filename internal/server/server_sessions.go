@@ -94,7 +94,7 @@ func (s *Server) handleTranscriptGet(w http.ResponseWriter, r *http.Request) {
 // transcriptEntries 转录记录 → 呈现单元。消息按 role 归并为 user /
 // assistant 两条形态:文本块拼接、思考块拼接、tool_use 逐条成卡、
 // tool_result 归入所在 user 消息;boundary(压缩边界)独立成行。
-// 超长截断(任务包与正文 16000 / 思考 4000 / 入参 2000 / 结果 4000)。
+// 超长截断(任务包与正文 16000 / 思考保留完整返回内容 / 入参 2000 / 结果 4000)。
 func transcriptEntries(recs []transcript.Record) []TranscriptEntry {
 	out := []TranscriptEntry{}
 	for _, rec := range recs {
@@ -131,7 +131,7 @@ func transcriptEntries(recs []transcript.Record) []TranscriptEntry {
 				})
 			}
 		}
-		e.Text, e.Thinking = clipText(strings.Join(texts, "\n"), 16000), clipText(strings.Join(thinks, "\n"), 4000)
+		e.Text, e.Thinking = clipText(strings.Join(texts, "\n"), 16000), strings.Join(thinks, "\n")
 		if e.Text == "" && e.Thinking == "" && len(e.Tools) == 0 && len(e.Results) == 0 {
 			continue
 		}
@@ -170,8 +170,6 @@ func clipText(s string, n int) string {
 
 // ---- 主宰研判轨迹(账本派生,零新增采集) ----
 
-// RoundNode 研判窗口内的一枚图上节点(步骤 / 声明 / 假设),状态取
-// 当前投影(派发时的决策 + 走到哪了,一眼可对)。
 type RoundNode struct {
 	ID     string `json:"id"`
 	Title  string `json:"title,omitempty"`
@@ -257,14 +255,19 @@ func (rep *panoramaReplay) apply(ev rings.RawEvent) {
 
 // panoramaRows 在途全景行装配(历史快照与实时视图同一语义,P4-46 ①):
 // 在跑+排队步骤按领取次序排(调度器同一比较器,面板次序即可核对领取
-// 次序),等前置如实标注,行带 covers 资产归属。panoramaReplay 的按轮
-// 快照与 handlePanoramaLive 的当前投影实时视图共用本装配,两视图不漂移。
+// 次序),等前置如实标注,行带 covers 资产归属。P5-05:挂等让位停等态
+// (scope_wait/gate_wait/pause_wait/model_wait)一并入列——让位后仍在
+// 工作线上(排队中,不标原因),解除唤醒回 dispatched 后按队首档排。
+// panoramaReplay 的按轮快照与 handlePanoramaLive 的当前投影实时视图
+// 共用本装配,两视图不漂移。
 // titlePolish 为步骤意图标题校对稿优先表(P4-65 ⑩:空表零变化——节点
 // 标题原文;与 RoundNode 同一口径,任务包与机器消费不走本装配)。
 func panoramaRows(steps map[string]rings.NodeFull, covers, deps map[string][]string, assetTitle map[string]string, titlePolish map[string]string) []PanoramaRow {
 	var flight []rings.NodeFull
 	for _, st := range steps {
-		if st.Status == "running" || st.Status == "dispatched" {
+		switch st.Status {
+		case "running", "dispatched",
+			rings.StepScopeWait, rings.StepGateWait, rings.StepPauseWait, rings.StepModelWait:
 			flight = append(flight, st)
 		}
 	}
@@ -318,11 +321,6 @@ func (s *Server) handlePanoramaLive(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// OvermindRound 一轮研判:五问结论 + 派发决策 + 本轮收割 + 在途全景。
-// 收割与派发从"本轮研判所读版本 → 下一轮研判所读版本"窗口内的账本
-// 变化派生(末轮开到当前):该窗口正是本轮研判之后、下一轮研判之前
-// 的全部落账——新增步骤(意图 / 反证 / 验证)、候选事实转正、声明仲裁
-// 裁决、假设收割裁决。全景(P4-11 ②)按本轮研判所读版本回放定格。
 type OvermindRound struct {
 	At             string                `json:"at"`
 	SessionID      string                `json:"session_id,omitempty"`
@@ -340,7 +338,6 @@ type OvermindRound struct {
 	Steps          []RoundNode           `json:"steps,omitempty"`
 	FactsConfirmed []string              `json:"facts_confirmed,omitempty"`
 	ClaimsJudged   []RoundNode           `json:"claims_judged,omitempty"`
-	Hypotheses     []RoundNode           `json:"hypotheses,omitempty"`
 	Panorama       []PanoramaRow         `json:"panorama"`
 }
 
@@ -398,8 +395,6 @@ func (s *Server) overmindRounds(r *http.Request, taskID string) ([]OvermindRound
 	}
 	// 步骤意图标题校对稿优先表(P4-65 ⑩:与图节点卡/虫群列表同一口径)。
 	stepTitlePolish := s.polishedNodeTitleOf(r.Context(), taskID)
-	// 节点类型预建(全量:种子资产 / 虫群提交的声明与假设多在首轮研判
-	// 前入账,窗口内的状态迁移要靠它认类型)+ 步骤当前投影。
 	nodeType := map[string]rings.NodeType{}
 	for _, ev := range evs {
 		if ev.Kind != rings.EventNodeAdded {
@@ -514,15 +509,10 @@ func (s *Server) overmindRounds(r *http.Request, taskID string) ([]OvermindRound
 					round.FactsConfirmed = append(round.FactsConfirmed, p.NodeID)
 				}
 			case rings.NodeTestClaim:
-				// 仲裁裁决迁移(confirmed / pending / awaiting_round);
-				// 主宰派反证的 testing 迁移不在此列(反证步骤见 Steps)。
+				// 交卷即查迁移(confirmed / insufficient / refuted;P5-02②
+				// 起不经收割轮——交卷事件同步触发机器三查,actor=arbiter)。
 				if ev.Actor == "arbiter" {
 					round.ClaimsJudged = append(round.ClaimsJudged,
-						RoundNode{ID: p.NodeID, Status: p.Status})
-				}
-			case rings.NodeHypothesis:
-				if ev.Actor == "overmind" {
-					round.Hypotheses = append(round.Hypotheses,
 						RoundNode{ID: p.NodeID, Status: p.Status})
 				}
 			}
@@ -552,7 +542,7 @@ type sessionInfoBar struct {
 }
 
 // agentInfoBy 按 token 行过滤条件聚合信息条(match 为 true 的行计入;
-// 口径:一行 = 一次模型调用,比例 = 最近请求 input ÷ 窗口)。
+// 口径:成本包含辅助请求;比例 = 最近会话请求 input ÷ 窗口)。
 func (s *Server) agentInfoBy(r *http.Request, taskID string, match func(rings.TokenUsage) bool) sessionInfoBar {
 	var info sessionInfoBar
 	rows, err := s.Store.TokenUsageRows(r.Context(), taskID)
@@ -568,8 +558,10 @@ func (s *Server) agentInfoBy(r *http.Request, taskID string, match func(rings.To
 		info.OutputTokens += x.OutputTokens
 		info.CacheTokens += x.CacheReadTokens + x.CacheWriteTokens
 		info.Calls++
-		lastModel, lastInput = x.Model, x.InputTokens
-		info.Model = x.Model
+		if x.HasConversationInput() {
+			lastModel, lastInput = x.Model, x.InputTokens
+			info.Model = x.Model
+		}
 	}
 	if info.Model == "" && s.Chain != nil {
 		info.Model = s.Chain.ActiveModel()

@@ -10,7 +10,7 @@ import (
 	"ghostreaper/internal/swarm"
 )
 
-// ---- P2-09 统一图投影 API(三视图共用,进度图首个接入)----
+// ---- P2-09 统一图投影 API(三视图共用,任务投影首个接入)----
 
 func graphSetup(t *testing.T) (http.Handler, string, string) {
 	t.Helper()
@@ -36,7 +36,7 @@ func graphSetup(t *testing.T) (http.Handler, string, string) {
 	var created map[string]string
 	post(t, h, http.MethodPost, "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],
 		"title":"图投影验证",
-		"assets":[{"class":"host","title":"web-01"},{"class":"service","title":"http://10.0.0.5"}]}`,
+		"assets":[{"class":"host","title":"192.0.2.1"},{"class":"service","title":"http://10.0.0.5"}]}`,
 		http.StatusOK, &created)
 	task := created["id"]
 
@@ -50,23 +50,23 @@ func graphSetup(t *testing.T) (http.Handler, string, string) {
 	get(t, h, "/api/tasks/"+task+"/assets", http.StatusOK, &tree)
 	hostID := ""
 	for _, a := range tree.Assets {
-		if a.Title == "web-01" {
+		if a.Title == "192.0.2.1" {
 			hostID = a.ID
 		}
 	}
 	if hostID == "" {
-		t.Fatalf("种子资产 web-01 未取回")
+		t.Fatalf("种子资产 192.0.2.1 未取回")
 	}
 
-	// 血缘链:g1 → s1(归属 g1,覆盖 web-01)→ f1(产出,关于 web-01)
-	//           → tc-1(派生自 f1,关于 web-01)
-	// 废弃分支:g1 → s2(aborted)→ h1(产出,已废弃,关于 web-01)
-	// 越界引用:s3 的 goal_id 指向非 goal 节点 → 不产 goal 派生边;
-	//          s2 的 testclaim_id 指向非声明节点 → 不产 falsify 派生边;
-	//          s3 的 testclaim_id 绑 tc-1 → 产 falsify 派生边(反证轮血缘)。
+	// 血缘链:g1 → s1(归属 g1,覆盖 192.0.2.1)→ f1(产出,关于 192.0.2.1)
+	//           → tc-1(派生自 f1,关于 192.0.2.1)
+	// 废弃分支:g1 → s2(aborted)→ h1(产出,已废弃,关于 192.0.2.1)
+	// 越界引用:s3 的 goal_id 指向非 goal 节点 → 不产 goal 派生边。
+	// (旧 falsify 派生边已随反证流程退役删除,P5-03③——testclaim_id
+	// 绑定不再上图投影。)
 	appendEvents(t, store, task,
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "creator", Payload: rings.NodeAdded{
-			NodeID: "g1", NodeType: rings.NodeGoal, Title: "摸清 web-01 暴露面", Status: "active"}},
+			NodeID: "g1", NodeType: rings.NodeGoal, Title: "摸清 192.0.2.1 暴露面", Status: "active"}},
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
 			NodeID: "s1", NodeType: rings.NodeStep, Title: "探测服务与目录", Status: "done",
 			Detail: map[string]any{"goal_id": "g1"}}},
@@ -78,22 +78,19 @@ func graphSetup(t *testing.T) (http.Handler, string, string) {
 			Detail: map[string]any{"goal_id": "f1", "testclaim_id": "tc-1"}}},
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u1", Payload: rings.NodeAdded{
 			NodeID: "f1", NodeType: rings.NodeFact, Title: "/old-backup/ 匿名可列举", Status: "confirmed"}},
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u1", Payload: rings.NodeAdded{
-			NodeID: "h1", NodeType: rings.NodeHypothesis, Title: "旁路管理面板猜测", Status: "discarded"}},
+
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u1", Payload: rings.NodeAdded{
 			NodeID: "tc-1", NodeType: rings.NodeTestClaim, Title: "备份目录可匿名列举", Status: "confirmed"}},
 		rings.Event{Kind: rings.EventEdgeAdded, Actor: "overmind", Payload: rings.EdgeAdded{
 			EdgeType: rings.EdgeCovers, FromNode: "s1", ToNode: hostID}},
 		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
 			EdgeType: rings.EdgeProduces, FromNode: "s1", ToNode: "f1"}},
-		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
-			EdgeType: rings.EdgeProduces, FromNode: "s2", ToNode: "h1"}},
+
 		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
 			EdgeType: rings.EdgeDerivedFrom, FromNode: "tc-1", ToNode: "f1"}},
 		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
 			EdgeType: rings.EdgeAbout, FromNode: "f1", ToNode: hostID}},
-		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
-			EdgeType: rings.EdgeAbout, FromNode: "h1", ToNode: hostID}},
+
 		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
 			EdgeType: rings.EdgeAbout, FromNode: "tc-1", ToNode: hostID}},
 		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
@@ -109,13 +106,12 @@ func TestServerTaskGraph(t *testing.T) {
 
 	var body struct {
 		Nodes []struct {
-			ID              string `json:"id"`
-			Type            string `json:"type"`
-			Status          string `json:"status"`
-			AssetClass      string `json:"asset_class"`
-			Covered         bool   `json:"covered"`
-			FactCount       int    `json:"fact_count"`
-			HypothesisCount int    `json:"hypothesis_count"`
+			ID         string `json:"id"`
+			Type       string `json:"type"`
+			Status     string `json:"status"`
+			AssetClass string `json:"asset_class"`
+			Covered    bool   `json:"covered"`
+			FactCount  int    `json:"fact_count"`
 		} `json:"nodes"`
 		Edges []struct {
 			Type string `json:"type"`
@@ -131,7 +127,7 @@ func TestServerTaskGraph(t *testing.T) {
 		byType[n.Type]++
 		nodeIDs[n.ID] = true
 	}
-	for _, typ := range []string{"goal", "step", "fact", "asset", "testclaim", "hypothesis"} {
+	for _, typ := range []string{"goal", "step", "fact", "asset", "testclaim"} {
 		if byType[typ] == 0 {
 			t.Fatalf("图投影缺 %s 类节点: %v", typ, byType)
 		}
@@ -155,16 +151,11 @@ func TestServerTaskGraph(t *testing.T) {
 	if hasEdge("goal", "f1", "s3") {
 		t.Fatalf("goal_id 指向非 goal 节点不应产出派生边: %+v", body.Edges)
 	}
-	// falsify 派生边(P2-11 反证轮血缘):绑定合法声明才产出(s2 的
-	// testclaim_id 指向 fact 不产边)。
-	if !hasEdge("falsify", "s3", "tc-1") {
-		t.Fatalf("缺 falsify 派生边 s3→tc-1: %+v", body.Edges)
-	}
-	if hasEdge("falsify", "s2", "f1") {
-		t.Fatalf("testclaim_id 指向非声明节点不应产出派生边: %+v", body.Edges)
+	if hasEdge("falsify", "s3", "tc-1") {
+		t.Fatalf("falsify 派生边应已退役(P5-03③): %+v", body.Edges)
 	}
 	for _, e := range [][3]string{
-		{"produces", "s1", "f1"}, {"produces", "s2", "h1"},
+		{"produces", "s1", "f1"},
 		{"derived_from", "tc-1", "f1"}, {"about", "f1", hostID},
 		{"about", "tc-1", hostID}, {"covers", "s1", hostID},
 		{"depends_on", "s2", "s1"},
@@ -174,13 +165,12 @@ func TestServerTaskGraph(t *testing.T) {
 		}
 	}
 
-	// 资产派生计数:web-01 被 s1 覆盖、挂 1 事实 + 1 假设。
 	for _, n := range body.Nodes {
 		if n.ID != hostID {
 			continue
 		}
-		if !n.Covered || n.FactCount != 1 || n.HypothesisCount != 1 {
-			t.Fatalf("web-01 派生计数不符: %+v", n)
+		if !n.Covered || n.FactCount != 1 {
+			t.Fatalf("192.0.2.1 派生计数不符: %+v", n)
 		}
 	}
 

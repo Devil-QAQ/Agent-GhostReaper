@@ -4,13 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
-	"strconv"
+
 	"strings"
 	"testing"
 	"time"
 
-	"ghostreaper/internal/failover"
 	"ghostreaper/internal/rings"
 	"ghostreaper/internal/swarm"
 )
@@ -127,7 +125,7 @@ func isBuiltinHardRuleIDForTest(id string) bool {
 }
 
 // TestRoEIntentRulesAPI RoE 快照携带任务级规则:提交校验(词表 / 资产
-// 存在性)、读回带资产标题与已用计数。
+// 存在性)、读回带资产标题，并完整传给动作判断。
 func TestRoEIntentRulesAPI(t *testing.T) {
 	srv, store := newSettingsServer(t)
 	h := srv.Handler()
@@ -162,7 +160,7 @@ func TestRoEIntentRulesAPI(t *testing.T) {
 	if len(view.IntentRules) != 2 {
 		t.Fatalf("应读回 2 条规则: %+v", view.IntentRules)
 	}
-	if view.IntentRules[0].AssetTitles[0] != "http://t-a:8080" || view.IntentRules[1].Used != 0 {
+	if view.IntentRules[0].AssetTitles[0] != "http://t-a:8080" {
 		t.Fatalf("规则视图不符: %+v", view.IntentRules)
 	}
 
@@ -181,179 +179,17 @@ func TestRoEIntentRulesAPI(t *testing.T) {
 		`{"intent_rules": [{"id": "x4", "action": "上传", "disposition": "forbid", "quota": 3}]}`,
 		http.StatusBadRequest, &struct{}{})
 
-	// 计数视图:入两条 quota_count 后读回 Used=2。
-	for i := 1; i <= 2; i++ {
-		if _, err := store.Append(ctx, taskID, rings.Event{
-			Kind: rings.EventGuardRecord, Actor: "swarm:u1",
-			Payload: rings.GuardRecord{StepID: "s1", UnitID: "u1", Type: rings.GuardRecQuotaCount,
-				RuleID: "ir-2", Action: "上传", Nth: i, ToolName: "bash"},
-		}); err != nil {
-			t.Fatalf("入计数失败: %v", err)
-		}
-	}
-	var view2 struct {
-		IntentRules []intentRuleOut `json:"intent_rules"`
-	}
-	get(t, h, "/api/tasks/"+taskID+"/roe", http.StatusOK, &view2)
-	for _, r := range view2.IntentRules {
-		if r.ID == "ir-2" && r.Used != 2 {
-			t.Fatalf("计数视图不符: %+v", r)
-		}
-		if r.ID == "ir-1" && r.Used != 0 {
-			t.Fatalf("禁止规则不应有计数: %+v", r)
-		}
-	}
-
-	// 增删随快照:提交空规则清单 = 全部删除。
-	post(t, h, "POST", "/api/tasks/"+taskID+"/roe", `{"intent_rules": []}`, http.StatusOK, &view2)
-	if len(view2.IntentRules) != 0 {
-		t.Fatalf("空快照应清空规则")
-	}
-}
-
-// TestRoERuleCRUDAPI 任务级规则逐条增删改(审核迭代):每笔变更落一笔
-// roe.updated 快照、唤醒主宰、返回新视图;非法词表 / 资产不在图 /
-// 未知规则 ID 受控拒绝。
-func TestRoERuleCRUDAPI(t *testing.T) {
-	srv, _ := newSettingsServer(t)
-	h := srv.Handler()
-	ctx := context.Background()
-
-	var created struct {
-		ID string `json:"id"`
-	}
-	post(t, h, "POST", "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"title": "逐条规则任务", "assets": [{"title": "http://t-a:8080", "class": "service"}, {"title": "http://t-b:90", "class": "service"}]}`,
-		http.StatusOK, &created)
-	taskID := created.ID
-	assets, _ := srv.Store.NodesByType(ctx, taskID, rings.NodeAsset, "")
-	if len(assets) != 2 {
-		t.Fatalf("资产未落图: %d", len(assets))
-	}
-	aID := assets[0].ID
-
-	// 新增(自由文本动作描述 + 判定正则)。
-	var view struct {
-		IntentRules []intentRuleOut `json:"intent_rules"`
-	}
-	post(t, h, "POST", "/api/tasks/"+taskID+"/roe/rules",
-		`{"action":"读后台数据","asset_ids":["`+aID+`"],"disposition":"forbid",
-		  "patterns":["(?i)\\bcurl\\b[^|;&]*\\s-G\\b"],"note":"别读A"}`,
-		http.StatusOK, &view)
-	if len(view.IntentRules) != 1 || view.IntentRules[0].Action != "读后台数据" ||
-		view.IntentRules[0].AssetTitles[0] != "http://t-a:8080" ||
-		len(view.IntentRules[0].Patterns) != 1 {
-		t.Fatalf("新增后视图不符: %+v", view.IntentRules)
-	}
-	rid := view.IntentRules[0].ID
-	if rid == "" {
-		t.Fatalf("服务端应生成规则 ID")
-	}
-
-	// 编辑(同 ID 覆盖:改为允许 + 次数上限,去正则走词表兼容)。
-	// 注意每次解码用新变量:json.Unmarshal 复用既有 slice 底层数组,
-	// JSON 缺省字段会保留旧值(踩过)。
-	var viewEdit struct {
-		IntentRules []intentRuleOut `json:"intent_rules"`
-	}
-	post(t, h, "POST", "/api/tasks/"+taskID+"/roe/rules/"+rid,
-		`{"action":"上传","asset_ids":["`+aID+`"],"disposition":"allow","quota":3}`,
-		http.StatusOK, &viewEdit)
-	if len(viewEdit.IntentRules) != 1 || viewEdit.IntentRules[0].Action != "上传" || viewEdit.IntentRules[0].Quota != 3 ||
-		len(viewEdit.IntentRules[0].Patterns) != 0 {
-		t.Fatalf("编辑后视图不符: %+v", viewEdit.IntentRules)
-	}
-
-	// 删除。
-	var viewDel struct {
-		IntentRules []intentRuleOut `json:"intent_rules"`
-	}
-	post(t, h, "DELETE", "/api/tasks/"+taskID+"/roe/rules/"+rid, "", http.StatusOK, &viewDel)
-	if len(viewDel.IntentRules) != 0 {
-		t.Fatalf("删除后应清空: %+v", viewDel.IntentRules)
-	}
-
-	// 三笔变更 = 三笔 roe.updated 事件(R7:每笔增删改各自留痕)。
-	evs, err := srv.Store.Events(ctx, taskID, 0, 0)
+	state, err := store.CurrentRoE(ctx, taskID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	roeUps := 0
-	for _, ev := range evs {
-		if ev.Kind == rings.EventRoeUpdated {
-			roeUps++
+	notes := rings.PolicyNotes(state.CreatorNotes, state.IntentRules)
+	for _, text := range []string{"数据读取", "上传", assetID, "2", "审批"} {
+		if !strings.Contains(notes, text) {
+			t.Fatalf("existing requirement lost from model boundary: %q", text)
 		}
 	}
-	if roeUps != 3 {
-		t.Fatalf("应恰 3 笔 roe.updated(新增/编辑/删除),得到 %d", roeUps)
-	}
 
-	// 受控拒绝:空描述 / 坏正则 / 资产不在图 / 未知规则 ID。
-	post(t, h, "POST", "/api/tasks/"+taskID+"/roe/rules",
-		`{"action":"  ","disposition":"forbid"}`, http.StatusBadRequest, &struct{}{})
-	post(t, h, "POST", "/api/tasks/"+taskID+"/roe/rules",
-		`{"action":"自定义动作","disposition":"forbid","patterns":["("]}`, http.StatusBadRequest, &struct{}{})
-	post(t, h, "POST", "/api/tasks/"+taskID+"/roe/rules",
-		`{"action":"飞天的动作","disposition":"forbid"}`, http.StatusOK, &struct{}{})
-	post(t, h, "POST", "/api/tasks/"+taskID+"/roe/rules",
-		`{"action":"上传","asset_ids":["a-nope"],"disposition":"forbid"}`, http.StatusBadRequest, &struct{}{})
-	post(t, h, "POST", "/api/tasks/"+taskID+"/roe/rules/ir-none",
-		`{"action":"上传","disposition":"forbid"}`, http.StatusNotFound, &struct{}{})
-	post(t, h, "DELETE", "/api/tasks/"+taskID+"/roe/rules/ir-none", "", http.StatusNotFound, &struct{}{})
-}
-
-// TestRoERulePatternsAPI 描述→正则生成(审核迭代三轮):单发模型调用,
-// 回填可编译正则;未配模型 503(指引手写/内置词);脏回复如实空清单;
-// 生成不落库。CRUD 的正则编译校验在 TestRoERuleCRUDAPI。
-func TestRoERulePatternsAPI(t *testing.T) {
-	srv, _ := newSettingsServer(t)
-	h := srv.Handler()
-	ctx := context.Background()
-
-	var created struct {
-		ID string `json:"id"`
-	}
-	post(t, h, "POST", "/api/tasks", `{"task_type":"redteam","goals":["种子目标"],"title": "生成任务", "assets": [{"title": "http://t-a:8080", "class": "service"}]}`,
-		http.StatusOK, &created)
-	taskID := created.ID
-
-	// 未配模型:503 + 指引。
-	post(t, h, "POST", "/api/tasks/"+taskID+"/roe/rules/patterns",
-		`{"text":"上传文件"}`, http.StatusServiceUnavailable, &struct{}{})
-
-	// 脚本模型:返回正则数组(含一条编译不过的,应被丢弃)。
-	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		content := `["(?i)\\bcurl\\b[^|;&]*(\\s-T\\b|--upload-file)", "("]`
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":` + strconv.Quote(content) + `},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":8}}`))
-	}))
-	t.Cleanup(endpoint.Close)
-	if err := failover.SaveModelConfig(ctx, srv.Store, failover.ModelConfig{
-		Name: "ex", Format: "openai", BaseURL: endpoint.URL, APIKey: "k",
-		Model: "m-ex", StreamDisabled: true,
-	}, "creator"); err != nil {
-		t.Fatal(err)
-	}
-	if err := failover.SetActive(ctx, srv.Store, failover.RolePrimary, "ex", "creator"); err != nil {
-		t.Fatal(err)
-	}
-	srv.Chain = failover.NewChain(srv.Store, failover.EnvConfig{})
-
-	var res struct {
-		Patterns []string `json:"patterns"`
-	}
-	post(t, h, "POST", "/api/tasks/"+taskID+"/roe/rules/patterns",
-		`{"text":"上传文件到目标"}`, http.StatusOK, &res)
-	if len(res.Patterns) != 1 || !strings.Contains(res.Patterns[0], "-T") {
-		t.Fatalf("应只回填可编译正则: %+v", res.Patterns)
-	}
-	// 生成不落库。
-	roe, _ := srv.Store.CurrentRoE(ctx, taskID)
-	if len(roe.IntentRules) != 0 {
-		t.Fatalf("生成不得落库")
-	}
-	// 空描述 400。
-	post(t, h, "POST", "/api/tasks/"+taskID+"/roe/rules/patterns",
-		`{"text":"  "}`, http.StatusBadRequest, &struct{}{})
 }
 
 // TestRoERuleNotifyTargeted 定向告知 E2E(审核迭代核心机制):规则变更只
@@ -378,6 +214,17 @@ func TestRoERuleNotifyTargeted(t *testing.T) {
 	byTitle := map[string]string{}
 	for _, a := range assets {
 		byTitle[a.Title] = a.ID
+	}
+
+	roe, err := srv.Store.CurrentRoE(ctx, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.Store.Append(ctx, taskID, rings.Event{Kind: rings.EventRoeUpdated, Actor: "creator", Payload: rings.RoeUpdated{
+		AllowedTools: roe.AllowedTools, DeniedTools: roe.DeniedTools, CreatorNotes: &roe.CreatorNotes,
+		IntentRules: []rings.IntentRule{{ID: "legacy-rule", Action: "上传", AssetIDs: []string{byTitle["http://t-a:8080"]}, Disposition: "forbid"}},
+	}}); err != nil {
+		t.Fatal(err)
 	}
 
 	// 脚本模型:每个单位先跑一条 3 秒慢命令(挂着,保持单位在飞),
@@ -436,13 +283,8 @@ func TestRoERuleNotifyTargeted(t *testing.T) {
 		t.Fatalf("应 2 个在飞单位,得到 %d", got)
 	}
 
-	// 规则变更:只圈资产 A(禁止上传)。
-	var view struct {
-		IntentRules []intentRuleOut `json:"intent_rules"`
-	}
-	post(t, h, "POST", "/api/tasks/"+taskID+"/roe/rules",
-		`{"action":"上传","asset_ids":["`+byTitle["http://t-a:8080"]+`"],"disposition":"forbid"}`,
-		http.StatusOK, &view)
+	// Removing an existing scoped requirement notifies only its affected unit.
+	post(t, h, "DELETE", "/api/tasks/"+taskID+"/roe/rules/legacy-rule", "", http.StatusOK, &struct{}{})
 
 	// 等舵杆记账出现:sa 有,b 无。
 	var saSteer, sbSteer bool

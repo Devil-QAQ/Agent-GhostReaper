@@ -34,60 +34,51 @@ const workerEditableDefault = `你是渗透测试虫群单位,在授权测试任
 // workerSafetyRules 虫群基线 B 段(代码固定,安全底线):Q7 消化的
 // 提示词红线,第八章第 8 节防线②。条款逐条对应设计定稿:①只做一条
 // 意图、意图外线索只回流不深挖;②边发现边写回(R8:候选经受控入口);
-// ③穷尽本意图但不空转;④finding 必须真实触发过、有可复现证据
-// (R11/R13 的提示词化);⑤被拒不重试(P1-02 审批语义)。
+// ③职责=把意图干到底(探索→发现→证明→反证自查→交卷,做完即停,
+// P5-01①单会话连打)、穷尽本意图但不空转;④交卷门槛(必须真实触发
+// 过、拿到可复现证据)+ 反证自查自觉句(无结构化强制字段)+ 定级锚
+// 自报(R11/R13 的提示词化);⑤被拒不重试(P1-02 审批语义)。
 const workerSafetyRules = `铁律(代码固定,配置不可移除):
-1. 只做你领到的这一条意图。瞥见意图之外的线索,只许用 submit_candidate_fact / submit_hypothesis 写成待确认证据交给主宰,不许自己拐过去挖。
+1. 只做你领到的这一条意图。瞥见意图之外的线索,只许用 submit_candidate_fact 写回交给主宰,不许自己拐过去挖。
 2. 边发现边写回:每取得一条值得保留的观察,立即提交,不要攒到收尾——步数或时间预算可能随时耗尽,攒着的发现会丢。
-3. 穷尽本意图的手段再下结论;但不因总目标未达成而继续,也不为凑步数在已探尽的方向空转。
-4. 必须本次真实触发过、拿到可复现证据,才能提交候选事实;「版本匹配到 CVE」「看起来可注入」这类只许记为待验证的猜测(submit_hypothesis)。真实触发并取得可复现证据的漏洞发现,用 submit_test_claim 提交为待反证的判断(存在性与影响面分开申报,并尽力列出竞争性替代解释);确认由独立反证与机器判定完成,你不许自评"已确认"、不得自报严重级别。立判门槛:` + ClaimHarmGate + `。
+3. 你的职责是把领到的意图干到底:探索 → 发现 → 证明 → 反证自查 → 交卷,做完即停;穷尽本意图的手段再下结论,但不因总目标未达成而继续,也不为凑步数在已探尽的方向空转。
+4. 普通观察、无漏洞结果和核对通过用 submit_candidate_fact 写回后正常完成意图，不交漏洞单；意图里写“交卷”也不代表普通结果可以作为漏洞。必须本次真实触发过、拿到可复现证据,才许交卷(submit_claim);「版本匹配到 CVE」「看起来可注入」这类疑似只许记为实际观察及证据(submit_candidate_fact)，未验证的猜测不得作为事实提交,不许交卷。交漏洞前自己再想想:这个结果会不会是缓存假象、权限本来就有、环境因素导致的?换个角度验证一下再交,交卷单 countercheck_note 如实写你做了什么检查、为什么没翻车。severity 按定级锚自报,机器只核验证据不校验级别。立判门槛:` + ClaimHarmGate + `。
 5. 被 RoE 或审批拒绝的操作不得重试。
 6. 本机回环(127.0.0.1 / localhost / ::1)与镜等测试环境自身设施属测试环境,不是目标攻击面:对它们的观察不提交为事实、判断或猜测(入口会拒收并记为环境观察);排查环境问题时的相关现象在总结里说明即可。任务资产清单内的目标(含操作者声明的本机测试靶标)不受此限。
-7. 信息源(RoE 约束块"信息源"行列出的地址)是查资料用的公开信息服务,不是测试目标:正常访问使用(搜索、下载、查文档)不受限;对其内容的观察不提交为判断或猜测;对它的写入、扫描、利用尝试等主动攻击动作会被拦,不要发起。`
+7. 查阅公开资料与其他工具动作走同一判断入口，不声明信息源身份或额外站点许可。资料中提到的组织、人员、文件或地址不自动成为任务资产；实际观察和来源证据如实写回，未验证内容不得当作事实或交卷。`
 
 // workerArtifactRules 虫群基线 C 段(代码固定,中间产物规约):
 // §11 语义细则——写回粒度(同线索观察汇总成一条,防图谱无限膨胀;
 // 证据原文走内容寻址存储,截断不丢原文)+ 收尾输出形态。
 const workerArtifactRules = `写回与收尾规约(代码固定,配置不可移除):
 - 写回粒度:同一条线索的多次观察汇总成一条候选提交,写明观察之间的关联,不要逐次各提一条——图谱按线索生长,不按调用次数膨胀;证据原文经内容寻址存储留档,提交界面所见被截断不丢原文。
-- 完成后输出简短总结:做了什么、提交了哪些待确认的事实与判断、有什么没做成。`
+- 已返回且未变化的材料先复用会话记录，不为重述已知信息重复调用；需要核对当前状态、条件变化或补缺证据时照常读取。旧工具输出有摘录和存档引用时，细节按需用 read 读取原文，不凭摘录猜测，也不重新执行原操作代替回读。
+- 完成后输出简短总结:做了什么、提交了哪些事实与交卷、有什么没做成。`
 
-// ResidentStyleRules 常驻文风条款(P4-65 B 起升级为报告级锚条款,问题
-// 清单 #82:单位执行叙述与收尾总结、牧者回答、插话答复、主宰研判叙述
-// 的生成时文风——宪法 §10"生成时就写对"路线,禁逐段二次清洗;原
-// humanizer 中文化精简版(P3-11a)的防 AI 味纪律全数保留为下限,新增
-// 报告级锚核心:数字精确实际值/目标完整标识/"做了什么→看到什么→说明
-// 了什么"叙述链/机器语禁令/反例三句——与校对通道的四段锚
-// (overmind.proofreadHumanStandard)同一文风口径的常驻形态)。全部
-// agent 的自然语言输出共用同一份;结构化输出(工具参数/JSON 契约/账本
-// 回流)不带文风,照契约原样(作用域行见尾注)。完整 25 模式深加工归
-// P3-11 的 humanizer skill:常驻管生成、skill 管改写,两套规矩不混用。
+// ResidentStyleRules 全部角色共用的自然语言生成要求。按提问组织结果，
+// 概览与证据分工；在生成时写清，不在生成后裁句。工具参数、JSON 和
+// 账本引用保持原契约。humanizer skill 另管操作者明确要求的文本改写。
 const ResidentStyleRules = `输出文风(代码固定,配置不可移除):
-1. 短句,先说结论再说理由;平实书面白话,写给不懂技术的读者也能读懂。
-2. 禁止开场白("好的""这是一个…")和总结结尾("总之""综上")。
-3. 禁用填充语:"值得注意的是""在某种程度上""不得不说"。
-4. 两三句话能说清的事不列列表;加粗最多 1~2 处;不用 emoji。
-5. 数字写精确实际值(3 台、8 次、1,847 条、第 2 轮),不写"多个/大量/部分/若干";事实优先于形容词;禁用"强大""优雅""无缝""赋能""闭环"这类膨胀词。
-6. 提到目标一律用完整标识(域名或 IP 起头、host:port 形态,如 jkysd.cn:9902、10.0.0.5:8080),不用裸端口、裸路径指代目标——读者不知道说的是哪个目标。
-7. 讲执行与验证按"做了什么→看到什么→说明了什么"的链条写,如"向该接口直接发 GET 请求,不携带登录凭据;返回 200,内容是 1,847 条员工记录;说明该接口的数据不登录也能拿到";同类动作做了多条时写明总数,如"共试了 3 个口令,列出命中的 1 条"。
-8. 不用"Not just X, but Y"式铺垫、强行三连排比、格言式收尾——直接说主张。
-9. 读者是渗透测试专家,不解释基础概念;不确定就直说不知道,不用对冲词包裹;只根据账本与工具返回的真实数据回答,不编造发现。
-10. 界面词:写给人看的叙述里,系统动词与状态一律用操作者语言——规划、检查归纳、终止、记录、需批准、判断、待验证、搁置、接管、纠偏、回传;不写开发词;牧者/主宰/虫群/RoE 等体系名照常使用。
-11. 不造压缩名词堆:禁止把一串限定语硬压成一个自造名词(如"非目标前置层""边界逃逸链前置态"),一律展开成平实短句——例:不写"流量经非目标前置层过滤",写"不属于测试目标的地址,在请求发出前就被过滤掉了";不确定该不该用一个词时,用完整句子说。
-12. 禁这些机器语:内部编号、解释编号、裸版本号数字、程序报错原文、英文状态词、无动词的压缩名词堆。
-反例(出现即不合格):"经过综合评估,系统整体风险较高,建议持续关注"(无结论、无数字、空话);"成功获取了大量敏感数据"(数字不清);"已对该方面进行了安全加固与综合整改"(空话)。
-作用域:以上只约束写给人读的自然语言(叙述、总结、理由、回答);结构化输出照契约——工具调用参数与 JSON 的字段名、结构、取值格式原样,不为文风改变,也不输出契约以外的内容。`
+写给正在操作系统的人。回复服务于这一次提问，不把读到的全部材料转述一遍。进度问题直接说当前结果与剩余问题；问漏洞就说问题和实际影响；问一条事实就解释该条观察和它能支持的结论。默认用一个短段落，确有不同要点再分段；只有明确索取证据、操作过程或完整报告时才逐项展开。问“具体是什么”需要把事情说明确，不等于要求抄录请求与报文。证据和执行过程已有独立入口，答复只保留理解结论必需的细节与可点击引用。回答完所问即结束，不自行附加测试计划、扩展方向或征求继续的套话。
+日常进度、单条结果解释和插话答复，以两三句、约60至120个中文字为写作目标：直接说结果，再说理解它所必需的条件和范围。这个长度是写作参考，不是截断规则；复杂问题、明确索取细节或完整报告时按材料充分展开，不为凑字数丢掉关键事实。
+用平实中文，把名称、说明、结果分清。不写开场白、套话或重复总结；不把长材料压成一大段，也不把正常句子压成自造名词。
+下面只示意表达方式与信息密度，不是当前任务的事实，不能照搬结论：
+问“现在有什么结果”：已确认1条漏洞：公开备份含有可用的后台凭据。尚未验证登录后的功能和数据。
+问“这条观察说明什么”：未登录时，后台拒绝了访问。目前只检查了首页，不能据此判断其他入口也受保护。
+问“这个漏洞影响在哪里”：无需登录即可下载备份，并用其中的凭据进入后台。已验证后台访问，尚未验证数据读写。
+概览让人看懂做了什么、看到了什么、还有什么未确定；命令、逐项请求、报文与冗长参数放在对应证据或执行内容里。地址与对象首次出现时说清，之后在同一上下文内可简写，不在每句话重复完整地址。行业概念在影响理解时用一句普通话解释，不写成教材。数字与时间用可核对的实际值；不知道就说不知道，不把未验证说成没有问题，也不把观察说成已确认漏洞。
+只根据账本和工具返回的真实数据回答，不编造发现或执行结果；引用节点仍用系统支持的可点击引用格式。系统状态与操作使用操作者语言，牧者/主宰/虫群/RoE 等名称保留。不贴机器字段、内部报错或编号解释，不用 emoji、服务腔、营销词和空泛评价。
+作用域:以上只约束给人读的叙述、总结、理由与回答；结构化输出照契约——工具参数与 JSON 的字段名、结构、取值、标识和必要定位信息保持准确，不因文风删改业务信息。`
 
-// StructuredFieldStyle 结构化展示字段文风的共用收口句(P4-11 ①,
-// 问题清单 #20;P4-27 ③ 追加目标完整标识约束):拆解 intent、声明
-// 一句话摘要(statement/impact)等面板高频展示的结构化字段——
-// ResidentStyleRules 只管自然语言输出(§10 作用域),这些字段此前
-// 无文风约束,模型写 148 字长意图,全景表/会话头/排队条目全跟着长。
-// 只约束新生成,不改写已有数据;主宰拆解契约与虫群声明提交契约引用
-// 同一份,防两处漂移。目标引用必须带完整标识(域名或 IP 起头的
-// host:port 形态)——裸端口/裸路径脱离上下文读不出说的是哪个目标
-// (问题清单 #44),新文本一律不写。
-const StructuredFieldStyle = "不超过 40 字;数字精确(端口/路径/条数);提到目标一律用完整标识(域名或 IP 起头,host:port 形态),不用裸端口或裸路径指代目标;不写工具名与实现细节;系统动作用界面词(规划/检查归纳/终止/记录/需批准/判断/待验证/搁置)"
+// HumanReplyPrompt 将本轮阅读任务放在提问之后。账本仍保存操作者原话，
+// 这里只装配模型输入；不改工具参数、权限或任务执行要求。
+func HumanReplyPrompt(text string) string {
+	return text + "\n\n【本次答复要求】\n本次只用两三句完整的话直接回答，写作目标60至120字，省去验证报文与过程清单，保留理解结论必需的条件、来源引用与已验证范围。普通观察、正常认证与漏洞利用分别如实描述：使用泄露的有效凭据登录，不等于绕过了认证逻辑；没有看到功能入口，不等于系统没有功能。若操作者明确要求详细过程或完整报告，则按其要求充分展开。仅约束给人看的说明，不改变工具调用、参数或应执行的任务。"
+}
+
+// StructuredFieldStyle 拆解意图与交卷摘要共用的字段要求。执行信息保留
+// 必要定位与边界；独立显示名称负责列表阅读，不用字数限制裁掉业务信息。
+const StructuredFieldStyle = "用平实中文讲清本条要做什么或实际观察到什么；保留执行所需的目标定位、数字和必要条件，不在一句话里复述全部参数或枚举清单；名称由独立显示字段承担，不为凑字数删掉关键业务信息。状态、操作使用操作者语言"
 
 // ClaimHarmGate 立判断危害门槛(P4-30 ①,问题清单 #51):收割纪律条款。
 // 虫群 submit_test_claim、主宰组合立判(combined_claims)与存量复核共用
@@ -97,9 +88,9 @@ const StructuredFieldStyle = "不超过 40 字;数字精确(端口/路径/条数
 // 的共用句纪律)。
 const ClaimHarmGate = "只有判断成立会给目标带来实际危害或边界突破——未授权访问数据/功能、可执行代码、越过鉴权、拒绝服务、泄露敏感信息——才立判断;纯前置条件(如验证码可解)、环境特性(如端口持续响应)、无害观察一律不立判断,只提交事实(它们作为组合判断环节引用时自然呈现)"
 
-// SeverityAnchor 定级校准锚(P4-30 ②,问题清单 #51):反证写回与收割
-// 定稿共用——影响面定级只跟直接影响走,信息性(无直接危害)不定级
-// 不立。反证任务包、submit_falsify_result 说明与主宰复核规则引用此
+// SeverityAnchor 定级校准锚(P4-30 ②,问题清单 #51;P5-01① 起随提示词
+// 给虫群自报级别):交卷自报与收割定稿共用——影响面定级只跟直接影响
+// 走,信息性(无直接危害)不定级不立。交卷工具说明与虫群铁律引用此
 // 常量,防漂移。
 const SeverityAnchor = "定级只跟直接影响走:critical=系统级权限或大量敏感数据;high=管理员或敏感数据访问;medium=普通业务越权或有限敏感信息;low=需苛刻前提才有影响;无直接危害的信息性观察不定级也不立判断"
 
@@ -139,21 +130,10 @@ func (p PromptSpec) Assemble(ctx context.Context, store *rings.Store) []string {
 // 最顶部并声明"凌驾于下方一切探索启发式")。
 const roeConstraintHeader = "【授权约束 · RoE】本块为授权硬边界,凌驾于下方一切探索启发式;越出本块的规划与动作一律不做。"
 
-// RenderRoEConstraint 渲染 RoE 约束块(虫群/主宰共用同一份措辞与
-// 结构,两处不得漂移)。lead 为面向角色的凌驾补充句(虫群侧重"不做",
-// 主宰侧重"不派")。excluded 为授权范围摘除的资产(P4-05;空 = 全部
-// 纳入,行为与历史一致),非空时追加"范围外资产"行——主宰侧读它不派
-// 覆盖这些资产的意图(派发入口守卫同判,covers 判定)。pending 为渗透
-// 任务的范围外待批资产(P4-44;空 = 无待批或非渗透任务),非空时追加
-// "待批资产"行——锁定不测,面板放行后转范围内(命令级硬拦在权限管线
-// 与只读工具补口兜底)。notes 为造物主注意事项(P4-49;空 = 无,行不
-// 出现——留空任务行为与历史一致),非空时逐行追加"造物主注意事项"行:
-// 对做法的软要求,与工具边界/审批门槛同处凌驾区;管边界不管打法——
-// 注意事项之外的侦察顺序/路径/工具选择/攻击链组合仍是读者自由。
-// infoSources 为任务信息源清单(P4-67;空 = 无,行不出现),非空时
-// 追加"信息源"行——查资料的公开信息服务:获取使用正常进行、观察
-// 不立判断、主动攻击动作会被拦。
-func RenderRoEConstraint(lead string, allowed, denied []string, threshold rings.ActionLevel, excluded []rings.ExcludedAssetView, pending []rings.ExcludedAssetView, notes string, infoSources []rings.RoeInfoSource) string {
+// RenderRoEConstraint is shared by worker and planner prompts. Inventory
+// membership is separate from actual action permission; notes retain operator
+// requirements without a second classifier or per-host permission mechanism.
+func RenderRoEConstraint(lead string, allowed, denied []string, excluded []rings.ExcludedAssetView, notes string) string {
 	var b strings.Builder
 	b.WriteString(roeConstraintHeader)
 	if lead != "" {
@@ -170,8 +150,7 @@ func RenderRoEConstraint(lead string, allowed, denied []string, threshold rings.
 	default:
 		b.WriteString("未设白名单与黑名单(工具全集)")
 	}
-	fmt.Fprintf(&b, "\n- 审批门槛: %s(达到该级的动作逐次需批准,等待造物主批准,被拒不重试)\n",
-		string(NormalizeApprovalThreshold(threshold)))
+	b.WriteString("\n- 动作判定:当前启用的硬规则命中直接拒绝，其余按实际动作与任务边界判断；需要操作者决定时才审批。批准仅适用于该次调用。\n- 资产加入:仅决定资产列表与后续规划，不加入不等于禁止访问，观察与证据仍须写回。\n")
 	b.WriteString("- 授权范围: 仅限本任务授权目标;本系统仅供授权测试。\n")
 	if notes != "" {
 		b.WriteString("- 造物主注意事项(对做法的要求,须遵守;未提及的做法你自主选择):\n")
@@ -188,20 +167,7 @@ func RenderRoEConstraint(lead string, allowed, denied []string, threshold rings.
 		}
 		fmt.Fprintf(&b, "- 范围外资产(已从授权范围摘除,不测不派): %s\n", strings.Join(parts, "、"))
 	}
-	if len(pending) > 0 {
-		parts := make([]string, 0, len(pending))
-		for _, a := range pending {
-			parts = append(parts, fmt.Sprintf("%s(%s)", a.ID, a.Title))
-		}
-		fmt.Fprintf(&b, "- 待批资产(渗透任务范围外,锁定不测;面板放行后才可测): %s\n", strings.Join(parts, "、"))
-	}
-	if len(infoSources) > 0 {
-		parts := make([]string, 0, len(infoSources))
-		for _, src := range infoSources {
-			parts = append(parts, src.Host)
-		}
-		fmt.Fprintf(&b, "- 信息源(查资料的公开信息服务,不是测试目标): %s——正常访问使用;对其观察不提交判断与猜测;对它的主动攻击动作会被拦\n", strings.Join(parts, "、"))
-	}
+
 	return b.String()
 }
 
@@ -210,9 +176,9 @@ func RenderRoEConstraint(lead string, allowed, denied []string, threshold rings.
 // 意图,单位领到的任务包不会锚定它们,虫群侧不重复渲染;待批清单
 // (P4-44)从任务包冻结副本渲染——单位自发越界测待批资产前读到锁定
 // 声明,硬拦在权限管线兜底;注意事项(P4-49)同样从领取时授权渲染)。
-func roeConstraintBlock(roe RoE, pending []rings.ExcludedAssetView, infoSources []rings.RoeInfoSource) string {
+func roeConstraintBlock(roe RoE) string {
 	return RenderRoEConstraint(
-		"你的探索手段受此框定。", roe.AllowedTools, roe.DeniedTools, roe.ApprovalThreshold, nil, pending, roe.CreatorNotes, infoSources)
+		"你的探索手段受此框定。", roe.AllowedTools, roe.DeniedTools, nil, roe.CreatorNotes)
 }
 
 // 意图块/锚定资产/启动指令(§11 不可变块,追加顺序固定:意图块 →
@@ -225,11 +191,11 @@ func intentBlock(pack *TaskPack) string {
 	b.WriteString("【本步骤意图 · 只做这一条】\n")
 	fmt.Fprintf(&b, "意图: %s\n", strings.TrimSpace(pack.StepIntent))
 	if pack.ExpectedObservation != "" {
-		fmt.Fprintf(&b, "预期观察: %s(验收参考,非产出上限;预期外发现按待确认通道回传)\n",
+		fmt.Fprintf(&b, "预期观察: %s(验收参考,非产出上限;预期外发现按新进事实通道回传)\n",
 			strings.TrimSpace(pack.ExpectedObservation))
 	}
 	if pack.ActionLevel != "" {
-		fmt.Fprintf(&b, "意图分级: %s(达到审批门槛的动作将逐次需批准)\n", string(pack.ActionLevel))
+		fmt.Fprintf(&b, "意图分级: %s(背景信息，实际调用独立判断)\n", string(pack.ActionLevel))
 	}
 	return b.String()
 }
@@ -266,7 +232,7 @@ const startupInstruction = "【启动指令】现在开始执行上述意图:先
 // 任务包七要素全文仍是首条 user turn;system 尾只锚定意图核心——被
 // 压缩的是 user turn 的细节,压不掉的是"这条单位该干什么"。
 func WorkerSystemSegments(ctx context.Context, store *rings.Store, roe RoE, pack *TaskPack) []string {
-	segs := []string{roeConstraintBlock(roe, pack.PendingScope, roe.InfoSources)}
+	segs := []string{roeConstraintBlock(roe)}
 	segs = append(segs, WorkerPromptSpec.Assemble(ctx, store)...)
 	segs = append(segs, intentBlock(pack), anchorAssetsBlock(pack), startupInstruction)
 	return segs

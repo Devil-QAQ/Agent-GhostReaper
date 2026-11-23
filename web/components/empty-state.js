@@ -13,11 +13,11 @@ export function EmptyState({ icon = "circleHelp", title, hint, action, className
   return (
     <div
       className={cn(
-        "flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed py-12 text-center",
+        "flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed px-4 py-6 text-center",
         className
       )}
     >
-      <Icon className="size-8 text-tertiary-foreground" />
+      <Icon className="size-6 text-tertiary-foreground" />
       <div className="text-[13px] font-medium">{title}</div>
       {hint && <div className="text-xs text-muted-foreground">{hint}</div>}
       {action && (

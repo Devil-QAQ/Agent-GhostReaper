@@ -44,9 +44,7 @@ func DefaultBudget() Budget {
 	return Budget{}.withDefaults()
 }
 
-// wrapupPrompt 预算耗尽时注入的收尾指令(Settlement):把已取得的发现
-// 写回图再结束——预算耗尽是暂停接力,不是失败(R16)。
-const wrapupPrompt = `运行预算即将耗尽。立即收尾:把本次已取得、尚未提交的可保留发现用 submit_candidate_fact / submit_hypothesis 写回,然后用一句话说明进度与剩余工作。不要发起新的探测。`
+const wrapupPrompt = `运行预算即将耗尽。立即收尾:把本次实际观察到、尚未提交的事实及证据用 submit_candidate_fact 写回；未验证的想法不要作为事实提交。然后用一句话说明进度与剩余工作。不要发起新的探测。`
 
 // TaskPack 最小任务包七要素(第四章 §2):虫群单位换实例、换上下文
 // 仍能接着同一条工作线继续。Claim 时从图上构建并绑定图版本,
@@ -69,12 +67,7 @@ type TaskPack struct {
 	// 拒绝服务类——无论门槛多宽都直接拒绝(非常严重项),面板可研判后
 	// 放行。从 step.detail.harm_class 读入,缺省空=普通。
 	HarmClass rings.HarmClass
-	// ExternalServices 外部服务声明(P4-67 ⑤ 规划前置):意图拆解契约的
-	// 可选字段——语义化描述本步骤将用的公开信息服务类型(不枚举站名),
-	// 如"代码托管平台的公开仓库"。执行中命中声明的服务形态 → 免分诊
-	// 放行(声明与 host 的匹配由分诊层一次性判定后入缓存);清单外新
-	// 地址照走分诊。从 step.detail.external_services 读入,空=无声明。
-	ExternalServices string
+
 	// ③ 相关可信事实与证据(仅 confirmed 事实;证据引用随 detail)
 	Facts []FactBrief
 	// ④ 必要资产与权限(本步骤 covers 的资产 + RoE 边界)
@@ -102,73 +95,21 @@ type TaskPack struct {
 	// GR_CRED_* 环境变量里,不进任务包与提示词正文。
 	Credentials []vault.Brief
 
-	// Falsify 反证任务上下文(P1-08 + P2-02,第三章 §5):本 Step 为主宰
-	// 派发的反证意图(detail.kind=falsify)时非 nil。R12:反证单位与发现
-	// 单位必不相同——发现者不得自证,由领任务包时的绑定与入口校验双重
-	// 保障。P2-02:携带轮次与本轮待检的存活竞争解释清单(收割派发时
-	// 从账本算出并冻结进 step.detail,前几轮已排除的不重复派)。
-	Falsify *FalsifyBrief
-
-	// Verify 假设验证任务上下文(P2-03,第四章 §5):本 Step 为主宰收割
-	// 评估"值得跟"派发的验证意图(detail.kind=verify)时非 nil。R12:验证
-	// 单位与提出单位必不相同——由领任务包时的绑定与写回入口校验双重保障。
-	Verify *HypothesisBrief
+	// Retake 补做证据/重验拉起情报(P5-02):本 Step 为交卷三查不过派的
+	// 补做步骤或 reopen 派的重验步骤(detail.kind=retake)时非 nil——单位
+	// 起飞接管原交卷会话续跑(转录取原步骤最近会话),失败原因/重开理由
+	// 作为续跑首条指令注入;补做后经 submit_claim 带 claim_id 重交。
+	Retake *RetakeBrief
 
 	// TaskType 任务类型(P4-44 ②:created 事件 detail 定格,建后不可改):
 	// 渗透/红队;空 = 存量未标(行为等同红队)。
 	TaskType string
 
-	// ScopeClosure 种子闭包(P4-44 ①③):种子/手动/已放行资产的主机锚点
-	// 集(给域名=域名级授权,给 IP=服务器级授权)。仅渗透任务在领取时
-	// 构建并冻结进任务包——权限管线据此对命令目标做范围外硬拦;红队/
-	// 未标任务为 nil(现状行为,不拦)。冻结语义与授权边界同款:面板
-	// 放行/新增资产对下一批领取的单位生效。
-	ScopeClosure *rings.ScopeClosure
-
-	// PendingScope 待批资产清单(P4-44 ③:渗透任务的范围外发现资产,
-	// 锁定不测)。领取时冻结,RoE 约束块据此渲染"待批资产"行;空 = 无。
-	PendingScope []rings.ExcludedAssetView
-}
-
-// HypothesisBrief 假设验证任务上下文:被验证假设的冻结要素。
-type HypothesisBrief struct {
-	HypothesisID string
-	Statement    string // 假设陈述
-	Basis        string // 提出者依据(允许弱依据)
-	ProposerUnit string // 提出单位(R12 独立性锚点,仅作背景告知)
-}
-
-// FalsifyBrief 反证任务上下文:被反证声明的冻结要素 + 本轮目标。
-type FalsifyBrief struct {
-	ClaimID        string
-	Round          int    // 反证轮次(P2-02;旧步骤缺省 0 显示为 1)
-	Statement      string // 存在性声明
-	Impact         string // 影响面声明(与存在性分开反证)
-	Vulnclass      string
-	Evidence       string // 发现者证据截头或引用
-	DiscovererUnit string // 发现单位(R12 独立性锚点,仅作背景告知)
-	// Alternatives 本轮须逐条检验的竞争解释(存活清单;全量冻结清单
-	// 在声明 detail,重开后回到全量)。空 = 该声明无竞争解释语义
-	//(P1-08 旧声明)。
-	Alternatives []AltBrief
-	// Chain 攻击链环节(P2-06 组合发现:链式 TestClaim 的血缘链条,
-	// 反证单位须看到链条才能独立重放组合效果)。空 = 单线索声明。
-	Chain []ChainBrief
-}
-
-// ChainBrief 攻击链环节条目(P2-06,第四章 §1 五问之"两条线索组合成
-// 新的边界问题"):组合声明的每条 Fact 环节(血缘经 derived_from 边
-// 挂在声明名下,此处为任务包呈现形态)。
-type ChainBrief struct {
-	FactID string
-	Role   string // 环节角色(入口/凭据/横移/目标等,发现者语言)
-	Title  string // 环节事实陈述
-}
-
-// AltBrief 任务包里的单条竞争解释。
-type AltBrief struct {
-	ID    string
-	Label string
+	// Briefing 任务简报(P5-04 虫群知情化):开工第一条消息开头的轻量
+	// 概况(锚例句 + 概况 JSON——目标/已确认事实/已确认漏洞/在跑排队
+	// 意图,无 coverage 信号)。领取时冻结;装配失败为空串(静默降级,
+	// 虫群照常开工)。见 briefing.go。
+	Briefing string
 }
 
 // FactBrief 任务包里的可信事实条目。
@@ -210,10 +151,10 @@ func (p *TaskPack) Render() string {
 	b.WriteString("\n二、本步骤意图(只做这一条)\n")
 	fmt.Fprintf(&b, "  %s\n", p.StepIntent)
 	if p.ActionLevel != "" {
-		fmt.Fprintf(&b, "  意图分级: %s(中高级别动作将逐次经审批门,被拒不重试)\n", string(p.ActionLevel))
+		fmt.Fprintf(&b, "  意图分级: %s(描述用途；实际动作按当前硬规则与边界判断，需要操作者决定时才审批)\n", string(p.ActionLevel))
 	}
 	if p.ExpectedObservation != "" {
-		fmt.Fprintf(&b, "  预期观察: %s(验收参考,非产出上限;预期外发现按待确认通道回传)\n", p.ExpectedObservation)
+		fmt.Fprintf(&b, "  预期观察: %s(验收参考,非产出上限;预期外发现按新进事实通道回传)\n", p.ExpectedObservation)
 	}
 
 	b.WriteString("\n三、相关可信事实(已确认)\n")
@@ -244,8 +185,7 @@ func (p *TaskPack) Render() string {
 	} else {
 		b.WriteString("未设白名单")
 	}
-	fmt.Fprintf(&b, "; 审批门槛: %s(该级及以上需批准,等待批准)\n",
-		string(NormalizeApprovalThreshold(p.Authorization.ApprovalThreshold)))
+	b.WriteString("; 实际调用按当前边界判断，批准只适用于该次调用\n")
 	b.WriteString("\n")
 
 	b.WriteString("\n五、前序尝试(同目标)\n")
@@ -302,63 +242,6 @@ func (p *TaskPack) Render() string {
 
 	fmt.Fprintf(&b, "\n七、当前图版本\n  %d\n", p.GraphVersion)
 
-	// 反证任务专用节(仅验证类意图携带;固定标头便于测试断言与模型解析)。
-	if p.Falsify != nil {
-		f := p.Falsify
-		if f.Round > 0 {
-			fmt.Fprintf(&b, "\n八、反证任务(验证类意图 · 第 %d 轮;你不是发现者,须独立复核,R12)\n", f.Round)
-		} else {
-			b.WriteString("\n八、反证任务(验证类意图;你不是发现者,须独立复核,R12)\n")
-		}
-		fmt.Fprintf(&b, "  判断 %s\n", f.ClaimID)
-		fmt.Fprintf(&b, "  存在性判断: %s\n", f.Statement)
-		fmt.Fprintf(&b, "  影响面判断: %s(与存在性分开反证)\n", f.Impact)
-		if f.Vulnclass != "" {
-			fmt.Fprintf(&b, "  漏洞类型: %s\n", f.Vulnclass)
-		}
-		fmt.Fprintf(&b, "  发现者证据: %s\n", clipLine(f.Evidence, 200))
-		if len(f.Chain) > 0 {
-			b.WriteString("  攻击链环节(组合判断:整条链的组合效果才是存在性,须逐环节独立重放):\n")
-			for _, c := range f.Chain {
-				line := "    - " + c.FactID
-				if c.Role != "" {
-					line += " [" + c.Role + "]"
-				}
-				if c.Title != "" {
-					line += " " + clipLine(c.Title, 120)
-				}
-				b.WriteString(line + "\n")
-			}
-		}
-		if len(f.Alternatives) > 0 {
-			b.WriteString("  本轮待检的其他可能原因(逐条给出 refuted 结论;真实排除才可标 true):\n")
-			for _, a := range f.Alternatives {
-				fmt.Fprintf(&b, "    - %s: %s\n", a.ID, clipLine(a.Label, 160))
-			}
-		}
-		b.WriteString("  你的职责: 独立尝试推翻上述判断——重放观察、核查证据、逐条排除其他可能原因。\n")
-		b.WriteString("  完成后必须经 submit_falsify_result 写回结构化结论(existence_refuted / impact_supported")
-		if len(f.Alternatives) > 0 {
-			b.WriteString(" + 逐条 alternatives 按 ID 给 refuted")
-		}
-		b.WriteString(" + 本轮证据);\n")
-		fmt.Fprintf(&b, "  影响面成立时须给 impact_level(critical|high|medium|low,报告级别只跟影响面证据走;%s);\n", SeverityAnchor)
-		b.WriteString("  结论所依据的交换必须附引用:evidence_exchanges 填工具结果里 exchange= 行给出的交换编号(http_probe 验证可直接取,通常恰 1 条——直接证明结论的那条;可达性确认、对照请求、重复重放与无关探测不引用);bash 通道取不到编号时留空,系统按证据文本中的地址回查;\n")
-		b.WriteString("  只输出文本结论不算完成,确认判定由仲裁者机器完成(你的 note 陈述不构成证据)。\n")
-	}
-
-	// 假设验证任务专用节(仅验证类意图携带;固定标头便于测试断言与模型解析)。
-	if p.Verify != nil {
-		h := p.Verify
-		fmt.Fprintf(&b, "\n九、假设验证任务(验证类意图;你不是提出者,须独立复核,R12)\n")
-		fmt.Fprintf(&b, "  假设 %s\n", h.HypothesisID)
-		fmt.Fprintf(&b, "  假设陈述: %s\n", h.Statement)
-		fmt.Fprintf(&b, "  提出者依据: %s\n", clipLine(h.Basis, 200))
-		b.WriteString("  你的职责: 独立验证这条假设——设计验证手段、真实执行、经 submit_hypothesis_result\n")
-		b.WriteString("  写回结构化结论(verdict: supported=成立|refuted=不成立|inconclusive=未能定论 + 本轮证据);\n")
-		b.WriteString("  验证中取得的可保留观察同时走 submit_candidate_fact / submit_test_claim 正常回传;\n")
-		b.WriteString("  假设成立不等于漏洞已验证(R11),只代表这条直觉值得跟。\n")
-	}
 	return b.String()
 }
 

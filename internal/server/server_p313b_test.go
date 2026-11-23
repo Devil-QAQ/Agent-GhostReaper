@@ -164,7 +164,7 @@ func TestClaimOrigin(t *testing.T) {
 			Payload: rings.SwarmRecord{StepID: "s2", UnitID: "u2", TranscriptID: "swarm-u2", Type: rings.SwarmRecSessionStarted}},
 		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "swarm:u2",
 			Payload: rings.TestClaimRecord{ClaimID: claim, StepID: "s2", UnitID: "u2",
-				Type: rings.TestClaimRecFalsify, Round: 1, ImpactSupported: true, ImpactLevel: "high"}},
+				Type: rings.TestClaimRecFalsify, Round: 1, EvidenceHead: "结论截头"}},
 		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "arbiter",
 			Payload: rings.NodeStateChanged{NodeID: claim, Status: rings.TestClaimConfirmed}},
 	)

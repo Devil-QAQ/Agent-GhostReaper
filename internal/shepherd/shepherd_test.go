@@ -18,6 +18,7 @@ import (
 	"ghostreaper/internal/hiber"
 	"ghostreaper/internal/manager"
 	"ghostreaper/internal/rings"
+	"ghostreaper/internal/swarm"
 )
 
 // ---- 进程内脚本模型(OpenAI Chat Completions 兼容 SSE;与 swarm/
@@ -283,7 +284,7 @@ func TestConversationFlow(t *testing.T) {
 		t.Fatalf("应有至少两次模型请求,实为 %d", len(reqs))
 	}
 	sys := reqs[0].System
-	for _, want := range []string{"牧者(Shepherd)", "工具与纪律(代码固定", "输出文风(代码固定", "短句,先说结论再说理由", "禁用填充语"} {
+	for _, want := range []string{"牧者(Shepherd)", "工具与纪律(代码固定", "输出文风(代码固定", shepherdStyleRules} {
 		if !strings.Contains(sys, want) {
 			t.Fatalf("system 段缺 %q", want)
 		}
@@ -363,8 +364,12 @@ func TestSessionResume(t *testing.T) {
 	if len(reqs) != 2 {
 		t.Fatalf("应恰 2 次请求,实为 %d", len(reqs))
 	}
-	if reqs[1].LastUser != "第二条" {
-		t.Fatalf("第二次请求末条 user 应为第二条消息: %q", reqs[1].LastUser)
+	if reqs[1].LastUser != swarm.HumanReplyPrompt("第二条") {
+		t.Fatalf("第二次请求应含原问题与本轮阅读任务: %q", reqs[1].LastUser)
+	}
+	v, err := s.View(t.Context(), task)
+	if err != nil || v.Messages[0].Text != "第一条" || v.Messages[1].Text != "第二条" {
+		t.Fatal("提示词装配不得改变入账和界面上的操作者原话")
 	}
 }
 
@@ -378,10 +383,10 @@ func TestUrgentIntentAndAdvice(t *testing.T) {
 
 	m := newScriptedModel(func(rr *recordedReq) scriptedRep {
 		switch {
-		case rr.LastUser == "插急活" && !seenTool(rr, "urgent_intent"):
+		case rr.LastUser == swarm.HumanReplyPrompt("插急活") && !seenTool(rr, "urgent_intent"):
 			return scriptedRep{ToolCalls: []scriptedToolCall{{ID: "c1", Name: "urgent_intent",
 				Args: `{"intent":"对种子主机做端口判定","expected_observation":"开放端口清单","action_level":"只读探测"}`}}}
-		case rr.LastUser == "纠方向" && !seenTool(rr, "advise_overmind"):
+		case rr.LastUser == swarm.HumanReplyPrompt("纠方向") && !seenTool(rr, "advise_overmind"):
 			return scriptedRep{ToolCalls: []scriptedToolCall{{ID: "c2", Name: "advise_overmind",
 				Args: `{"advice":"优先覆盖 web 服务,主机探测暂缓"}`}}}
 		}
@@ -540,7 +545,7 @@ func TestRestartAdoption(t *testing.T) {
 		t.Fatalf("失败原因应说明中断: %q", n)
 	}
 	// 只答排队消息:模型恰被请求一次(不重复注入送达消息)。
-	if reqs := m.requests(); len(reqs) != 1 || reqs[0].LastUser != "排队中的问题" {
+	if reqs := m.requests(); len(reqs) != 1 || reqs[0].LastUser != swarm.HumanReplyPrompt("排队中的问题") {
 		t.Fatalf("收养应恰答排队消息: %d 次", len(reqs))
 	}
 }
@@ -573,7 +578,7 @@ func TestShepherdPromptSpecImmutable(t *testing.T) {
 	}
 	segs := shepherdSystemSegments(ctx, store)
 	joined := strings.Join(segs, "\n")
-	for _, want := range []string{"工具与纪律(代码固定,配置不可移除)", "输出文风(代码固定,配置不可移除)", "禁用填充语"} {
+	for _, want := range []string{"工具与纪律(代码固定,配置不可移除)", "输出文风(代码固定,配置不可移除)", shepherdStyleRules} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("对抗正文下固定段缺失: %q", want)
 		}

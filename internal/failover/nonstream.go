@@ -21,6 +21,7 @@ func (p nonStreaming) Complete(ctx context.Context, req llm.CompletionRequest) (
 func (p nonStreaming) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
 		msg, stop, usage, err := p.inner.Complete(ctx, req)
+		preserveReturnedUsage(ctx, usage)
 		if err != nil {
 			yield(llm.StreamEvent{}, err)
 			return

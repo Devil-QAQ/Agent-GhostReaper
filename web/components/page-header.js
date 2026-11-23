@@ -2,21 +2,21 @@ import * as React from "react";
 
 import { cn } from "@/lib/utils";
 
-// 页面头三段式(8.1④):H1 标题 + 一句话语义副标题(#43,说明数据来源
-// 与刷新机制)+ 右侧主操作槽位。
-// P4-31 ②:页面标题 22 粗(.t-page);分组靠留白不靠线(8.9 #2,去底线)。
-export function PageHeader({ title, subtitle, children, className }) {
+// 当前页面由侧栏/任务页签标明；保留无障碍标题，提示与操作共用一行。
+// 待退役的旧图保留原内部页头，外层导航仍由任务空间统一。
+export function PageHeader({ title, subtitle, children, className, compact = true }) {
   return (
     <div
-      className={cn("flex flex-wrap items-end justify-between gap-3 pb-2", className)}
+      className={cn("flex flex-wrap justify-between", compact ? "min-h-8 items-center gap-2" : "items-end gap-3 pb-2", className)}
+      data-page-header={compact ? "compact" : "legacy"}
     >
       <div className="min-w-0">
-        <h1 className="t-page">{title}</h1>
+        <h1 className={compact ? "sr-only" : "t-page"}>{title}</h1>
         {subtitle && (
-          <p className="mt-1 text-xs text-muted-foreground">{subtitle}</p>
+          <p className={cn("text-xs text-muted-foreground", !compact && "mt-1")}>{subtitle}</p>
         )}
       </div>
-      {children && <div className="flex items-center gap-2">{children}</div>}
+      {children && <div className="flex min-w-0 flex-wrap items-center gap-2">{children}</div>}
     </div>
   );
 }

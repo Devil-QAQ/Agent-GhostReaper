@@ -32,6 +32,15 @@ func TestOvermindP430PromptClauses(t *testing.T) {
 	if !strings.Contains(overmindOutputContract, "report_exclusions") {
 		t.Fatalf("输出契约须声明 report_exclusions 可选字段")
 	}
+	// P5-01③b① 同步点:combined_claims 的 alternatives 必答字段已删
+	//——组合声明不再要求列竞争解释(与交卷单砍除口径一致;漏改则
+	// 组合声明链路全断——模型照契约输出旧字段时解析层无消费点)。
+	if strings.Contains(overmindOutputContract, "alternatives") {
+		t.Fatalf("P5-01③b①:输出契约不得再含 alternatives 字段:\n%s", overmindOutputContract)
+	}
+	if strings.Contains(overmindDisciplineRules, "独立反证") {
+		t.Fatalf("主宰纪律不得再引用独立反证(三段流水线退役)")
+	}
 }
 
 // TestApplyReportExclusion 存量复核标记落账:程序校验形状(判断在快照

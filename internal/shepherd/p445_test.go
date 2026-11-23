@@ -112,7 +112,7 @@ func TestP445SetAssetScopeIncludePentest(t *testing.T) {
 	if isErr {
 		t.Fatalf("纳入不应报错: %s", out)
 	}
-	if !strings.Contains(out, "已放行待批资产 a-disc") || !strings.Contains(out, "a-x(x.example.com) 本就在测试范围内") {
+	if !strings.Contains(out, "已加入资产 a-disc") || !strings.Contains(out, "a-x(x.example.com) 已在资产列表中") {
 		t.Fatalf("纳入答复应分待批放行与本就在范围内: %s", out)
 	}
 	if pending, _ := store.PendingScopeAssets(ctx, task); len(pending) != 0 {
@@ -132,7 +132,7 @@ func TestP445SetAssetScopeIncludeRedTeam(t *testing.T) {
 	if isErr {
 		t.Fatalf("纳入不应报错: %s", out)
 	}
-	if !strings.Contains(out, "本就全部可测") {
+	if !strings.Contains(out, "加入") {
 		t.Fatalf("红队纳入应如实答复本就全开: %s", out)
 	}
 	// 零变更不落账。

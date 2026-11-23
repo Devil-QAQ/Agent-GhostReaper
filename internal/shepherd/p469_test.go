@@ -67,24 +67,21 @@ func TestP469ShepherdExcludeClosesWaiters(t *testing.T) {
 	if isErr {
 		t.Fatalf("摘除不应报错: %s", out)
 	}
-	// 挂等单位分族收口。
+	// Explicit exclusion cancels work covering that asset. Historical scope
+	// cards are audit only; unrelated archived waiters are not revived.
 	if st, _ := store.Node(ctx, task, "s-cover"); st.Status != "aborted" {
-		t.Fatalf("覆盖者应终止留痕: %+v", st.Status)
+		t.Fatal("covered frozen work was not stopped", st.Status)
 	}
-	st, _ := store.Node(ctx, task, "s-touch")
-	if st.Status != "dispatched" {
-		t.Fatalf("顺带触碰者应唤醒换路: %+v", st.Status)
+	if st, _ := store.Node(ctx, task, "s-touch"); st.Status != rings.StepScopeWait {
+		t.Fatal("unrelated historical execution was changed", st.Status)
 	}
-	if v, _ := st.Detail["scope_head"].(bool); !v {
-		t.Fatalf("唤醒应带队首标记: %+v", st.Detail)
-	}
-	// 卡收口(卡消红点消)+互斥。
 	rows, _ := store.ApprovalByRequest(ctx, task, rings.ScopeCardID("wait-target.com", "80"))
-	if last := rows[len(rows)-1]; last.Type != rings.ApprovalRecDenied {
-		t.Fatalf("卡应按拒绝语义收口: %+v", last)
+	if len(rows) != 1 || rows[0].Type != rings.ApprovalRecScopeWait {
+		t.Fatal("historical scope decision was rewritten")
 	}
-	if n, _ := store.ScopePendingCount(ctx, task); n != 0 {
-		t.Fatalf("红点应归零: %d", n)
+	cards, err := store.PendingAssetProposals(ctx, task)
+	if err != nil || len(cards) != 0 {
+		t.Fatal("old permission card became a new inventory request", err)
 	}
 	roe, _ := store.CurrentRoE(ctx, task)
 	if len(roe.ScopeApproved) != 0 {

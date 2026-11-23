@@ -127,7 +127,7 @@ func ClosureOf(ctx context.Context, store *rings.Store, taskID string) (ClosureS
 
 // evalClosure 一轮研判记录落账后的收口评估:双条件同时满足且无待决
 // 提醒时落一条 closure.record(prompt)。只写账不动任务——"弹窗提醒,
-// 任务不打断"由本函数的实现保证(零控制面触点)。失败如实留 LastErr
+// 任务不打断"由本函数的实现保证(零控制面触点)。失败如实留 lastErr
 // 不重试(下一轮评估重算,账本派生态不受影响)。
 func (l *Loop) evalClosure(ctx context.Context) {
 	l.mu.Lock()

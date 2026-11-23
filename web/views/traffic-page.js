@@ -6,9 +6,9 @@ import { toast } from "sonner";
 import { EmptyState } from "@/components/empty-state";
 import { ExchangeRaw, TrafficTypeBadge, fmtBytes, statusVariant } from "@/components/exchange-raw";
 import { PageHeader } from "@/components/page-header";
+import { SearchInput } from "@/components/search-input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -108,14 +108,14 @@ export function TrafficPage({ tasks }) {
   const titleOf = (id) => taskList.find((t) => t.id === id)?.title || id;
 
   return (
-    <div className="flex flex-col gap-6">
-      <PageHeader title="流量" subtitle="镜的全程留痕 · 按任务 / host / 方法 / 状态筛选 · 原文分段回放" />
+    <div className="flex flex-col gap-3">
+      <PageHeader title="流量" subtitle="查看请求与响应，可按任务、地址和状态筛选" />
 
       {/* 筛选栏(数据表规范 8.5:搜索 + 筛选;任务/host/方法/状态/类型/时间) */}
       <div className="flex flex-wrap items-center gap-2">
-        <div className="w-48">
+        <div className="w-40">
           <Select value={fTask} onValueChange={setFTask}>
-            <SelectTrigger>
+            <SelectTrigger className="h-8 text-xs">
               <SelectValue placeholder="全部任务" />
             </SelectTrigger>
             <SelectContent>
@@ -128,15 +128,14 @@ export function TrafficPage({ tasks }) {
             </SelectContent>
           </Select>
         </div>
-        <Input
-          className="w-44"
+        <SearchInput
           placeholder="host 筛选"
           value={hostInput}
           onChange={(e) => setHostInput(e.target.value)}
         />
-        <div className="w-32">
+        <div className="w-28">
           <Select value={fMethod} onValueChange={setFMethod}>
-            <SelectTrigger>
+            <SelectTrigger className="h-8 text-xs">
               <SelectValue placeholder="全部方法" />
             </SelectTrigger>
             <SelectContent>
@@ -151,7 +150,7 @@ export function TrafficPage({ tasks }) {
         </div>
         <div className="w-28">
           <Select value={fStatus} onValueChange={setFStatus}>
-            <SelectTrigger>
+            <SelectTrigger className="h-8 text-xs">
               <SelectValue placeholder="全部状态" />
             </SelectTrigger>
             <SelectContent>
@@ -166,7 +165,7 @@ export function TrafficPage({ tasks }) {
         </div>
         <div className="w-28">
           <Select value={fType} onValueChange={setFType}>
-            <SelectTrigger>
+            <SelectTrigger className="h-8 text-xs">
               <SelectValue placeholder="全部类型" />
             </SelectTrigger>
             <SelectContent>
@@ -181,14 +180,14 @@ export function TrafficPage({ tasks }) {
         </div>
         <input
           type="datetime-local"
-          className="h-9 rounded-md border border-border/55 bg-input-surface px-2 text-sm text-foreground"
+          className="h-8 w-44 max-w-full rounded-md border border-border/55 bg-input-surface px-2 text-xs text-foreground"
           value={fSince}
           onChange={(e) => setFSince(e.target.value)}
           title="起始时间(含)"
         />
         <input
           type="datetime-local"
-          className="h-9 rounded-md border border-border/55 bg-input-surface px-2 text-sm text-foreground"
+          className="h-8 w-44 max-w-full rounded-md border border-border/55 bg-input-surface px-2 text-xs text-foreground"
           value={fUntil}
           onChange={(e) => setFUntil(e.target.value)}
           title="截止时间(含)"
@@ -198,9 +197,9 @@ export function TrafficPage({ tasks }) {
       {error ? (
         <EmptyState icon="waves" title="读取失败" hint={error} />
       ) : !data ? (
-        <EmptyState icon="waves" title="读取中" hint="镜留痕读取中…" />
+        <EmptyState icon="waves" title="读取中" hint="正在读取流量记录" />
       ) : rows.length === 0 ? (
-        <EmptyState icon="waves" title="暂无流量" hint="当前筛选内无镜留痕;任务执行中的工具流量会留痕在此呈现" />
+        <EmptyState icon="waves" title="暂无流量" hint="当前条件下没有请求记录" />
       ) : (
         <div className="rounded-xl border border-border/55 bg-card">
           <Table>
@@ -281,8 +280,9 @@ export function TrafficPage({ tasks }) {
 
 // PageBar 标准分页条(P3-05c ③;P3-11a ④:每页条数下拉挪入底部分页条,
 // 与页码并排):总数 + 页码跳转(首末与当前邻域,超界省略)+ 每页条数。
-// 数字精确(8.5),按钮 ≤4 字。
-function PageBar({ page, pages, total, onPage, pageSize, onPageSize }) {
+// 数字精确(8.5),按钮 ≤4 字。onPageSize 缺省 = 固定页大小只读形态
+//(P5-07④ 发现页三页签台账同款复用,不出现每页条数下拉)。
+export function PageBar({ page, pages, total, onPage, pageSize, onPageSize }) {
   // 页码窗口:首末页 + 当前页前后 2 页,间隙折叠为省略号。
   const want = new Set([1, pages, page - 1, page, page + 1].filter((n) => n >= 1 && n <= pages));
   const nums = [...want].sort((a, b) => a - b);
@@ -327,20 +327,22 @@ function PageBar({ page, pages, total, onPage, pageSize, onPageSize }) {
           下一页
         </Button>
       )}
-      <div className="ml-auto w-32">
-        <Select value={pageSize} onValueChange={onPageSize}>
-          <SelectTrigger className="h-8 text-xs">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {["10", "20", "50", "100", "200"].map((n) => (
-              <SelectItem key={n} value={n}>
-                每页 {n} 条
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
+      {onPageSize ? (
+        <div className="ml-auto w-32">
+          <Select value={pageSize} onValueChange={onPageSize}>
+            <SelectTrigger className="h-8 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {["10", "20", "50", "100", "200"].map((n) => (
+                <SelectItem key={n} value={n}>
+                  每页 {n} 条
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -411,7 +413,7 @@ function BindPanel({ tid, row }) {
         <div className="flex flex-wrap items-center gap-2">
           <div className="w-64">
             <Select value={claimID} onValueChange={setClaimID}>
-              <SelectTrigger>
+              <SelectTrigger className="h-8 text-xs">
                 <SelectValue placeholder="选择判断" />
               </SelectTrigger>
               <SelectContent>

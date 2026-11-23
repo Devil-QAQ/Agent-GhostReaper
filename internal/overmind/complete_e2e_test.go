@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +38,25 @@ func completedEventRev(t *testing.T, store *rings.Store, task string) int64 {
 			t.Fatalf("completed 事件理由不符: %+v", p.Detail)
 		}
 		return ev.Revision
+	}
+	return -1
+}
+
+// claimFirstSubmitRev 取声明战役内首条交换单的 revision(交卷时点)。
+func claimFirstSubmitRev(t *testing.T, store *rings.Store, task, claimID string) int64 {
+	t.Helper()
+	evs, err := store.Events(context.Background(), task, 0, 0)
+	if err != nil {
+		t.Fatalf("查事件流失败: %v", err)
+	}
+	for _, ev := range evs {
+		if ev.Kind != rings.EventTestClaimRecord {
+			continue
+		}
+		var r rings.TestClaimRecord
+		if json.Unmarshal(ev.Payload, &r) == nil && r.ClaimID == claimID && r.Type == rings.TestClaimRecSubmit {
+			return ev.Revision
+		}
 	}
 	return -1
 }
@@ -87,58 +105,15 @@ func TestLoopCompletesTaskAfterClaimsSettle(t *testing.T) {
 	t.Cleanup(target.Close)
 	mainURL := target.MainURL()
 
-	// 脚本模型:拆解状态感知(审计意图已派过即空);发现包 port_probe →
-	// robots/备份/版本三连 curl → 两条声明 → 候选事实 → 收口;反证包
-	// 按"存在性声明:"行分支(备份=影响面成立 / 版本=影响面不足)。
-	claimIDRe := regexp.MustCompile(`判断 (tc-[0-9a-f]+)`)
-	stmtBackupRe := regexp.MustCompile(`(?m)^\s*存在性判断: .*备份目录`)
-	packURLRe := regexp.MustCompile(`-\s+web1 \[service\] (http://\S+)`)
+	// 脚本模型(P5-01 单会话连打):拆解状态感知(审计意图已派过即空);
+	// 发现包 port_probe → robots/备份/版本三连 curl → 两条 submit_claim
+	// 交卷(六字段,evidence_refs 引 URL) → 候选事实 → 收口(无反证包)。
 	model := newGatedScriptedModel(func(rr *recordedRequest) scriptedReply {
 		if len(rr.ToolsOffered) == 0 {
 			if strings.Contains(rr.LastUser, "审计主站敏感路径") {
 				return scriptedReply{Text: `{"new_intents":[]}`, Finish: "stop"}
 			}
 			return scriptedReply{Text: `{"new_intents":[{"intent":"审计主站敏感路径暴露(robots/备份目录/版本接口)","expected_observation":"敏感路径清单与各自内容证据","action_level":"只读探测","covers":["web1"]}]}`, Finish: "stop"}
-		}
-		if strings.Contains(rr.LastUser, "八、反证任务") {
-			m := claimIDRe.FindStringSubmatch(rr.LastUser)
-			if m == nil {
-				return scriptedReply{Text: "反证任务包缺声明 ID。", Finish: "stop"}
-			}
-			claimID := m[1]
-			base := mainURL
-			if u := packURLRe.FindStringSubmatch(rr.LastUser); u != nil {
-				base = u[1]
-			}
-			if stmtBackupRe.MatchString(rr.LastUser) {
-				switch {
-				case !seenToolResult(rr, "bash", "mock backup archive listing"):
-					return scriptedReply{ToolCalls: []scriptedToolCall{{
-						ID: "fb", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/old-backup/"}`, base),
-					}}, Finish: "tool_calls"}
-				case !seenToolResult(rr, "submit_falsify_result", "已记录"):
-					return scriptedReply{ToolCalls: []scriptedToolCall{{
-						ID: "fr1", Name: "submit_falsify_result",
-						// P4-73:证据带完整 URL(证明交换经回查兜底锚定)。
-						Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":true},{"id":"alt2","refuted":true},{"id":"alt3","refuted":true},{"id":"alt4","refuted":true}],"evidence":"独立重放 %s/old-backup/ 仍返回备份文件列举,匿名可读,影响面成立","note":"复核一致"}`, claimID, base),
-					}}, Finish: "tool_calls"}
-				default:
-					return scriptedReply{Text: "反证完成:存在性未推翻,影响面证据充分。", Finish: "stop"}
-				}
-			}
-			switch {
-			case !seenToolResult(rr, "bash", `"version":"2.4.1"`):
-				return scriptedReply{ToolCalls: []scriptedToolCall{{
-					ID: "fv", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/api/version"}`, base),
-				}}, Finish: "tool_calls"}
-			case !seenToolResult(rr, "submit_falsify_result", "已记录"):
-				return scriptedReply{ToolCalls: []scriptedToolCall{{
-					ID: "fr2", Name: "submit_falsify_result",
-					Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":false,"alternatives":[{"id":"alt1","refuted":true},{"id":"alt2","refuted":true},{"id":"alt3","refuted":true},{"id":"alt4","refuted":true}],"evidence":"独立重放 /api/version 返回 2.4.1,但仅版本号本身,影响面证据不足","note":"存在,影响面不足"}`, claimID),
-				}}, Finish: "tool_calls"}
-			default:
-				return scriptedReply{Text: "反证完成:存在性未推翻,影响面证据不足。", Finish: "stop"}
-			}
 		}
 		u, err := url.Parse(mainURL)
 		if err != nil || u.Port() == "" {
@@ -162,23 +137,23 @@ func TestLoopCompletesTaskAfterClaimsSettle(t *testing.T) {
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
 				ID: "d3", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/api/version"}`, mainURL),
 			}}, Finish: "tool_calls"}
-		case !hasToolCallWithArg(rr, "submit_test_claim", "备份目录可公开匿名列举"):
+		case !hasToolCallWithArg(rr, "submit_claim", "备份目录可公开匿名列举"):
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
-				ID: "d4", Name: "submit_test_claim",
-				Args: fmt.Sprintf(`{"statement":"/old-backup/ 备份目录可公开匿名列举","impact":"备份文件可被未授权下载,存在敏感数据泄露","evidence":"curl 实测返回列举","asset_id":"web1","vulnclass":"信息暴露"}`),
+				ID: "d4", Name: "submit_claim",
+				Args: fmt.Sprintf(`{"summary":"/old-backup/ 备份目录可公开匿名列举","severity":"high","evidence_refs":[%q],"proving_marker":"mock backup archive listing","countercheck_note":"直接请求与绕缓存重放各一次,返回一致,排除缓存假象","impact_note":"备份文件可被未授权下载","asset_id":"web1","vulnclass":"信息暴露"}`, mainURL+"/old-backup/"),
 			}}, Finish: "tool_calls"}
-		case !hasToolCallWithArg(rr, "submit_test_claim", "公开暴露服务版本号"):
+		case !hasToolCallWithArg(rr, "submit_claim", "公开暴露服务版本号"):
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
-				ID: "d5", Name: "submit_test_claim",
-				Args: fmt.Sprintf(`{"statement":"/api/version 公开暴露服务版本号","impact":"版本号可支撑定向利用","evidence":"curl 实测返回 2.4.1","asset_id":"web1","vulnclass":"信息暴露"}`),
+				ID: "d5", Name: "submit_claim",
+				Args: fmt.Sprintf(`{"summary":"/api/version 公开暴露服务版本号","severity":"none","evidence_refs":[%q],"proving_marker":"2.4.1","countercheck_note":"重放一次确认稳定返回,非一次性状态","asset_id":"web1","vulnclass":"信息暴露"}`, mainURL+"/api/version"),
 			}}, Finish: "tool_calls"}
 		case !seenToolResult(rr, "submit_candidate_fact", "已提交新进事实"):
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
 				ID: "d6", Name: "submit_candidate_fact",
-				Args: `{"statement":"主站服务在线,HTTP 指纹已确认","evidence":"port_probe state=open;curl 首页含 gr-mock-main","asset_id":"web1"}`,
+				Args: `{"statement":"主站服务在线，版本号观察为2.4.1","evidence":"port_probe state=open；本次/api/version原文{\"version\":\"2.4.1\"}","asset_id":"web1"}`,
 			}}, Finish: "tool_calls"}
 		default:
-			return scriptedReply{Text: "审计完成:两条声明与一条候选事实已提交。", Finish: "stop"}
+			return scriptedReply{Text: "审计完成:两条交卷单与一条候选事实已提交。", Finish: "stop"}
 		}
 	})
 	t.Cleanup(model.Close)
@@ -225,16 +200,42 @@ func TestLoopCompletesTaskAfterClaimsSettle(t *testing.T) {
 	})
 	revCompleted := completedEventRev(t, store, task)
 
-	// ---- 完成前反证轮已完整收尾:两条声明到终态,且终态迁移先于 completed ----
+	// 普通信息按事实回写，只有具有实际影响的声明进入漏洞确认。
 	backup := claimByTitle(t, store, task, "备份目录")
-	version := claimByTitle(t, store, task, "版本号")
-	if backup.Status != rings.TestClaimConfirmed || version.Status != rings.TestClaimPending {
-		t.Fatalf("完成前声明应全部到终态(一 Confirmed 一待确认),不得遗弃在飞反证: %s %s",
-			backup.Status, version.Status)
+	if claimByTitleSoft(store, task, "版本号") != nil {
+		t.Fatal("信息性结果被立为漏洞")
 	}
-	for _, c := range []string{backup.ID, version.ID} {
-		if rv := claimVerdictRev(t, store, task, c); rv <= 0 || rv >= revCompleted {
-			t.Fatalf("声明 %s 终态迁移(rev %d)必须先于 completed(rev %d)", c, rv, revCompleted)
+	facts, _ := store.NodesByType(ctx, task, rings.NodeFact, "confirmed")
+	versionObserved := false
+	for _, f := range facts {
+		versionObserved = versionObserved || strings.Contains(f.Title, "版本号观察")
+	}
+	if !versionObserved {
+		t.Fatal("拒收后实际版本观察未按事实回写")
+	}
+	if backup.Status != rings.TestClaimConfirmed {
+		for _, r := range testclaimRecords(t, store, task, rings.TestClaimRecVerdict) {
+			t.Logf("verdict %s: %s %q", r.ClaimID, r.Decision, r.PendingReason)
+		}
+		for _, r := range testclaimRecords(t, store, task, rings.TestClaimRecSubmit) {
+			t.Logf("submit %s: step=%s refs=%v", r.ClaimID, r.StepID, r.EvidenceRefs)
+		}
+		allEvs, _ := store.Events(ctx, task, 0, 0)
+		for _, ev := range allEvs {
+			if ev.Kind != rings.EventSwarmRecord {
+				continue
+			}
+			var sr rings.SwarmRecord
+			if json.Unmarshal(ev.Payload, &sr) == nil && sr.Type == rings.SwarmRecToolCall && sr.ToolName == "bash" {
+				t.Logf("toolrec step=%s args=%.120s ref=%.40s", sr.StepID, sr.ToolArgs, sr.ResultRef)
+			}
+		}
+		t.Fatalf("P5-02:证据成立的交卷应经三查确认: %s 原因=%q", backup.Status, backup.Status)
+	}
+	// 交卷时点取首单(补考重交允许发生在收尾宽限内——原会话原地补做)。
+	for _, c := range []string{backup.ID} {
+		if rv := claimFirstSubmitRev(t, store, task, c); rv <= 0 || rv >= revCompleted {
+			t.Fatalf("声明 %s 首交(rev %d)必须先于 completed(rev %d)", c, rv, revCompleted)
 		}
 	}
 	// Goal 经仲裁者判定达成。
@@ -255,7 +256,7 @@ func TestLoopCompletesTaskAfterClaimsSettle(t *testing.T) {
 	if m.Task(task).Status() != manager.StatusCompleted {
 		t.Fatalf("完成后状态保持 completed: %s", m.Task(task).Status())
 	}
-	if err := loop.LastErr(); err != nil {
+	if err := loopErr(loop); err != nil {
 		t.Fatalf("干净运行不应残留错误: %v", err)
 	}
 }

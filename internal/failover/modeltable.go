@@ -1,7 +1,6 @@
 package failover
 
 import (
-	"sort"
 	"strings"
 )
 
@@ -251,16 +250,6 @@ var opencodeModePresets = map[string]map[string]string{
 	},
 }
 
-// OpenCodeModeURL opencode 接入方式 × 格式的默认端点;非法方式或格式
-// 返回空串。
-func OpenCodeModeURL(mode, format string) string {
-	m, ok := opencodeModePresets[strings.TrimSpace(strings.ToLower(mode))]
-	if !ok {
-		return ""
-	}
-	return m[NormalizeFormat(format)]
-}
-
 // OpenCodeModePresetURLs 接入方式双形态快照(随 /api/models 下发,建
 // 模型弹窗"接入方式"预填数据源)。
 func OpenCodeModePresetURLs() map[string]map[string]string {
@@ -275,16 +264,6 @@ func OpenCodeModePresetURLs() map[string]map[string]string {
 	return out
 }
 
-// PlatformDefaultURL 平台 × 格式的默认端点;非预设组合(含自定义平台、
-// openai-responses)返回空串走纯手动。
-func PlatformDefaultURL(platform, format string) string {
-	m, ok := platformPresets[strings.TrimSpace(strings.ToLower(platform))]
-	if !ok {
-		return ""
-	}
-	return m[NormalizeFormat(format)]
-}
-
 // PlatformPresetURLs 全部预设端点(面板预填判定"当前地址是否仍是预设
 // 值"用;也随 /api/models 下发)。
 func PlatformPresetURLs() map[string]map[string]string {
@@ -296,21 +275,5 @@ func PlatformPresetURLs() map[string]map[string]string {
 		}
 		out[p] = cm
 	}
-	return out
-}
-
-// IsKnownPlatform 平台词是否在预设清单内(自定义返回 false)。
-func IsKnownPlatform(platform string) bool {
-	_, ok := platformPresets[strings.TrimSpace(strings.ToLower(platform))]
-	return ok
-}
-
-// sortedPlatformNames 测试辅助:稳定序的平台名清单。
-func sortedPlatformNames() []string {
-	out := make([]string, 0, len(platformPresets))
-	for p := range platformPresets {
-		out = append(out, p)
-	}
-	sort.Strings(out)
 	return out
 }

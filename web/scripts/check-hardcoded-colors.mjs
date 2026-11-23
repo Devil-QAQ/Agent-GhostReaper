@@ -7,7 +7,7 @@
 //   - 色值唯一权威 = web/app/globals.css(token 定义点)与登录页内联
 //     色板(server_auth.go 的 loginPageHTML,自足内联副本,允许出现
 //     换装后色值)——二者不在扫描范围。
-//   - 图页画布取色(Cytoscape/ReactFlow 不吃 CSS 变量)允许持有
+//   - 图页画布取色(Canvas 运行时读取主题 token)允许持有
 //     globals.css 同源 token 的**回退值**:仅允许出现在 web/views 的
 //     T_DARK/graphPalette/chartColors 色板定义行(白名单),且值必须
 //     与当前 token 一致;其余位置零容忍。
@@ -44,7 +44,7 @@ const OLD_RGB = [
 
 // 图页画布回退值白名单:文件 → 允许的色板行特征(回退值须为新 token 值,
 // 旧值在 OLD 表里命中仍然报错——白名单只放行"位置",不放行"旧值")
-const PALETTE_FILES = new Set(["views/annulus-page.js", "views/observe-page.js"]);
+const PALETTE_FILES = new Set(["views/observe-page.js"]);
 
 function walk(dir, out) {
   let entries;
@@ -116,21 +116,21 @@ const cssToken = (name) => {
   return m ? m[1].toLowerCase() : null;
 };
 const TOKEN_FALLBACK = [
-  ["views/annulus-page.js", "background", "--background"],
-  ["views/annulus-page.js", "card", "--card"],
-  ["views/annulus-page.js", "foreground", "--foreground"],
-  ["views/annulus-page.js", "mutedFg", "--muted-foreground"],
-  ["views/annulus-page.js", "primary", "--primary"],
-  ["views/annulus-page.js", "critical", "--severity-critical"],
-  ["views/annulus-page.js", "high", "--severity-high"],
-  ["views/annulus-page.js", "medium", "--severity-medium"],
-  ["views/annulus-page.js", "info", "--severity-info"],
-  ["views/annulus-page.js", "success", "--status-success"],
-  ["views/annulus-page.js", "warning", "--status-warning"],
-  ["views/annulus-page.js", "danger", "--status-danger"],
-  ["views/annulus-page.js", "running", "--status-running"],
-  ["views/annulus-page.js", "paused", "--status-paused"],
-];
+  // P5-09 全景图 Canvas 引擎回退值对账。
+  ["lib/panorama-engine.js", "background", "--background"],
+  ["lib/panorama-engine.js", "card", "--card"],
+  ["lib/panorama-engine.js", "foreground", "--foreground"],
+  ["lib/panorama-engine.js", "mutedFg", "--muted-foreground"],
+  ["lib/panorama-engine.js", "border", "--border"],
+  ["lib/panorama-engine.js", "primary", "--primary"],
+  ["lib/panorama-engine.js", "intent", "--pano-intent"],
+  ["lib/panorama-engine.js", "critical", "--severity-critical"],
+  ["lib/panorama-engine.js", "high", "--severity-high"],
+  ["lib/panorama-engine.js", "medium", "--severity-medium"],
+  ["lib/panorama-engine.js", "low", "--severity-low"],
+  ["lib/panorama-engine.js", "info", "--severity-info"],
+  ["lib/panorama-engine.js", "warning", "--status-warning"],
+];;
 for (const [rel, field, tokenName] of TOKEN_FALLBACK) {
   const src = readFileSync(join(WEB, rel), "utf8");
   const m = src.match(new RegExp(`${field}:\\s*"(#[0-9a-fA-F]{6})"`));

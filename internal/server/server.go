@@ -94,10 +94,6 @@ type Server struct {
 	// 零值=LLM 未注入,main.go 装配时填入真实值。
 	Config ConfigView
 
-	// scopeMu 范围待决卡两键裁决的并发互斥(P4-51:同卡并点只许一次
-	// 收口;跨重启由账本裁决记录的存在性兜底)。
-	scopeMu sync.Mutex
-
 	// live 实时推送枢纽(P3-08):账本 OnCommit → 主题广播 → /api/ws
 	// 在线连接。New 时创建并挂上账本钩子(单 Store 单观察者,后建覆盖
 	// 先建);nil 不会发生(New 恒建)。
@@ -206,11 +202,6 @@ func New(store *rings.Store, mgr *manager.Manager, gate swarm.ApprovalGate) (*Se
 	if err := seedHardRulesOnce(store); err != nil {
 		return nil, fmt.Errorf("server: 播种内置硬规则: %w", err)
 	}
-	// 存量一次归位(P4-55 ⑤):被推翻类 pending 转不成立、"待重派"类
-	// 回锤炼触发重派;标记键幂等,只跑一次。
-	if err := migratePendingClaimsOnce(store); err != nil {
-		return nil, fmt.Errorf("server: P4-55 存量归位: %w", err)
-	}
 	// 实时推送枢纽(P3-08):挂账本提交钩子——一切面板关心的状态变化
 	// 经 Append 落库后单点通知,广播归枢纽自身循环。
 	live := newLiveHub(gate)
@@ -288,8 +279,18 @@ func (s *Server) Handler() *http.ServeMux {
 	mux.HandleFunc("POST /api/tasks/{id}/assets", s.handleAssetCreate) // P4-05 手动新增资产(批量,来源=手动)
 	mux.HandleFunc("GET /api/tasks/{id}/assets/{nid}", s.handleAssetDetail)
 	// 统一图投影(P2-09,8.7 三视图共用):树/DAG/全图共用的账本→图数据
-	// 唯一端点,进度图为首个接入方(年轮图 P2-11 接入)。
+	// 唯一端点,任务投影为首个接入方(全景图 P2-11 接入)。
 	mux.HandleFunc("GET /api/tasks/{id}/graph", s.handleTaskGraph)
+	mux.HandleFunc("GET /api/tasks/{id}/workbench", s.handleTaskWorkbench)
+	// 水位轻量接口(P5-06 ③):只回水位数字,工作台水位行数据源(拆自
+	// graph 消费面;图接口其余消费面收口归 P5-10)。
+	mux.HandleFunc("GET /api/tasks/{id}/watermark", s.handleTaskWatermark)
+	// 全景图数据接口(P5-09①):骨架/节点关联按需/图内搜索定位三件,
+	// 服务任务空间"全景图"页(与 /panorama 研判卡在途全景无关)。
+	mux.HandleFunc("GET /api/tasks/{id}/pview/skeleton", s.handlePanoSkeleton)
+	mux.HandleFunc("GET /api/tasks/{id}/pview/links/{nid}", s.handlePanoLinks)
+	mux.HandleFunc("GET /api/tasks/{id}/pview/search", s.handlePanoSearch)
+	mux.HandleFunc("GET /api/tasks/{id}/pview/details/{nid}", s.handlePanoDetail)
 	mux.HandleFunc("GET /api/config", s.handleConfig)
 	mux.HandleFunc("POST /api/config/system", s.handleSystemParamsUpdate) // P4-34 任务并发写
 	mux.HandleFunc("POST /api/config/search", s.handleSearchUpdate)       // P3-03 搜索配置(后端/key/独立出口代理)
@@ -324,10 +325,8 @@ func (s *Server) Handler() *http.ServeMux {
 	mux.HandleFunc("POST /api/tasks/{id}/recover", s.handleTaskRecover)
 	mux.HandleFunc("GET /api/tasks/{id}/roe", s.handleRoEGet)
 	mux.HandleFunc("POST /api/tasks/{id}/roe", s.handleRoEUpdate)
-	mux.HandleFunc("POST /api/tasks/{id}/roe/assets", s.handleRoEAssetScope)                // P4-05 授权资产范围(纳入/摘除;P4-45 摘除即止损)
-	mux.HandleFunc("GET /api/tasks/{id}/roe/assets/impact", s.handleRoEAssetImpact)         // P4-45 摘除影响预览(确认弹窗)
-	mux.HandleFunc("POST /api/tasks/{id}/roe/infosources/revoke", s.handleInfoSourceRevoke) // P4-67 信息源撤销(恢复拦截)
-	mux.HandleFunc("POST /api/tasks/{id}/roe/infosources/mark", s.handleInfoSourceMark)     // P4-68 允许访问(RoE 面板标记,与牧者/分诊自动授同源;P4-70 起为卡外唯一手授入口)
+	mux.HandleFunc("POST /api/tasks/{id}/roe/assets", s.handleRoEAssetScope)        // P4-05 授权资产范围(纳入/摘除;P4-45 摘除即止损)
+	mux.HandleFunc("GET /api/tasks/{id}/roe/assets/impact", s.handleRoEAssetImpact) // P4-45 摘除影响预览(确认弹窗)
 	// P4-52 ⑤:待批资产放行/忽略端点随资产页按钮一并退役(审批集中
 	// RoE,走 /approvals/{rid} 与 /approvals/batch 的范围卡通道)。
 	mux.HandleFunc("GET /api/tasks/{id}/goals", s.handleGoalsList)
@@ -337,16 +336,15 @@ func (s *Server) Handler() *http.ServeMux {
 	mux.HandleFunc("POST /api/tasks/{id}/goals/{gid}/delete", s.handleGoalDelete) // P4-54 目标删除(同停聚焦力度)
 	mux.HandleFunc("POST /api/tasks/{id}/goals/{gid}/achieve", s.handleGoalAchieve)
 	mux.HandleFunc("GET /api/tasks/{id}/claims", s.handleClaimsList)
-	mux.HandleFunc("GET /api/tasks/{id}/unread", s.handleUnread)      // P4-47 A 发现未读红点
-	mux.HandleFunc("POST /api/tasks/{id}/seen", s.handleSeen)         // P4-47 A 子页签已读线(服务端盖戳)
-	mux.HandleFunc("POST /api/tasks/{id}/dive", s.handleOperatorDive) // P4-48 操作者深入指令(记账+唤醒)
+	mux.HandleFunc("GET /api/tasks/{id}/intents", s.handleIntentsList) // P5-07① 意图页签台账(节点投影直查)
+	mux.HandleFunc("GET /api/tasks/{id}/unread", s.handleUnread)       // P5-08 发现两层未读(三页签数字+条目已看集合)
+	mux.HandleFunc("POST /api/tasks/{id}/seen", s.handleSeen)          // P5-08 进页盖戳 / 条目记已看(服务端存,跨浏览器一致)
+	mux.HandleFunc("POST /api/tasks/{id}/dive", s.handleOperatorDive)  // P4-48 操作者深入指令(记账+唤醒)
 	mux.HandleFunc("POST /api/tasks/{id}/claims/{cid}/retest", s.handleClaimRetest)
 	mux.HandleFunc("POST /api/tasks/{id}/claims/{cid}/replay", s.handleClaimReplay)
 	mux.HandleFunc("GET /api/tasks/{id}/claims/{cid}", s.handleClaimDetail)
 	mux.HandleFunc("GET /api/tasks/{id}/claims/{cid}/repro", s.handleClaimRepro) // P4-36 ② 复现步骤分段取
 	mux.HandleFunc("POST /api/tasks/{id}/claims/{cid}/reopen", s.handleClaimReopen)
-	mux.HandleFunc("GET /api/tasks/{id}/hypotheses", s.handleHypothesesList)
-	mux.HandleFunc("GET /api/tasks/{id}/hypotheses/{hid}", s.handleHypothesisDetail)
 	mux.HandleFunc("GET /api/tasks/{id}/facts", s.handleFactsList)
 	mux.HandleFunc("GET /api/tasks/{id}/report", s.handleReport)
 	mux.HandleFunc("GET /api/tasks/{id}/report/export", s.handleTaskReportExport)  // P2-13 任务级格式矩阵
@@ -357,8 +355,7 @@ func (s *Server) Handler() *http.ServeMux {
 	mux.HandleFunc("GET /api/tasks/{id}/report/archives/{rev}", s.handleReportArchiveDownload)
 	mux.HandleFunc("GET /api/tasks/{id}/approvals", s.handleApprovalsList)
 	mux.HandleFunc("POST /api/tasks/{id}/approvals/{rid}", s.handleApprovalDecide)
-	mux.HandleFunc("POST /api/tasks/{id}/approvals/batch", s.handleApprovalBatch)           // P4-52 ⑤ 范围卡勾选批量两键(P4-70 ① 批量第三键入口移除)
-	mux.HandleFunc("POST /api/tasks/{id}/approvals/{rid}/reverse", s.handleApprovalReverse) // P4-71 ② 审批记录反向操作(详情 Sheet 反向键)
+	mux.HandleFunc("POST /api/tasks/{id}/approvals/batch", s.handleApprovalBatch) // P4-52 ⑤ 范围卡勾选批量两键(P4-70 ① 批量第三键入口移除)
 	mux.HandleFunc("POST /api/tasks/{id}/wake", s.handleWake)
 
 	// ---- 舵杆(P2-05,第八章第 8 节:操作者侧 kill_work 与指令审计流;
@@ -390,6 +387,7 @@ func (s *Server) Handler() *http.ServeMux {
 	mux.HandleFunc("GET /api/tasks/{id}/shepherd/claim/{cid}", s.handleShepherdClaimGet)
 	mux.HandleFunc("POST /api/tasks/{id}/shepherd/claim/{cid}/messages", s.handleShepherdClaimPost)
 	mux.HandleFunc("GET /api/tasks/{id}/nodes/{nid}", s.handleNodeDetail)
+	mux.HandleFunc("GET /api/tasks/{id}/nodes/{nid}/evidence", s.handleNodeEvidence)
 
 	// ---- 人机通道(P2-08,第四章 §7 v1.8:插话 + 三级控制) ----
 	// 插话子会话(问/改)与单位列表;单位控制(暂停/继续,停止走既有
@@ -415,9 +413,6 @@ func (s *Server) Handler() *http.ServeMux {
 	mux.HandleFunc("GET /api/guard/rules", s.handleGuardRulesList)
 	mux.HandleFunc("POST /api/guard/rules", s.handleGuardRulesSave)
 	mux.HandleFunc("DELETE /api/guard/rules/{id}", s.handleGuardRulesDelete)
-	mux.HandleFunc("POST /api/tasks/{id}/roe/rules", s.handleRoERuleAdd)
-	mux.HandleFunc("POST /api/tasks/{id}/roe/rules/patterns", s.handleRoERulePatterns)
-	mux.HandleFunc("POST /api/tasks/{id}/roe/rules/{rid}", s.handleRoERuleEdit)
 	mux.HandleFunc("DELETE /api/tasks/{id}/roe/rules/{rid}", s.handleRoERuleDelete)
 
 	// ---- 流量页与证据绑定(P3-02,8.3 一级·流量 + 第五章绑定三机制):
@@ -427,6 +422,10 @@ func (s *Server) Handler() *http.ServeMux {
 	mux.HandleFunc("GET /api/mirror/exchanges/{exID}", s.handleTrafficDetail)
 	mux.HandleFunc("GET /api/mirror/exchanges/{exID}/raw", s.handleTrafficRaw)
 	mux.HandleFunc("POST /api/tasks/{id}/claims/{cid}/evidence", s.handleClaimEvidenceBind)
+	// Unknown API paths must not fall through to the embedded application shell.
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("接口不存在"))
+	})
 	return mux
 }
 
@@ -557,9 +556,9 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		GoalsTotal    int                `json:"goals_total"`           // 目标总数
 		RunningUnits  int                `json:"running_units"`         // 运行中虫群单位数(图上 running 步骤)
 		PendingAppr   int                `json:"pending_approvals"`     // 待审批笔数(P4-23:任务行与 RoE 标签红点计数,审批门现读)
-		PendingScope  int                `json:"pending_scope"`         // 待批资产数(P4-44 ③:任务行与侧栏任务入口红点计数,处理即消)
-		UnreadClaims  int                `json:"unread_claims"`         // 发现·成果未读数(P4-47 A:看过即消,任务行汇总红点数据源)
-		UnreadFacts   int                `json:"unread_facts"`          // 发现·事实未读数(P4-47 A:同上,与成果独立记已读)
+		UnreadIntents int                `json:"unread_intents"`        // 发现·意图未读数(P5-08①:上次进意图页后新提出,任务行汇总红点数据源)
+		UnreadClaims  int                `json:"unread_claims"`         // 发现·漏洞未读数(P5-08①:上次进漏洞页后新确认,沿 P4-47 键面)
+		UnreadFacts   int                `json:"unread_facts"`          // 发现·事实未读数(P5-08①:上次进事实页后新确认,三页签独立记已读)
 		Closure       *closurePromptView `json:"closure,omitempty"`     // 待决收口提醒(P4-18,仅运行中任务)
 		ClosureConfig *closureConfigView `json:"closure_config"`        // 收口配置生效值(审核迭代 1,常呈)
 	}
@@ -575,11 +574,7 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		d := s.digestOf(r.Context(), row.ID)
 		v.Description, v.Targets, v.TaskType = d.Description, d.Targets, d.TaskType
 		v.GoalsAchieved, v.GoalsTotal, v.RunningUnits = d.GoalsAchieved, d.GoalsTotal, d.RunningUnits
-		if v.TaskType == rings.TaskTypePentest {
-			if pending, err := s.Store.PendingScopeAssets(r.Context(), row.ID); err == nil {
-				v.PendingScope = len(pending)
-			}
-		}
+
 		if by, _ := row.Detail["settled_by"].(string); by == rings.SettleByTaskGate || by == rings.SettleByClosurePrompt {
 			v.Settled = true
 			v.SettledBy = by
@@ -597,10 +592,11 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		v.PendingAppr = len(s.Gate.Pending(row.ID))
 		// P4-51:范围待决卡(渗透拦截/红队可否决)并入待审批计数——红点走
 		// 既有 pending 机制,处理即消。
-		if n, err := s.Store.ScopePendingCount(r.Context(), row.ID); err == nil {
-			v.PendingAppr += n
+		if proposals, err := s.Store.PendingAssetProposals(r.Context(), row.ID); err == nil {
+			v.PendingAppr += len(proposals)
 		}
-		v.UnreadClaims, v.UnreadFacts = s.unreadOf(r.Context(), row.ID)
+		st := s.unreadStateOf(r.Context(), row.ID)
+		v.UnreadIntents, v.UnreadClaims, v.UnreadFacts = st.Intents, st.Claims, st.Facts
 		v.Closure = s.closureViewOf(r, row.ID, v.Status)
 		v.ClosureConfig = s.closureConfigViewOf(r, row.ID)
 		out = append(out, v)
@@ -874,7 +870,19 @@ func buildAssetSeed(assets []assetIn) (*assetSeed, error) {
 	titleToID := seed.titleToID
 	type link struct{ id, parentTitle string }
 	var links []link
+	identities := map[string]bool{}
+	byNode := map[string]rings.NodeAdded{}
 	for i, a := range assets {
+		rawTitle := strings.TrimSpace(a.Title)
+		normalized, key, err := normalizeAssetInput(a)
+		if err != nil {
+			return nil, fmt.Errorf("第 %d 行资产: %w", i+1, err)
+		}
+		a = normalized
+		if identities[key] {
+			return nil, fmt.Errorf("第 %d 行资产重复", i+1)
+		}
+		identities[key] = true
 		title := strings.TrimSpace(a.Title)
 		if title == "" {
 			return nil, fmt.Errorf("第 %d 行资产的标识不能为空", i+1)
@@ -888,6 +896,8 @@ func buildAssetSeed(assets []assetIn) (*assetSeed, error) {
 		}
 		id := shortID("a")
 		titleToID[title] = id
+		titleToID[rawTitle] = id
+		byNode[id] = rings.NodeAdded{AssetClass: class, Title: title}
 		seed.events = append(seed.events, rings.Event{
 			Kind: rings.EventNodeAdded, Actor: "creator",
 			Payload: rings.NodeAdded{NodeID: id, NodeType: rings.NodeAsset,
@@ -906,6 +916,11 @@ func buildAssetSeed(assets []assetIn) (*assetSeed, error) {
 	// 环检测:沿 parent 链走,步数超过资产数必回到访问过的节点。
 	parentOf := make(map[string]string, len(links)) // id → parent id
 	for _, lk := range links {
+		parent := byNode[titleToID[lk.parentTitle]]
+		child := byNode[lk.id]
+		if err := rings.ValidateAssetParent(child.AssetClass, child.Title, parent.AssetClass, parent.Title); err != nil {
+			return nil, err
+		}
 		parentOf[lk.id] = titleToID[lk.parentTitle]
 	}
 	for start := range parentOf {
@@ -1055,30 +1070,26 @@ func detailStr(detail map[string]any, key string) string {
 	return s
 }
 
-// assetTreeView 资产图最小投影的读模型:节点(覆盖标志 + 事实/假设
-// 计数)与 sub_of 层级边(from=子、to=父),前端据此渲染树。
-// P4-44:TaskType 供前端区分待批分组(渗透)与"发现的其他资产"分组
-// (红队/未标);ScopeState 为资产范围呈现态(pending=待批锁定,
-// out_open=范围外可测,""=范围内常规呈现)。
 type assetTreeView struct {
-	Assets   []assetNodeJSON `json:"assets"`
-	Tree     []edgeJSON      `json:"hierarchy"`
-	TaskType string          `json:"task_type"`
+	Assets    []assetNodeJSON           `json:"assets"`
+	Tree      []edgeJSON                `json:"hierarchy"`
+	Relations []rings.AssetRelationView `json:"relations"`
+	TaskType  string                    `json:"task_type"`
 }
 
 type assetNodeJSON struct {
-	ID              string `json:"id"`
-	Title           string `json:"title"`
-	Class           string `json:"class"`
-	Status          string `json:"status"`
-	Covered         bool   `json:"covered"`
-	FactCount       int    `json:"fact_count"`
-	HypothesisCount int    `json:"hypothesis_count"`
-	Source          string `json:"source"`      // 来源三态:seed/manual/discovered(P4-05)
-	Excluded        bool   `json:"excluded"`    // 已从授权范围摘除(P4-05;范围外)
-	ScopeOut        bool   `json:"scope_out"`   // 入图冻结的范围归属(P4-44:true=种子闭包外)
-	ScopeState      string `json:"scope_state"` // 范围呈现态(P4-44:pending/out_open/""=范围内)
-	CreatedRev      int64  `json:"created_rev"`
+	ID           string `json:"id"`
+	Title        string `json:"title"`
+	DisplayTitle string `json:"display_title"`
+	Class        string `json:"class"`
+	Status       string `json:"status"`
+	Covered      bool   `json:"covered"`
+	FactCount    int    `json:"fact_count"`
+	Source       string `json:"source"`      // 来源三态:seed/manual/discovered(P4-05)
+	Excluded     bool   `json:"excluded"`    // 已从授权范围摘除(P4-05;范围外)
+	ScopeOut     bool   `json:"scope_out"`   // 入图冻结的范围归属(P4-44:true=种子闭包外)
+	ScopeState   string `json:"scope_state"` // 范围呈现态(P4-44:pending/out_open/""=范围内)
+	CreatedRev   int64  `json:"created_rev"`
 	// 发现型资产的出生血缘(P4-12):发现单位/发现步骤/发现事实(收割入图时
 	// 冻结进 detail;非发现资产零值,如实断链)。
 	BirthUnit string `json:"birth_unit,omitempty"`
@@ -1102,26 +1113,13 @@ func (s *Server) handleAssetTree(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	var excluded, approved map[string]bool
-	if roe, err := s.Store.CurrentRoE(r.Context(), taskID); err == nil {
-		excluded = roe.ExcludedAssetSet()
-		approved = roe.ScopeApprovedSet()
-	}
-	taskType := ""
-	if detail, err := s.Store.CreatedDetail(r.Context(), taskID); err == nil {
-		taskType = rings.TaskTypeOf(detail)
-	}
-	v := assetTreeView{Assets: []assetNodeJSON{}, Tree: []edgeJSON{}, TaskType: taskType}
+	v := assetTreeView{Assets: []assetNodeJSON{}, Tree: []edgeJSON{}, Relations: ag.Relations}
 	for _, a := range ag.Assets {
-		frozen := rings.AssetScopeIn
-		if a.ScopeOut {
-			frozen = rings.AssetScopeOut
-		}
 		v.Assets = append(v.Assets, assetNodeJSON{
 			ID: a.ID, Title: a.Title, Class: string(a.AssetClass), Status: a.Status,
-			Covered: a.Covered, FactCount: a.FactCount, HypothesisCount: a.HypothesisCount,
-			Source: a.Source, Excluded: excluded[a.ID], ScopeOut: a.ScopeOut,
-			ScopeState: rings.ScopeStateOf(taskType, a.Source, frozen, approved[a.ID], excluded[a.ID]),
+			DisplayTitle: rings.AssetDisplayTitle(a.AssetClass, a.Title),
+			Covered:      a.Covered, FactCount: a.FactCount,
+			Source:     a.Source,
 			CreatedRev: a.CreatedRev,
 		})
 	}
@@ -1151,17 +1149,36 @@ func (s *Server) handleAssetCreate(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	events, err := s.buildManualAssets(r.Context(), taskID, req.Assets)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	if _, err := s.Store.Append(r.Context(), taskID, events...); err != nil {
-		writeErr(w, http.StatusInternalServerError, fmt.Errorf("手动资产写入: %w", err))
-		return
+	var events []rings.Event
+	for {
+		rev, err := s.Store.CurrentRevision(r.Context(), taskID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		events, err = s.buildManualAssets(r.Context(), taskID, req.Assets)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		_, err = s.Store.AppendAtRevision(r.Context(), taskID, rev, events...)
+		if errors.Is(err, rings.ErrStaleRevision) {
+			continue
+		}
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, fmt.Errorf("手动资产写入: %w", err))
+			return
+		}
+		break
 	}
 	s.wake(taskID)
-	writeJSON(w, http.StatusOK, map[string]any{"added": len(req.Assets), "edges": len(events) - len(req.Assets)})
+	edges := 0
+	for _, ev := range events {
+		if ev.Kind == rings.EventEdgeAdded {
+			edges++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"added": len(req.Assets), "edges": edges})
 }
 
 // buildManualAssets 校验并编译手动资产批:标识非空、批内唯一、不与图上
@@ -1176,17 +1193,42 @@ func (s *Server) buildManualAssets(ctx context.Context, taskID string, assets []
 	if err != nil {
 		return nil, err
 	}
+	all, err := s.Store.NodesByType(ctx, taskID, rings.NodeAsset, "")
+	if err != nil {
+		return nil, err
+	}
+	existingIdentities := map[string]bool{}
+	for _, a := range all {
+		_, _, key, e := rings.AssetIdentity(a.AssetClass, a.Title)
+		if e == nil {
+			existingIdentities[key] = true
+		}
+	}
+	batchIdentities := map[string]bool{}
+	joined := []rings.NodeAdded{}
 	titleIDs := map[string][]string{} // 图上标识 → 资产 ID(可重名)
 	byID := map[string]bool{}
+	byNode := map[string]rings.NodeAdded{}
 	for _, a := range ag.Assets {
 		titleIDs[a.Title] = append(titleIDs[a.Title], a.ID)
 		byID[a.ID] = true
+		byNode[a.ID] = rings.NodeAdded{AssetClass: a.AssetClass, Title: a.Title}
 	}
 	batchIDs := map[string]string{} // 本批标识 → 新 ID
 	type link struct{ id, parentRef string }
 	var links []link
 	events := make([]rings.Event, 0, len(assets))
 	for i, a := range assets {
+		rawTitle := strings.TrimSpace(a.Title)
+		normalized, key, err := normalizeAssetInput(a)
+		if err != nil {
+			return nil, fmt.Errorf("第 %d 行资产: %w", i+1, err)
+		}
+		a = normalized
+		if existingIdentities[key] || batchIdentities[key] {
+			return nil, fmt.Errorf("资产已存在，请核对当前资产或在RoE中重新加入")
+		}
+		batchIdentities[key] = true
 		title := strings.TrimSpace(a.Title)
 		if title == "" {
 			return nil, fmt.Errorf("第 %d 行资产的标识不能为空", i+1)
@@ -1203,6 +1245,9 @@ func (s *Server) buildManualAssets(ctx context.Context, taskID string, assets []
 		}
 		id := shortID("a")
 		batchIDs[title] = id
+		batchIDs[rawTitle] = id
+		joined = append(joined, rings.NodeAdded{NodeID: id, AssetClass: class, Title: title})
+		byNode[id] = rings.NodeAdded{AssetClass: class, Title: title}
 		events = append(events, rings.Event{
 			Kind: rings.EventNodeAdded, Actor: "creator",
 			Payload: rings.NodeAdded{NodeID: id, NodeType: rings.NodeAsset,
@@ -1241,6 +1286,10 @@ func (s *Server) buildManualAssets(ctx context.Context, taskID string, assets []
 		if pid == lk.id {
 			return nil, errors.New("资产的父标识不能指向自身")
 		}
+		child, parent := byNode[lk.id], byNode[pid]
+		if err := rings.ValidateAssetParent(child.AssetClass, child.Title, parent.AssetClass, parent.Title); err != nil {
+			return nil, err
+		}
 		parentOf[lk.id] = pid
 	}
 	total := len(parentOf)
@@ -1272,11 +1321,13 @@ func (s *Server) buildManualAssets(ctx context.Context, taskID string, assets []
 			Payload: rings.EdgeAdded{EdgeType: rings.EdgeSubOf, FromNode: lk.id, ToNode: pid},
 		})
 	}
-	return events, nil
+	bindings, err := s.Store.AssetJoinEvents(ctx, taskID, joined, "creator")
+	if err != nil {
+		return nil, err
+	}
+	return append(events, bindings...), nil
 }
 
-// handleAssetDetail 资产详情(8.7 Sheet 抽屉数据,P1-09b):节点投影 +
-// about 边反查挂在该资产上的事实/假设/发现。读事务快照由各查询自理。
 func (s *Server) handleAssetDetail(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 	if !s.taskExists(taskID) {
@@ -1325,10 +1376,10 @@ func (s *Server) handleAssetDetail(w http.ResponseWriter, r *http.Request) {
 		return out
 	}
 	v := struct {
-		Asset      assetNodeJSON `json:"asset"`
-		Facts      []itemJSON    `json:"facts"`
-		Hypotheses []itemJSON    `json:"hypotheses"`
-		Claims     []itemJSON    `json:"claims"`
+		Asset     assetNodeJSON             `json:"asset"`
+		Facts     []itemJSON                `json:"facts"`
+		Claims    []itemJSON                `json:"claims"`
+		Relations []rings.AssetRelationView `json:"relations"`
 	}{
 		Asset: assetNodeJSON{
 			ID: n.ID, Title: n.Title, Class: string(n.AssetClass), Status: n.Status,
@@ -1338,18 +1389,22 @@ func (s *Server) handleAssetDetail(w http.ResponseWriter, r *http.Request) {
 			BirthStep:  detailStr(n.Detail, "step_id"),
 			BirthFact:  detailStr(n.Detail, "discovered_fact"),
 		},
-		Facts:      pick(rings.NodeFact),
-		Hypotheses: pick(rings.NodeHypothesis),
-		Claims:     pick(rings.NodeTestClaim),
+		Facts:  pick(rings.NodeFact),
+		Claims: pick(rings.NodeTestClaim),
 	}
 	// 覆盖标志与计数以 AssetGraph 投影为准(节点 detail 不承载派生值);
 	// 范围外(P4-05)与 RoE 摘除清单同源。
 	if ag, err := s.Store.AssetGraph(r.Context(), taskID); err == nil {
+		v.Relations = []rings.AssetRelationView{}
+		for _, r := range ag.Relations {
+			if r.From == nodeID || r.To == nodeID {
+				v.Relations = append(v.Relations, r)
+			}
+		}
 		for _, a := range ag.Assets {
 			if a.ID == nodeID {
 				v.Asset.Covered = a.Covered
 				v.Asset.FactCount = a.FactCount
-				v.Asset.HypothesisCount = a.HypothesisCount
 				v.Asset.Source = a.Source
 				break
 			}
@@ -1541,15 +1596,14 @@ func (s *Server) handleSearchUpdate(w http.ResponseWriter, r *http.Request) {
 // 授权范围摘除清单(P4-05):随快照整体提交;面板专用端点 /roe/assets
 // 改它,其余快照提交须透传当前值(否则清空)。
 type roeBody struct {
-	AllowedTools      []string               `json:"allowed_tools"`
-	DeniedTools       []string               `json:"denied_tools"`
-	ApprovalThreshold string                 `json:"approval_threshold"` // 空 = 默认宽(仅增删改弹门)
-	IntentRules       []intentRuleIn         `json:"intent_rules"`
-	ExcludedAssets    []string               `json:"excluded_assets"` // 授权范围摘除清单(P4-05;省略 = 保持现值)
-	ScopeApproved     []string               `json:"scope_approved"`  // 范围外资产放行清单(P4-44;省略 = 保持现值)
-	CreatorNotes      *string                `json:"creator_notes"`   // 造物主注意事项(P4-49;省略 = 保持现值,空串 = 清空)
-	InfoSources       *[]rings.RoeInfoSource `json:"info_sources"`    // 信息源清单(P4-67;省略 = 保持现值;专用端点管理)
-	Note              string                 `json:"note"`
+	AllowedTools      []string       `json:"allowed_tools"`
+	DeniedTools       []string       `json:"denied_tools"`
+	ApprovalThreshold string         `json:"approval_threshold"` // 空 = 默认宽(仅增删改弹门)
+	IntentRules       []intentRuleIn `json:"intent_rules"`
+	ExcludedAssets    []string       `json:"excluded_assets"` // 授权范围摘除清单(P4-05;省略 = 保持现值)
+	ScopeApproved     []string       `json:"scope_approved"`  // 范围外资产放行清单(P4-44;省略 = 保持现值)
+	CreatorNotes      *string        `json:"creator_notes"`   // 造物主注意事项(P4-49;省略 = 保持现值,空串 = 清空)
+	Note              string         `json:"note"`
 }
 
 func (b *roeBody) toRings() rings.RoeUpdated {
@@ -1565,7 +1619,6 @@ func (b *roeBody) toRings() rings.RoeUpdated {
 		ExcludedAssets:    b.ExcludedAssets,
 		ScopeApproved:     b.ScopeApproved,
 		CreatorNotes:      b.CreatorNotes,
-		InfoSources:       b.InfoSources,
 		Note:              b.Note,
 	}
 }
@@ -1585,16 +1638,22 @@ func normalizeCreatorNotesIn(p *string) (*string, error) {
 }
 
 // roeView RoE 当前值(显式给出生效的审批门槛,面板不必懂默认值)。
+type roeExcludedTarget struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	Class string `json:"class"`
+}
+
 type roeView struct {
-	AllowedTools      []string              `json:"allowed_tools"`
-	DeniedTools       []string              `json:"denied_tools"`
-	ApprovalThreshold string                `json:"approval_threshold"` // 已归一的生效审批门槛
-	IntentRules       []intentRuleOut       `json:"intent_rules"`       // 任务级拦截规则(带资产标题与已用次数)
-	ExcludedAssets    []string              `json:"excluded_assets"`    // 授权范围摘除清单(P4-05)
-	CreatorNotes      string                `json:"creator_notes"`      // 造物主注意事项(P4-49;空 = 无)
-	InfoSources       []rings.RoeInfoSource `json:"info_sources"`       // 信息源清单(P4-67;空 = 无)
-	Note              string                `json:"note,omitempty"`
-	UpdatedRev        int64                 `json:"updated_rev"`
+	ExcludedTargets   []roeExcludedTarget `json:"excluded_targets"`
+	AllowedTools      []string            `json:"allowed_tools"`
+	DeniedTools       []string            `json:"denied_tools"`
+	ApprovalThreshold string              `json:"approval_threshold"` // 已归一的生效审批门槛
+	IntentRules       []intentRuleOut     `json:"intent_rules"`       // 任务级拦截规则(带资产标题与已用次数)
+	ExcludedAssets    []string            `json:"excluded_assets"`    // 授权范围摘除清单(P4-05)
+	CreatorNotes      string              `json:"creator_notes"`      // 造物主注意事项(P4-49;空 = 无)
+	Note              string              `json:"note,omitempty"`
+	UpdatedRev        int64               `json:"updated_rev"`
 }
 
 func (s *Server) currentRoE(taskID string) (roeView, error) {
@@ -1602,14 +1661,30 @@ func (s *Server) currentRoE(taskID string) (roeView, error) {
 	if err != nil {
 		return roeView{}, err
 	}
+	excluded := []roeExcludedTarget{}
+	if len(st.ExcludedAssets) > 0 {
+		assets, err := s.Store.NodesByType(context.Background(), taskID, rings.NodeAsset, "")
+		if err != nil {
+			return roeView{}, err
+		}
+		byID := map[string]rings.NodeFull{}
+		for _, a := range assets {
+			byID[a.ID] = a
+		}
+		for _, id := range st.ExcludedAssets {
+			if a, ok := byID[id]; ok {
+				excluded = append(excluded, roeExcludedTarget{ID: id, Title: a.Title, Class: string(rings.DisplayAssetClass(a.AssetClass))})
+			}
+		}
+	}
 	return roeView{
+		ExcludedTargets:   excluded,
 		AllowedTools:      st.AllowedTools,
 		DeniedTools:       st.DeniedTools,
 		ApprovalThreshold: string(swarm.NormalizeApprovalThreshold(st.ApprovalThreshold)),
 		IntentRules:       s.intentRuleViews(taskID, st.IntentRules),
 		ExcludedAssets:    st.ExcludedAssets,
 		CreatorNotes:      st.CreatorNotes,
-		InfoSources:       st.InfoSources,
 		Note:              st.Note,
 		UpdatedRev:        st.UpdatedRev,
 	}, nil
@@ -1667,13 +1742,7 @@ func (s *Server) handleRoEUpdate(w http.ResponseWriter, r *http.Request) {
 			roe.ScopeApproved = st.ScopeApproved
 		}
 	}
-	// P4-67:信息源清单同款指针语义——其余快照提交不携带时保持现值
-	//(分诊自动授/面板撤销/牧者标记三处显式写)。
-	if body.InfoSources == nil {
-		if st, err := s.Store.CurrentRoE(r.Context(), taskID); err == nil && st.InfoSources != nil {
-			roe.InfoSources = &st.InfoSources
-		}
-	}
+
 	if err := s.validateAssetIDs(taskID, roe.ExcludedAssets); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
@@ -1913,43 +1982,46 @@ func (s *Server) handleGoalDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": goalID, "status": overmind.GoalStatusDiscarded,
 		"killed_units": len(res.KilledUnits), "aborted_steps": len(res.AbortedSteps),
-		"suspended_claims": len(res.SuspendedClaims),
 	})
 }
 
 // ---- 发现列表(P1-08,TestClaim 读投影) ----
 
 // claimView 发现列表条目:节点投影 + 类型化边(资产锚点/血缘)+ 状态机
-// 审计流补足(搁置理由、验证者)。待确认条目的 PendingReason 是 R4 的
-// 面板可见面;发现者/验证者并排呈现,R12(发现者不得自证)审计可查。
+// 审计流补足(搁置理由)。证据不足条目的 PendingReason 是 R4 的面板
+// 可见面。
 type claimView struct {
-	ID            string   `json:"id"`
-	Status        string   `json:"status"`           // candidate|testing|awaiting_round|confirmed|pending|fixed
-	Statement     string   `json:"statement"`        // 存在性声明
-	Impact        string   `json:"impact,omitempty"` // 影响面声明(与存在性分开)
-	Vulnclass     string   `json:"vulnclass,omitempty"`
-	Severity      string   `json:"severity,omitempty"`        // 收割定稿严重级别(=末轮反证影响面定级,P2-02)
-	ReproSteps    int      `json:"repro_steps"`               // 定稿复现步骤数(P2-13 列表折叠入口;0=无定稿)
-	AssetIDs      []string `json:"asset_ids,omitempty"`       // 资产锚点(about 边)
-	Discoverer    string   `json:"discoverer_unit,omitempty"` // 发现单位
-	DiscoverStep  string   `json:"discover_step,omitempty"`   // 发现步骤(derived_from 边)
-	FalsifyStep   string   `json:"falsify_step,omitempty"`    // 反证步骤
-	Verifier      string   `json:"verifier_unit,omitempty"`   // 反证单位(≠发现者,R12)
-	PendingReason string   `json:"pending_reason,omitempty"`  // 待确认搁置理由(R4)
-	VerdictRev    int64    `json:"verdict_rev,omitempty"`     // 裁决事件 revision
-	CreatedRev    int64    `json:"created_rev"`
-	// AddedAt 判断立账时刻(P4-61 排序口径:nodes 投影 added_at,写侧
-	// 同事务维护)——成果页时间倒序与锤炼页区内排序的比较键。
-	AddedAt string `json:"added_at,omitempty"`
+	Addresses     []string        `json:"addresses"`
+	Title         string          `json:"title,omitempty"`
+	Assets        []factAssetView `json:"assets,omitempty"`
+	ID            string          `json:"id"`
+	Status        string          `json:"status"`           // candidate|confirmed|insufficient|refuted|discarded|fixed(旧账本旧状态原样)
+	Statement     string          `json:"statement"`        // 存在性声明
+	Impact        string          `json:"impact,omitempty"` // 影响面声明(与存在性分开)
+	Vulnclass     string          `json:"vulnclass,omitempty"`
+	Severity      string          `json:"severity,omitempty"`        // 定稿严重级别(=交换单自报级别,P5-02)
+	ReproSteps    int             `json:"repro_steps"`               // 定稿复现步骤数(P2-13 列表折叠入口;0=无定稿)
+	AssetIDs      []string        `json:"asset_ids,omitempty"`       // 资产锚点(about 边)
+	Discoverer    string          `json:"discoverer_unit,omitempty"` // 发现单位
+	DiscoverStep  string          `json:"discover_step,omitempty"`   // 发现步骤(derived_from 边)
+	PendingReason string          `json:"pending_reason,omitempty"`  // 非确认裁决理由(补考反馈/证据不足理由,R4)
+	VerdictRev    int64           `json:"verdict_rev,omitempty"`     // 裁决事件 revision
+	CreatedRev    int64           `json:"created_rev"`
+	// AddedAt 判断立账时刻(交卷时刻;nodes 投影 added_at,写侧同事务
+	// 维护)与 ConfirmedAt 确认时刻(转 confirmed 的迁移记,重开再确认
+	// 随新迁移更新)——P5-07③ 漏洞页落页时间倒序的比较键:确认时刻
+	// 优先、缺失(证据不足/瞬态)退立账时刻。
+	AddedAt     string `json:"added_at,omitempty"`
+	ConfirmedAt string `json:"confirmed_at,omitempty"`
 	// 复测面(P3-06):最新复测结论与轮次、当前是否有活复测会话、状态可否
-	// 复测(已确认/待确认/已修复)。
+	// 复测(已确认/证据不足/已修复)。
 	RetestVerdict string `json:"retest_verdict,omitempty"` // fixed|unfixed|inconclusive
 	RetestRound   int    `json:"retest_round,omitempty"`
 	RetestAt      string `json:"retest_at,omitempty"`
 	RetestRunning bool   `json:"retest_running"`
 	Retestable    bool   `json:"retestable"`
 	// 重放面(P3-07):最新重放校验结论与轮次、当前是否有活重放、可否
-	// 重放(声明有绑定流量证据即可,与锤炼状态无关——重放不迁移状态)。
+	// 重放(声明有绑定流量证据即可,与状态机无关——重放不迁移状态)。
 	ReplayVerdict string `json:"replay_verdict,omitempty"` // reproduced|diverged|unreachable
 	ReplayRound   int    `json:"replay_round,omitempty"`
 	ReplayAt      string `json:"replay_at,omitempty"`
@@ -1963,17 +2035,15 @@ type claimView struct {
 	// report_review 记录为准,理由随标记透出。
 	ReportExcluded       bool   `json:"report_excluded,omitempty"`
 	ReportExcludedReason string `json:"report_excluded_reason,omitempty"`
-	// Display/DisplayHint 四页签显示键与悬停细分(P4-56:机器状态+反证
-	// 步骤现值推导,见 rings.ClaimDisplay;hint 为细分键,面板按
-	// CLAIM_HINT 取词)。
-	Display     string `json:"display,omitempty"`
-	DisplayHint string `json:"display_hint,omitempty"`
-	// FactRefs 血缘引用的事实(P4-56 ④:锤炼条目点回所引事实——
-	// derived_from → Fact 的目标清单,锤炼页与详情同源)。
+	// Display 显示键(P5-02⑤ 三态:机器状态直接映射,rings.ClaimDisplay
+	// 单源;P5-03③ 起无步骤现值推导与悬停细分)。
+	Display string `json:"display,omitempty"`
+	// FactRefs 血缘引用的事实(漏洞条目点回所引事实——
+	// derived_from → Fact 的目标清单,详情与报告同源)。
 	FactRefs []FactRefView `json:"fact_refs,omitempty"`
 }
 
-// FactRefView 锤炼条目引用的事实(P4-56 ④ 迁移血缘:锤炼→事实页回链)。
+// FactRefView 漏洞条目引用的事实(P4-56 ④ 迁移血缘:漏洞→事实页回链)。
 type FactRefView struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
@@ -2015,10 +2085,7 @@ func (s *Server) handleClaimsList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	// P4-56 四页签显示态:步骤投影一次直查 + 舵杆 kind 定向查询推导
-	// 显示键(等待反证/反证中/反证暂停/…),零事件流全量扫描。
-	dc := s.loadDisplayCtx(r.Context(), taskID)
-	// 事实标题/类型缓存(锤炼条目点回事实的引用行)。P4-59 ①:定稿
+	// 事实标题/类型缓存(漏洞条目点回事实的引用行)。P4-59 ①:定稿
 	// 校对后的事实描述优先(任务级反查自各判断的声明摘要,后定稿覆盖
 	// 先定稿——取代语义同其他冻结文本);P4-64 ③:事实确认批次文本
 	//(node_polish)再覆盖(不限于已定稿判断链上的事实)。
@@ -2027,16 +2094,22 @@ func (s *Server) handleClaimsList(w http.ResponseWriter, r *http.Request) {
 	polishedFact := polishedFactMapOf(digests)
 	s.overlayFactPolish(r.Context(), taskID, polishedFact)
 
+	contexts, err := s.assetContexts(r.Context(), taskID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
 	out := make([]claimView, 0, len(claims))
 	for _, c := range claims {
 		v := claimView{
 			ID: c.ID, Status: c.Status, Statement: c.Title, CreatedRev: c.CreatedRev,
-			AddedAt: c.AddedAt,
+			AddedAt: c.AddedAt, ConfirmedAt: c.ConfirmedAt,
 		}
 		v.Impact, _ = c.Detail["impact"].(string)
 		// 声明文本优先定稿校对稿(P4-59 ①:描述=一句话本质+影响对象、
 		// 危害=直接说结果+数字精确;未生成退节点原文)。
 		if d, ok := digests[c.ID]; ok {
+			v.Title = d.Title
 			if d.Statement != "" {
 				v.Statement = d.Statement
 			}
@@ -2049,7 +2122,7 @@ func (s *Server) handleClaimsList(w http.ResponseWriter, r *http.Request) {
 		v.DiscoverStep, _ = c.Detail["step_id"].(string)
 		v.Combined, _ = c.Detail["combined"].(bool)
 		if v.Combined {
-			// 组合声明的链序与角色随列表下发(P2-11 年轮图·攻击链透镜
+			// 组合声明的链序与角色随列表下发(P2-11 全景图·攻击链透镜
 			// 读列表装配,与详情同源 chainLinksOf;环节事实标题优先定稿
 			// 校对稿,P4-59 ①)。
 			v.Chain = s.chainLinksOf(r.Context(), taskID, &c, polishedFact)
@@ -2059,6 +2132,7 @@ func (s *Server) handleClaimsList(w http.ResponseWriter, r *http.Request) {
 				v.AssetIDs = append(v.AssetIDs, e.To)
 			}
 		}
+		v.Assets, v.Addresses = claimAssetContexts(v.AssetIDs, contexts)
 		if v.DiscoverStep == "" {
 			// 组合声明(P2-06):血缘指向环节 Fact,发现步骤如实留空
 			//(详情侧以攻击链卡呈现血缘)。
@@ -2071,7 +2145,7 @@ func (s *Server) handleClaimsList(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		// 血缘引用的事实(P4-56 ④:锤炼条目点回事实;节点类型缓存防
+		// 血缘引用的事实(漏洞条目点回事实;节点类型缓存防
 		// 重复查询,非事实目标〔发现步骤〕只查一次不再进引用行)。
 		for _, e := range derived {
 			if e.From != c.ID {
@@ -2095,7 +2169,6 @@ func (s *Server) handleClaimsList(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if d, ok := digests[c.ID]; ok {
-			v.FalsifyStep, v.Verifier = d.FalsifyStep, d.Verifier
 			v.Severity, v.ReproSteps = d.Severity, d.ReproSteps
 			v.PendingReason, v.VerdictRev = d.PendingReason, d.VerdictRev
 			v.RetestVerdict, v.RetestRound, v.RetestAt = d.RetestVerdict, d.RetestRound, d.RetestAt
@@ -2105,7 +2178,7 @@ func (s *Server) handleClaimsList(w http.ResponseWriter, r *http.Request) {
 			}
 			v.Replayable = d.HasEvidence
 		}
-		v.Display, v.DisplayHint = ClaimDisplayFor(dc, c.ID, c.Status, v.PendingReason)
+		v.Display, _ = rings.ClaimDisplay(c.Status)
 		v.Retestable = swarm.Retestable(c.Status)
 		if exec := s.swarmExec(); exec != nil {
 			v.RetestRunning = exec.RetestRunning(taskID, c.ID)
@@ -2140,7 +2213,6 @@ type approvalRecordView struct {
 	OccurredAt  string `json:"occurred_at"`
 	// Reverse 反向操作元数据(P4-71 ②:详情 Sheet 反向键的呈现面——
 	// null=该记录无反向〔弹门批准等已执行的一次性动作,如实〕)。
-	Reverse *reverseMeta `json:"reverse,omitempty"`
 }
 
 // approvalView 待决审批请求(审批弹门的面板核对物)。端点视图与实时
@@ -2168,28 +2240,7 @@ type approvalView struct {
 	ToolName    string `json:"tool_name"`      // 实际工具
 	ToolArgs    string `json:"tool_args"`      // 实际参数(人即兜底的核对物)
 	Note        string `json:"note,omitempty"` // 弹门上下文/范围卡说明
-	// HarmNote 危害说明三段式(P4-27 ⑨):按命令实际内容分级(P4-74 ①)
-	// ＋命令特征确定性拼装,现组装现服务(不落库);说清做什么/目标会
-	// 怎样/最坏后果。
-	HarmNote string `json:"harm_note,omitempty"`
-	// CmdLevel 命令实际内容分级(P4-74 ①;空=认不出,前端回退 ActionLevel)。
-	CmdLevel string `json:"cmd_level,omitempty"`
-	// StepGround 步骤分级背景行(P4-74 ①;空=无落差不渲染)。
-	StepGround string `json:"step_ground,omitempty"`
-	CreatedAt  string `json:"created_at"`
-}
-
-// scopeAssetView 待批资产合成的范围卡(P4-52 ⑤:审批集中 RoE——渗透
-// 任务发现入图的范围外资产以同骨架卡呈现在审批区,卡 ID=资产 ID,
-// 两键"加入资产/禁止测试"走资产裁决通道)。
-type scopeAssetView struct {
-	ID        string `json:"id"`
-	Kind      string `json:"kind"` // 恒 "scope"
-	Mode      string `json:"mode"` // 恒 "pentest"(待批资产仅渗透任务有)
-	Target    string `json:"target"`
-	StepID    string `json:"step_id,omitempty"`
-	UnitID    string `json:"unit_id,omitempty"`
-	CreatedAt string `json:"created_at,omitempty"`
+	CreatedAt   string `json:"created_at"`
 }
 
 // handleApprovalsList 审批待决请求(弹门 + 范围卡,P4-51)+ 待批资产卡
@@ -2201,101 +2252,30 @@ func (s *Server) handleApprovalsList(w http.ResponseWriter, r *http.Request) {
 	pending := s.Gate.Pending(taskID)
 	out := make([]approvalView, 0, len(pending))
 	for _, p := range pending {
-		kind, target := "", ""
-		if p.AttackTarget != "" {
-			kind, target = "attack", p.AttackTarget // P4-67 攻击行为卡
-		}
-		view := approvalView{
-			ID: p.ID, Kind: kind, Target: target,
-			StepID: p.StepID, UnitID: p.UnitID, Intent: p.Intent,
-			ActionLevel: string(p.ActionLevel), ToolName: p.ToolName,
-			ToolArgs:  p.ToolArgs,
-			Note:      p.Note,
-			HarmNote:  swarm.HarmNote(p.ActionLevel, p.ToolName, json.RawMessage(p.ToolArgs)),
-			CreatedAt: p.CreatedAt.Local().Format("2006-01-02 15:04:05"),
-		}
-		// P4-74 ①:卡面以命令为准——命令分级(徽标)与步骤分级背景行
-		// 仅弹门票装配(范围卡/攻击卡的徽标是卡型,Note 已说明缘由)。
-		if kind == "" {
-			if lvl, ok := swarm.ClassifyCommandAction(p.ToolName, json.RawMessage(p.ToolArgs)); ok {
-				view.CmdLevel = string(lvl)
-			}
-			view.StepGround = swarm.StepGroundNote(p.ActionLevel, p.ToolName, json.RawMessage(p.ToolArgs))
-		}
-		out = append(out, view)
+		out = append(out, approvalView{ID: p.ID, StepID: p.StepID, UnitID: p.UnitID, Intent: p.Intent,
+			ActionLevel: string(p.ActionLevel), ToolName: p.ToolName, ToolArgs: p.ToolArgs, Note: p.Note,
+			CreatedAt: p.CreatedAt.Local().Format("2006-01-02 15:04:05")})
 	}
+
 	records, err := s.approvalRecords(context.Background(), taskID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	// P4-51:范围待决卡(渗透拦截/红队可否决)并入待决区——同一目标
-	// 一张卡(approval.record scope_wait 无同 RequestID 裁决收口即待决),
-	// 面板两键"加入资产/禁止测试"。
-	mode := "redteam"
-	if detail, derr := s.Store.CreatedDetail(r.Context(), taskID); derr == nil && rings.TaskTypeOf(detail) == rings.TaskTypePentest {
-		mode = "pentest"
+	proposals, err := s.assetProposalViews(r, taskID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
 	}
-	scopeCards := scopePendingViews(records)
-	scopedAnchors := map[string]bool{}
-	for i := range scopeCards {
-		scopeCards[i].Mode = mode
-		if scopeCards[i].ToolName != "" {
-			scopeCards[i].HarmNote = swarm.HarmNote(
-				rings.ActionLevel(scopeCards[i].ActionLevel), scopeCards[i].ToolName,
-				json.RawMessage(scopeCards[i].ToolArgs))
-		}
-		if a, ok := rings.ScopeAnchorOf(scopeCards[i].Target); ok {
-			scopedAnchors[a.Host+"\x00"+a.Port] = true
-		}
-	}
-	out = append(out, scopeCards...)
-	// P4-52 ⑤:渗透任务待批资产合成同骨架卡(拦截卡已覆盖的锚点不重复)。
-	assetCards := []scopeAssetView{}
-	if assets, aerr := s.Store.PendingScopeAssets(r.Context(), taskID); aerr == nil {
-		for _, a := range assets {
-			if anchor, ok := rings.ScopeAnchorOf(a.Title); ok && scopedAnchors[anchor.Host+"\x00"+anchor.Port] {
-				continue
-			}
-			assetCards = append(assetCards, scopeAssetView{
-				ID: a.ID, Kind: "scope", Mode: "pentest", Target: a.Title,
-				StepID: a.StepID, UnitID: a.UnitID, CreatedAt: a.AddedAt,
-			})
-		}
-	}
+	out = append(out, proposals...)
+
 	// 待决区按登记时间稳定排序(弹门与范围卡混排,先到先决)。
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
 	// P2-08:冬眠中审批单冻结为只读(面板禁用裁决按钮并提示;唤醒恢复)。
 	writeJSON(w, http.StatusOK, map[string]any{
-		"pending": out, "scope_assets": assetCards,
+		"pending": out,
 		"records": records, "frozen": s.taskHibernated(taskID),
 	})
-}
-
-// scopePendingViews 审批记录里的待决范围卡(P4-51):rows 为倒序(最新
-// 在先),同一 RequestID 首见即最新记录——恰为 scope_wait 即待决(裁决
-// approved/denied 必晚于卡面,倒序会先被见到);同一目标一张卡。
-func scopePendingViews(rows []approvalRecordView) []approvalView {
-	var out []approvalView
-	seen := map[string]bool{}
-	for _, r := range rows {
-		if seen[r.RequestID] {
-			continue // 同 RequestID 只看最新一笔
-		}
-		seen[r.RequestID] = true
-		if r.Type != rings.ApprovalRecScopeWait {
-			continue
-		}
-		target := strings.TrimPrefix(r.RequestID, rings.ScopeCardIDPrefix)
-		out = append(out, approvalView{
-			ID: r.RequestID, Kind: "scope", Target: target,
-			StepID: r.StepID, UnitID: r.UnitID, Intent: r.Intent,
-			ActionLevel: r.ActionLevel, ToolName: r.ToolName,
-			ToolArgs: r.ToolArgs, Note: r.Note,
-			CreatedAt: r.OccurredAt,
-		})
-	}
-	return out
 }
 
 // approvalRecords 审批记录视图(P4-36 起读 approval_records 投影——
@@ -2307,11 +2287,6 @@ func (s *Server) approvalRecords(ctx context.Context, taskID string) ([]approval
 		return nil, err
 	}
 	var recs []approvalRecordView
-	// P4-71 ②:反向键可用性——攻击档在 unitEnv 内存态,单位在飞才可调
-	//(旧攻击记录如实置灰);执行器未装配视为全部不可用。
-	exec := s.swarmExec()
-	unitActive := func(unitID string) bool { return exec != nil && exec.UnitActive(taskID, unitID) }
-	frozen := s.taskHibernated(taskID)
 	for _, r := range rows {
 		note := r.Note
 		// P4-67 研判分诊留痕的依据摘要人话化(账本原文 verdict=/basis=
@@ -2319,20 +2294,18 @@ func (s *Server) approvalRecords(ctx context.Context, taskID string) ([]approval
 		if r.Type == rings.ApprovalRecTriage {
 			note = triageNoteText(r.Note)
 		}
-		var rev *reverseMeta
-		if m := reverseOpOf(r, unitActive); m != nil {
-			// 冬眠中反向键一并冻结(审批只读既有口径)。
-			if frozen {
-				m.Unavailable = "任务冬眠中,审批记录只读"
+		if r.Type == rings.ApprovalRecActionReview {
+			note = "需审批"
+			if r.Note == swarm.ActionAllow {
+				note = "允许执行"
 			}
-			rev = m
 		}
 		recs = append(recs, approvalRecordView{
 			RequestID: r.RequestID, StepID: r.StepID, UnitID: r.UnitID,
 			Type: r.Type, ActionLevel: r.ActionLevel, HarmClass: r.HarmClass,
 			Intent: r.Intent, ToolName: r.ToolName, ToolArgs: r.ToolArgs,
 			Note: note, DenyLine: r.DenyLine, DecidedBy: r.DecidedBy, Reason: r.Reason,
-			WaitMillis: r.WaitMillis, OccurredAt: r.OccurredAt, Reverse: rev,
+			WaitMillis: r.WaitMillis, OccurredAt: r.OccurredAt,
 		})
 	}
 	// 倒序:最新在先。
@@ -2342,44 +2315,29 @@ func (s *Server) approvalRecords(ctx context.Context, taskID string) ([]approval
 	return recs, nil
 }
 
-// handleApprovalDecide 面板裁决(批准/拒绝):先记账后送达(审批门
-// LedgerGate 保证),此处只做参数透传。裁决者恒为造物主(creator)。
-// P4-68 ②:面板拒绝只杀该动作不杀单位(drive 侧注入换路反馈,连拒
-// 同类 3 次升级杀)。
-// P4-51:范围待决卡(sc- 前缀)走两键裁决"加入资产/禁止测试"——
-// 瞬间返回,命令由单位自己异步跑(严禁同步执行命令)。
-// P4-52 ⑤:待批资产卡(资产 ID,a- 前缀)走资产裁决通道(同一两键)。
-// P4-68 ①:范围卡第三键"允许访问"(action="allow_access",approved
-// 不参与)——host 入信息源清单＋资产退役＋挂等单位唤醒续跑,瞬间返回。
-// P4-70 ①:卡面与批量的第三键入口已移除(批量端点不再收 allow_access),
-// 本单卡决策端点保留——只授访问权的日常入口在 RoE 页信息源区标记行
-// (与牧者标记、分诊自动授同走 AllowScopeAccess 统一入口)。
+// handleApprovalDecide routes exact action decisions and inventory choices.
+// Neither path executes a command inside the HTTP request.
 func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 	rid := r.PathValue("rid")
 	var req struct {
 		Approved *bool  `json:"approved"` // 显式布尔,缺省视为坏请求
 		Reason   string `json:"reason"`
-		Action   string `json:"action"` // P4-68:"allow_access"=范围卡第三键
+		Action   string `json:"action"` // retired action-based requests are rejected
 	}
 	if !readJSON(w, r, &req) {
 		return
 	}
-	action := strings.TrimSpace(req.Action)
-	if action == "allow_access" {
-		if strings.HasPrefix(rid, rings.ScopeCardIDPrefix) || strings.HasPrefix(rid, assetCardIDPrefix) {
-			s.handleScopeDecide(w, r, taskID, rid, false, strings.TrimSpace(req.Reason), true)
-			return
-		}
-		writeErr(w, http.StatusBadRequest, errors.New("允许访问只适用于范围卡"))
+	if strings.TrimSpace(req.Action) != "" {
+		writeErr(w, http.StatusBadRequest, errors.New("不支持此审批动作"))
 		return
 	}
 	if req.Approved == nil {
 		writeErr(w, http.StatusBadRequest, errors.New("审批结果必须是布尔值"))
 		return
 	}
-	if strings.HasPrefix(rid, rings.ScopeCardIDPrefix) || strings.HasPrefix(rid, assetCardIDPrefix) {
-		s.handleScopeDecide(w, r, taskID, rid, *req.Approved, strings.TrimSpace(req.Reason), false)
+	if strings.HasPrefix(rid, overmind.AssetProposalPrefix) {
+		s.handleAssetAdoption(w, r, taskID, rid, *req.Approved, strings.TrimSpace(req.Reason))
 		return
 	}
 	err := s.Gate.Decide(r.Context(), taskID, rid, swarm.GateDecision{
@@ -2393,15 +2351,11 @@ func (s *Server) handleApprovalDecide(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, err)
 		return
 	}
+	// P5-05:让位停等步骤的裁决唤醒已随 Decide 落账(回 dispatched+队首
+	// 档)——踢醒主宰循环即时领取,不等下一轮(原地等待中的单位走票
+	// 通道续跑,唤醒无副作用)。
+	s.wake(taskID)
 	writeJSON(w, http.StatusOK, map[string]any{"id": rid, "approved": *req.Approved})
-}
-
-// clipJSONText 面板回显的执行结果截断(全文在账本 tool_call 记录)。
-func clipJSONText(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }
 
 // handleWake 手动唤醒(面板调试入口;RoE/目标变更已自动唤醒)。
@@ -2513,6 +2467,8 @@ func (s *Server) handleTaskTokens(w http.ResponseWriter, r *http.Request) {
 		Agent            string `json:"agent"`
 		Model            string `json:"model"`
 		TranscriptID     string `json:"transcript_id"`
+		Purpose          string `json:"purpose,omitempty"`
+		UsageMissing     bool   `json:"usage_missing,omitempty"`
 		Turn             int    `json:"turn"`
 		InputTokens      int    `json:"input_tokens"`
 		OutputTokens     int    `json:"output_tokens"`
@@ -2524,6 +2480,7 @@ func (s *Server) handleTaskTokens(w http.ResponseWriter, r *http.Request) {
 	for _, x := range rows {
 		out = append(out, rowView{
 			Agent: x.Agent, Model: x.Model, TranscriptID: x.TranscriptID, Turn: x.Turn,
+			Purpose: x.Purpose, UsageMissing: x.UsageMissing,
 			InputTokens: x.InputTokens, OutputTokens: x.OutputTokens,
 			CacheReadTokens: x.CacheReadTokens, CacheWriteTokens: x.CacheWriteTokens,
 			OccurredAt: x.OccurredAt.Local().Format("2006-01-02 15:04:05"),

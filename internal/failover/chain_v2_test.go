@@ -175,7 +175,7 @@ func TestChainTaskBindingStrict(t *testing.T) {
 	_ = SaveModelConfig(ctx, store, ModelConfig{Name: "a", Format: "openai", BaseURL: "http://127.0.0.1:1", APIKey: "k", Model: "m-a"}, "creator")
 	_ = SaveModelConfig(ctx, store, ModelConfig{Name: "b", Format: "openai", BaseURL: "http://127.0.0.1:2", APIKey: "k", Model: "m-b"}, "creator")
 	_ = SetActive(ctx, store, RolePrimary, "a", "creator")
-	_ = SetTaskOverride(ctx, store, "tk", RolePrimary, "a", "creator")
+	_ = store.SetSetting(ctx, keyTaskPrefix+"tk."+RolePrimary, "a", "creator")
 
 	// 绑定腿(主)持续失败:重放耗尽后如实上抛原始错误;再请求时如实
 	// 报"绑定…冷却中"——两种失败都不落全局备。
@@ -192,7 +192,7 @@ func TestChainTaskBindingStrict(t *testing.T) {
 		t.Fatal("显式绑定失败不得悄悄换到全局备")
 	}
 	// 绑定主+备:失败只在绑定集内接续(备服务)。
-	_ = SetTaskOverride(ctx, store, "tk", RoleBackup, "b", "creator")
+	_ = store.SetSetting(ctx, keyTaskPrefix+"tk."+RoleBackup, "b", "creator")
 	c.Reload(ctx) // 清 taskCache,重建绑定集
 	c.mu.Lock()
 	c.lead = &leg{name: "a", model: "m-a", prov: lead, brk: breakerState{State: "closed"}}

@@ -242,10 +242,15 @@ func TestUnitModelDeepBlocked(t *testing.T) {
 	if cls := blackboxClass(t, store, task, rings.BlackboxUnitBlocked); cls != BlockedClassModelFault {
 		t.Fatalf("黑匣子 unit_blocked 应带模型故障归因: %q", cls)
 	}
-	// token 零记账:无成功模型轮,不产生用量行。
+	// 失败请求也须逐笔记账;未返回用量不估算,不冒充完成轮次。
 	rows, err := store.TokenUsageRows(ctx, task)
-	if err != nil || len(rows) != 0 {
-		t.Fatalf("受阻单位不应有 token 行: %v %d", err, len(rows))
+	if err != nil || len(rows) != int(gate.hits.Load()) || len(rows) == 0 {
+		t.Fatalf("失败请求应逐笔记账: err=%v rows=%d requests=%d", err, len(rows), gate.hits.Load())
+	}
+	for _, row := range rows {
+		if row.Purpose != "interrupted" || !row.UsageMissing || row.Turn != 0 || row.InputTokens != 0 || row.OutputTokens != 0 || row.CacheReadTokens != 0 || row.CacheWriteTokens != 0 || row.Agent != "swarm:"+res.UnitID || row.TranscriptID != res.TranscriptID {
+			t.Fatalf("失败请求不可估算消耗或冒充完成轮次: %+v", row)
+		}
 	}
 }
 

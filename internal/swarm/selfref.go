@@ -111,6 +111,27 @@ func (env *unitEnv) selfRefEvidence(ctx context.Context, evidence string) (strin
 	return "", false
 }
 
+// selfRefEvidenceRef 证据引用自指判定(P5-01②,交卷单 evidence_refs
+// 专用):按交换 ID 回查镜留痕摘要,引用命中的交换目标 URL 指向操作者
+// 目标之外的环回地址即自指。悬空引用(查不到)不在本判定范围——
+// 引用命中校验归机器三查(P5-02 查一),提交侧只拦确证自指。
+func (env *unitEnv) selfRefEvidenceRef(ctx context.Context, refs []string) (string, bool) {
+	briefs, err := env.Executor.Store.MirrorBriefs(ctx, env.TaskID, refs)
+	if err != nil {
+		return "", false // 读失败不拦提交(命中校验有机器三查兜底)
+	}
+	for _, r := range refs {
+		b, ok := briefs[r]
+		if !ok {
+			continue
+		}
+		if e, hit := env.selfRefEvidence(ctx, b.URL); hit {
+			return e, true
+		}
+	}
+	return "", false
+}
+
 // allowedLoopback 环回提法是否操作者声明的目标:与任一种子/手动资产
 // 的环回标识对账——资产带端口要求端口一致(靶标 4481 不放行镜 60437);
 // 资产为裸环回主机(无端口)视为主机整段授权,放行该主机任意端口
@@ -151,7 +172,7 @@ func sameLoopbackHost(a, b string) bool {
 }
 
 // recordEnvObservation 环境观察留痕(P4-25 ①):被拒收的自指提交原文
-// 进黑匣子,信息不丢、供排查。kind 为提交类(待确认事实/漏洞判断/
+// 进黑匣子,信息不丢、供排查。kind 为提交类(候选事实/漏洞判断/
 // 猜测),anchor 为命中自指的锚点/证据提法。留痕失败不挡拒收(观察
 // 原文仍在单位转录里,审计可下钻)。
 func (env *unitEnv) recordEnvObservation(kind, anchor, statement, evidence string) {

@@ -83,7 +83,7 @@ func TestPendingSessionDetection(t *testing.T) {
 	// 有始无终:待决。
 	crashResidue(t, store, "t1", "s1", "u1")
 	e := NewExecutor(store, nil, dir, Budget{})
-	if got, kind := e.pendingSession(context.Background(), "t1", "s1"); got != "swarm-u1" || kind != resumeAdoption {
+	if got, kind, _ := e.pendingSession(context.Background(), "t1", "s1"); got != "swarm-u1" || kind != resumeAdoption {
 		t.Fatalf("有始无终应报待决会话 swarm-u1,得到 (%q,%v)", got, kind)
 	}
 	// 收场后:无待决。
@@ -94,17 +94,17 @@ func TestPendingSessionDetection(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("铺收场失败: %v", err)
 	}
-	if got, kind := e.pendingSession(context.Background(), "t1", "s1"); got != "" || kind != resumeNone {
+	if got, kind, _ := e.pendingSession(context.Background(), "t1", "s1"); got != "" || kind != resumeNone {
 		t.Fatalf("已收场不应报待决会话,得到 (%q,%v)", got, kind)
 	}
 	// 二次崩溃残留(收养续跑后再崩):取最近一笔。
 	crashResidue(t, store, "t1", "s1", "u2")
-	if got, _ := e.pendingSession(context.Background(), "t1", "s1"); got != "swarm-u2" {
+	if got, _, _ := e.pendingSession(context.Background(), "t1", "s1"); got != "swarm-u2" {
 		t.Fatalf("二次残留应取最近待决会话 swarm-u2,得到 %q", got)
 	}
 	// 别的步骤的会话不算本步骤待决。
 	crashResidue(t, store, "t1", "s2", "u3") // s2 不是本步骤
-	if got, _ := e.pendingSession(context.Background(), "t1", "s1"); got != "swarm-u2" {
+	if got, _, _ := e.pendingSession(context.Background(), "t1", "s1"); got != "swarm-u2" {
 		t.Fatalf("他步骤会话不应影响本步骤判定,得到 %q", got)
 	}
 }

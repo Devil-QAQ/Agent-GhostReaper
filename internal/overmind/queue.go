@@ -63,6 +63,10 @@ func QueueWatermarkOf(steps []rings.NodeFull, edges []rings.EdgeView, limit int)
 			w.Running++
 		case "dispatched":
 			pending = append(pending, s)
+		case rings.StepScopeWait, rings.StepGateWait, rings.StepPauseWait, rings.StepModelWait:
+			// 挂等让位趴窝:计 Hold(等待 N),不计排队(可领取口径)、
+			// 不占容量(解除唤醒回 dispatched 才进排队)。
+			w.Hold++
 		}
 	}
 	w.Queued = len(RunnableSteps(pending, steps, edges))
@@ -105,13 +109,10 @@ func (e *QueueFullError) Error() string {
 	return "派发已满，等待单位结果后再规划：" + queueLine(e.Watermark)
 }
 
-// 来源由受控入口决定；高优先级、意图措辞不构成豁免。
 type dispatchSource uint8
 
 const (
 	sourceExplore dispatchSource = iota
-	sourceFalsify
-	sourceVerify
 	sourceUrgent
 )
 
@@ -122,13 +123,12 @@ type cancelPlan struct {
 }
 
 func protectedStep(s rings.NodeFull) bool {
-	kind, _ := s.Detail["kind"].(string)
 	urgent, _ := s.Detail["urgent"].(bool)
-	return urgent || kind == "falsify" || kind == StepDetailKindVerify
+	return urgent
 }
 
 // cancelQueued 只取消仍未领取的普通探索；整棵依赖后继同批留痕。
-// 反证、验证、急活及它们的关键前置受保护。模型给取消理由与图上证据，
+// 急活及其关键前置受保护。模型给取消理由与图上证据，
 // 程序核对引用、状态、领取竞态和依赖闭包，不代替模型判断语义重复。
 func (l *Loop) cancelQueued(ctx context.Context, p cancelPlan, evaluatedRev int64) error {
 	if strings.TrimSpace(p.Reason) == "" || len(p.Evidence) == 0 {
@@ -171,7 +171,7 @@ func (l *Loop) cancelQueued(ctx context.Context, p cancelPlan, evaluatedRev int6
 				continue
 			}
 			if s.Status != "dispatched" || protectedStep(s) {
-				return fmt.Errorf("步骤 %s 已领取或属反证、验证、急活及其关键前置，保留", s.ID)
+				return fmt.Errorf("步骤 %s 已领取或属急活及其关键前置，保留", s.ID)
 			}
 			if _, flying := l.launching[s.ID]; flying {
 				return fmt.Errorf("步骤 %s 已领取，保留", s.ID)
@@ -272,20 +272,24 @@ func (l *Loop) planningTriggers(ctx context.Context) ([]int64, bool, error) {
 			var p rings.NodeAdded
 			if json.Unmarshal(ev.Payload, &p) == nil {
 				urgent, _ := p.Detail["urgent"].(bool)
-				trigger = p.NodeType == rings.NodeAsset || p.NodeType == rings.NodeGoal || (p.NodeType == rings.NodeStep && urgent) || (p.NodeType == rings.NodeHypothesis && ev.Actor == "creator")
+				trigger = p.NodeType == rings.NodeAsset || p.NodeType == rings.NodeGoal || (p.NodeType == rings.NodeStep && urgent)
 			}
 		case rings.EventTestClaimRecord:
 			var p rings.TestClaimRecord
 			trigger = json.Unmarshal(ev.Payload, &p) == nil && p.Type == rings.TestClaimRecReopen
-		case rings.EventHypothesisRecord:
-			// 验证结果由单位落地处理；外部升级/管理才单独触发。
-			trigger = ev.Actor == "creator"
 		case rings.EventShepherdRecord:
 			var p rings.ShepherdRecord
 			trigger = json.Unmarshal(ev.Payload, &p) == nil && (p.Type == rings.ShepherdRecUserMessage || p.Type == rings.ShepherdRecAdvice)
 		case rings.EventNodeStateChanged:
 			var p rings.NodeStateChanged
-			trigger = (ev.Actor == "creator" || ev.Actor == actorShepherd) && json.Unmarshal(ev.Payload, &p) == nil
+			if json.Unmarshal(ev.Payload, &p) == nil {
+				trigger = ev.Actor == "creator" || ev.Actor == actorShepherd
+				if !trigger && p.Status == "confirmed" {
+					if n, err := l.Store.Node(ctx, l.TaskID, p.NodeID); err == nil {
+						trigger = n.Type == rings.NodeFact
+					}
+				}
+			}
 		case rings.EventNodeAmended:
 			// 目标变更(P4-54):改标题/完成条件/聚焦标记构成新规划依据
 			// (修改通知主宰并可复活任务,宪法既有);纯优先级调整不触发
@@ -300,6 +304,9 @@ func (l *Loop) planningTriggers(ctx context.Context) ([]int64, bool, error) {
 			// 操作者深入指令(P4-48):硬承诺——立即唤醒规划。
 			trigger = true
 			dive = true
+		case rings.EventBlackboxRecord:
+			var p rings.BlackboxRecord
+			trigger = json.Unmarshal(ev.Payload, &p) == nil && heartbeatAlert(p.Type)
 		}
 		if trigger {
 			out = append(out, ev.Revision)

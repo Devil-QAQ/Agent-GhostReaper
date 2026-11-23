@@ -95,7 +95,7 @@ func (l *Loop) dropPendingAdvice(idx map[string]int, out *[]pendingAdvice, advic
 
 // writeAdviceVerdicts 落一批建议裁决(每轮拆解后调用):只对真实存在
 // 且仍待裁决的建议落账,幂等跳过其余(重复裁决/幽灵 ID 不入账);
-// 单条失败不拖垮其余,如实留 LastErr。裁决写回建议的同源事件
+// 单条失败不拖垮其余,如实留 lastErr。裁决写回建议的同源事件
 // (shepherd 建议落 shepherd.record、插话建议落 interject.record)——
 // 两路提交同一裁决语义,面板各自读同源状态。
 func (l *Loop) writeAdviceVerdicts(ctx context.Context, plans []adviceVerdictPlan) {

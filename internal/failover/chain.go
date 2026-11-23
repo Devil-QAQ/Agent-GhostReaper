@@ -171,6 +171,8 @@ type Chain struct {
 	// lastRule 会话键→最近生效的思考回传规则(P4-57 ②:跨腿规则切换
 	// 的日志判定;配置重载清零)。
 	lastRule map[string]string
+	// Only warning identities, bounded and independent of request semantics.
+	sanitizeSeen map[[32]byte]bool
 }
 
 // NewChain 构建链:按模型库/环境变量构建腿集 + 装载持久化熔断状态
@@ -234,7 +236,7 @@ func BuildProvider(cfg ModelConfig, opts func(*llm.Config)) (llm.Provider, error
 		APIKey: cfg.APIKey, Model: cfg.Model,
 		Proxy:           cfg.Proxy,
 		MaxTokensField:  cfg.MaxTokensField,
-		ThinkingType:    cfg.Thinking,
+		ThinkingType:    cfg.EffectiveThinking(),
 		ReasoningEffort: cfg.ThinkingEffort,
 	}
 	if client, err := llmHTTPClient(cfg); err != nil {
@@ -914,7 +916,7 @@ func (c *Chain) replayLimitOf(l *leg) int {
 // 重放预算重计(新腿自帷新生)。入口先做出站消息清洗(P4-27 ⑤:坏
 // 消息根本不出站)。
 func (c *Chain) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
-	req = sanitizeReq(ctx, req)
+	req = c.sanitizeReq(ctx, req)
 	return func(yield func(llm.StreamEvent, error) bool) {
 		replays := 0
 		lastName := ""
@@ -923,15 +925,19 @@ func (c *Chain) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2
 			route := c.routeLocked(ctx, req, true)
 			c.mu.Unlock()
 			if route.current == nil {
+				noUsageAttempt(ctx)
 				yield(llm.StreamEvent{}, fmt.Errorf("failover: %s", route.noRoute))
 				return
 			}
 			delivered := false
 			var termErr error
+			var callUsage llm.Usage
+			returned := &returnedUsage{}
+			callCtx := context.WithValue(ctx, returnedUsageKey{}, returned)
 			// P4-57 ②:按当前服务腿的思考回传规则处理整个历史(重放换腿
 			// 各自按新腿规则;确定性,前缀缓存友好)。
 			legReq := c.legThinkingReq(ctx, route.current, req)
-			for ev, err := range route.current.prov.Stream(ctx, legReq) {
+			for ev, err := range route.current.prov.Stream(callCtx, legReq) {
 				if err != nil {
 					termErr = err
 					break
@@ -944,10 +950,15 @@ func (c *Chain) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2
 					c.noteServedLocked(ctx, route.current.model)
 					c.mu.Unlock()
 				}
+				if ev.Type == llm.SEMessageStart || ev.Type == llm.SEMessageDelta {
+					callUsage.Add(ev.Usage)
+				}
 				if !yield(ev, nil) {
+					reportUsage(ctx, route.current.model, returned.resolve(callUsage), false)
 					return // 调用方停止消费:不当失败处理
 				}
 			}
+			reportUsage(ctx, route.current.model, returned.resolve(callUsage), termErr == nil)
 			if termErr == nil {
 				c.mu.Lock()
 				c.onSuccess(route.current)
@@ -1008,7 +1019,7 @@ func (c *Chain) routeChanged(ctx context.Context, req llm.CompletionRequest, pre
 // Complete 非流式:整请求要么成功要么失败,失败一律可安全重放(无半截
 // 交付),路由与计数语义同 Stream。入口先做出站消息清洗(P4-27 ⑤)。
 func (c *Chain) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
-	req = sanitizeReq(ctx, req)
+	req = c.sanitizeReq(ctx, req)
 	replays := 0
 	lastName := ""
 	for {
@@ -1016,12 +1027,14 @@ func (c *Chain) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Me
 		route := c.routeLocked(ctx, req, true)
 		c.mu.Unlock()
 		if route.current == nil {
+			noUsageAttempt(ctx)
 			return llm.Message{}, "", llm.Usage{}, fmt.Errorf("failover: %s", route.noRoute)
 		}
 		// P4-57 ②:按当前服务腿的思考回传规则处理整个历史(重放换腿
 		// 各自按新腿规则)。
 		legReq := c.legThinkingReq(ctx, route.current, req)
 		msg, sr, usage, err := route.current.prov.Complete(ctx, legReq)
+		reportUsage(ctx, route.current.model, usage, err == nil)
 		if err == nil {
 			c.mu.Lock()
 			c.noteServedLocked(ctx, route.current.model)

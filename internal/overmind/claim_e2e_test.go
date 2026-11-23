@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -99,6 +98,12 @@ func claimByTitle(t *testing.T, store *rings.Store, task, substr string) *rings.
 //	  候选 → testing(第 1 轮:解释已除但影响面证据不足;Note 里 LLM
 //	  自称"影响面证据充分建议确认")→ 待确认(LLM 陈述被仲裁者拒收,R4
 //	  机器搁置理由)。
+//
+// TestClaimLifecycleE2E P5-01 声明生命周期 e2e(单会话连打版):虫群在
+// 同一会话内探索→发现→证明→反证自查→交卷(submit_claim 六字段),
+// 交卷即停 candidate(机器三查归 P5-02);同任务零反证/验证步骤产生
+// (P5-01⑤);reopen 保留 reopen 记录与 testing 迁移、零新步骤。
+// (旧多轮反证/裁决链/收割定稿链路已随三段流水线退役,重建归 P5-02/03。)
 func TestClaimLifecycleE2E(t *testing.T) {
 	dir := t.TempDir()
 	store := openStore(t)
@@ -112,110 +117,17 @@ func TestClaimLifecycleE2E(t *testing.T) {
 	t.Cleanup(target.Close)
 	mainURL := target.MainURL()
 
-	// 脚本模型分支:
+	// 脚本模型分支(P5-01 单会话连打):
 	//   拆解(无工具):审计意图已派过才派,否则空列表;
-	//   发现包(任务包含 web1 资产):robots → 备份目录 → 版本接口 →
-	//     两条 submit_test_claim(各带显式竞争解释)→ 收口;
-	//   反证包(任务包含"八、反证任务"):按声明分支 + 轮次分支——
-	//     备份声明:第 1 轮只排除"归属错误"(alt2),第 2 轮缓存穿透重放
-	//       排除"缓存污染"(alt1)→ 确认;重开第 3 轮两条全排 → 再确认;
-	//     版本声明:第 1 轮排除唯一解释但影响面不成立(Note 自称充分,
-	//       演示 LLM 陈述拒收)→ 待确认。
-	claimIDRe := regexp.MustCompile(`判断 (tc-[0-9a-f]+)`)
-	roundRe := regexp.MustCompile(`第 (\d+) 轮`)
-	stmtBackupRe := regexp.MustCompile(`(?m)^\s*存在性判断: .*备份目录`)
-	packURLRe := regexp.MustCompile(`-\s+web1 \[service\] (http://\S+)`)
+	//   连打包:robots → 备份目录 → 版本接口 → 两条 submit_claim 交卷
+	//     (备份 high/版本 none,evidence_refs 引证明 URL)→ 收口。
 	model := newGatedScriptedModel(func(rr *recordedRequest) scriptedReply {
 		if len(rr.ToolsOffered) == 0 {
-			// P4-62 A:定稿最小集挑选会话(候选池事实包→选择 JSON)——
-			// 如实挑 seq 1(字段留空退确定性兜底)。
-			if strings.Contains(rr.LastUser, "复现步骤事实") {
-				return scriptedReply{Text: `{"steps":[{"seq":1}]}`, Finish: "stop"}
-			}
 			if strings.Contains(rr.LastUser, "审计主站敏感路径") {
 				return scriptedReply{Text: `{"new_intents":[]}`, Finish: "stop"}
 			}
 			return scriptedReply{Text: `{"new_intents":[{"intent":"审计主站敏感路径暴露(robots/备份目录/版本接口)","expected_observation":"敏感路径清单与各自内容证据","action_level":"只读探测","covers":["web1"]}]}`, Finish: "stop"}
 		}
-		if strings.Contains(rr.LastUser, "八、反证任务") {
-			m := claimIDRe.FindStringSubmatch(rr.LastUser)
-			if m == nil {
-				return scriptedReply{Text: "反证任务包缺判断 ID。", Finish: "stop"}
-			}
-			claimID := m[1]
-			base := mainURL
-			if u := packURLRe.FindStringSubmatch(rr.LastUser); u != nil {
-				base = u[1]
-			}
-			rm := roundRe.FindStringSubmatch(rr.LastUser)
-			round := 0
-			if rm != nil {
-				fmt.Sscanf(rm[1], "%d", &round)
-			}
-			if stmtBackupRe.MatchString(rr.LastUser) {
-				switch round {
-				case 1: // 第 1 轮:排除归属错误,缓存污染留活 → 待下轮。
-					switch {
-					case !seenToolResult(rr, "bash", "mock backup archive listing"):
-						return scriptedReply{ToolCalls: []scriptedToolCall{{
-							ID: "fb1", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/old-backup/"}`, base),
-						}}, Finish: "tool_calls"}
-					case !seenToolResult(rr, "submit_falsify_result", "已记录"):
-						return scriptedReply{ToolCalls: []scriptedToolCall{{
-							ID: "fr1", Name: "submit_falsify_result",
-							Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":false},{"id":"alt2","refuted":true}],"evidence":"独立重放 /old-backup/ 仍返回备份列举(db-2026-09-01.sql.gz、config.bak),响应头无缓存命中标记,归属为本站;缓存来源未排除,须穿透复核","note":"归属已确认,缓存污染待下轮"}`, claimID),
-						}}, Finish: "tool_calls"}
-					default:
-						return scriptedReply{Text: "第 1 轮反证完成:归属错误已排除,缓存污染待下轮。", Finish: "stop"}
-					}
-				case 2: // 第 2 轮:缓存穿透重放 → 全灭 → 确认。
-					switch {
-					case !seenToolResult(rr, "bash", "mock backup archive listing"):
-						return scriptedReply{ToolCalls: []scriptedToolCall{{
-							ID: "fb2", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/old-backup/?nocache=880011"}`, base),
-						}}, Finish: "tool_calls"}
-					case !seenToolResult(rr, "submit_falsify_result", "已记录"):
-						return scriptedReply{ToolCalls: []scriptedToolCall{{
-							ID: "fr2", Name: "submit_falsify_result",
-							// P4-73:证据带完整 URL(证明交换经回查兜底锚定)。
-							Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":true}],"evidence":"带随机穿透参数重放 %s/old-backup/?nocache=880011 仍返回同一备份列举,内容来自源站而非缓存;匿名可读成立,影响面为敏感备份可被未授权下载","note":"缓存污染已排除"}`, claimID, base),
-						}}, Finish: "tool_calls"}
-					default:
-						return scriptedReply{Text: "第 2 轮反证完成:全部解释已排除,结论已写回。", Finish: "stop"}
-					}
-				default: // 重开轮:全部解释复活,逐条重新排除 → 再确认。
-					switch {
-					case !seenToolResult(rr, "bash", "mock backup archive listing"):
-						return scriptedReply{ToolCalls: []scriptedToolCall{{
-							ID: "fb3", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/old-backup/?recheck=1"}`, base),
-						}}, Finish: "tool_calls"}
-					case !seenToolResult(rr, "submit_falsify_result", "已记录"):
-						return scriptedReply{ToolCalls: []scriptedToolCall{{
-							ID: "fr3", Name: "submit_falsify_result",
-							// P4-73:重开轮同带完整 URL。
-							Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":true,"impact_level":"high","alternatives":[{"id":"alt1","refuted":true},{"id":"alt2","refuted":true}],"evidence":"重开复核:%s/old-backup/?recheck=1 穿透参数重放与直连重放均返回同一备份列举,归属与缓存两项解释均排除;匿名可读仍成立","note":"重开轮复核一致"}`, claimID, base),
-						}}, Finish: "tool_calls"}
-					default:
-						return scriptedReply{Text: "重开轮反证完成:全部解释重新排除,结论已写回。", Finish: "stop"}
-					}
-				}
-			}
-			// 版本声明:第 1 轮即终态——解释排除,影响面不成立。
-			switch {
-			case !seenToolResult(rr, "bash", `"version":"2.4.1"`):
-				return scriptedReply{ToolCalls: []scriptedToolCall{{
-					ID: "fv", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/api/version"}`, base),
-				}}, Finish: "tool_calls"}
-			case !seenToolResult(rr, "submit_falsify_result", "已记录"):
-				return scriptedReply{ToolCalls: []scriptedToolCall{{
-					ID: "frv", Name: "submit_falsify_result",
-					Args: fmt.Sprintf(`{"claim_id":%q,"existence_refuted":false,"impact_supported":false,"alternatives":[{"id":"alt1","refuted":true}],"evidence":"独立重放 /api/version 确实返回 2.4.1,内容来自源站;但仅版本号本身,未取得可支撑定向利用的实际影响证据","note":"LLM 自评:影响面证据充分,建议直接确认"}`, claimID),
-				}}, Finish: "tool_calls"}
-			default:
-				return scriptedReply{Text: "反证完成:存在性未推翻,影响面证据不足,结论已写回。", Finish: "stop"}
-			}
-		}
-		// 发现任务分支。
 		switch {
 		case !seenToolResult(rr, "bash", "Disallow: /old-backup"):
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
@@ -229,18 +141,20 @@ func TestClaimLifecycleE2E(t *testing.T) {
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
 				ID: "d3", Name: "bash", Args: fmt.Sprintf(`{"command":"curl -sS -m 5 %s/api/version"}`, mainURL),
 			}}, Finish: "tool_calls"}
-		case !hasToolCallWithArg(rr, "submit_test_claim", "备份目录可公开匿名列举"):
+		case !hasToolCallWithArg(rr, "submit_claim", "备份目录可公开匿名列举"):
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
-				ID: "d4", Name: "submit_test_claim",
-				Args: fmt.Sprintf(`{"statement":"/old-backup/ 备份目录可公开匿名列举","impact":"备份文件 db-2026-09-01.sql.gz 与 config.bak 可被未授权下载,存在敏感数据泄露","evidence":"curl 实测 /old-backup/ 返回列举: mock backup archive listing: db-2026-09-01.sql.gz, config.bak","asset_id":"web1","vulnclass":"信息暴露","alternatives":["缓存污染:列举内容可能来自中间缓存而非目标本体","归属错误:列举可能来自其他资产或共用组件"]}`),
+				ID: "d4", Name: "submit_claim",
+				Args: fmt.Sprintf(`{"summary":"/old-backup/ 备份目录可公开匿名列举","severity":"high","evidence_refs":[%q],"proving_marker":"db-2026-09-01.sql.gz","countercheck_note":"直连重放与加随机参数绕缓存重放各一次,返回同一列举,排除缓存假象;URL 归属本站,排除归属错误","impact_note":"备份文件 db-2026-09-01.sql.gz 与 config.bak 可被未授权下载","asset_id":"web1","vulnclass":"信息暴露"}`, mainURL+"/old-backup/"),
 			}}, Finish: "tool_calls"}
-		case !hasToolCallWithArg(rr, "submit_test_claim", "公开暴露服务版本号"):
+		case !hasToolCallWithArg(rr, "submit_claim", "公开暴露服务版本号"):
 			return scriptedReply{ToolCalls: []scriptedToolCall{{
-				ID: "d5", Name: "submit_test_claim",
-				Args: fmt.Sprintf(`{"statement":"/api/version 公开暴露服务版本号","impact":"版本号可支撑针对已知漏洞的定向利用","evidence":"curl 实测 /api/version 返回 {\"service\":\"gr-mock-main\",\"version\":\"2.4.1\"}","asset_id":"web1","vulnclass":"信息暴露","alternatives":["缓存污染:版本响应可能来自中间缓存"]}`),
+				ID: "d5", Name: "submit_claim",
+				Args: fmt.Sprintf(`{"summary":"/api/version 公开暴露服务版本号","severity":"none","evidence_refs":[%q],"proving_marker":"2.4.1","countercheck_note":"重放一次确认稳定返回,非一次性状态;仅版本号本身无直接危害","asset_id":"web1","vulnclass":"信息暴露"}`, mainURL+"/api/version"),
 			}}, Finish: "tool_calls"}
+		case !seenToolResult(rr, "submit_candidate_fact", "已提交新进事实"):
+			return scriptedReply{ToolCalls: []scriptedToolCall{{ID: "version-observation", Name: "submit_candidate_fact", Args: `{"statement":"版本号观察：服务公开返回2.4.1","evidence":"本次/api/version原始响应为{\"version\":\"2.4.1\"}，仅版本本身无直接危害","asset_id":"web1"}`}}, Finish: "tool_calls"}
 		default:
-			return scriptedReply{Text: "审计完成:两条待反证的判断已提交,待主宰派独立单位反证。", Finish: "stop"}
+			return scriptedReply{Text: "实际漏洞交卷与版本观察均已写回。", Finish: "stop"}
 		}
 	})
 	t.Cleanup(model.Close)
@@ -251,7 +165,7 @@ func TestClaimLifecycleE2E(t *testing.T) {
 	}
 	root := dir
 	ex := swarm.NewExecutor(store, prov, root, swarm.Budget{})
-	ex.Mirror = mirror.New(store, ex.Blobs, t.TempDir()) // P2-02:反证重放全程经镜留痕(复现步骤来源)
+	ex.Mirror = mirror.New(store, ex.Blobs, t.TempDir())
 
 	loop := &Loop{TaskID: task, Store: store, Swarm: ex, Provider: prov}
 	m, err := manager.New(manager.Config{
@@ -265,10 +179,9 @@ func TestClaimLifecycleE2E(t *testing.T) {
 		_ = m.Stop(task)
 		m.Close()
 	})
-	if _, err := m.CreateTask(ctx, task, "TestClaim 完整负向认证 E2E", rings.RoeUpdated{}, nil); err != nil {
+	if _, err := m.CreateTask(ctx, task, "交卷生命周期 E2E", rings.RoeUpdated{}, nil); err != nil {
 		t.Fatalf("创建任务失败: %v", err)
 	}
-	// 种子:无谓词目标(开放任务,LLM 拆解治理何时算完)+ 主站资产。
 	if err := SeedGoal(ctx, store, task, "g1", "审计 mock 靶站主站暴露面", nil); err != nil {
 		t.Fatalf("种目标失败: %v", err)
 	}
@@ -276,205 +189,116 @@ func TestClaimLifecycleE2E(t *testing.T) {
 	tk := m.Task(task)
 	tk.Wake()
 
-	// ---- 阶段一:两条声明走完各自状态机(备份 Confirmed / 版本待确认) ----
-	waitFor(t, 60*time.Second, "两条声明都到首个终态", func() bool {
+	// 实际漏洞确认，信息性误交卷拒收后按工具反馈提交事实。
+	waitFor(t, 60*time.Second, "漏洞确认且版本观察按事实写回", func() bool {
 		backup := claimByTitleSoft(store, task, "备份目录")
-		version := claimByTitleSoft(store, task, "版本号")
-		return backup != nil && version != nil &&
-			backup.Status == rings.TestClaimConfirmed &&
-			version.Status == rings.TestClaimPending
+		facts, _ := store.NodesByType(ctx, task, rings.NodeFact, "confirmed")
+		for _, f := range facts {
+			if strings.Contains(f.Title, "版本号观察") {
+				return backup != nil && backup.Status == rings.TestClaimConfirmed
+			}
+		}
+		return false
 	})
 	backup := claimByTitle(t, store, task, "备份目录")
-	version := claimByTitle(t, store, task, "版本号")
-
-	// 状态机轨迹:备份 候选 → 反证中 → 待下轮 → 反证中 → Confirmed。
-	if got := claimStates(t, store, task, backup.ID); len(got) != 5 ||
-		got[0] != rings.TestClaimCandidate || got[1] != rings.TestClaimTesting ||
-		got[2] != rings.TestClaimAwaitingRound || got[3] != rings.TestClaimTesting ||
-		got[4] != rings.TestClaimConfirmed {
-		t.Fatalf("备份声明完整状态机轨迹不符: %v", got)
-	}
-	// 版本:候选 → 反证中 → 待确认。
-	if got := claimStates(t, store, task, version.ID); len(got) != 3 ||
-		got[0] != rings.TestClaimCandidate || got[1] != rings.TestClaimTesting || got[2] != rings.TestClaimPending {
-		t.Fatalf("版本声明状态机轨迹不符: %v", got)
+	if claimByTitleSoft(store, task, "版本号") != nil {
+		t.Fatal("信息性结果不得进入漏洞图")
 	}
 
-	// 冻结竞争解释:备份 2 条(alt1 缓存污染 / alt2 归属错误)、版本 1 条。
-	if alts, _ := backup.Detail["alternatives"].([]any); len(alts) != 2 {
-		t.Fatalf("备份声明冻结解释应恰 2 条: %+v", backup.Detail["alternatives"])
+	// 交卷单事件六字段落账(引用=证明 URL;marker 为证据原文关键值)。
+	submits := testclaimRecords(t, store, task, rings.TestClaimRecSubmit)
+	if len(submits) != 1 {
+		t.Fatalf("应恰1条真实漏洞交卷，信息性尝试不得落单: %+v", submits)
 	}
-	if alts, _ := version.Detail["alternatives"].([]any); len(alts) != 1 {
-		t.Fatalf("版本声明冻结解释应恰 1 条: %+v", version.Detail["alternatives"])
-	}
-
-	// ---- 裁决链:轮末机器评估逐轮落账,决策语义正确 ----
-	verdicts := testclaimRecords(t, store, task, rings.TestClaimRecVerdict)
-	var backupVerdicts []rings.TestClaimRecord
-	for _, v := range verdicts {
-		if v.ClaimID == backup.ID {
-			backupVerdicts = append(backupVerdicts, v)
+	for _, sub := range submits {
+		if sub.Summary == "" || !rings.IsValidSubmitSeverity(sub.Severity) ||
+			len(sub.EvidenceRefs) == 0 || sub.ProvingMarker == "" || sub.CountercheckNote == "" {
+			t.Fatalf("交卷单六字段必须齐全: %+v", sub)
 		}
-	}
-	if len(backupVerdicts) != 2 {
-		t.Fatalf("重开前备份声明应恰 2 条裁决(R1 advance + R2 confirm): %+v", backupVerdicts)
-	}
-	if backupVerdicts[0].Decision != rings.VerdictAdvanceRound || backupVerdicts[0].Satisfied {
-		t.Fatalf("R1 裁决应为待下轮反证: %+v", backupVerdicts[0])
-	}
-	if !strings.Contains(backupVerdicts[0].PendingReason, "疑点没排除") ||
-		!strings.Contains(backupVerdicts[0].PendingReason, "缓存污染") {
-		t.Fatalf("advance 裁决理由应言明未排除的疑点内容: %q", backupVerdicts[0].PendingReason)
-	}
-	if backupVerdicts[1].Decision != rings.VerdictConfirm || !backupVerdicts[1].Satisfied {
-		t.Fatalf("R2 裁决应为确认: %+v", backupVerdicts[1])
-	}
-	for _, c := range backupVerdicts[1].Conditions {
-		if !c.Satisfied {
-			t.Fatalf("Confirmed 裁决条件须逐条满足: %+v", c)
+		if sub.StepID == "" || sub.UnitID == "" {
+			t.Fatalf("交卷单必须锚定交卷步骤与单位: %+v", sub)
 		}
 	}
 
-	// LLM 陈述拒收:版本声明的反证 Note 自称"影响面证据充分,建议直接
-	// 确认",结构化结论却 impact_supported=false → 仲裁者判待确认,
-	// 理由言明影响面(文本不进求值,契约④)。
-	var versionVerdict *rings.TestClaimRecord
-	for i := range verdicts {
-		if verdicts[i].ClaimID == version.ID {
-			versionVerdict = &verdicts[i]
+	// ---- 零反证步骤产生(P5-01⑤):同任务无 kind=falsify/verify 步骤,
+	// 旧 falsify_result 写回零条 ----
+	steps, _ := store.NodesByType(ctx, task, rings.NodeStep, "")
+	for _, st := range steps {
+		if k, _ := st.Detail["kind"].(string); k == "falsify" || k == "verify" {
+			t.Fatalf("P5-01⑤:任务不得产生反证/验证步骤: %+v", st)
 		}
 	}
-	if versionVerdict == nil || versionVerdict.Satisfied ||
-		!strings.Contains(versionVerdict.PendingReason, "证据不足以支撑申报的影响") {
-		t.Fatalf("版本声明应判待确认且理由言明影响面(LLM 陈述被拒收): %+v", versionVerdict)
-	}
-	falsifies := testclaimRecords(t, store, task, rings.TestClaimRecFalsify)
-	var versionNote string
-	for _, f := range falsifies {
-		if f.ClaimID == version.ID {
-			versionNote = f.Note
-		}
-	}
-	if !strings.Contains(versionNote, "建议直接确认") {
-		t.Fatalf("版本反证 Note 应携带 LLM 自评文本(拒收演示的对照组): %q", versionNote)
+	if got := len(testclaimRecords(t, store, task, rings.TestClaimRecFalsify)); got != 0 {
+		t.Fatalf("P5-01:新账本零反证写回: %d", got)
 	}
 
-	// ---- 两维声明与定级:级别只跟影响面证据走 ----
-	// 发现者提交侧无级别字段(工具 schema 即无);确认后的收割定稿
-	// Severity 必须等于末轮反证影响面定级 high。
-	repros := testclaimRecords(t, store, task, rings.TestClaimRecRepro)
-	var backupRepro *rings.TestClaimRecord
-	for i := range repros {
-		if repros[i].ClaimID == backup.ID {
-			backupRepro = &repros[i]
-		}
-	}
-	if backupRepro == nil || backupRepro.Severity != "high" {
-		t.Fatalf("备份声明收割定稿应携带 high 定级(来自末轮影响面证据): %+v", backupRepro)
-	}
-	if len(backupRepro.Steps) == 0 {
-		t.Fatalf("收割定稿必须携带复现步骤")
-	}
-	for _, st := range backupRepro.Steps {
-		if st.Op == "" || st.Method != "GET" || !strings.Contains(st.URL, "/old-backup/") ||
-			st.Status != 200 || st.BlobRef == "" || st.UnitID == "" {
-			t.Fatalf("复现步骤须含操作方法+HTTP 交换摘要+blob 引用: %+v", st)
-		}
-		// blob 可回放:Burp 可验证数据包原文(镜留痕)。
-		doc, err := ex.Blobs.Read(st.BlobRef)
-		if err != nil {
-			t.Fatalf("复现步骤 blob 不可回放: %v", err)
-		}
-		var exch mirror.Exchange
-		if err := json.Unmarshal(doc, &exch); err != nil || exch.Request == nil ||
-			!strings.Contains(exch.Request.URL, "/old-backup/") {
-			t.Fatalf("复现步骤 blob 不是该声明的镜交换原文: %v %+v", err, exch.Request)
-		}
-	}
-	// 复现步骤 = 当前战役(第 1+2 轮)反证单位的真实重放。
-	if backupRepro.Steps[0].Round < 1 {
-		t.Fatalf("复现步骤应携带轮次: %+v", backupRepro.Steps[0])
-	}
-
-	// ---- R12:每一轮验证者 ≠ 发现者 ----
-	discoverer, _ := backup.Detail["unit_id"].(string)
-	if discoverer == "" {
-		t.Fatalf("备份声明缺发现单位记录")
-	}
-	backupRounds := 0
-	for _, f := range falsifies {
-		if f.ClaimID != backup.ID {
+	// ---- 单会话连打:同一单位同一会话完成探索与交卷(transcript 连续) ----
+	starterUnits := map[string]bool{}
+	evs, _ := store.Events(ctx, task, 0, 0)
+	for _, ev := range evs {
+		if ev.Kind != rings.EventSwarmRecord {
 			continue
 		}
-		backupRounds++
-		if f.UnitID == "" || f.UnitID == discoverer {
-			t.Fatalf("R12 违例:声明 %s 第 %d 轮验证者 %s 与发现者 %s", backup.ID, f.Round, f.UnitID, discoverer)
+		var rec rings.SwarmRecord
+		if json.Unmarshal(ev.Payload, &rec) != nil || rec.Type != rings.SwarmRecSessionStarted {
+			continue
 		}
+		starterUnits[rec.StepID] = true
 	}
-	if backupRounds != 2 {
-		t.Fatalf("重开前备份声明应恰 2 轮反证写回: %d", backupRounds)
-	}
-
-	// ---- 真实性:靶站被多轮真实命中(发现 + 两轮反证),非账本自说自话 ----
-	if got := target.Hits("main", "/old-backup/"); got < 3 {
-		t.Fatalf("/old-backup/ 应被发现与两轮反证真实命中,实际 %d", got)
-	}
-	if got := target.Hits("main", "/api/version"); got < 2 {
-		t.Fatalf("/api/version 应被发现与反证两轮真实命中,实际 %d", got)
+	if len(starterUnits) != 1 { // 拆解只派一条审计意图,零验证/反证意图
+		t.Fatalf("连打形态应恰 1 条工作线步骤有单位起飞: %v", starterUnits)
 	}
 
-	// ---- 阶段二:重开(结论可反驳)→ 重开轮再证 ----
+	// ---- 阶段二:reopen 保留(记录+回候选+派重验步骤,P5-02⑦) ----
+	stepsBefore := 0
+	steps, _ = store.NodesByType(ctx, task, rings.NodeStep, "")
+	stepsBefore = len(steps)
+	// reopen 需终态入口(交卷即查即时判定;测试直接置一终态再重开
+	// ——reopen 机制本身的回归)。
+	if _, err := store.Append(ctx, task, rings.Event{
+		Kind: rings.EventNodeStateChanged, Actor: "test",
+		Payload: rings.NodeStateChanged{NodeID: backup.ID, Status: rings.TestClaimConfirmed},
+	}); err != nil {
+		t.Fatalf("置终态失败: %v", err)
+	}
 	if err := ReopenClaim(ctx, store, task, backup.ID, rings.ReopenManual,
 		"靶站疑似调整缓存策略,备份目录结论须复核", "creator"); err != nil {
 		t.Fatalf("重开备份声明失败: %v", err)
 	}
-	tk.Wake() // 重开是外部触发:唤醒主宰跑重开轮
-	waitFor(t, 60*time.Second, "重开轮走完再确认", func() bool {
-		b := claimByTitleSoft(store, task, "备份目录")
-		return b != nil && b.Status == rings.TestClaimConfirmed
-	})
-
-	// 完整轨迹:候选 → testing → awaiting → testing → confirmed →
-	// testing(重开轮)→ confirmed(新裁决取代旧裁决)。
-	if got := claimStates(t, store, task, backup.ID); len(got) != 7 || got[5] != rings.TestClaimTesting ||
-		got[6] != rings.TestClaimConfirmed {
-		t.Fatalf("重开后完整状态机轨迹不符: %v", got)
+	if b := claimByTitle(t, store, task, "备份目录"); b.Status != rings.TestClaimCandidate {
+		t.Fatalf("重开应回候选(等新交卷重验): %s", b.Status)
 	}
-	// 重开记录:触发词 + 理由落账,历史不删(旧裁决仍在)。
 	reopens := testclaimRecords(t, store, task, rings.TestClaimRecReopen)
 	if len(reopens) != 1 || reopens[0].Trigger != rings.ReopenManual ||
 		!strings.Contains(reopens[0].Reason, "复核") {
 		t.Fatalf("重开记录不符: %+v", reopens)
 	}
-	verdicts2 := testclaimRecords(t, store, task, rings.TestClaimRecVerdict)
-	backupVerdicts2 := 0
-	for _, v := range verdicts2 {
-		if v.ClaimID == backup.ID {
-			backupVerdicts2++
+	// P5-02⑦:重开同批派重验步骤(拉起原会话带新反证重跑)。
+	steps, _ = store.NodesByType(ctx, task, rings.NodeStep, "")
+	if len(steps) != stepsBefore+1 {
+		t.Fatalf("P5-02⑦:重开应派 1 条重验步骤: 前 %d 后 %d", stepsBefore, len(steps))
+	}
+	retakeSteps := 0
+	for _, s := range steps {
+		if k, _ := s.Detail["kind"].(string); k == "retake" {
+			if cid, _ := s.Detail["claim_id"].(string); cid == backup.ID {
+				if rv, _ := s.Detail["reverify"].(bool); !rv {
+					t.Fatalf("重开派的是重验步骤(reverify): %+v", s.Detail)
+				}
+				retakeSteps++
+			}
 		}
 	}
-	if backupVerdicts2 != 3 {
-		t.Fatalf("重开后再确认应共 3 条裁决(advance/confirm/confirm): %d", backupVerdicts2)
+	if retakeSteps != 1 {
+		t.Fatalf("重开应恰派 1 条 reverify 步骤: %d", retakeSteps)
 	}
-	// 新收割定稿:重开战役(仅第 3 轮)的复现步骤 + 同源定级。
-	repros2 := testclaimRecords(t, store, task, rings.TestClaimRecRepro)
-	var latestRepro *rings.TestClaimRecord
-	for i := range repros2 {
-		if repros2[i].ClaimID == backup.ID {
-			latestRepro = &repros2[i]
-		}
+
+	// ---- 真实性:靶站被真实命中(证明交换非账本自说自话) ----
+	if got := target.Hits("main", "/old-backup/"); got < 1 {
+		t.Fatalf("/old-backup/ 应被真实命中,实际 %d", got)
 	}
-	if latestRepro == nil || latestRepro.Severity != "high" || len(latestRepro.Steps) == 0 {
-		t.Fatalf("重开后再确认应有新收割定稿: %+v", latestRepro)
-	}
-	for _, st := range latestRepro.Steps {
-		if st.Round != 3 { // 战役边界:重开后只收重开轮交换
-			t.Fatalf("重开后定稿只应收重开战役交换: %+v", st)
-		}
-	}
-	// 旧定稿记录仍在事件流(取代语义:历史不删,R1)。
-	if len(repros2) != 2 {
-		t.Fatalf("新旧两份定稿应并存于账本: %d", len(repros2))
+	if got := target.Hits("main", "/api/version"); got < 1 {
+		t.Fatalf("/api/version 应被真实命中,实际 %d", got)
 	}
 
 	// ---- 静默:终态后主宰收尾回静默,拆解计数稳定不再增长 ----
@@ -488,7 +312,7 @@ func TestClaimLifecycleE2E(t *testing.T) {
 		}
 		return stable >= 20 // ≈300ms 无新拆解
 	})
-	if err := loop.LastErr(); err != nil {
+	if err := loopErr(loop); err != nil {
 		t.Fatalf("干净运行不应残留错误: %v", err)
 	}
 }
@@ -507,124 +331,17 @@ func claimByTitleSoft(store *rings.Store, task, substr string) *rings.NodeFull {
 	return nil
 }
 
-// TestHarvestClaimsIntegrity 收割侧完整性门槛:无冻结标准/无发现单位的
-// 声明不进反证(留原因);完备声明派第 1 轮反证(绑定轮次与冻结解释,
-// 声明迁移 testing);待下轮声明派下一轮(轮次续号、只带存活解释);
-// 反证 Step 继承发现步骤的意图分级。
-func TestHarvestClaimsIntegrity(t *testing.T) {
-	store := openStore(t)
-	ctx := context.Background()
-	const task = "claims-integrity"
+// (TestHarvestClaimsNoDispatch 已随 HarvestClaims 派发链整段删除而退役,
+// P5-03①——收割侧无声明派发工作,零派发成为结构事实,无单测对象。)
 
-	// 铺垫:资产 + 发现步骤(L2 主动测试)+ 完备声明(两条冻结解释)、
-	// 无标准声明、待下轮声明(带一轮历史:alt1 已排除)。
-	altList := []any{
-		map[string]any{"id": "alt1", "label": "缓存污染"},
-		map[string]any{"id": "alt2", "label": "归属错误"},
-	}
-	if _, err := store.Append(ctx, task,
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
-			NodeID: "g1", NodeType: rings.NodeGoal, Title: "目标", Status: "active"}},
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "creator", Payload: rings.NodeAdded{
-			NodeID: "web1", NodeType: rings.NodeAsset, Title: "http://mock", Status: "active", AssetClass: rings.AssetService}},
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
-			NodeID: "s1", NodeType: rings.NodeStep, Title: "主动验证", Status: "done",
-			Detail: map[string]any{"goal_id": "g1", "action_level": "主动测试"}}},
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u1", Payload: rings.NodeAdded{
-			NodeID: "tc-ok", NodeType: rings.NodeTestClaim, Title: "完备声明", Status: rings.TestClaimCandidate,
-			Detail: map[string]any{"unit_id": "u1", "step_id": "s1", "impact": "影响",
-				"standard": arbiter.DefaultClaimStandard(), "alternatives": altList}}},
-		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
-			EdgeType: rings.EdgeAbout, FromNode: "tc-ok", ToNode: "web1"}},
-		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
-			EdgeType: rings.EdgeDerivedFrom, FromNode: "tc-ok", ToNode: "s1"}},
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u1", Payload: rings.NodeAdded{
-			NodeID: "tc-nostd", NodeType: rings.NodeTestClaim, Title: "无标准声明", Status: rings.TestClaimCandidate,
-			Detail: map[string]any{"unit_id": "u1", "step_id": "s1"}}},
-		// 待下轮声明:第 1 轮已排除 alt1,alt2 存活。
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u1", Payload: rings.NodeAdded{
-			NodeID: "tc-next", NodeType: rings.NodeTestClaim, Title: "待下轮声明", Status: rings.TestClaimAwaitingRound,
-			Detail: map[string]any{"unit_id": "u1", "step_id": "s1", "impact": "影响",
-				"standard": arbiter.DefaultClaimStandard(), "alternatives": altList}}},
-		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
-			EdgeType: rings.EdgeAbout, FromNode: "tc-next", ToNode: "web1"}},
-		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
-			EdgeType: rings.EdgeDerivedFrom, FromNode: "tc-next", ToNode: "s1"}},
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
-			NodeID: "s2", NodeType: rings.NodeStep, Title: "反证(第 1 轮)", Status: "done",
-			Detail: map[string]any{"kind": "falsify", "testclaim_id": "tc-next", "round": 1}}},
-		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "swarm:u2", Payload: rings.TestClaimRecord{
-			ClaimID: "tc-next", StepID: "s2", UnitID: "u2", Type: rings.TestClaimRecFalsify, Round: 1,
-			Alternatives: []rings.AltResult{{ID: "alt1", Refuted: true}}, EvidenceHead: "第一轮"}},
-	); err != nil {
-		t.Fatalf("铺垫失败: %v", err)
-	}
-
-	res, err := HarvestClaims(ctx, store, task)
+// nodeCountOf 任务内指定类型节点计数。
+func nodeCountOf(t *testing.T, store *rings.Store, task string, nt rings.NodeType) int {
+	t.Helper()
+	ns, err := store.NodesByType(context.Background(), task, nt, "")
 	if err != nil {
-		t.Fatalf("收割声明失败: %v", err)
+		t.Fatalf("查节点失败: %v", err)
 	}
-	if len(res.Dispatched) != 2 {
-		t.Fatalf("应恰派发完备候选 + 待下轮声明: %+v", res.Dispatched)
-	}
-	if len(res.Skipped) != 1 || res.Skipped[0].FactID != "tc-nostd" {
-		t.Fatalf("无标准声明应被跳过留原因: %+v", res.Skipped)
-	}
-
-	// tc-ok:s3 反证 Step(铺垫已占 s1/s2),继承 L2 分级,round=1,冻结解释全量。
-	step, err := store.Node(ctx, task, "s3")
-	if err != nil {
-		t.Fatalf("查反证步骤失败: %v", err)
-	}
-	if step.Detail["testclaim_id"] != "tc-ok" || step.Detail["kind"] != "falsify" {
-		t.Fatalf("反证步骤绑定不符: %+v", step.Detail)
-	}
-	if step.Detail["round"] != float64(1) {
-		t.Fatalf("首轮反证步骤应带 round=1: %+v", step.Detail)
-	}
-	if alts, _ := step.Detail["alternatives"].([]any); len(alts) != 2 {
-		t.Fatalf("首轮反证应携带全量冻结解释: %+v", step.Detail["alternatives"])
-	}
-	if step.Detail["action_level"] != "主动测试" {
-		t.Fatalf("反证步骤应继承发现步骤意图分级: %+v", step.Detail)
-	}
-	if got := claimStates(t, store, task, "tc-ok"); len(got) != 2 || got[1] != rings.TestClaimTesting {
-		t.Fatalf("完备声明应迁移 testing: %v", got)
-	}
-	// covers 继承资产锚点。
-	covers, _ := store.Edges(ctx, task, rings.EdgeCovers)
-	found := false
-	for _, e := range covers {
-		if e.From == "s3" && e.To == "web1" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("反证步骤应 covers 声明锚定资产: %+v", covers)
-	}
-
-	// tc-next:s4 第 2 轮,只带存活解释(alt2),轮次续号。
-	step3, err := store.Node(ctx, task, "s4")
-	if err != nil {
-		t.Fatalf("查第 2 轮反证步骤失败: %v", err)
-	}
-	if step3.Detail["testclaim_id"] != "tc-next" || step3.Detail["round"] != float64(2) {
-		t.Fatalf("第 2 轮反证步骤绑定/轮次不符: %+v", step3.Detail)
-	}
-	if alts, _ := step3.Detail["alternatives"].([]any); len(alts) != 1 {
-		t.Fatalf("第 2 轮应只带存活解释: %+v", step3.Detail["alternatives"])
-	} else if m, _ := alts[0].(map[string]any); m["id"] != "alt2" {
-		t.Fatalf("存活解释应为 alt2: %+v", alts[0])
-	}
-	if got := claimStates(t, store, task, "tc-next"); got[len(got)-1] != rings.TestClaimTesting {
-		t.Fatalf("待下轮声明应回 testing: %v", got)
-	}
-
-	// 幂等:已 testing 的声明不再派发。
-	res2, err := HarvestClaims(ctx, store, task)
-	if err != nil || len(res2.Dispatched) != 0 {
-		t.Fatalf("二次收割应零派发: %v %+v", err, res2.Dispatched)
-	}
+	return len(ns)
 }
 
 // TestReopenClaimGuards 重开入口守卫:非终态/幽灵声明/空理由拒绝;
@@ -656,7 +373,7 @@ func TestReopenClaimGuards(t *testing.T) {
 		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
 			EdgeType: rings.EdgeDerivedFrom, FromNode: "tc-c", ToNode: "s1"}},
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u1", Payload: rings.NodeAdded{
-			NodeID: "tc-t", NodeType: rings.NodeTestClaim, Title: "反证中声明", Status: rings.TestClaimTesting,
+			NodeID: "tc-t", NodeType: rings.NodeTestClaim, Title: "反证中声明", Status: "testing",
 			Detail: map[string]any{"unit_id": "u1", "step_id": "s1", "impact": "影响",
 				"standard": arbiter.DefaultClaimStandard(), "alternatives": altList}}},
 		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
@@ -679,23 +396,16 @@ func TestReopenClaimGuards(t *testing.T) {
 		t.Fatalf("空理由不可重开")
 	}
 
-	// 合法重开:轮次续号(历史已有 round=1 → 新轮 round=2),解释全量
-	// 复活,reopen 记录与状态迁移落账。
+	// 合法重开(P5-02⑦:reopen 记录 + 回候选 + 派重验步骤拉起原会话)。
+	stepsBefore := nodeCountOf(t, store, task, rings.NodeStep)
 	if err := ReopenClaim(ctx, store, task, "tc-c", rings.ReopenExpired, "结论时效过期", "creator"); err != nil {
 		t.Fatalf("合法重开失败: %v", err)
 	}
-	if got := claimStates(t, store, task, "tc-c"); len(got) != 2 || got[1] != rings.TestClaimTesting {
-		t.Fatalf("重开应迁移 testing: %v", got)
+	if got := claimStates(t, store, task, "tc-c"); len(got) != 2 || got[1] != rings.TestClaimCandidate {
+		t.Fatalf("重开应回候选(等新交卷重验): %v", got)
 	}
-	sf2, err := store.Node(ctx, task, "s2")
-	if err != nil {
-		t.Fatalf("查重开反证步骤失败: %v", err)
-	}
-	if sf2.Detail["testclaim_id"] != "tc-c" || sf2.Detail["round"] != float64(2) {
-		t.Fatalf("重开轮步骤应续号 round=2: %+v", sf2.Detail)
-	}
-	if alts, _ := sf2.Detail["alternatives"].([]any); len(alts) != 1 {
-		t.Fatalf("重开轮应携带全量冻结解释: %+v", sf2.Detail["alternatives"])
+	if got := nodeCountOf(t, store, task, rings.NodeStep); got != stepsBefore+1 {
+		t.Fatalf("重开应恰派 1 条重验步骤: 前 %d 后 %d", stepsBefore, got)
 	}
 	reopens := testclaimRecords(t, store, task, rings.TestClaimRecReopen)
 	if len(reopens) != 1 || reopens[0].Trigger != rings.ReopenExpired || reopens[0].Reason != "结论时效过期" {

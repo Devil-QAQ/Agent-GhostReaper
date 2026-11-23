@@ -27,6 +27,7 @@ import (
 	"ghostreaper/internal/mirror"
 	"ghostreaper/internal/rings"
 	"ghostreaper/internal/runlog"
+	"ghostreaper/internal/websearch"
 )
 
 func timeDuration(seconds int) time.Duration {
@@ -43,10 +44,14 @@ type Executor struct {
 	Store    *rings.Store
 	Provider llm.Provider
 	Blobs    *BlobStore
+	search   websearch.TaskSearch
 	Budget   Budget
 	// Model 模型名(token 独立表按模型记账,第四章 §6)。装配层从环境
 	// 变量注入;缺省空串如实记空(用量仍按任务/agent 可查)。
 	Model string
+	// ReviewAction is the single semantic policy decision for a concrete action.
+	// nil uses the task Provider, with normal request usage accounting.
+	ReviewAction ActionReviewFunc
 	// RootDir 任务工作目录根(第七章 §5):每步子目录 <RootDir>/<taskID>/i<stepID>/,
 	// 转录与 blob 亦按任务切分。
 	RootDir string
@@ -67,6 +72,11 @@ type Executor struct {
 	// (block_wait)。测试缩小时长只影响时序不影响语义。
 	ModelRetryLadder []time.Duration
 	BlockedDeepAfter time.Duration
+	// GraceYield 挂等宽限(P5-05,五类挂等源统一):宽限内解除=原位
+	// 继续,超时=冻结收场让位(停等态+名额释放)。零值取定值 5 分钟
+	// (DefaultGraceYield,条目①定死不做配置项);测试旋钮缩小时长
+	// 只影响时序不影响语义。
+	GraceYield time.Duration
 	// Helm 舵杆(P2-05,第八章第 8 节):steer_work / kill_work 的权威
 	// 登记表,面板与主宰经它下达指令;生效点在单位工具调用边界
 	//(见 guard.go)。NewExecutor 自建默认实例;装配层把同一实例交给
@@ -86,12 +96,15 @@ type Executor struct {
 	// 实例;nil = 无断点语义(单测)。
 	Ckpt *ckpt.Gate
 
-	// RoundHumanGen 反证轮人话生成钩子(P4-64 ①,问题清单 #82):每轮
-	// falsify 结构化结论入账时同链生成该轮"疑点→怎么验的→结论"三段
-	// 人话,与机器记录同批落账(生成失败由钩子侧回退拼句,不阻塞轮次
-	// 入账)。装配层按任务路由到在跑主宰循环;nil 或返回 nil = 本轮
-	// 不落人话(无在跑循环等,读侧退机器层)。
-	RoundHumanGen func(ctx context.Context, taskID, claimID string, rec *rings.TestClaimRecord) *rings.ClaimRoundHuman
+	// (旧 RoundHumanGen 反证轮人话生成钩子已随三段流水线退役删除,
+	// P5-03③;RetestNotePolisher 复测备注钩子保留。)
+	// claimChecks 任务提交处理表(taskID → 当前主宰循环):事实合并通知
+	// 已有结果泵，交卷沿既有同步机器核验入口。
+	// 交卷受控入口落账后同步调用——机器三查判定与确认/补考/证据不足
+	// 落账,毫秒-秒级、不经收割轮。主宰循环启动时注册、退出时注销;
+	// 无注册(纯 swarm 单测/循环未跑)时交卷停候选,收割兜底轮重查。
+	claimCheckMu sync.Mutex
+	claimChecks  map[string]SubmissionHandlers
 	// RetestNotePolisher 复测结论备注校对钩子(P4-64 ⑦):复测结论入账
 	// 时过既有校对通道,校对稿与 retest 记录同批落账(机器 Note 原文
 	// 一字不动)。nil 或返回 nil = 不落校对稿,读侧退机器记录原文。
@@ -99,7 +112,6 @@ type Executor struct {
 
 	// triageCalls P4-67 研判分诊的调用计数(测试断言用:同 host 第二次
 	// 访问零分诊调用;零锁——计数只作观测)。
-	triageCalls int64
 
 	mu      sync.Mutex
 	unitSeq int
@@ -108,11 +120,7 @@ type Executor struct {
 	// 任务级收尾的宽限超时后,主宰对仍挂着的单位逐个硬停(cancel 单位
 	// ctx → 引擎真中断,不进收尾)。单位落地即注销。
 	unitCancels map[string]context.CancelFunc
-	// rulingUnits 在飞单位的调档登记(P4-71 ②:审批记录反向操作
-	// "撤销允许/转为允许"操作在跑单位的攻击档——档在 unitEnv 内存态,
-	// 单位落地即注销,旧攻击记录反向如实答复单位已结束)。unitID → env。
-	rulingMu    sync.Mutex
-	rulingUnits map[string]*unitEnv
+
 	// stepUnits 在飞单位的步骤索引(task+"\x00"+step → unitID,P2-05
 	// kill_work 止损定位用;一 Step 一单位)。单位落地即注销。
 	stepUnits map[string]string
@@ -159,8 +167,7 @@ func NewExecutor(store *rings.Store, provider llm.Provider, rootDir string, budg
 	e := &Executor{Store: store, Provider: provider, Budget: budget, RootDir: rootDir,
 		unitCancels: map[string]context.CancelFunc{}, stepUnits: map[string]string{},
 		unitLatches: map[string]chan struct{}{}, bgRuns: map[string][]*bgRun{},
-		rulingUnits: map[string]*unitEnv{},
-		clocks:      map[string]*runClock{}}
+		clocks: map[string]*runClock{}, claimChecks: map[string]SubmissionHandlers{}}
 	if e.Blobs == nil {
 		e.Blobs = NewBlobStore(filepath.Join(rootDir, "blobs"))
 	}
@@ -179,8 +186,16 @@ func NewExecutor(store *rings.Store, provider llm.Provider, rootDir string, budg
 // 单位并 cancel 其单位 ctx——引擎真中断(不进收尾),步骤落 aborted。
 // 命中返回单位 ID;未命中(单位已落地/未起飞)返回 ok=false。
 func (e *Executor) KillUnitByStep(taskID, stepID string) (string, bool) {
+	return e.killUnitByStep(taskID, stepID, "")
+}
+
+func (e *Executor) killUnitByStep(taskID, stepID, expectedUnit string) (string, bool) {
 	e.mu.Lock()
 	unitID, ok := e.stepUnits[steerKey(taskID, stepID)]
+	if expectedUnit != "" && unitID != expectedUnit {
+		e.mu.Unlock()
+		return "", false
+	}
 	var cancel context.CancelFunc
 	if ok {
 		cancel = e.unitCancels[unitID]
@@ -197,38 +212,6 @@ func (e *Executor) KillUnitByStep(taskID, stepID string) (string, bool) {
 type RunningStep struct {
 	StepID string
 	UnitID string
-}
-
-// UnitActive 单位是否在飞(P4-71 ②:攻击卡反向键的可用性——档在
-// unitEnv 内存态,单位终态即失效,旧攻击记录反向键如实置灰)。
-func (e *Executor) UnitActive(taskID, unitID string) bool {
-	e.rulingMu.Lock()
-	env, ok := e.rulingUnits[unitID]
-	e.rulingMu.Unlock()
-	return ok && env.TaskID == taskID
-}
-
-// SetUnitAttackRuling 反向调档(P4-71 ②:审批记录反向操作"撤销允许/
-// 转为允许"只调会话档不动单位):allowed=nil=撤销档(该单位后续同类
-// 攻击重新出卡)、true=授档免卡(该单位后续同类攻击免卡)。host 归一
-// 到裸形态(与 setAttackRuling 的档键一致)。单位不在册=已终态,返回
-// ErrUnitFinished 由调用方如实答复(档已随单位销毁)。
-func (e *Executor) SetUnitAttackRuling(taskID, unitID, host string, allowed *bool) error {
-	if a, ok := rings.ScopeAnchorOf(strings.ToLower(strings.TrimSpace(host))); ok {
-		host = a.Host // 端口无关:攻击档与信息源清单同为 host 级
-	}
-	e.rulingMu.Lock()
-	env, ok := e.rulingUnits[unitID]
-	e.rulingMu.Unlock()
-	if !ok || env.TaskID != taskID {
-		return ErrUnitFinished
-	}
-	if allowed == nil {
-		env.unsetAttackRuling(host)
-		return nil
-	}
-	env.setAttackRuling(host, *allowed)
-	return nil
 }
 
 // ErrUnitFinished 反向调档的目标单位已终态(档随单位销毁,如实答复)。
@@ -303,12 +286,21 @@ type RunResult struct {
 	// Checkpointed 断点存档收场(P3-07):当前工具调用完成后单位落地,
 	// 步骤回可领取、会话保留可续(session_finished 带 Checkpointed 标记)。
 	Checkpointed bool
-	// ScopeWait 范围等待批准收场(P4-51 ①):命令命中任务范围外,拦下
-	// 出待决卡后单位冻结收场让位名额——步骤落 scope_wait 态(不可领
-	// 取,等"加入资产/禁止测试"裁决)、会话冻结保留(session_finished
-	// 带 ScopeWait 标记)、并发名额释放、计时停走;批准后步骤回可领取
-	//(插队队首),重领的单位原会话 Resume 续跑。
+	// ScopeWait 范围等待批准收场(P4-51 ①→P5-05 宽限让位):命令命中
+	// 任务范围外,拦下出待决卡后单位原位宽限等待,超时冻结收场让位名
+	// 额——步骤落 scope_wait 态(不可领取,等"加入资产/禁止测试"裁决)
+	// 、会话冻结保留(session_finished 带 ScopeWait 标记)、并发名额释
+	// 放、计时停走;批准后步骤回可领取(插队队首),重领的单位原会话
+	// Resume 续跑。
 	ScopeWait bool
+	// YieldWait 挂等让位收场(P5-05):弹门卡/攻击卡/人工暂停/模型故障
+	// 挂等超宽限冻结收场——步骤落对应停等态(gate_wait/pause_wait/
+	// model_wait)、会话保留(Yield 标记携带续跑上下文)、名额释放、
+	// 计费停走;解除唤醒回 dispatched+队首档后重领续跑。
+	YieldWait bool
+	// Yield 让位上下文(仅 YieldWait 时有值;随 session_finished 落账,
+	// 重领续跑的指令与放行配额来源)。
+	Yield *rings.YieldNote
 
 	// 时间账(P2-06b 审批等待 / P2-06e 模型故障 / P2-08 挂起等待,计时
 	// 暂停对账):billable 只含各有效执行段时长,gateWait 为弹门等待合计,
@@ -419,6 +411,12 @@ func (e *Executor) beginUnit(ctx context.Context, pack *TaskPack) (*unitEnv, Bud
 		return nil, Budget{}, &RunResult{UnitID: unitID, StepStatus: step.Status, Stale: true}, ErrStaleGraph
 	}
 
+	e.mu.Lock()
+	active := e.stepUnits[steerKey(pack.TaskID, pack.StepID)]
+	e.mu.Unlock()
+	if active != "" {
+		return nil, Budget{}, &RunResult{UnitID: active, StepStatus: "dispatched", Stale: true}, ErrStaleGraph
+	}
 	env := e.newUnit(pack)
 	budget := pack.Budget.withDefaults()
 
@@ -426,9 +424,20 @@ func (e *Executor) beginUnit(ctx context.Context, pack *TaskPack) (*unitEnv, Bud
 	// 该步骤存在可续会话(上一进程崩溃残留 / 受阻保留 / 断点存档收场)
 	// ——本单位接过原会话原地续跑,账本归因钉在真实会话文件上
 	//(TranscriptID 沿用原值,UnitID 是新单位;与冬眠唤醒同为"原地续",
-	// 省上下文重建成本)。
+	// 省上下文重建成本)。P5-02:补做证据/重验步骤接管原交卷会话续跑
+	//(原会话通常已正常收场——拉起即续,失败原因/重开理由作为续跑
+	// 首条指令注入)。
 	resumeNote := ""
-	if tid, kind := e.pendingSession(ctx, pack.TaskID, pack.StepID); tid != "" {
+	if pack.Retake != nil {
+		if tid := e.retakeTranscript(ctx, pack.TaskID, pack.Retake.OriginStep); tid != "" {
+			env.TranscriptID = tid
+			env.resumed = true
+			env.resumeKind = resumeRetake
+			resumeNote = "补做续跑:原会话续(" + tid + ")"
+		}
+		// 原会话缺失(转录被清/直连任务无转录)按全新会话起飞,首条
+		// 消息同样带补做指令(drive 的 retake 分支)。
+	} else if tid, kind, yn := e.pendingSession(ctx, pack.TaskID, pack.StepID); tid != "" {
 		env.TranscriptID = tid
 		env.resumed = true
 		env.resumeKind = kind
@@ -439,30 +448,30 @@ func (e *Executor) beginUnit(ctx context.Context, pack *TaskPack) (*unitEnv, Bud
 			resumeNote = "断点续接:原会话续(" + tid + ")"
 		case resumeScope:
 			resumeNote = "范围批准续跑:原会话续(" + tid + ")"
+		case resumeYield:
+			resumeNote = "让位上位:原会话续(" + tid + ")"
+			env.resumeYield = yn
 		default:
 			resumeNote = "重启接管:原会话续(" + tid + ")"
 		}
 	}
 
-	// step → running(虫群领取即动工)
-	if _, err := e.Store.Append(ledgerCtx, pack.TaskID, rings.Event{
-		Kind: rings.EventNodeStateChanged, Actor: "swarm:" + env.UnitID,
-		Payload: rings.NodeStateChanged{NodeID: pack.StepID, Status: "running"},
-	}); err != nil {
-		runlog.Errorf("账本写入失败: 步骤 running %s/%s: %v", pack.TaskID, pack.StepID, err)
-		return nil, Budget{}, nil, fmt.Errorf("swarm: 标记步骤 running: %w", err)
+	// Claim and execution-start provenance commit together at the checked version.
+	revs, err := e.Store.AppendAtRevision(ledgerCtx, pack.TaskID, cur,
+		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "swarm:" + env.UnitID,
+			Payload: rings.NodeStateChanged{NodeID: pack.StepID, Status: "running"}},
+		rings.Event{Kind: rings.EventSwarmRecord, Actor: "swarm:" + env.UnitID,
+			Payload: rings.SwarmRecord{StepID: pack.StepID, UnitID: env.UnitID, TranscriptID: env.TranscriptID,
+				Type: rings.SwarmRecSessionStarted, GraphVersion: pack.GraphVersion, Note: resumeNote}},
+	)
+	if errors.Is(err, rings.ErrStaleRevision) {
+		return nil, Budget{}, &RunResult{UnitID: env.UnitID, StepStatus: "dispatched", Stale: true}, ErrStaleGraph
 	}
-	if _, err := e.Store.Append(ledgerCtx, pack.TaskID, rings.Event{
-		Kind: rings.EventSwarmRecord, Actor: "swarm:" + env.UnitID,
-		Payload: rings.SwarmRecord{
-			StepID: pack.StepID, UnitID: env.UnitID, TranscriptID: env.TranscriptID,
-			Type: rings.SwarmRecSessionStarted, GraphVersion: pack.GraphVersion,
-			Note: resumeNote,
-		},
-	}); err != nil {
-		runlog.Errorf("账本写入失败: 单位起飞 %s/%s: %v", pack.TaskID, env.UnitID, err)
-		return nil, Budget{}, nil, fmt.Errorf("swarm: session_started 写入: %w", err)
+	if err != nil {
+		return nil, Budget{}, nil, fmt.Errorf("swarm: 单位起飞写入: %w", err)
 	}
+	env.graphVersion = pack.GraphVersion
+	env.owner = &rings.ExecutionOwner{StepID: pack.StepID, UnitID: env.UnitID, StartedRev: revs[1]}
 	if resumeNote != "" {
 		runlog.Infof("虫群单位起飞: %s 任务 %s 步骤 %s(%s)", env.UnitID, pack.TaskID, pack.StepID, resumeNote)
 	} else {
@@ -478,7 +487,70 @@ const (
 	resumeBlocked    = "blocked"    // 模型故障受阻保留(session_finished 带 Resumable)
 	resumeCheckpoint = "checkpoint" // 断点存档收场(session_finished 带 Checkpointed)
 	resumeScope      = "scope"      // 范围等待批准收场(P4-51:session_finished 带 ScopeWait;批准后重领续跑)
+	resumeRetake     = "retake"     // 补做证据/重验拉起(P5-02:原交卷会话正常收场后接管续跑)
+	resumeYield      = "yield"      // 挂等让位收场(P5-05:session_finished 带 Yield;裁决/继续/恢复唤醒后重领续跑)
 )
+
+// retakeStepKind 补做证据/重验步骤的 kind 标记(与 overmind 派发侧
+// 同词面;Claim 据此装配 RetakeBrief)。
+const retakeStepKind = "retake"
+
+// ClaimCheckResult 交卷即查结果(钩子回传:交卷受控入口据此拼工具
+// 反馈——确认/补考反馈/证据不足终态)。
+type ClaimCheckResult struct {
+	Status string // confirmed | insufficient | retake(候选,待补考)
+	Reason string // 非确认时的失败原因(缺哪样)
+}
+
+// ClaimCheckFunc 交卷即查钩子(overmind 主宰循环实现:机器三查判定与
+// 确认/补考/证据不足落账)。
+type ClaimCheckFunc func(ctx context.Context, taskID, claimID string) (*ClaimCheckResult, error)
+
+// SubmissionHandlers keeps both submissions attached to their actual task loop.
+// FactSubmitted only signals the existing result pump, never calls the store.
+type SubmissionHandlers struct {
+	ClaimCheck    ClaimCheckFunc
+	FactSubmitted func()
+}
+
+func (e *Executor) factSubmitted(taskID string) {
+	e.claimCheckMu.Lock()
+	notify := e.claimChecks[taskID].FactSubmitted
+	e.claimCheckMu.Unlock()
+	if notify != nil {
+		notify()
+	}
+}
+
+// RegisterSubmissionHandlers 注册现有提交处理入口(主宰循环启动时调用;
+// 重复注册后者覆盖——重启收养换新循环的自然形态)。
+func (e *Executor) RegisterSubmissionHandlers(taskID string, f SubmissionHandlers) {
+	e.claimCheckMu.Lock()
+	defer e.claimCheckMu.Unlock()
+	if e.claimChecks == nil {
+		e.claimChecks = map[string]SubmissionHandlers{}
+	}
+	e.claimChecks[taskID] = f
+}
+
+// UnregisterSubmissionHandlers 注销任务的提交处理入口(循环退出时调用)。
+func (e *Executor) UnregisterSubmissionHandlers(taskID string) {
+	e.claimCheckMu.Lock()
+	defer e.claimCheckMu.Unlock()
+	delete(e.claimChecks, taskID)
+}
+
+// claimCheck 交卷即查分发:无注册(循环未跑/纯单测)返回 nil——交卷
+// 停候选,收割兜底轮重查(交卷工具按"待机器核验"回话)。
+func (e *Executor) claimCheck(ctx context.Context, taskID, claimID string) (*ClaimCheckResult, error) {
+	e.claimCheckMu.Lock()
+	f := e.claimChecks[taskID].ClaimCheck
+	e.claimCheckMu.Unlock()
+	if f == nil {
+		return nil, nil
+	}
+	return f(ctx, taskID, claimID)
+}
 
 // pendingSession 查该步骤的可续会话转录 ID 与来源(P2-06f 重启收养判定
 // + P3-05c ① 受阻重开判定 + P3-07 断点续接判定):扫事件流,步骤最近
@@ -486,15 +558,17 @@ const (
 // 精确签名(正常落地、R14 拒绝、审批拒绝、硬停的收场路径都会落
 // session_finished);最近一笔 session_finished 带 Resumable 标记则是
 // 模型故障受阻的保留会话(恢复重开优先原会话续),带 Checkpointed 标记
-// 则是断点存档收场的保留会话(重启/恢复续跑优先原会话续)。返回空串 =
+// 则是断点存档收场的保留会话(重启/恢复续跑优先原会话续),带 Yield
+// 标记则是挂等让位收场的保留会话(P5-05:裁决/继续/模型恢复唤醒后
+// 原会话 Resume 续跑,让位上下文随返回透出供续跑指令组装)。返回空串 =
 // 无可续会话,按全新会话起飞。
-func (e *Executor) pendingSession(ctx context.Context, taskID, stepID string) (tid string, kind string) {
+func (e *Executor) pendingSession(ctx context.Context, taskID, stepID string) (tid string, kind string, yn *rings.YieldNote) {
 	evs, err := e.Store.Events(ctx, taskID, 0, 0)
 	if err != nil {
-		return "", resumeNone // 读失败退全新会话(fail-safe:恢复不了就接力,不挡领取)
+		return "", resumeNone, nil // 读失败退全新会话(fail-safe:恢复不了就接力,不挡领取)
 	}
 	pending := ""
-	kind = resumeNone
+	kind, yn = resumeNone, nil
 	for _, ev := range evs {
 		if ev.Kind != rings.EventSwarmRecord {
 			continue
@@ -505,30 +579,62 @@ func (e *Executor) pendingSession(ctx context.Context, taskID, stepID string) (t
 		}
 		switch rec.Type {
 		case rings.SwarmRecSessionStarted:
-			pending, kind = rec.TranscriptID, resumeAdoption
+			pending, kind, yn = rec.TranscriptID, resumeAdoption, nil
 		case rings.SwarmRecSessionEnd:
 			switch {
 			case rec.Checkpointed:
 				// 断点存档收场:续跑资格保留,恢复领取时原会话 Resume。
-				kind = resumeCheckpoint
+				kind, yn = resumeCheckpoint, nil
 			case rec.ScopeWait:
 				// 范围等待批准收场(P4-51):步骤被"加入资产"裁决唤醒回
 				// 可领取时,重领的单位原会话 Resume 续跑(重发被拦命令)。
-				kind = resumeScope
+				kind, yn = resumeScope, nil
+			case rec.Yield != nil:
+				// 挂等让位收场(P5-05):停等态被解除唤醒回可领取时,重领
+				// 的单位原会话 Resume 续跑(指令按让位上下文与裁决现值组装)。
+				kind, yn = resumeYield, rec.Yield
 			case rec.Resumable:
 				// 受阻保留会话:续跑资格保留,恢复重开时原会话 Resume。
-				kind = resumeBlocked
+				kind, yn = resumeBlocked, nil
 			default:
-				pending, kind = "", resumeNone
+				pending, kind, yn = "", resumeNone, nil
 			}
 		}
 	}
-	return pending, kind
+	return pending, kind, yn
 }
 
 // ckptArmed 断点冻结信号当前是否武装(nil 门 = 否)。
 func (e *Executor) ckptArmed(taskID string) bool {
 	return e.Ckpt != nil && e.Ckpt.Armed(taskID)
+}
+
+// retakeTranscript 补做证据/重验步骤接管的原会话转录 ID(P5-02):取
+// 原交卷步骤最近一笔 session_started 的转录——正常收场的会话照续
+// (拉起即续,与 pendingSession 的"保留会话"标记语义不同);原步骤
+// 缺失或无会话返回空串(按全新会话起飞)。
+func (e *Executor) retakeTranscript(ctx context.Context, taskID, originStep string) string {
+	if originStep == "" {
+		return ""
+	}
+	evs, err := e.Store.Events(ctx, taskID, 0, 0)
+	if err != nil {
+		return "" // 读失败退全新会话(fail-safe,不挡领取)
+	}
+	tid := ""
+	for _, ev := range evs {
+		if ev.Kind != rings.EventSwarmRecord {
+			continue
+		}
+		var rec rings.SwarmRecord
+		if json.Unmarshal(ev.Payload, &rec) != nil || rec.StepID != originStep {
+			continue
+		}
+		if rec.Type == rings.SwarmRecSessionStarted && rec.TranscriptID != "" {
+			tid = rec.TranscriptID
+		}
+	}
+	return tid
 }
 
 // finishUnit 单位落地:驱动执行循环并按引擎终因入账终态(无论成败,
@@ -546,15 +652,10 @@ func (e *Executor) finishUnit(ctx context.Context, env *unitEnv, pack *TaskPack,
 	e.unitCancels[env.UnitID] = cancel
 	e.stepUnits[steerKey(env.TaskID, env.StepID)] = env.UnitID
 	e.mu.Unlock()
-	// P4-71 ②:在飞单位登记调档通道(反向"撤销允许/转为允许"的落点;
-	// 单位落地即注销——旧攻击记录反向时如实答复单位已结束)。
-	e.rulingMu.Lock()
-	e.rulingUnits[env.UnitID] = env
-	e.rulingMu.Unlock()
 	// 舵杆止损路由自登记(P2-05):该任务的单位起飞即把 kill_work
 	// 路由到本执行器(幂等;演示/重启换执行器时覆盖)。
 	if e.Helm != nil {
-		e.Helm.attachTask(env.TaskID, e.KillUnitByStep)
+		e.Helm.attachTask(env.TaskID, e.killUnitByStep)
 	}
 	defer func() {
 		// 后台 bash 进程整组回收(P3-05):单位落地即杀残余后台命令
@@ -569,23 +670,24 @@ func (e *Executor) finishUnit(ctx context.Context, env *unitEnv, pack *TaskPack,
 			delete(e.stepUnits, steerKey(env.TaskID, env.StepID))
 		}
 		e.mu.Unlock()
-		// 调档登记注销(P4-71 ②):档随单位销毁失效——后续反向键如实
-		// 答复单位已结束(置灰),不复活内存档。
-		e.rulingMu.Lock()
-		if e.rulingUnits[env.UnitID] == env {
-			delete(e.rulingUnits, env.UnitID)
-		}
-		e.rulingMu.Unlock()
 		// 单位落地即清暂停闩(在暂停中落地 = 暂停失效,pause_lapse 留痕)。
 		e.dropUnitLatch(env.TaskID, env.StepID)
 		cancel()
 	}()
 
 	res, err := e.drive(unitCtx, env, pack, budget)
+	cancel()
+	env.drainCallbacks(true)
+	// Only a deliberate gate yield or frozen hibernation keeps a durable ticket.
+	if env.park != nil && !res.YieldWait && !e.hibernating(pack.TaskID) && e.Gate != nil {
+		if gerr := e.Gate.Expire(pack.TaskID, env.park.Req.ID, "所属执行已结束"); gerr != nil && !errors.Is(gerr, ErrGateRequestNotFound) && err == nil {
+			err = gerr
+		}
+	}
 	// 落地收尾:同步骤未送达的舵杆指令失去生效点,落 stale 回执
 	//(P2-08 回执状态机闭环;正常路径无未送达指令,零留痕)。
 	if e.Helm != nil {
-		e.Helm.expirePending(pack.TaskID, pack.StepID, "单位已干完,指令失去生效点(已过时)")
+		e.Helm.expirePending(pack.TaskID, pack.StepID, env.UnitID, "单位已干完,指令失去生效点(已过时)")
 	}
 
 	// 终态入账(无论成败,审计闭环)。时间账随 session_finished note 落账:
@@ -606,31 +708,56 @@ func (e *Executor) finishUnit(ctx context.Context, env *unitEnv, pack *TaskPack,
 	if status == StepBlocked {
 		stateNote = res.BlockedClass
 	}
-	// P4-51 ①:scope_wait 态携带越界目标(机器标记"scope_wait <host>
-	// <port>",投影层合并进 detail——对账唤醒按 host:port 重判范围的
-	// 判定面)。
-	if status == rings.StepScopeWait && env.scopeHold != nil {
-		stateNote = "scope_wait " + env.scopeHold.host + " " + env.scopeHold.port
+	// P5-05 让位终态的防覆盖保护:停等态收场写入前核对步骤现值——
+	// 裁决/继续/终局清点可能在收场过渡期已把步骤唤醒(dispatched+队首
+	// 档)或收口(aborted),此时不再落停等态(不覆盖他方迁移;会话
+	// 记录照写——重领续跑按 Yield 标记回查裁决现值,两条竞态序都收敛)。
+	stateEv := rings.Event{
+		Kind: rings.EventNodeStateChanged, Actor: "swarm:" + env.UnitID,
+		Payload: rings.NodeStateChanged{NodeID: pack.StepID, Status: status, Note: stateNote},
+	}
+	if isYieldWaitStatus(status) {
+		if cur, nerr := e.Store.Node(ledgerCtx, pack.TaskID, pack.StepID); nerr == nil && cur.Status != "running" {
+			stateEv.Kind = "" // 已被唤醒/收口:停等态写入作废,只留会话记录
+		}
+	}
+	sessionEv := rings.Event{
+		Kind: rings.EventSwarmRecord, Actor: "swarm:" + env.UnitID,
+		Payload: rings.SwarmRecord{
+			StepID: pack.StepID, UnitID: env.UnitID, TranscriptID: env.TranscriptID,
+			Type: rings.SwarmRecSessionEnd, GraphVersion: pack.GraphVersion,
+			Resumable:    status == StepBlocked,
+			Checkpointed: res.Checkpointed,
+			ScopeWait:    res.ScopeWait,
+			Yield:        res.Yield,
+			Note: fmt.Sprintf("reason=%s turns=%d status=%s billable=%.1fs gate_wait=%.1fs block_wait=%.1fs pause_wait=%.1fs",
+				res.Reason, res.Turns, status, res.billable.Seconds(), res.gateWait.Seconds(), res.blockWait.Seconds(), res.pauseWait.Seconds()),
+		},
 	}
 	e.claimMu.Lock()
-	_, serr := e.Store.Append(ledgerCtx, pack.TaskID,
-		rings.Event{
-			Kind: rings.EventNodeStateChanged, Actor: "swarm:" + env.UnitID,
-			Payload: rings.NodeStateChanged{NodeID: pack.StepID, Status: status, Note: stateNote},
-		},
-		rings.Event{
-			Kind: rings.EventSwarmRecord, Actor: "swarm:" + env.UnitID,
-			Payload: rings.SwarmRecord{
-				StepID: pack.StepID, UnitID: env.UnitID, TranscriptID: env.TranscriptID,
-				Type: rings.SwarmRecSessionEnd, GraphVersion: pack.GraphVersion,
-				Resumable:    status == StepBlocked,
-				Checkpointed: res.Checkpointed,
-				ScopeWait:    res.ScopeWait,
-				Note: fmt.Sprintf("reason=%s turns=%d status=%s billable=%.1fs gate_wait=%.1fs block_wait=%.1fs pause_wait=%.1fs",
-					res.Reason, res.Turns, status, res.billable.Seconds(), res.gateWait.Seconds(), res.blockWait.Seconds(), res.pauseWait.Seconds()),
-			},
-		},
-	)
+	var serr error
+	for {
+		rev, rerr := e.Store.CurrentRevision(ledgerCtx, pack.TaskID)
+		if rerr != nil {
+			serr = rerr
+			break
+		}
+		cur, nerr := e.Store.Node(ledgerCtx, pack.TaskID, pack.StepID)
+		if nerr != nil {
+			serr = nerr
+			break
+		}
+		evs := []rings.Event{}
+		if stateEv.Kind != "" && cur.Status == "running" && (env.owner == nil || e.Store.ExecutionCurrent(pack.TaskID, *env.owner) == nil) {
+			evs = append(evs, stateEv)
+		}
+		evs = append(evs, sessionEv)
+		_, serr = e.Store.AppendAtRevision(ledgerCtx, pack.TaskID, rev, evs...)
+		if errors.Is(serr, rings.ErrStaleRevision) {
+			continue
+		}
+		break
+	}
 	e.claimMu.Unlock()
 	if serr != nil && err == nil {
 		runlog.Errorf("账本写入失败: 单位结束 %s/%s: %v", pack.TaskID, env.UnitID, serr)
@@ -684,6 +811,24 @@ func (e *Executor) finishUnit(ctx context.Context, env *unitEnv, pack *TaskPack,
 			err = berr
 		}
 	}
+	// 挂等让位收场(P5-05):让位事件入黑匣子——会话保留/名额释放/停等
+	// 态等解除,生命周期可对账;范围卡让位(scope_wait)同族一并入账。
+	if res.YieldWait || res.ScopeWait {
+		source := "scope"
+		if res.Yield != nil {
+			source = res.Yield.Source
+		}
+		if berr := blackbox.Record(ledgerCtx, e.Store, pack.TaskID, "swarm:"+env.UnitID,
+			rings.BlackboxRecord{
+				Type: rings.BlackboxUnitYield, StepID: pack.StepID, UnitID: env.UnitID,
+				Detail: map[string]any{
+					"reason": res.Reason, "source": source, "status": status,
+					"note": "挂等超宽限,冻结收场让位(会话保留,名额释放,停等态等解除)",
+				},
+			}); berr != nil && err == nil {
+			err = berr
+		}
+	}
 	return res, err
 }
 
@@ -701,7 +846,6 @@ func (e *Executor) newUnit(pack *TaskPack) *unitEnv {
 		UnitID:       unitID,
 		TranscriptID: "swarm-" + unitID,
 		// P4-67 分诊输入的任务目标摘要(领取时冻结;空目标如实空)。
-		goalSummary: pack.GoalTitle,
 	}
 }
 
@@ -739,6 +883,7 @@ func unitModelName(e *Executor, taskID, transcriptID string) string {
 
 func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budget Budget) (*RunResult, error) {
 	res := &RunResult{UnitID: env.UnitID, TranscriptID: env.TranscriptID}
+	env.graphVersion = pack.GraphVersion
 
 	// 活动时钟(P4-02 ④):登记即活动(起飞即计时),落地注销——
 	// 等待点(弹门/退避/挂起)在段循环内逐点冻结,读侧见 clock.go。
@@ -758,6 +903,8 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 		defer sess.Close()
 	}
 
+	defer env.drainCallbacks(false)
+
 	stepDir := e.stepDir(pack.TaskID, pack.StepID)
 
 	// 工具门卫(P2-05 纠偏纵深):舵杆生效点 + 循环内重锚定,包装全部
@@ -769,23 +916,27 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 	tools := wrapSpillGuard(env, guard.wrapAll(filterTools(env.toolset(), pack.Authorization)))
 
 	// 工具调用实时记账:KindToolUse 记名与参数,KindToolResult 落账
-	//(大结果整段入 blob,账本只存引用与截头,R18);KindUsage 逐轮切
-	// 增量入 token 独立表(P2-04 四类记录分工,一行=一次模型调用)。
-	// 记账器跨段累计(单位粒度的账,不是段粒度)。
+	//(大结果整段入 blob,账本只存引用与截头,R18)。模型成本从请求端
+	// 记账;KindUsage 只推进正常轮次预算。计量和预算均跨执行段保留。
 	var mu sync.Mutex
 	toolNames := map[string]string{}         // toolUseID -> name
 	toolArgs := map[string]json.RawMessage{} // toolUseID -> args
-	usage := &UsageTracker{
+	usage := &turnBudgetTracker{
 		Store: e.Store, TaskID: pack.TaskID, Agent: "swarm:" + env.UnitID,
-		Model: e.Model, ModelOf: modelNowFunc(e.Provider, pack.TaskID, env.TranscriptID), Transcript: env.TranscriptID,
 		MaxTurns: budget.MaxTurns, StepID: pack.StepID, UnitID: env.UnitID,
 	}
 	var usageErr error // 用量/里程碑记账失败:不中断执行,收尾时如实带回
+	provider := MeterProvider(e.Provider, e.Store, rings.TokenUsage{
+		TaskID: pack.TaskID, Agent: "swarm:" + env.UnitID, Model: e.Model, TranscriptID: env.TranscriptID,
+	}, func(err error) { usageErr = err })
 
 	transcriptStore := transcript.NewStore(filepath.Join(e.RootDir, pack.TaskID, "transcripts"))
 	// 复测单位(P3-06)的首条消息是发起时确定性组装的复测上下文
 	// (自动首条消息机制),不是七要素任务包。
-	input := pack.Render()
+	// 普通单位首条消息 = 任务简报(P5-04:概况 JSON,装配失败静默降级
+	// 为空)+ 七要素任务包;续跑接管/补做等接管形态不重注入(原会话
+	// 历史里已有)。
+	input := pack.FirstMessage()
 	if env.retest != nil {
 		input = env.retest.firstMessage
 	}
@@ -793,6 +944,8 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 	// 首段不重注入任务包——七要素原文已在恢复出的会话历史里,只追发短
 	// 续跑指令(与 P2-06e 模型重试的短指令同一纪律,防续跑消息重复注入);
 	// 转录缺失/为空时在首段续跑处降级回全新会话(exhausted 同款接力)。
+	// P5-02:补做证据/重验步骤的续跑指令(失败原因/重开理由 + 重交通道)
+	// ——原会话缺失时同样注入(全新会话首条消息,补做上下文不丢)。
 	if env.resumed {
 		switch env.resumeKind {
 		case resumeBlocked:
@@ -800,10 +953,20 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 		case resumeCheckpoint:
 			input = checkpointResumePrompt(pack)
 		case resumeScope:
-			input = scopeResumePrompt(e, pack)
+			input = checkpointResumePrompt(pack)
+		case resumeRetake:
+			input = retakeResumePrompt(pack)
+		case resumeYield:
+			// P5-05 让位上位:按让位上下文回查裁决/继续/恢复状态组装指令;
+			// 审批类批准同时武装放行配额(重发的被拦命令恰好一次)。
+			var arm *ApprovalRequest
+			input, arm = e.yieldResumeInput(ledgerCtx, pack, env.resumeYield)
+			env.yieldArmApproval(arm)
 		default:
 			input = adoptionResumePrompt(pack)
 		}
+	} else if pack.Retake != nil {
+		input = retakeResumePrompt(pack)
 	}
 	// system 段(§11 组装规范,见 promptspec.go):RoE 约束块置顶(凌驾
 	// 声明)+ 三段式基线(A 可编辑/B 铁律/C 写回规约)+ 意图块/锚定
@@ -898,6 +1061,14 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 				res.Reason, res.StepStatus, res.Checkpointed = "checkpointed", "dispatched", true
 				break
 			}
+			// P5-05:暂停挂等超宽限 → 冻结收场让位(步骤落 pause_wait 停等
+			// 态,会话保留、名额释放、计费停走;操作者点继续经 ResumeUnit
+			// 停等态唤醒通道回队首档续跑)。
+			if env.parkYielded {
+				res.Reason, res.StepStatus = "pause_yield", rings.StepPauseWait
+				res.YieldWait, res.Yield = true, &rings.YieldNote{Source: "pause"}
+				break
+			}
 			// R14 复检:挂起期间前提变过 → 拒绝旧计划,交主宰重判。
 			if why := e.premiseStale(ledgerCtx, pack.TaskID, pack.StepID, anchor); why != "" {
 				staleExit(why)
@@ -949,15 +1120,14 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 		}
 
 		segCtx, cancelSeg := context.WithCancel(ctx)
-		env.segCancel = cancelSeg
-		env.park = nil
+		env.openSegment(cancelSeg)
 
 		// 单位会话压缩器(P4-39 ②):旧轮工具结果体微压缩(宿主实现,
 		// 覆盖本项目工具名)+ 摘要压缩(引擎默认时机与参数,摘要器
-		// 从同一 Provider 构造)。窗口未配置(0)不挂——与牧者同款
-		// 装配纪律;模型名按当前服务腿解析,主备切换后逐段跟随。
+		// 从同一 Provider 构造)。窗口未配置时仅归档旧大结果，不虚设
+		// 摘要窗口；模型名按当前服务腿解析,主备切换后逐段跟随。
 		unitOpts := agentcore.Options{
-			Provider:       e.Provider,
+			Provider:       failover.LibraryOutput(provider),
 			SystemPrompt:   workerSegments,
 			Tools:          tools,
 			PermissionMode: permission.ModeDefault,
@@ -968,14 +1138,18 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 				Prompt:   retestWrapupOf(env),
 				MaxTurns: budget.WrapupMaxTurns,
 			},
-			MaxTokens:              4096,
 			WorkingDir:             stepDir,
 			Transcript:             transcriptStore,
 			SessionID:              env.TranscriptID,
 			DisableBackgroundTasks: true,
 		}
-		if uc := newUnitCompactor(e.Store, pack.TaskID, pack.StepID, env.UnitID,
-			failover.ContextWindowFor(ctx, e.Store, unitModelName(e, pack.TaskID, env.TranscriptID)), 4096, e.Provider); uc != nil {
+		if uc := newUnitCompactor(e.Store, e.Blobs, pack.TaskID, pack.StepID, env.UnitID,
+			failover.ContextWindowFor(ctx, e.Store, unitModelName(e, pack.TaskID, env.TranscriptID)),
+			failover.OutputTokensFor(ctx, e.Store, unitModelName(e, pack.TaskID, env.TranscriptID)),
+			MeterProvider(e.Provider, e.Store, rings.TokenUsage{
+				TaskID: pack.TaskID, Agent: "swarm:" + env.UnitID, Model: e.Model,
+				TranscriptID: env.TranscriptID, Purpose: "compaction",
+			})); uc != nil {
 			// 判空再挂:nil *unitCompactor 塞进接口是非 nil 值,引擎会
 			// 照调方法(空指针崩溃),必须只在真挂时赋值。
 			unitOpts.Compactor = uc
@@ -994,21 +1168,16 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 			// 原会话续(P2-06f 重启收养 + P3-05c ① 受阻重开):恢复崩溃
 			// 残留或受阻保留的会话(引擎 cleanResumed 丢弃未收尾的尾部
 			// tool_use,模型重新发起)。转录缺失/为空降级回全新会话,重注入
-			// 完整任务包。用量不重复计:历史行属上一进程/上一单位,本段
-			// 增量自段首基线清零起算(见段首 beginSegment)。
+			// 完整任务包。只计本段实际新请求,恢复历史不重复计量。
 			if err := sess.Resume(env.TranscriptID); err != nil {
 				cancelSeg()
 				res.Reason, res.StepStatus = "resume_error", "failed"
 				return res, fmt.Errorf("swarm: 恢复会话: %w", err)
 			}
 			if len(sess.Messages()) == 0 {
-				input = pack.Render()
+				input = pack.FirstMessage() // 空历史降级回全新会话:简报随任务包照常注入
 			}
 		}
-		// 段首用量基线清零:KindUsage 是单次 Prompt 运行内的累计(每段
-		// 从零起算),跨段不清零会把上一段的累计误当本段基线,产生负
-		// 增量行(P2-06f 修订,审批续跑/模型重试/重启收养段同享)。
-		usage.beginSegment()
 		guard.refreshBudget(deadlineOf(maxDur), win.turns+budget.MaxTurns)
 
 		segStart := time.Now()
@@ -1022,7 +1191,7 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 			switch ev.Kind {
 			case harness.KindUsage:
 				if ev.Usage != nil {
-					if uerr := usage.OnUsage(*ev.Usage); uerr != nil {
+					if uerr := usage.OnTurn(); uerr != nil {
 						usageErr = uerr
 					}
 					// 重锚定的剩余预算读数(P2-05):逐轮喂入门卫(近似值,
@@ -1052,15 +1221,6 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 					Type: rings.SwarmRecToolCall, GraphVersion: pack.GraphVersion,
 					ToolName: name, ToolArgs: args, IsError: ev.ToolResult.IsError,
 				}
-				// R18 分层:工具已把原始大输出入 blob 并在返回文本中携带引用的,
-				// 账本直接记该引用(原文一次落盘);否则此处兜底 spill。
-				if ref := extractBlobRef(text); ref != "" && e.Blobs.Exists(ref) {
-					rec.ResultRef, rec.ResultHead = ref, clipLine(text, 512)
-				} else if ref, head := e.Blobs.spill(text); ref != "" {
-					rec.ResultRef, rec.ResultHead = ref, clipLine(head, 512)
-				} else {
-					rec.ResultHead = clipLine(text, 2048)
-				}
 				// 工具执行异常落运行日志 ERROR(P3-13b ③;参数与结果原文
 				// 不进日志——账本已有,红线:流量正文零记录)。设计内暂缓
 				//(审批挂起/舵杆注入/单位挂起)与段收拢打断的在飞调用不落
@@ -1089,12 +1249,11 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 							pack.TaskID, env.UnitID, name, clipLine(text, 200))
 					}
 				}
-				if _, aerr := e.Store.Append(ledgerCtx, pack.TaskID, rings.Event{
-					Kind: rings.EventSwarmRecord, Actor: "swarm:" + env.UnitID, Payload: rec,
-				}); aerr != nil {
-					// 记账失败不中断执行,但结果必须如实带回。
-					runlog.Errorf("账本写入失败: 工具调用 %s/%s: %v", pack.TaskID, env.UnitID, aerr)
-					return res, fmt.Errorf("swarm: 工具调用写入: %w", aerr)
+				if !env.takeAuditedResult(ev.ToolResult.ToolUseID) {
+					rec.ToolCallID = ev.ToolResult.ToolUseID
+					if aerr := env.persistToolResult(rec, text); aerr != nil {
+						return res, fmt.Errorf("swarm: 工具调用写入: %w", aerr)
+					}
 				}
 			case harness.KindText:
 				// 助手正文累计(P2-08 舵杆回执标记的扫描源;段末统一扫)。
@@ -1112,14 +1271,17 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 			}
 		}
 		elapsed := time.Since(segStart)
+		cancelSeg()
 		_ = sess.Close()
-		cancelSeg() // 段 ctx 用毕即收(已结束的段,取消无副作用)
+		env.drainCallbacks(false)
 
 		// 舵杆回执扫描(P2-08):助手正文中的采纳/拒绝标记 → 回执落账
 		//(已采纳/被拒;去重,未表态落地停在已送达,不伪造回执)。
 		if e.Helm != nil {
 			for _, r := range scanSteerReceipts(asst.String()+"\n"+res.FinalText, receiptSeen) {
-				e.Helm.RecordVerdict(pack.TaskID, pack.StepID, env.UnitID, r)
+				if err := e.Helm.RecordVerdict(pack.TaskID, pack.StepID, env.UnitID, r); err != nil {
+					runlog.Warnf("纠偏回执记录失败: 任务 %s 单位 %s: %v", pack.TaskID, env.UnitID, err)
+				}
 			}
 		}
 		asst.Reset()
@@ -1138,8 +1300,9 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 			} else {
 				blockWait += elapsed
 			}
-			// 活动时钟:退避等待前冻结(读数停在已收拢的 billable)。
-			e.clockSet(pack.TaskID, env.TranscriptID, billable, false)
+			// 活动时钟:退避等待前冻结(读数停在已收拢的 billable),等待
+			// 种类=等待模型(挂等宽限期的面板状态词)。
+			e.clockSetWait(pack.TaskID, env.TranscriptID, clockWaitModel)
 			modelFails++
 			if failStreak.IsZero() {
 				failStreak = time.Now()
@@ -1170,6 +1333,27 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 				break
 			}
 			wait := e.modelRetryBackoff(modelFails, streak, deep)
+			// P5-05 模型故障挂等宽限:退避等待即挂等——本段等待会跨宽限
+			// 线(挂等满 5 分钟)即在边界冻结收场让位(步骤落 model_wait
+			// 停等态、名额释放、计费停走;模型恢复由主宰循环轮对账唤醒,
+			// 冷却自动恢复无配置事件可触发重开——不走 blocked 等配置保存
+			// 的重开通道)。宽限先于深阈值定值触发(5m<15m)。
+			if since := time.Since(failStreak); since+wait > e.graceYield() {
+				if capd := e.graceYield() - since; capd > 0 {
+					if !sleepInterruptible(ctx, capd) {
+						res.Reason, res.StepStatus = "aborted", "aborted"
+						return res, fmt.Errorf("swarm: 模型重试等待被中断: %w", ctx.Err())
+					}
+					blockWait += capd
+				}
+				runlog.Warnf("模型故障挂等超宽限让位: 任务 %s 单位 %s(连续失败 %s): %s",
+					pack.TaskID, env.UnitID, roundDur(time.Since(failStreak)), failBrief)
+				res.Reason = fmt.Sprintf("模型故障挂等超宽限让位(连续失败 %s): %s",
+					roundDur(time.Since(failStreak)), failBrief)
+				res.StepStatus, res.YieldWait = rings.StepModelWait, true
+				res.Yield = &rings.YieldNote{Source: "model"}
+				break
+			}
 			runlog.Warnf("模型错误重跑: 任务 %s 单位 %s 第 %d 次(已连续失败 %s,再不通 %s 后受阻): %s",
 				pack.TaskID, env.UnitID, modelFails, roundDur(streak), roundDur(deep-streak), failBrief)
 			if !sleepInterruptible(ctx, wait) {
@@ -1185,24 +1369,6 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 		// 模型恢复:连续失败计数与起算时刻清零(深阈值只量"全不通"
 		// 的连续段;恢复过就重新起算)。
 		modelFails, failStreak = 0, time.Time{}
-		// ---- P4-51 ①:范围等待批准——单位冻结收场让位名额 ----
-		// 命中范围外的命令拦下出待决卡后,单位收段冻结:goroutine 退出
-		//(并发名额让位给其他方向)、会话冻结保留(scope_wait 标记,批
-		// 准后重领原会话 Resume 续跑)、计时停走(等待不进任何时间账)。
-		// 裁决与唤醒走面板两键/RoE 面板的对账通道,单位侧不驻留等待
-		//(与弹门挂起占名额等待是两套纪律:弹门等待是既有纪律不动)。
-		if env.scopeHold != nil {
-			e.clockSet(pack.TaskID, env.TranscriptID, billable, false)
-			res.Reason, res.StepStatus, res.ScopeWait = "scope_wait", rings.StepScopeWait, true
-			break
-		}
-		// P4-51 ②:目标已获准但本单位闭包是领取时快照——步骤回可领取,
-		// 重领的新任务包含该目标,原会话 Resume 续跑重发命令(与断点收
-		// 场同款落地)。
-		if env.scopeReclaim {
-			res.Reason, res.StepStatus, res.Checkpointed = "scope_reclaim", "dispatched", true
-			break
-		}
 		// ---- P2-08 工具边界/段间挂起:先于流错误结案 ----
 		// guard 收段后引擎可能以 aborted 终态或段 ctx 流错误收段,两者都
 		// 是挂起信号而非失败(段是被挂起收拢的);单位在被暂缓调用后自然
@@ -1235,10 +1401,15 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 			if e.Hiber != nil {
 				env.ticketGen = e.Hiber.Generation(pack.TaskID)
 			}
-			// 活动时钟:弹门等待前冻结(等待期计时暂停的可视面)。
-			e.clockSet(pack.TaskID, env.TranscriptID, billable, false)
+			// 活动时钟:弹门等待前冻结(等待期计时暂停的可视面),等待
+			// 种类=等待审批(挂等宽限期的面板状态词)。
+			e.clockSetWait(pack.TaskID, env.TranscriptID, clockWaitApproval)
 			waitStart := time.Now()
-			d, werr := env.park.Wait(ctx)
+			// P5-05 挂等宽限:5 分钟内裁决到达=原位继续(零开销);超时
+			// 冻结收场让位(步骤落 gate_wait 停等态、票留待决表、名额释
+			// 放、计费停走)——让位与裁决在票内同锁互斥(WaitGrace 边界
+			// 排空),裁决后到走"已批准待上位"唤醒(Decide 侧)。
+			d, werr, yielded := env.park.WaitGrace(ctx, e.graceYield())
 			gateWait += time.Since(waitStart)
 			if werr != nil {
 				// 等待期间任务熔断/收尾:按拒绝结案留痕,单位随任务 ctx 中止。
@@ -1246,6 +1417,23 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 				env.park = nil
 				res.Reason, res.StepStatus = "aborted", "aborted"
 				return res, fmt.Errorf("swarm: 审批等待被中断: %w", ctx.Err())
+			}
+			if yielded {
+				// 冻结收场让位:会话保留(Yield 标记带被拦命令上下文)、
+				// 票留待决表面板可裁、步骤停等不可领取(排队中不二次挂等
+				// ——不执行命令就出不了卡)。终态入账由 finishUnit 统一落。
+				res.Reason = "gate_yield"
+				res.StepStatus, res.YieldWait = rings.StepGateWait, true
+				res.Yield = &rings.YieldNote{
+					Source:         "approval",
+					PolicyRevision: env.park.Req.PolicyRevision,
+					Request:        env.park.Req.ID,
+					ToolName:       env.park.Req.ToolName,
+					ToolArgs:       env.park.Req.ToolArgs,
+					Intent:         env.park.Req.Intent,
+				}
+				env.park = nil
+				break
 			}
 			if d.Released {
 				// P4-33 冬眠收场放行:票面保持待裁决冻结(零裁决记录),
@@ -1280,28 +1468,8 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 				env.park = nil
 				continue
 			}
-			// 动作类拒绝(P4-68 ② 拒绝分族;P4-70 ③ 攻击卡落会话档):
-			// 弹门人工拒/攻击行为卡拒/模糊形态弹门拒＝只杀该动作不杀单位
-			// ——注入拒绝反馈(拒绝原因即换路指引),模型读到后自行换路,
-			// 同会话继续;连拒同类 HardDenyEscalateAfter 次(单位生命周期累
-			// 计不重置,与硬规则升级保险同机制)升级杀单位(防连环硬撞)。
-			// 攻击行为卡拒绝同时落会话档"禁止"——该单位后续对同一信息源
-			// 的攻击动作自动拒不弹卡(P4-70 ③)。
-			if n := env.bumpDenyHits(gateDenyKey(env.park.Req)); n >= HardDenyEscalateAfter {
-				env.deniedReason = fmt.Sprintf(
-					"审批拒绝终止: 面板拒绝%s · 同类拒绝累计 %d 次,升级终止单位",
-					reasonSuffix(d.Reason), n)
-				env.park = nil
-				break
-			}
-			if env.park.Req.AttackTarget != "" {
-				if host, ok := ParseInfoSourceHost(env.park.Req.AttackTarget); ok {
-					env.setAttackRuling(host, false)
-				}
-				input = attackDenyResumePrompt(env.park.Req, d.Reason)
-			} else {
-				input = gateDenyResumePrompt(env.park.Req, d.Reason)
-			}
+			// A denied action returns feedback to the same session without a host grant.
+			input = gateDenyResumePrompt(env.park.Req, d.Reason)
 			reqID = nextRequestID(env.UnitID, &reqSeq) // 新逻辑注入,新 requestID
 			env.park = nil
 			continue
@@ -1319,9 +1487,9 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 		break
 	}
 
-	// 升级熔断(denyGuard 拒绝线/动作类拒绝连拒同类到限):Step 终态
-	//"审批拒绝终止"(主宰收割可见原因;P4-68 ② 起普通面板拒不再走到
-	// 这里——只杀动作注入换路反馈)。
+	// 拒绝线熔断(denyGuard:数据销毁/拒绝服务类):Step 终态"审批拒绝
+	// 终止"(主宰收割可见原因;P5-03③ 起动作类拒绝不再熔断单位——只
+	// 杀动作注入换路反馈)。
 	if env.deniedReason != "" {
 		res.Reason, res.StepStatus = env.deniedReason, StepApprovalDenied
 	}
@@ -1395,33 +1563,8 @@ func approvalResumePrompt(req ApprovalRequest, d GateDecision) string {
 	if r := strings.TrimSpace(d.Reason); r != "" {
 		fmt.Fprintf(&b, "造物主批准附言(请遵照执行):%s。", r)
 	}
-	switch {
-	case req.AttackTarget != "":
-		// P4-70 ③:攻击行为卡批准＝会话档允许——该次动作直接重新发起,
-		// 本单位本会话内对该信息源的后续攻击动作一并放行(仅此单位、仅
-		// 此信息源;其他信息源照常逐次判定)。
-		fmt.Fprintf(&b, "对信息源 %s 的攻击动作已获准,该次动作可直接重新发起;本单位本会话内对该信息源的后续攻击动作也已一并获准,请继续完成本步骤意图。", req.AttackTarget)
-	case req.GateGroup == HardGroupProxyBypass:
-		b.WriteString("该次调用已被单次授权,可直接重新发起;本单位后续命中代理旁路组的命令已一并获准,可直接执行。等待期间该单位的运行预算未消耗,请继续完成本步骤意图。")
-	default:
-		b.WriteString("该次调用已被单次授权,可直接重新发起;本步骤的后续命令已一并获准,可直接执行。等待期间该单位的运行预算未消耗,请继续完成本步骤意图。")
-	}
+	b.WriteString("批准仅适用于本次调用；后续动作仍按当前边界判断，硬规则始终生效。等待期间运行预算未消耗，请继续完成本步骤意图。")
 	return b.String()
-}
-
-// gateDenyKey 动作类拒绝的同类计数键(P4-68 ②:连拒同类
-// HardDenyEscalateAfter 次升级杀单位,与硬规则升级保险 hr:/ir: 同机制、
-// 单位生命周期累计不重置):攻击行为卡一族(gd:attack)、同拦截规则组
-// 弹门一族(gd:<组>)、审批门槛弹门一族(gd:threshold)。
-func gateDenyKey(req ApprovalRequest) string {
-	switch {
-	case req.AttackTarget != "":
-		return "gd:attack"
-	case req.GateGroup != "":
-		return "gd:" + req.GateGroup
-	default:
-		return "gd:threshold"
-	}
 }
 
 // gateDenyResumePrompt 弹门人工拒绝后的换路反馈(P4-68 ②:只杀该动作
@@ -1439,19 +1582,22 @@ func gateDenyResumePrompt(req ApprovalRequest, reason string) string {
 	return b.String()
 }
 
-// attackDenyResumePrompt 攻击行为卡拒绝后的换路反馈(P4-67 起只杀该
-// 动作不杀单位,P4-68 ② 并入动作类拒绝分族——同类连拒升级保险同款;
-// 单位同会话继续;拒绝原因即换路指引——"报错文案写成路由教学"§11
-// 通道,与 P4-63 拒动作反馈同构)。
-func attackDenyResumePrompt(req ApprovalRequest, reason string) string {
+// retakeResumePrompt 补做证据/重验的续跑指令(P5-02,进会话上下文):
+// 交卷三查不过的失败原因(缺哪样)或 reopen 重开理由注入原会话——
+// 补做后带 claim_id 重交;重验单位坐实则重交,立不住则如实收尾不交
+// (不编造交卷)。
+func retakeResumePrompt(pack *TaskPack) string {
+	r := pack.Retake
 	var b strings.Builder
-	fmt.Fprintf(&b, "【审批结果 · 动作被拒】面板拒绝了请求 %s:对信息源 %s 的攻击动作不批准(意图:%s;工具 %s)。",
-		req.ID, req.AttackTarget, req.Intent, req.ToolName)
-	b.WriteString("该动作到此为止,不要换个写法重试。")
-	if r := strings.TrimSpace(reason); r != "" {
-		fmt.Fprintf(&b, "拒绝理由:%s。", r)
+	if r.Reverify {
+		b.WriteString("【重验 · 续跑】此前交卷的漏洞被重开,本会话已从转录完整恢复(历史消息与已耗用量俱在)。")
+		fmt.Fprintf(&b, "重开理由:%s。", r.Reason)
+		fmt.Fprintf(&b, "带着这条反证重跑证明链:坐实了就重交(调用 submit_claim 时带 claim_id=%s,六字段重新写全);立不住就如实收尾,把推翻依据记成事实,不交卷。", r.ClaimID)
+		return b.String()
 	}
-	fmt.Fprintf(&b, "%s 仍可正常访问查资料(获取使用不受影响),但对它的主动攻击动作一律禁止;请基于已获取的信息换授权范围内的方向继续。", req.AttackTarget)
+	b.WriteString("【补做证据 · 续跑】此前交卷未过机器核验,本会话已从转录完整恢复(历史消息与已耗用量俱在)。")
+	fmt.Fprintf(&b, "未过原因:%s。", r.Reason)
+	fmt.Fprintf(&b, "缺什么补什么(证据引用要真实出现在本次流量里,证明物从证据原文里抄),补做后重交:调用 submit_claim 时带 claim_id=%s,六字段重新写全。这是补考,只有一次。", r.ClaimID)
 	return b.String()
 }
 
@@ -1486,69 +1632,6 @@ func checkpointResumePrompt(pack *TaskPack) string {
 	b.WriteString("【断点 · 续跑】执行进程重启,任务从账本续跑,本会话已从转录完整恢复(历史消息与已耗用量俱在)。")
 	fmt.Fprintf(&b, "继续完成本步骤意图:%s。", pack.StepIntent)
 	b.WriteString("断点存档前被暂缓的调用可重新发起;已执行过的动作与已写回的结论勿重复;若意图已近完成,直接收尾写回最终结论。本单位的运行预算已按新领取重置。")
-	return b.String()
-}
-
-// scopeResumePrompt 范围等待唤醒的续跑指令(P4-51 ② 加入资产 / P4-68 ①
-// 允许访问 / P4-69 ① 目标已排除,按步骤 detail 携带的越界目标现值区分
-// 措辞:目标已入范围——转为可测试;已获访问授权——只授访问权,不是
-// 测试目标;已被排除(P4-69:意图不覆盖被排除目标的挂等单位唤醒换路,
-// 注入"目标已排除"反馈)——不再对该目标发起任何命令,继续意图其余
-// 工作)。判定顺序:排除优先(止损语义)→ 信息源 → 默认批准。
-func scopeResumePrompt(e *Executor, pack *TaskPack) string {
-	step, err := e.Store.Node(ledgerCtx, pack.TaskID, pack.StepID)
-	if err == nil {
-		if host, _ := step.Detail["scope_wait_host"].(string); host != "" {
-			port, _ := step.Detail["scope_wait_port"].(string)
-			roe, rerr := e.Store.CurrentRoE(ledgerCtx, pack.TaskID)
-			if rerr == nil {
-				if excluded := roe.ExcludedAssetSet(); excluded != nil {
-					if assets, aerr := e.Store.NodesByType(ledgerCtx, pack.TaskID, rings.NodeAsset, ""); aerr == nil &&
-						rings.ExcludedCoversTarget(assets, excluded, host, port) {
-						return scopeExcludedResumePrompt(pack, host)
-					}
-				}
-				if roe.InfoSourceHit(host) {
-					return scopeAccessResumePrompt(pack, host)
-				}
-			}
-		}
-	}
-	return scopeApprovedResumePrompt(pack)
-}
-
-// scopeExcludedResumePrompt 目标已排除唤醒的续跑指令(P4-69 ①:意图不
-// 覆盖被排除目标的挂等单位按分族唤醒换路——此前等待批准的目标已从
-// 任务范围排除,单位同会话继续意图其余工作;对该目标的后续命令会被
-// 直接拒绝,反馈即换路指引,与命令路顺带触碰拒绝同锚例)。
-func scopeExcludedResumePrompt(pack *TaskPack, host string) string {
-	var b strings.Builder
-	b.WriteString("【目标已排除 · 续跑】此前等待批准的范围外目标已被排除(任务范围外),本会话已从转录完整恢复(历史消息与已耗用量俱在)。")
-	fmt.Fprintf(&b, "继续完成本步骤意图:%s。", pack.StepIntent)
-	fmt.Fprintf(&b, "%s 已被排除,不要再对它发起测试(连通性测距也不行,会被直接拒绝);本步骤其余工作不受影响,换测试对象或跳过该部分继续。已执行过的动作与已写回的结论勿重复。本单位的运行预算已按新领取重置。", host)
-	return b.String()
-}
-
-// scopeAccessResumePrompt 允许访问唤醒的续跑指令(P4-68 ①:目标获访问
-// 授权——只授访问权,不入资产图、不是测试目标;被拦下的访问命令可重新
-// 发起,对它的主动攻击动作仍会被拦下等批准)。
-func scopeAccessResumePrompt(pack *TaskPack, host string) string {
-	var b strings.Builder
-	b.WriteString("【允许访问 · 续跑】此前等待批准的范围外目标已获访问授权(只授访问权,不是测试目标),本会话已从转录完整恢复(历史消息与已耗用量俱在)。")
-	fmt.Fprintf(&b, "继续完成本步骤意图:%s。", pack.StepIntent)
-	fmt.Fprintf(&b, "此前被拦下的对 %s 的访问命令现在可以重新发起(查资料类获取使用不受影响);该地址不是测试目标,对它的主动攻击动作会被拦下等批准;已执行过的动作与已写回的结论勿重复。本单位的运行预算已按新领取重置。", host)
-	return b.String()
-}
-
-// scopeApprovedResumePrompt 范围批准的续跑指令(P4-51 ②,进会话上下文,
-// transcript 可查):此前等待批准的目标已加入任务范围,新任务包闭包已
-// 含该目标——被拦下的命令可直接重新发起(会自然通过范围判定),从暂
-// 停点继续,不是从头再来。
-func scopeApprovedResumePrompt(pack *TaskPack) string {
-	var b strings.Builder
-	b.WriteString("【范围批准 · 续跑】此前等待批准的范围外目标已加入任务范围,本会话已从转录完整恢复(历史消息与已耗用量俱在)。")
-	fmt.Fprintf(&b, "继续完成本步骤意图:%s。", pack.StepIntent)
-	b.WriteString("此前被拦下等待批准的命令现在可以重新发起;已执行过的动作与已写回的结论勿重复;若意图已近完成,直接收尾写回最终结论。本单位的运行预算已按新领取重置。")
 	return b.String()
 }
 
@@ -1645,187 +1728,104 @@ func isEngineInterrupt(text string) bool {
 	return strings.TrimSpace(text) == engineInterruptNote
 }
 
-// approvalGate 安全闸门的执行层挂接点(Norma CanUseTool 回调,第二章
-// §3③):三级处置(第四章 §3 v2,P2-06b 重构;v2.1 判定链 P2-08e;P4-63
-// 拒动作不杀单位)。审批对象是 Step 意图(分级 + 危害声明随任务包),
-// 不是工具。判定次序:
-//
-//	① 拒绝线·超 RoE 授权范围:工具不在 RoE 边界内直接拒绝留痕
-//	   (工具表已经过 RoE 过滤,此处二次校验防未来工具动态发现绕过
-//	   静态过滤);
-//	② 拒绝线·全局内置硬规则:参数级确定性正则 + 三档判定位(P4-63 A,
-//	   动作位拒/非动作位放/模糊弹门)——不依赖模型声明(补 harm_class
-//	   漏报的洞),插在意图分级之前,分级无论怎么声明都拦;确定性拒绝
-//	   只拒本次动作不熔断单位,同规则累计 3 次升级杀(P4-63 B);
-//	③ 拒绝线·任务级意图拦截:资产范围 × 动作类型 × 处置(P2-08e)
-//	   ——禁止命中/超额只拒本次调用并留痕,同规则累计 3 次升级杀
-//	   (P4-63 B);允许 + 次数上限计数入账,超额自动转禁止(量化额度);
-//	④ 拒绝线·分级缺失/非法:fail-safe 拒绝(派发侧本应校验,此处兜住
-//	   绕过 overmind.DispatchStep 的直接入账);危害声明非法同理;
-//	⑤ 拒绝线·非常严重:数据销毁/拒绝服务类(harm_class)直接拒绝且
-//	   留痕,面板提供"研判后放行"逐次放行——无论门槛多宽都不过弹门;
-//	⑥ 弹门线的单次放行配额:批准续跑后模型重新发起同一调用(同工具
-//	   同参数),消费配额放行(配额只来自面板 Decide,对话内容不构成
-//	   决策通路——R9);
-//	⑦ 弹门线·达到审批门槛:意图分级 ≥ RoE 审批门槛(默认宽:仅增删改
-//	   弹门)→ 挂起等面板裁决:登记审批票 → 收拢当前执行段(等待期
-//	   该单位计时暂停)→ 批准后 Resume 续跑/拒绝只杀该动作注入换路反馈
-//	   (P4-68 ②,连拒同类 3 次升级杀);无门可用 fail-safe 拒绝(没有
-//	   人在环,就不放行弹门级动作);
-//	⑧ 其余一律放行留痕:不列举、不预判(留痕=tool_call 执行记录,
-//	   全量记录兜底审计)。
-//
-// 熔断该单位会话的拒绝(①④⑤与各升级保险触发):单位级终止,Step 终态
-// "审批拒绝终止"(approval_denied),主宰收割可见原因。P4-68 ② 起面板
-// 拒绝(弹门拒)与硬规则/意图拦截的确定性拒绝同款——只拒那一条命令,
-// 单位存活读到反馈(拒绝原因即换路指引)自行换路,同会话继续;连拒同
-// 类到限(硬规则 hr:/意图 ir:/动作类 gd:/排除触碰 et:)升级杀单位。
-// 只读工具(引擎侧 ReadOnly,如 port_probe 与受控回流入口)在权限
-// 管线第 3 阶段自动放行,不进本回调——回流入口只写自家账本、不碰目标,
-// 不设门是防审批疲劳,RoE 工具过滤照常生效。
+// approvalGate applies one chain to every environmental tool action: current
+// hard rules reject, otherwise the model allows or asks the existing human gate.
+// No filename/flag inference, host class, step pass, or rule group can bypass it.
 func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 	return func(ctx context.Context, toolName string, input json.RawMessage, _ permission.Context) permission.Decision {
-		// denyUnit 拒绝线处置:留痕 → 熔断单位 → 拒绝该次调用。
-		denyUnit := func(denyLine, reason string) permission.Decision {
-			env.denyGuard(pack, toolName, input, denyLine, reason)
-			return permission.Denied(reason)
+		if !env.beginCallback(ctx) {
+			return permission.Denied("所属执行已结束，本次调用未执行")
 		}
-		// ① 超 RoE 授权范围。
-		if !pack.Authorization.Allows(toolName) {
-			return denyUnit(rings.DenyLineRoeScope,
-				"超出 RoE 授权范围:工具 "+toolName+" 不在授权边界内(拒绝线)")
+		defer env.endCallback()
+		env.reviewMu.Lock()
+		defer env.reviewMu.Unlock()
+		if ctx.Err() != nil {
+			return permission.Denied("调用已取消，未执行")
 		}
-		// ② 全局内置硬规则(P2-08e):读规则用独立 ctx——收尾/熔断路径
-		// 的判定不因任务 ctx 取消而失守(fail-safe 方向:宁可多拦)。
-		// P4-03 ②:处置为弹门的规则(内置代理旁路组)命中改人审——
-		// 挂起等面板裁决,审批卡带命令原文与命中上下文(如"怀疑观测
-		// 被镜污染、直连对照复测"由人判);批准后模型重发同调用,先查
-		// 放行配额(⑥ 同语义,查在拦前——否则批准的重发被再次拦住);
-		// 拒绝照旧熔断。其余处置(拒绝)命中直接拒绝留痕。
-		// P4-17:该单位代理旁路组已批准过一次的,同组任何命中(不同
-		// 规则、不同参数)直接放行执行、逐次留痕,不再弹门。
-		// P4-63 A:系统破坏/数据库破坏组按三档判定位收窄——动作位拒、
-		// 非动作位放行不当动作、模糊形态弹门人审(人即兜底)。
-		// P4-63 B:确定性拒绝只拒本次动作不熔断单位(denyHardAction),
-		// 同规则累计 3 次升级杀;P4-68 ② 起面板弹门拒绝同款只杀动作
-		//(drive 侧注入换路反馈,连拒同类 3 次升级杀)。
-		if r, m, tier, hit := matchHardRule(guardLedgerCtx, env.Executor.Store, toolName, input); hit {
-			if r.Action == HardActionGate || tier == hardTierAmbiguous {
-				if a := env.allowance; a != nil && a.toolName == toolName && jsonEquiv(a.args, string(input)) {
-					env.allowance = nil
-					return permission.Allowed()
-				}
-				if env.bypassPass != nil && r.Group == HardGroupProxyBypass {
-					env.recordGateGroupPass(pack, r, m, toolName, input)
-					return permission.Allowed()
-				}
-				if env.Executor.Gate == nil {
-					return permission.Denied(env.denyHardAction(pack, toolName, input, r, m, rings.DenyLineNoGate,
-						"无审批门可用(fail-safe):命中拦截规则(需人审处置)的动作无人在环,本次调用拒绝"))
-				}
-				note := hardRuleGateNote(r, m)
-				if tier == hardTierAmbiguous {
-					note += " · 判位模糊,待批准或拒绝"
-				}
-				ticket, err := env.Executor.Gate.Enter(ApprovalRequest{
-					TaskID: pack.TaskID, StepID: pack.StepID, UnitID: env.UnitID,
-					Intent: pack.StepIntent, ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
-					ToolName: toolName, ToolArgs: string(input), Note: note,
-					GateGroup: r.Group,
-				})
-				if err != nil {
-					return permission.Denied("审批请求登记失败(fail-safe): " + err.Error())
-				}
-				env.park = ticket
-				env.fuseSegment()
-				return permission.Denied(fmt.Sprintf(
-					"%s(请求 %s):命令命中拦截规则(%s · %s),已提交面板审批,批准后继续执行",
-					approvalPendingNote, ticket.Req.ID, r.Group, strings.TrimPrefix(r.Name, HardRuleBuiltinPrefix)))
-			}
-			return permission.Denied(env.denyHardAction(pack, toolName, input, r, m, rings.DenyLineHardRule, ""))
+		if env.park != nil {
+			return permission.Denied(approvalPendingNote)
 		}
-		// ②b 范围外拦截(P4-51 ①,问题清单 #73②):渗透任务的命令目标
-		// 不在种子闭包内——拦下出待决卡(同一目标一张卡)＋单位冻结收
-		// 场让位名额(denyScope 内部完成出卡/分流/置位,drive 收段后落
-		// scope_wait 态);已排除目标(禁止测试/摘除)直接拒留痕熔断。
-		// 只读探测工具在门卫补口同判,bash 经由本回调。
-		// P4-67:批准续跑的单次放行配额查在拦前(与硬规则 ② 分支内配额
-		// 同语义——攻击行为卡批准后的重发目标仍是范围外,不查会被再次
-		// 拦住出新卡)。
-		if a := env.allowance; a != nil && a.toolName == toolName && jsonEquiv(a.args, string(input)) {
-			env.allowance = nil
-			return permission.Allowed()
-		}
-		if reason := env.denyScope(pack, toolName, input); reason != "" {
-			return permission.Denied(reason)
-		}
-		// ③ 任务级意图拦截(P2-08e,审核迭代:现读+范围过滤+不熔断):
-		// 禁止命中 / 超额只拒本次调用并留痕,单位继续其余工作(告知走
-		// 舵杆定向投递,见 server 侧规则变更端点);允许 + 次数上限在此
-		// 计数入账。P4-63 B:同规则累计 3 次拒绝升级杀单位(防硬撞)。
-		if reason, rid, deny := env.checkIntentRules(pack, toolName, input); deny {
-			return permission.Denied(env.denyIntentAction(pack, toolName, input, reason, rid))
-		}
-		// ④ 分级缺失/非法、危害声明非法:fail-safe。
-		if ActionLevelRank(pack.ActionLevel) == 0 {
-			return denyUnit(rings.DenyLineLevelInvalid, errActionLevelMissing(pack.ActionLevel).Error())
-		}
-		if pack.HarmClass != "" && !rings.IsValidHarmClass(pack.HarmClass) {
-			return denyUnit(rings.DenyLineHarm,
-				fmt.Sprintf("危害声明非法(%q),拒绝线 fail-safe 拒绝", string(pack.HarmClass)))
-		}
-		// ⑤ 非常严重项:数据销毁/拒绝服务类直接拒绝(P4-51 ⑤:"规划后
-		// 放行"整体废除,拒绝即终局)。
-		if pack.HarmClass == rings.HarmDataDestruction || pack.HarmClass == rings.HarmDenialOfService {
-			harmWord := "数据销毁"
-			if pack.HarmClass == rings.HarmDenialOfService {
-				harmWord = "拒绝服务类"
-			}
-			return denyUnit(rings.DenyLineHarm,
-				"拒绝线(非常严重):"+harmWord+"动作直接拒绝,不提供放行通道")
-		}
-		// ⑥ 批准续跑的单次放行配额:同请求(同工具同参数)恰好一次。
-		// 参数比对按 JSON 语义等价(键序与转义形态无关)——续跑重发的
-		// 参数经会话历史往返可能改变转义形态,字节级比对会误判为不同
-		// 调用。不同参数的调用不消费配额,重新过门。
-		if a := env.allowance; a != nil && a.toolName == toolName && jsonEquiv(a.args, string(input)) {
-			env.allowance = nil
-			return permission.Allowed()
-		}
-		// ⑥b 同步骤放行(P4-27 ⑧):审批门槛的首条命令批准一次后,本
-		// 单位本步骤的后续命令(不同工具、不同参数,含查看类)直接
-		// 放行执行、逐次留痕——门第一次照弹、意图照审,同一意图的
-		// 执行延续不再逐条弹门(P4-17 只解决了"同规则不同参数",这
-		// 里补"同步骤不同命令")。
-		if env.stepPass != nil {
-			env.recordStepPass(pack, toolName, input)
-			return permission.Allowed()
-		}
-		// ⑦ 弹门线:达到审批门槛的意图分级挂起等裁决。
-		threshold := NormalizeApprovalThreshold(pack.Authorization.ApprovalThreshold)
-		if ActionLevelRank(pack.ActionLevel) >= ActionLevelRank(threshold) {
-			if env.Executor.Gate == nil {
-				return denyUnit(rings.DenyLineNoGate,
-					"无审批门可用(fail-safe):需批准级动作须有人在环批准")
-			}
-			ticket, err := env.Executor.Gate.Enter(ApprovalRequest{
-				TaskID: pack.TaskID, StepID: pack.StepID, UnitID: env.UnitID,
-				Intent: pack.StepIntent, ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
-				ToolName: toolName, ToolArgs: string(input),
-			})
-			if err != nil {
-				// 登记失败是账本基础设施故障:fail-safe 拒绝本次调用(不熔断
-				// 单位——这不是审批裁决,错误如实透传由收尾带回)。
-				return permission.Denied("审批请求登记失败(fail-safe): " + err.Error())
-			}
-			// 挂起:收拢当前执行段(被挂起调用未执行),单位停在票上等裁决。
-			env.park = ticket
+		if env.Executor.unitShouldPark(env) {
+			env.parkArmed = true
 			env.fuseSegment()
-			return permission.Denied(fmt.Sprintf(
-				"%s(请求 %s),本回合暂挂;批准后将继续执行", approvalPendingNote, ticket.Req.ID))
+			return permission.Denied(pauseDeferNote)
 		}
-		// ⑧ 其余一律放行留痕(留痕=tool_call 执行记录)。
-		return permission.Allowed()
+		// Ledger submission text is evidence, not an environmental action.
+		// Matching its contents as a command would discard the very observation
+		// explaining a rejected action. The registered tool still validates it.
+		if guardExemptTool(toolName) {
+			return permission.Allowed()
+		}
+		deny := func(line, reason string) permission.Decision {
+			env.recordApproval(rings.ApprovalRecord{StepID: pack.StepID, UnitID: env.UnitID,
+				Type: rings.ApprovalRecDenied, ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
+				Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input, DenyLine: line, Reason: reason})
+			return permission.Denied(reason)
+		}
+		roe, err := env.Executor.Store.CurrentRoE(ctx, pack.TaskID)
+		if err != nil {
+			return deny(rings.DenyLineRoeScope, "无法读取当前任务边界，本次调用未执行")
+		}
+		if r, matched, err := matchHardRule(ctx, env.Executor.Store, toolName, input); err != nil {
+			return deny(rings.DenyLineHardRule, err.Error())
+		} else if r.ID != "" {
+			return permission.Denied(env.denyHardAction(pack, toolName, input, r, matched, rings.DenyLineHardRule, ""))
+		}
+		if a := env.allowance; a != nil && a.toolName == toolName && jsonEquiv(a.args, string(input)) && a.policyRevision == roe.UpdatedRev {
+			env.allowance = nil
+			return permission.Allowed()
+		}
+		boundary, err := env.actionBoundary(ctx, pack, roe)
+		if err != nil {
+			return deny(rings.DenyLineRoeScope, err.Error())
+		}
+		review := env.Executor.ReviewAction
+		if review == nil {
+			review = env.meteredActionReview()
+		}
+		reviewBy := "model"
+		result, reviewErr := review(ctx, ActionReviewInput{TaskType: string(pack.TaskType), Goal: pack.GoalTitle,
+			Intent: pack.StepIntent, Tool: toolName, Arguments: input, Boundaries: boundary})
+		if ctx.Err() != nil {
+			return permission.Denied("调用已取消，未执行")
+		}
+		if reviewErr != nil || (result.Decision != ActionAllow && result.Decision != ActionApproval) || strings.TrimSpace(result.Reason) == "" {
+			reviewBy = "system"
+			result = ActionReview{Decision: ActionApproval, Reason: "动作判断未完成，请核对当前调用后决定是否批准"}
+		}
+		// An operator edit made while the model was answering invalidates its result.
+		current, err := env.Executor.Store.CurrentRoE(ctx, pack.TaskID)
+		if err != nil || current.UpdatedRev != roe.UpdatedRev {
+			return deny(rings.DenyLineRoeScope, "任务边界已变化，本次调用未执行，请按当前边界重新发起")
+		}
+		if r, matched, err := matchHardRule(ctx, env.Executor.Store, toolName, input); err != nil {
+			return deny(rings.DenyLineHardRule, err.Error())
+		} else if r.ID != "" {
+			return permission.Denied(env.denyHardAction(pack, toolName, input, r, matched, rings.DenyLineHardRule, ""))
+		}
+		_, err = env.appendBusiness(guardLedgerCtx, rings.Event{Kind: rings.EventApprovalRecord,
+			Actor: "swarm:" + env.UnitID, Payload: rings.ApprovalRecord{StepID: pack.StepID, UnitID: env.UnitID,
+				RequestID: "ar-" + strings.TrimPrefix(gateRequestID(), "ap-"), Type: rings.ApprovalRecActionReview, ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
+				Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input, DecidedBy: reviewBy,
+				Note: result.Decision, Reason: result.Reason}})
+		if err != nil {
+			return permission.Denied("动作判断记录未保存，本次调用未执行")
+		}
+		if result.Decision == ActionAllow {
+			return permission.Allowed()
+		}
+		if env.Executor.Gate == nil {
+			return deny(rings.DenyLineNoGate, "本次动作需要审批，审批入口不可用，未执行")
+		}
+		ticket, err := env.Executor.Gate.Enter(ApprovalRequest{TaskID: pack.TaskID, StepID: pack.StepID, UnitID: env.UnitID,
+			Intent: pack.StepIntent, ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass, ToolName: toolName,
+			ToolArgs: string(input), Note: result.Reason, PolicyRevision: roe.UpdatedRev, owner: env.owner})
+		if err != nil {
+			return permission.Denied("审批请求未保存，本次调用未执行")
+		}
+		env.park = ticket
+		env.fuseSegment()
+		return permission.Denied(fmt.Sprintf("%s(请求 %s)，批准后可重新发起本次调用", approvalPendingNote, ticket.Req.ID))
 	}
 }
 
@@ -1833,80 +1833,15 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 // 发起同一调用时恰好放行一次(不同调用重新过门)。配额只在 drive 收到
 // Decide 送达的批准时设置——对话内容不构成决策通路(R9)。
 type gateAllowance struct {
-	requestID string
-	toolName  string
-	args      string
+	policyRevision int64
+	requestID      string
+	toolName       string
+	args           string
 }
 
-// gateGroupPass P4-17 代理旁路组的单位级放行:面板对该组弹门批准一次后
-// 武装,该单位后续命中该组任何弹门规则(组内不同规则、不同参数)直接
-// 放行执行、逐次留痕。"永久"=单位生命周期——一 Step 一单位,销毁即
-// 失效,任务内新单位重新弹门一次;拒绝照旧熔断。其他弹门规则不享受:
-// 用户自建 gate 规则批准一次仅放行同参数那一次(现状不变)。放行只对
-// 弹门处置生效——组内被改成拒绝处置的条目照旧拒绝,不越过用户意志。
-type gateGroupPass struct {
-	originRequestID string // 触发放行的批准请求(逐次留痕回指)
-}
-
-// gateStepPass P4-27 ⑧ 同步骤放行:审批门槛(意图分级)弹门批准一次后
-// 武装,该单位本步骤后续命令不再逐条弹门(直接执行、逐次留痕)。
-// 与 gateGroupPass 的分工:组级放行管硬规则弹门(代理旁路组),步骤级
-// 放行管审批门槛(分级线);"同一单位同一步骤"=单位生命周期,一 Step
-// 一单位,销毁即失效,任务内新单位重新弹门一次。
-type gateStepPass struct {
-	originRequestID string // 触发放行的批准请求(逐次留痕回指)
-}
-
-// armGateApproval 批准续跑的执行侧授权(P4-17;P4-27 ⑧;P4-70 ③):
-// 攻击行为卡(AttackTarget 非空)批准→落会话档——该单位会话内对该信息
-// 源的后续攻击动作放行免卡(档命中零判定调用,单次配额退役);其余恒
-// 置单次放行配额(同工具同参数恰好一次,重发同调用走配额不另留痕);
-// 来源是代理旁路组弹门时同时武装单位级组放行(后续同组任何命中直接
-// 执行);来源是审批门槛弹门(无 GateGroup)时同时武装同步骤放行(本
-// 步骤后续命令不再逐条弹门)。用户自建 gate 规则不武装步骤级放行
-// (P4-17 语义保持:批准一次仅放行同参数那一次)。
+// armGateApproval permits only the approved invocation once.
 func (env *unitEnv) armGateApproval(req ApprovalRequest) {
-	if req.AttackTarget != "" {
-		if host, ok := ParseInfoSourceHost(req.AttackTarget); ok {
-			env.setAttackRuling(host, true)
-		}
-		return
-	}
-	env.allowance = &gateAllowance{requestID: req.ID, toolName: req.ToolName, args: req.ToolArgs}
-	switch {
-	case req.GateGroup == HardGroupProxyBypass:
-		env.bypassPass = &gateGroupPass{originRequestID: req.ID}
-	case req.GateGroup == "":
-		env.stepPass = &gateStepPass{originRequestID: req.ID}
-	}
-}
-
-// recordStepPass P4-27 ⑧ 同步骤放行的逐次留痕:每次经放行直接执行的
-// 命令落一笔 step_pass 审批记录(带命令原文,与弹门流的审批卡同口径,
-// 可对账)。留痕失败不挡执行——放行依据是先前的面板批准,账本基础
-// 设施故障由 tool_call 侧的写入路径如实暴露。
-func (env *unitEnv) recordStepPass(pack *TaskPack, toolName string, input json.RawMessage) {
-	env.recordApproval(rings.ApprovalRecord{
-		StepID: pack.StepID, UnitID: env.UnitID, Type: rings.ApprovalRecStepPass,
-		ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
-		Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input,
-		DecidedBy: "creator",
-		Reason:    fmt.Sprintf("本步骤审批已批准一次(请求 %s),本命令直接放行", env.stepPass.originRequestID),
-	})
-}
-
-// recordGateGroupPass P4-17 单位级放行的逐次留痕:每次经放行直接执行的
-// 命令落一笔 group_pass 审批记录(带命令原文与命中规则,与弹门流的
-// 审批卡同口径,可对账)。留痕失败不挡执行——放行依据是先前的面板
-// 批准,账本基础设施故障由 tool_call 侧的写入路径如实暴露。
-func (env *unitEnv) recordGateGroupPass(pack *TaskPack, r HardRule, matched, toolName string, input json.RawMessage) {
-	env.recordApproval(rings.ApprovalRecord{
-		StepID: pack.StepID, UnitID: env.UnitID, Type: rings.ApprovalRecGroupPass,
-		ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
-		Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input,
-		Note: hardRuleGateNote(r, matched), DecidedBy: "creator",
-		Reason: fmt.Sprintf("代理旁路组已批准一次(请求 %s),本命令直接放行", env.bypassPass.originRequestID),
-	})
+	env.allowance = &gateAllowance{requestID: req.ID, toolName: req.ToolName, args: req.ToolArgs, policyRevision: req.PolicyRevision}
 }
 
 // fuseSegment 收拢当前执行段(弹门挂起):取消段 ctx,引擎以 aborted
@@ -1923,11 +1858,10 @@ func (env *unitEnv) fuseUnit() {
 	env.fuseSegment()
 }
 
-// denyGuard 拒绝线统一处置(P2-08e 起审批门回调与门卫边界共用):
-// 留痕(approval.record denied + DenyLine)→ 熔断单位。适用拒绝线:
-// RoE 工具边界、分级缺失/危害声明非法 fail-safe、危害类拒绝。
-// P4-63 B 起硬规则与意图拦截改走 denyHardAction/denyIntentAction——
-// 拒动作不杀单位,同规则累计 3 次升级杀。
+// denyGuard 拒绝线熔断(第四章 §3 v2 ②:非常严重——拒绝该条命令且
+// 终止单位;数据销毁/拒绝服务类、RoE 工具边界、分级缺失/危害声明非法
+// fail-safe、危害类拒绝)。P4-63 B 起硬规则与意图拦截改走 denyHardAction/
+// denyIntentAction——拒动作不杀单位(P5-03③:无连拒计数升级杀)。
 func (env *unitEnv) denyGuard(pack *TaskPack, toolName string, input json.RawMessage, denyLine, reason string) {
 	env.deniedReason = "审批拒绝终止: " + reason
 	env.recordApproval(rings.ApprovalRecord{
@@ -1938,68 +1872,21 @@ func (env *unitEnv) denyGuard(pack *TaskPack, toolName string, input json.RawMes
 	env.fuseUnit()
 }
 
-// bumpDenyHits 同单位生命周期内按规则累计确定性拒绝次数(P4-63 B⑤,
-// 键 hr:<硬规则ID> / ir:<意图规则ID>,累计不重置),返回累计值。
-func (env *unitEnv) bumpDenyHits(key string) int {
-	env.denyMu.Lock()
-	defer env.denyMu.Unlock()
-	if env.denyHits == nil {
-		env.denyHits = map[string]int{}
-	}
-	env.denyHits[key]++
-	return env.denyHits[key]
-}
-
 // denyHardAction P4-63 B:硬规则确定性拒绝——只拒本次动作(模型读到
-// 换路指引,单位存活自行换路),不熔断单位;同规则累计
-// HardDenyEscalateAfter 次升级杀单位(防硬撞/试探)。denyLine 取
-// hard_rule(命中拒绝)或 no_gate(无门 fail-safe,reason 由调用方给)。
-// 留痕走 approval.record denied(Reason 保持 hardRuleDenyReason 的可解析
-// 身份格式,升级说明并入同一笔尾注)。返回给模型的拒绝文案。
+// 换路指引,单位存活自行换路),不熔断单位(P5-03③:无连拒计数升级
+// 杀)。denyLine 取 hard_rule(命中拒绝)或 no_gate(无门 fail-safe,
+// reason 由调用方给)。留痕走 approval.record denied(Reason 保持
+// hardRuleDenyReason 的可解析身份格式)。返回给模型的拒绝文案。
 func (env *unitEnv) denyHardAction(pack *TaskPack, toolName string, input json.RawMessage, r HardRule, matched string, denyLine, reason string) string {
 	if reason == "" {
 		reason = hardRuleDenyReason(r, matched)
-	}
-	escalated := false
-	if n := env.bumpDenyHits("hr:" + r.ID); n >= HardDenyEscalateAfter {
-		escalated = true
-		reason += fmt.Sprintf(" · 同规则累计命中 %d 次,升级终止单位", n)
-		env.deniedReason = "审批拒绝终止: " + reason
-		env.fuseUnit()
 	}
 	env.recordApproval(rings.ApprovalRecord{
 		StepID: pack.StepID, UnitID: env.UnitID, Type: rings.ApprovalRecDenied,
 		ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass, DenyLine: denyLine,
 		Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input, Reason: reason,
 	})
-	text := hardRuleRejectText(r)
-	if escalated {
-		text += "(同规则累计命中已到上限,单位终止)"
-	}
-	return text
-}
-
-// denyIntentAction 任务级拦截拒绝(P2-08e 起只留痕不熔断;P4-63 B 加
-// 升级保险):只拒绝本次调用,单位继续其余工作;同规则累计
-// HardDenyEscalateAfter 次升级杀单位。规则变更的提前告知走舵杆定向
-// 投递。返回给模型的拒绝文案。
-func (env *unitEnv) denyIntentAction(pack *TaskPack, toolName string, input json.RawMessage, reason, ruleID string) string {
-	escalated := false
-	if n := env.bumpDenyHits("ir:" + ruleID); n >= HardDenyEscalateAfter {
-		escalated = true
-		reason += fmt.Sprintf(" · 同规则累计命中 %d 次,升级终止单位", n)
-		env.deniedReason = "审批拒绝终止: " + reason
-		env.fuseUnit()
-	}
-	env.recordApproval(rings.ApprovalRecord{
-		StepID: pack.StepID, UnitID: env.UnitID, Type: rings.ApprovalRecDenied,
-		ActionLevel: pack.ActionLevel, DenyLine: rings.DenyLineIntentRule,
-		Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input, Reason: reason,
-	})
-	if escalated {
-		return reason + ";同规则累计命中已到上限,单位终止"
-	}
-	return reason
+	return hardRuleRejectText(r)
 }
 
 // recordApproval 审批审计流入口(拒绝等不进弹门的判定也要留痕)。

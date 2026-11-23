@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -75,6 +76,13 @@ func (m *ckptMockLLM) handle(w http.ResponseWriter, r *http.Request) {
 			req.LastUser = msg.Content
 		}
 	}
+	for _, msg := range body.Messages {
+		if msg.Role == "system" && strings.Contains(msg.Content, "你负责判断任务中一次实际工具调用") {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": `{"decision":"allow","reason":"测试中的已授权动作"}`}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 40, "completion_tokens": 10}})
+			return
+		}
+	}
 	m.mu.Lock()
 	m.reqs = append(m.reqs, req)
 	m.mu.Unlock()
@@ -83,12 +91,13 @@ func (m *ckptMockLLM) handle(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case req.ToolsOffered == 0:
 		// 拆解会话:图上已有同标记意图则空产物,否则派一条只读意图。
-		if strings.Contains(string(raw), intentMarker) {
+		goal := regexp.MustCompile(`(?m)^\s*-\s+(\S+) \[active\] 确认靶标暴露面$`).FindStringSubmatch(req.LastUser)
+		if strings.Contains(string(raw), intentMarker) || goal == nil {
 			text = `{"new_intents":[]}`
 		} else {
 			asset := assetRe.FindString(string(raw))
-			text = fmt.Sprintf(`{"new_intents":[{"intent":"%s 对靶标域名做一次确认观察","action_level":"只读探测","covers":["%s"],"expected_observation":"域名解析可达"}]}`,
-				intentMarker, asset)
+			text = fmt.Sprintf(`{"new_intents":[{"goal_id":%q,"intent":"%s 对靶标域名做一次确认观察","action_level":"只读探测","covers":["%s"],"expected_observation":"域名解析可达"}]}`,
+				goal[1], intentMarker, asset)
 		}
 	case strings.Contains(req.LastUser, "断点 · 续跑"):
 		text = "步骤完成:断点前的观察已写回,本步骤意图达成。"
@@ -230,6 +239,26 @@ func TestCheckpointResumeE2E(t *testing.T) {
 		}
 	}
 	if !sawHistory || !sawResumeInput {
+		for _, req := range mock2.requests() {
+			if req.ToolsOffered > 0 {
+				t.Logf("resume request tools=%d last_user=%.180s", req.ToolsOffered, req.LastUser)
+			}
+		}
+		_ = gen2.cmd.Process.Kill()
+		_, _ = gen2.cmd.Process.Wait()
+		if store, err := rings.Open(dbPath); err == nil {
+			events, _ := store.Events(t.Context(), task, 0, 0)
+			for _, event := range events {
+				if event.Kind != rings.EventSwarmRecord {
+					continue
+				}
+				var rec rings.SwarmRecord
+				if json.Unmarshal(event.Payload, &rec) == nil && (rec.Type == rings.SwarmRecSessionStarted || rec.Type == rings.SwarmRecSessionEnd) {
+					t.Logf("session rev=%d step=%s unit=%s type=%s checkpoint=%t note=%s", event.Revision, rec.StepID, rec.UnitID, rec.Type, rec.Checkpointed, rec.Note)
+				}
+			}
+			store.Close()
+		}
 		t.Fatalf("原会话续证据不足: 历史=%v 续跑指令=%v", sawHistory, sawResumeInput)
 	}
 	if sawPackReinjected {

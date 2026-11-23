@@ -273,7 +273,7 @@ func (s *Store) TokenUsageRows(ctx context.Context, taskID string) ([]TokenUsage
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT task_id, agent, model, transcript_id, turn,
-		       input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, occurred_at
+		       input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, occurred_at, purpose, usage_missing
 		FROM token_usage WHERE task_id = ? ORDER BY seq`, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("rings: 查询任务 %s token 用量: %w", taskID, err)
@@ -284,7 +284,7 @@ func (s *Store) TokenUsageRows(ctx context.Context, taskID string) ([]TokenUsage
 		var r TokenUsage
 		var occurred string
 		if err := rows.Scan(&r.TaskID, &r.Agent, &r.Model, &r.TranscriptID, &r.Turn,
-			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &occurred); err != nil {
+			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &occurred, &r.Purpose, &r.UsageMissing); err != nil {
 			return nil, fmt.Errorf("rings: 扫描任务 %s token 用量: %w", taskID, err)
 		}
 		if r.OccurredAt, err = time.Parse(time.RFC3339Nano, occurred); err != nil {
@@ -301,7 +301,7 @@ func (s *Store) TokenUsageRows(ctx context.Context, taskID string) ([]TokenUsage
 func (s *Store) AllTokenUsageRows(ctx context.Context) ([]TokenUsage, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT task_id, agent, model, transcript_id, turn,
-		       input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, occurred_at
+		       input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, occurred_at, purpose, usage_missing
 		FROM token_usage ORDER BY occurred_at, seq`)
 	if err != nil {
 		return nil, fmt.Errorf("rings: 查询全量 token 用量: %w", err)
@@ -312,7 +312,7 @@ func (s *Store) AllTokenUsageRows(ctx context.Context) ([]TokenUsage, error) {
 		var r TokenUsage
 		var occurred string
 		if err := rows.Scan(&r.TaskID, &r.Agent, &r.Model, &r.TranscriptID, &r.Turn,
-			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &occurred); err != nil {
+			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &occurred, &r.Purpose, &r.UsageMissing); err != nil {
 			return nil, fmt.Errorf("rings: 扫描全量 token 用量: %w", err)
 		}
 		if r.OccurredAt, err = time.Parse(time.RFC3339Nano, occurred); err != nil {
@@ -422,12 +422,16 @@ func (s *Store) ExcludedAssets(ctx context.Context, taskID string) ([]ExcludedAs
 // 不设白名单、无黑名单——边界从宽起步,收紧靠记账事件;审批门槛归一为
 // 默认宽:仅增删改弹门)。
 func (s *Store) CurrentRoE(ctx context.Context, taskID string) (RoeState, error) {
+	return currentRoE(ctx, s.db, taskID)
+}
+
+func currentRoE(ctx context.Context, reader assetRelationReader, taskID string) (RoeState, error) {
 	if taskID == "" {
 		return RoeState{}, ErrEmptyTaskID
 	}
 	var r RoeState
 	var allowed, denied, maxLevel, threshold, rules, exAssets, scApproved, infoSrcs string
-	err := s.db.QueryRowContext(ctx, `
+	err := reader.QueryRowContext(ctx, `
 		SELECT allowed_tools, denied_tools, max_action_level, approval_threshold, intent_rules, excluded_assets, scope_approved, creator_notes, info_sources, note, updated_rev
 		FROM roe_state WHERE task_id = ?`, taskID,
 	).Scan(&allowed, &denied, &maxLevel, &threshold, &rules, &exAssets, &scApproved, &r.CreatorNotes, &infoSrcs, &r.Note, &r.UpdatedRev)
@@ -481,25 +485,20 @@ type EdgeView struct {
 	CreatedRev int64
 }
 
-// AssetNodeView 资产图节点:层级由 sub_of 边表达(R5);
-// Covered 表示是否有 Step─covers→该资产(覆盖查询"哪些资产还没测过");
-// FactCount/HypothesisCount 为挂在该资产上的事实数与假设数(about 边按来源类型计);
-// Source 为来源三态(seed/manual/discovered,Detail 归一,P4-05);
-// ScopeOut 为入图冻结的范围归属(P4-44:收割入图时对照种子闭包判定,
-// true=范围外;种子/手动与存量资产恒 false)。
+// AssetNodeView carries coverage, fact counts and scope from the asset projection.
 type AssetNodeView struct {
 	NodeView
-	Covered         bool
-	FactCount       int
-	HypothesisCount int
-	Source          string
-	ScopeOut        bool
+	Covered   bool
+	FactCount int
+	Source    string
+	ScopeOut  bool
 }
 
 // AssetGraphView 资产图最小投影:目标环境真值库的读模型。
 type AssetGraphView struct {
 	Assets    []AssetNodeView
-	Hierarchy []EdgeView // sub_of 层级边
+	Hierarchy []EdgeView          // sub_of 层级边
+	Relations []AssetRelationView // 明确观察到的非层级关联，与来源和父子边独立
 }
 
 // AssetGraph 资产图最小投影查询。多语句读在同一事务快照内完成,
@@ -515,6 +514,7 @@ func (s *Store) AssetGraph(ctx context.Context, taskID string) (*AssetGraphView,
 	defer tx.Rollback()
 
 	view := &AssetGraphView{}
+	var candidates []NodeFull
 	rows, err := tx.QueryContext(ctx, `
 		SELECT n.node_id, n.title, n.status, n.asset_class, n.detail, n.created_rev, n.updated_rev,
 		       EXISTS (
@@ -526,12 +526,6 @@ func (s *Store) AssetGraph(ctx context.Context, taskID string) (*AssetGraphView,
 		         JOIN nodes src ON src.task_id = e.task_id AND src.node_id = e.from_node
 		         WHERE e.task_id = n.task_id AND e.edge_type = 'about' AND e.to_node = n.node_id
 		           AND src.node_type = 'fact'
-		       ),
-		       (
-		         SELECT COUNT(*) FROM edges e
-		         JOIN nodes src ON src.task_id = e.task_id AND src.node_id = e.from_node
-		         WHERE e.task_id = n.task_id AND e.edge_type = 'about' AND e.to_node = n.node_id
-		           AND src.node_type = 'hypothesis'
 		       )
 		FROM nodes n
 		WHERE n.task_id = ? AND n.node_type = 'asset' AND n.status != 'retired'
@@ -543,25 +537,51 @@ func (s *Store) AssetGraph(ctx context.Context, taskID string) (*AssetGraphView,
 	for rows.Next() {
 		var a AssetNodeView
 		var class, detail string
-		var covered, factCount, hypCount int
+		var covered, factCount int
 		if err := rows.Scan(&a.ID, &a.Title, &a.Status, &class, &detail, &a.CreatedRev, &a.UpdatedRev,
-			&covered, &factCount, &hypCount); err != nil {
+			&covered, &factCount); err != nil {
 			return nil, fmt.Errorf("rings: 扫描任务 %s 资产: %w", taskID, err)
 		}
 		a.Type = NodeAsset
 		a.AssetClass = AssetClass(class)
 		a.Covered = covered != 0
 		a.FactCount = factCount
-		a.HypothesisCount = hypCount
 		a.Source = detailSource(detail)
 		a.ScopeOut = detailScopeOut(detail)
+		var fields map[string]any
+		if err := json.Unmarshal([]byte(detail), &fields); err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, NodeFull{NodeView: a.NodeView, Detail: fields})
 		view.Assets = append(view.Assets, a)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("rings: 遍历任务 %s 资产: %w", taskID, err)
 	}
 
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	roe, err := currentRoE(ctx, tx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	members := InventoryAssetIDs(candidates, roe)
+	kept := view.Assets[:0]
+	for _, a := range view.Assets {
+		if members[a.ID] {
+			a.AssetClass = DisplayAssetClass(a.AssetClass)
+			kept = append(kept, a)
+		}
+	}
+	view.Assets = kept
+
 	view.Hierarchy, err = queryEdges(ctx, tx, taskID, `edge_type = 'sub_of'`)
+	if err != nil {
+		return nil, err
+	}
+	view.Hierarchy = AssetDisplayHierarchy(candidates, view.Hierarchy, members)
+	view.Relations, err = queryAssetRelations(ctx, tx, taskID, view.Assets)
 	if err != nil {
 		return nil, err
 	}
@@ -600,36 +620,23 @@ func detailScopeOut(detail string) bool {
 
 // EdgeGoal 派生边类型(P2-09 统一图投影的投影层补边,不入账本):
 // Goal → Step。Step 归属目标只存于 step.detail.goal_id(主宰派发时的
-// 自由细节,无类型化边),进度图"Goal 为根向右生长"的血缘依赖这层投影
+// 自由细节,无类型化边),任务投影"Goal 为根向右生长"的血缘依赖这层投影
 // 补齐;edgeRules 不含它——它永远不出现在账本事件里,只存在于图投影。
 const EdgeGoal EdgeType = "goal"
 
-// EdgeFalsify 派生边类型(P2-11 年轮图补,同 EdgeGoal 机制不入账本):
-// Step → TestClaim。反证轮绑定只存于 step.detail.testclaim_id(P2-02
-// 反证 Step 是独立 Step,无类型化边),全图视图的"反证轮血缘"依赖这层
-// 投影补齐。语义 = 该步骤对本声明做了反证(结果在仲裁事件,边不表态);
-// 设计示意标签「反驳」无对应账本边,按真实语义呈现为反证。
-const EdgeFalsify EdgeType = "falsify"
-
-// GraphNode 统一图投影节点(P2-09):六类节点全量。Covered/FactCount/
-// HypothesisCount 仅对 asset 节点有值(派生计数,与 AssetGraph 同源:
-// Covered=有 covers 边入;两计数=about 边按来源节点类型),非资产为零值;
-// Source 同理仅资产有值(来源三态,P4-05);Birth* 为发现型资产的出生
-// 血缘(P4-12:收割入图时冻结进 detail,此处只透传——出生步骤/单位/
-// 发现事实,非发现资产为零值)。
+// GraphNode adds asset coverage and birth provenance to the shared node view.
 type GraphNode struct {
 	NodeView
-	Covered         bool
-	FactCount       int
-	HypothesisCount int
-	Source          string
-	BirthStep       string
-	BirthUnit       string
-	BirthFact       string
+	Covered   bool
+	FactCount int
+	Source    string
+	BirthStep string
+	BirthUnit string
+	BirthFact string
 }
 
-// GraphView 统一图投影(P2-09,8.7 三视图共用):资产树 / 进度图 / 年轮图
-// 三种视图共用的"账本 → 图数据"唯一定义——全部六类节点 + 全部类型化边
+// GraphView 统一图投影(P2-09,8.7 三视图共用):资产树 / 任务投影 / 全景图
+// 三种视图共用的"账本 → 图数据"唯一定义——全部五类节点 + 全部类型化边
 // + Goal→Step 派生边。视图差异全部由消费侧投影,投影层不再各查各的。
 type GraphView struct {
 	Nodes []GraphNode
@@ -677,12 +684,8 @@ func (s *Store) Graph(ctx context.Context, taskID string) (*GraphView, error) {
 		return nil, err
 	}
 
-	// 资产派生计数(AssetGraph 同源语义):covers 边入=已覆盖;about 边
-	// 按来源节点类型分计事实/假设。一遍边扫建索引再回填节点(O(N+E),
-	// P4-58:原资产×边双重循环在大图上平方级,结果不变)。
 	coverIn := make(map[string]bool, 64)
 	factIn := make(map[string]int, 64)
-	hypIn := make(map[string]int, 64)
 	for _, e := range view.Edges {
 		switch e.Type {
 		case EdgeCovers:
@@ -691,8 +694,6 @@ func (s *Store) Graph(ctx context.Context, taskID string) (*GraphView, error) {
 			switch nodeType[e.From] {
 			case NodeFact:
 				factIn[e.To]++
-			case NodeHypothesis:
-				hypIn[e.To]++
 			}
 		}
 	}
@@ -702,7 +703,6 @@ func (s *Store) Graph(ctx context.Context, taskID string) (*GraphView, error) {
 		}
 		view.Nodes[i].Covered = coverIn[view.Nodes[i].ID]
 		view.Nodes[i].FactCount = factIn[view.Nodes[i].ID]
-		view.Nodes[i].HypothesisCount = hypIn[view.Nodes[i].ID]
 	}
 
 	// 资产来源三态(P4-05):读 asset.detail 的 source(归一,缺省种子)。
@@ -716,6 +716,7 @@ func (s *Store) Graph(ctx context.Context, taskID string) (*GraphView, error) {
 	}
 	defer arows.Close()
 	assetSource := make(map[string]string, 32)
+	assetDetails := map[string]map[string]any{}
 	type assetBirth struct{ step, unit, fact string }
 	assetBirthOf := make(map[string]assetBirth, 32)
 	for arows.Next() {
@@ -724,6 +725,11 @@ func (s *Store) Graph(ctx context.Context, taskID string) (*GraphView, error) {
 			return nil, fmt.Errorf("rings: 扫描任务 %s 资产来源: %w", taskID, err)
 		}
 		assetSource[id] = detailSource(detail)
+		var fields map[string]any
+		if err := json.Unmarshal([]byte(detail), &fields); err != nil {
+			return nil, err
+		}
+		assetDetails[id] = fields
 		var d struct {
 			StepID        string `json:"step_id"`
 			UnitID        string `json:"unit_id"`
@@ -746,6 +752,41 @@ func (s *Store) Graph(ctx context.Context, taskID string) (*GraphView, error) {
 		}
 	}
 
+	if err := arows.Close(); err != nil {
+		return nil, err
+	}
+	roe, err := currentRoE(ctx, tx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	candidates := []NodeFull{}
+	for _, n := range view.Nodes {
+		if n.Type == NodeAsset {
+			candidates = append(candidates, NodeFull{NodeView: n.NodeView, Detail: assetDetails[n.ID]})
+		}
+	}
+	members := InventoryAssetIDs(candidates, roe)
+	keptNodes := view.Nodes[:0]
+	removedAssets := map[string]bool{}
+	for _, n := range view.Nodes {
+		if n.Type == NodeAsset {
+			if !members[n.ID] {
+				removedAssets[n.ID] = true
+				continue
+			}
+			n.AssetClass = DisplayAssetClass(n.AssetClass)
+		}
+		keptNodes = append(keptNodes, n)
+	}
+	view.Nodes = keptNodes
+	keptEdges := view.Edges[:0]
+	for _, e := range view.Edges {
+		if !removedAssets[e.From] && !removedAssets[e.To] {
+			keptEdges = append(keptEdges, e)
+		}
+	}
+	view.Edges = keptEdges
+
 	// Goal→Step 派生边:读 step.detail.goal_id(只查步骤节点,大 detail
 	// 的证据类节点不出投影)。同一次扫描兼收 testclaim_id(P2-11 反证轮
 	// 派生边)。
@@ -757,24 +798,19 @@ func (s *Store) Graph(ctx context.Context, taskID string) (*GraphView, error) {
 	}
 	defer srows.Close()
 	stepGoal := make(map[string]string, 16)
-	stepClaim := make(map[string]string, 16)
 	for srows.Next() {
 		var id, detail string
 		if err := srows.Scan(&id, &detail); err != nil {
 			return nil, fmt.Errorf("rings: 扫描任务 %s 步骤归属: %w", taskID, err)
 		}
 		var d struct {
-			GoalID      string `json:"goal_id"`
-			TestClaimID string `json:"testclaim_id"`
+			GoalID string `json:"goal_id"`
 		}
 		if json.Unmarshal([]byte(detail), &d) != nil {
 			continue
 		}
 		if d.GoalID != "" && nodeType[d.GoalID] == NodeGoal {
 			stepGoal[id] = d.GoalID
-		}
-		if d.TestClaimID != "" && nodeType[d.TestClaimID] == NodeTestClaim {
-			stepClaim[id] = d.TestClaimID
 		}
 	}
 	if err := srows.Err(); err != nil {
@@ -783,52 +819,9 @@ func (s *Store) Graph(ctx context.Context, taskID string) (*GraphView, error) {
 	for stepID, goalID := range stepGoal {
 		view.Edges = append(view.Edges, EdgeView{Type: EdgeGoal, From: goalID, To: stepID})
 	}
-	for stepID, claimID := range stepClaim {
-		view.Edges = append(view.Edges, EdgeView{Type: EdgeFalsify, From: stepID, To: claimID})
-	}
-	return view, nil
-}
-
-// ProgressGraphView 进度图最小投影:意图→事实→漏洞的血缘链读模型。
-// 全局一张,每任务只是子图查询(视图隔离、数据统一)。
-type ProgressGraphView struct {
-	Goals      []NodeView
-	Steps      []NodeView
-	Facts      []NodeView
-	TestClaims []NodeView
-	Lineage    []EdgeView // produces(Step→Fact)+ derived_from(TestClaim→Step|Fact)
-}
-
-// ProgressGraph 进度图最小投影(P1-04 原独立查询,P2-09 起改为 Graph
-// 统一图投影之上的兼容视图:图数据唯一定义在 Graph,此处仅按测试与
-// 收割侧消费的 分组+血缘 形状重组,不再自查)。
-func (s *Store) ProgressGraph(ctx context.Context, taskID string) (*ProgressGraphView, error) {
-	g, err := s.Graph(ctx, taskID)
-	if err != nil {
-		return nil, err
-	}
-	view := &ProgressGraphView{}
-	for _, n := range g.Nodes {
-		var dst *[]NodeView
-		switch n.Type {
-		case NodeGoal:
-			dst = &view.Goals
-		case NodeStep:
-			dst = &view.Steps
-		case NodeFact:
-			dst = &view.Facts
-		case NodeTestClaim:
-			dst = &view.TestClaims
-		default:
-			continue
-		}
-		*dst = append(*dst, n.NodeView)
-	}
-	for _, e := range g.Edges {
-		if e.Type == EdgeProduces || e.Type == EdgeDerivedFrom {
-			view.Lineage = append(view.Lineage, e)
-		}
-	}
+	// (旧 EdgeFalsify 反证派生边已随反证流程退役删除,P5-03③——新账本
+	// 零反证步骤,图投影不再补该血缘;交卷步骤与声明的关联由 claim_cases
+	// 投影承载。)
 	return view, nil
 }
 
@@ -933,7 +926,8 @@ func (s *Store) NodesByType(ctx context.Context, taskID string, nt NodeType, sta
 	return out, rows.Err()
 }
 
-// PanoramaLive 在途全景实时取数(P4-58):只取在跑/排队步骤(nodes
+// PanoramaLive 在途全景实时取数(P4-58;P5-05 扩挂等让位停等态):
+// 取在跑/排队/停等步骤(nodes
 // 投影直查,含 detail 供领取次序排序)与其 covers 资产标题、depends_on
 // 前置状态——四结构与 panoramaRows 装配入参同形(历史快照回放器的
 // 实时对照面),读侧零全图重建、零事件流扫描。前置步骤以状态桩入
@@ -960,7 +954,8 @@ func (s *Store) PanoramaFlight(ctx context.Context, taskID string) (*PanoramaLiv
 		SELECT node_id, title, status, asset_class, detail, created_rev, updated_rev,
 		  added_at, confirmed_at, confirmed_rev
 		FROM nodes
-		WHERE task_id = ? AND node_type = 'step' AND status IN ('running', 'dispatched')
+		WHERE task_id = ? AND node_type = 'step' AND status IN
+		  ('running', 'dispatched', 'scope_wait', 'gate_wait', 'pause_wait', 'model_wait')
 		ORDER BY created_rev, node_id`, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("rings: 查询任务 %s 在途步骤: %w", taskID, err)
@@ -1089,28 +1084,30 @@ func (s *Store) PanoramaFlight(ctx context.Context, taskID string) (*PanoramaLiv
 	return out, nil
 }
 
-// UnreadConfirms 已读线之后的"新确认"计数(P4-47 A 未读红点):成果
-// (testclaim 状态 confirmed/fixed,与发现页签成果视图同口径)与事实
-// (fact 状态 confirmed,与事实页签同口径;P4-56 起假设成立显示层迁入
-// 事实页,已成立假设同计入事实未读——与页签展示口径一致)分开计数;
-// 判定时刻取 nodes 投影的确认时刻列(confirmed_at,转 confirmed 的写侧
-// 同事务维护;历史空值回退入账时刻 added_at,与事实列表呈现同口径),
-// 在 Go 侧解析比较——RFC3339Nano 变长小数位的字符串序不保时序,不进
-// SQL 比较。since 零值(从未看过)= 全部已确认计为未读。
-func (s *Store) UnreadConfirms(ctx context.Context, taskID string, claimsSince, factsSince time.Time) (claims, facts int, err error) {
+// UnreadFindings 三页签"新落页"计数(P5-08 两层未读·页面级数字):意图
+// (step 且 detail.kind≠retake,与意图台账同滤;提出时刻=added_at)、漏洞
+// (testclaim 状态 confirmed/fixed,确认时刻——被推翻/已废弃不上页;证据
+// 不足非"新确认"不计数,其落页由条目级红点单独提醒)与事实(fact 状态
+// confirmed,与事实页同口径)分线独立计数;判定时刻取 nodes 投影的确认
+// 时刻列(confirmed_at,转 confirmed 的写侧同事务维护;历史空值回退入账
+// 时刻 added_at,与列表呈现同口径),在 Go 侧解析比较——RFC3339Nano
+// 变长小数位的字符串序不保时序,不进 SQL 比较。since 零值(从未看过)
+// = 全部在页条目计为未读。
+func (s *Store) UnreadFindings(ctx context.Context, taskID string, intentsSince, claimsSince, factsSince time.Time) (intents, claims, facts int, err error) {
 	if taskID == "" {
-		return 0, 0, ErrEmptyTaskID
+		return 0, 0, 0, ErrEmptyTaskID
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT node_type, confirmed_at, added_at FROM nodes
+		SELECT node_type, confirmed_at, added_at, detail FROM nodes
 		WHERE task_id = ?
-		  AND ((node_type = ? AND status IN (?, ?))
-		    OR (node_type = ? AND status = ?)
+		  AND ((node_type = ?)
+		    OR (node_type = ? AND status IN (?, ?))
 		    OR (node_type = ? AND status = ?))`,
-		taskID, string(NodeTestClaim), TestClaimConfirmed, TestClaimFixed,
-		string(NodeFact), "confirmed", string(NodeHypothesis), HypothesisConfirmed)
+		taskID, string(NodeStep),
+		string(NodeTestClaim), TestClaimConfirmed, TestClaimFixed,
+		string(NodeFact), "confirmed")
 	if err != nil {
-		return 0, 0, fmt.Errorf("rings: 查询任务 %s 已确认节点: %w", taskID, err)
+		return 0, 0, 0, fmt.Errorf("rings: 查询任务 %s 台账节点: %w", taskID, err)
 	}
 	defer rows.Close()
 	confirmedAt := func(confirmed, added string) time.Time {
@@ -1120,24 +1117,51 @@ func (s *Store) UnreadConfirms(ctx context.Context, taskID string, claimsSince, 
 		return parseTimeCol(added)
 	}
 	for rows.Next() {
-		var nt, confirmed, added string
-		if err := rows.Scan(&nt, &confirmed, &added); err != nil {
-			return 0, 0, fmt.Errorf("rings: 扫描任务 %s 已确认节点: %w", taskID, err)
+		var nt, confirmed, added, detail string
+		if err := rows.Scan(&nt, &confirmed, &added, &detail); err != nil {
+			return 0, 0, 0, fmt.Errorf("rings: 扫描任务 %s 台账节点: %w", taskID, err)
 		}
-		at := confirmedAt(confirmed, added)
-		if NodeType(nt) == NodeTestClaim {
-			if at.After(claimsSince) {
+		switch NodeType(nt) {
+		case NodeStep:
+			var d struct {
+				Kind string `json:"kind"`
+			}
+			_ = json.Unmarshal([]byte(detail), &d)
+			if d.Kind == "retake" {
+				continue // 补考/重验步骤非主宰意图,不入台账(与意图页签同滤)
+			}
+			if parseTimeCol(added).After(intentsSince) {
+				intents++
+			}
+		case NodeTestClaim:
+			if confirmedAt(confirmed, added).After(claimsSince) {
 				claims++
 			}
-		} else if at.After(factsSince) {
-			facts++
+		default:
+			if confirmedAt(confirmed, added).After(factsSince) {
+				facts++
+			}
 		}
 	}
-	return claims, facts, rows.Err()
+	return intents, claims, facts, rows.Err()
 }
 
-// SteerKilledSteps 任务内收到舵杆 kill_work 送达回执的步骤集合(P4-56
-// 发现区四页签:锤炼页"等待主宰判定去留"悬停的判定面,与
+// LatestSteerRecord reads the latest durable state of one instruction.
+func (s *Store) LatestSteerRecord(ctx context.Context, taskID, steerID string) (SteerRecord, error) {
+	var raw []byte
+	err := s.db.QueryRowContext(ctx, `SELECT payload FROM events WHERE task_id=? AND kind='steer.record' AND json_extract(payload,'$.steer_id')=? ORDER BY revision DESC LIMIT 1`, taskID, steerID).Scan(&raw)
+	var rec SteerRecord
+	if err != nil {
+		return rec, err
+	}
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return rec, err
+	}
+	return rec, nil
+}
+
+// SteerKilledSteps 任务内收到舵杆 kill_work 送达回执的步骤集合
+// (步骤行"等待主宰判定去留"悬停的判定面,与
 // arbiter.operatorKilled 同口径——cancelled 状态由调用方按步骤现值另判)。
 // 经 v13 (task_id, kind) 索引按 kind 定向直查,不触碰其余事件(P4-36
 // 列表禁全量扫描纪律);读失败如实返回空集合(显示退粗词,不误标)。

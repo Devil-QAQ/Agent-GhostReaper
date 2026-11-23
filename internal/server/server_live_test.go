@@ -259,7 +259,9 @@ func TestLiveRoeDirty(t *testing.T) {
 		Kind: rings.EventRoeUpdated, Actor: "creator",
 		Payload: rings.RoeUpdated{ExcludedAssets: []string{"a-1"}},
 	})
-	c.expectMsg(2*time.Second, map[string]any{"t": "dirty", "k": "tasks"})
+	// P5-09 起骨架主题 pview(资产摘除进骨架)同批照发,主题顺序不
+	// 保证——收齐 tasks 即可。
+	c.drainUntil(2*time.Second, func(m map[string]any) bool { return m["k"] == "tasks" })
 }
 
 func TestLiveApprovalPayload(t *testing.T) {
@@ -347,13 +349,14 @@ func TestLiveClaimsTopic(t *testing.T) {
 	})
 	c.drainUntil(2*time.Second, func(m map[string]any) bool { return m["k"] == "tasks" })
 
-	// 发现节点:claims + tasks 两主题都到(顺序不保证,收齐为准)。
+	// 发现节点:claims + tasks 两主题都到(顺序不保证,收齐为准;
+	// P5-09 起骨架主题 pview 同批照发,一并收齐不断言缺席)。
 	commitEvents(t, srv, "t-cl", rings.Event{
 		Kind: rings.EventNodeAdded, Actor: "u-1",
 		Payload: rings.NodeAdded{NodeID: "tc-1", NodeType: rings.NodeTestClaim, Title: "存在未鉴权接口", Status: "candidate"},
 	})
 	got := map[string]bool{}
-	for len(got) < 2 {
+	for !got["claims:t-cl"] || !got["tasks"] {
 		c.drainUntil(2*time.Second, func(m map[string]any) bool {
 			k, _ := m["k"].(string)
 			if k == "" || got[k] {

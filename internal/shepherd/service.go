@@ -19,7 +19,6 @@ import (
 	"github.com/Autumn-27/norma/skill"
 	"github.com/Autumn-27/norma/transcript"
 
-	"ghostreaper/internal/failover"
 	"ghostreaper/internal/hiber"
 	"ghostreaper/internal/overmind"
 	"ghostreaper/internal/rings"
@@ -96,6 +95,12 @@ type Service struct {
 	// 照常)。
 	Skills *skill.Registry
 
+	// Blobs 虫群 blob 存储(P5-04 牧者配发流量查询三件:原始报文按
+	// 引用惰性读)。与虫群执行器同一物理目录(root/blobs,内容寻址,
+	// 各自实例安全)。nil = 无原文可读(traffic_get/traffic_blob 如实
+	// 答查无原文)。
+	Blobs *swarm.BlobStore
+
 	// TurnLimit 单条消息的模型轮上限(工具循环轮数);零值 8。
 	TurnLimit int
 	// TurnSeconds 单条消息的墙钟上限;零值 240。
@@ -162,21 +167,6 @@ func (s *Service) helm() *swarm.Helm {
 		return s.HelmOf()
 	}
 	return nil
-}
-
-// resolveScopeWakes 范围对账收口(P4-69 ①:摘除资产后即时收口挂等
-// 冻结单位与未决卡——与 server 同款语义,三通道同源):在跑主宰循环
-// 直达(唤醒单位即时拉起);循环不在跑(终态/未装配)时用裸循环执行
-// 对账本体(纯账本驱动,落账照常)。
-func (s *Service) resolveScopeWakes(taskID string) (woken, terminated int) {
-	var l *overmind.Loop
-	if s.Loops != nil {
-		l = s.Loops.Get(taskID)
-	}
-	if l == nil {
-		l = &overmind.Loop{TaskID: taskID, Store: s.Store}
-	}
-	return l.ResolveScopeWaits(context.Background())
 }
 
 // ErrNoProvider 未配模型时入队的应答失败原因。
@@ -481,7 +471,7 @@ func (s *Service) answer(ctx context.Context, taskID string, msg *convMessage, t
 		}
 	}
 	opts := agentcore.Options{
-		Provider:     s.Provider,
+		Provider:     swarm.MeterProvider(s.Provider, s.Store, rings.TokenUsage{TaskID: taskID, Agent: ActorShepherd, Model: s.Model, TranscriptID: sid}),
 		SystemPrompt: shepherdSystemSegments(ctx, s.Store),
 		Tools:        s.toolset(taskID, msg.id),
 		// 文风 skill 按需层(P3-11):非 nil 时 SDK 自动追加 Skill 工具,
@@ -506,13 +496,15 @@ func (s *Service) answer(ctx context.Context, taskID string, msg *convMessage, t
 	if w := s.window(); w > 0 {
 		// MaxOutputTokens 同步会话输出上限:压缩预留 min(输出上限,20000),
 		// 不设则默认预留 20000——小窗口配置会被预留吃穿(实测发现)。
-		opts.Compaction = &compaction.Config{ContextWindow: w, MaxOutputTokens: s.maxTokens()}
+		opts.Compactor = compaction.New(compaction.Config{ContextWindow: w, MaxOutputTokens: s.maxTokens()},
+			compaction.ProviderSummarizer(swarm.MeterProvider(s.Provider, s.Store, rings.TokenUsage{
+				TaskID: taskID, Agent: ActorShepherd, Model: s.Model, TranscriptID: sid, Purpose: "compaction",
+			}), s.maxTokens(), false))
 	}
 	sess := agentcore.NewSession(opts)
 	defer sess.Close()
 	// 原会话续:转录存在则恢复上下文(消息间隔不重置对话);缺失即
-	// 全新会话(首条消息)。会话续不重复计历史 token(UsageTracker 段
-	// 内增量,KindUsage 每次运行从零起算)。
+	// 全新会话(首条消息)。只在新请求实际返回时记账,恢复历史不重复计量。
 	if tstore != nil {
 		if _, err := os.Stat(tstore.MainPath(sid)); err == nil {
 			if err := sess.Resume(sid); err != nil {
@@ -522,23 +514,27 @@ func (s *Service) answer(ctx context.Context, taskID string, msg *convMessage, t
 		}
 	}
 
-	usage := &swarm.UsageTracker{
-		Store: s.Store, TaskID: taskID, Agent: ActorShepherd,
-		Model: s.Model, ModelOf: failover.ModelNow(s.Provider, taskID, sid), Transcript: sid,
-	}
-	appendRec := func(p rings.ShepherdRecord) {
+	appendRec := func(p rings.ShepherdRecord) error {
 		p.ClaimID, p.Round = msg.claimID, msg.round
-		_, _ = s.Store.Append(context.Background(), taskID, rings.Event{
+		_, err := s.Store.Append(context.Background(), taskID, rings.Event{
 			Kind: rings.EventShepherdRecord, Actor: ActorShepherd, Payload: p,
 		})
+		return err
 	}
 
 	toolNames := map[string]string{}
 	toolArgs := map[string]json.RawMessage{}
 	delivered := false
-	var think strings.Builder
+	think := rings.NewThinkingWriter(func(delta string, done bool) error {
+		state := ""
+		if done {
+			state = "finished"
+		}
+		return appendRec(rings.ShepherdRecord{MessageID: msg.id, Type: rings.ShepherdRecThinking, Text: delta, State: state})
+	})
+	defer func() { _ = think.Finish() }()
 	replyText := ""
-	for ev, err := range sess.Prompt(ctx, text) {
+	for ev, err := range sess.Prompt(ctx, swarm.HumanReplyPrompt(text)) {
 		if err != nil {
 			fail("应答中断: " + clipHead(err.Error(), 300))
 			return
@@ -550,11 +546,13 @@ func (s *Service) answer(ctx context.Context, taskID string, msg *convMessage, t
 				State: rings.ShepherdMsgDelivered,
 			})
 		}
-		switch ev.Kind {
-		case harness.KindUsage:
-			if ev.Usage != nil {
-				_ = usage.OnUsage(*ev.Usage)
+		if ev.Kind == harness.KindText || ev.Kind == harness.KindToolUse || ev.Kind == harness.KindResult {
+			if err := think.Finish(); err != nil {
+				fail("思考记录失败")
+				return
 			}
+		}
+		switch ev.Kind {
 		case harness.KindToolUse:
 			if ev.ToolUse != nil {
 				toolNames[ev.ToolUse.ID] = ev.ToolUse.Name
@@ -574,7 +572,10 @@ func (s *Service) answer(ctx context.Context, taskID string, msg *convMessage, t
 			})
 		case harness.KindThinking:
 			if ev.Text != "" {
-				think.WriteString(ev.Text)
+				if err := think.Write(ev.Text); err != nil {
+					fail("思考记录失败")
+					return
+				}
 			}
 		case harness.KindResult:
 			if ev.Terminal != nil {
@@ -586,10 +587,9 @@ func (s *Service) answer(ctx context.Context, taskID string, msg *convMessage, t
 			}
 		}
 	}
-	if t := strings.TrimSpace(think.String()); t != "" {
-		appendRec(rings.ShepherdRecord{
-			MessageID: msg.id, Type: rings.ShepherdRecThinking, Text: clipHead(t, 1200),
-		})
+	if err := think.Finish(); err != nil {
+		fail("思考记录失败")
+		return
 	}
 	if replyText == "" {
 		fail("回复为空(模型未产出正文;可重发或换模型)")
@@ -614,17 +614,18 @@ type ToolCallView struct {
 // MessageView 一条问答(user_message 及其锚定的状态/工具/思考/回复/建议;
 // System=true 为系统收尾提示,正文非造物主发言)。
 type MessageView struct {
-	ID        string         `json:"id"`
-	Text      string         `json:"text"`
-	System    bool           `json:"system,omitempty"`
-	State     string         `json:"state"` // queued|delivered|failed
-	Note      string         `json:"note,omitempty"`
-	Thinking  string         `json:"thinking,omitempty"`
-	ToolCalls []ToolCallView `json:"tool_calls,omitempty"`
-	Advices   []AdviceView   `json:"advices,omitempty"` // 本条消息内提交的建议(内联呈现)
-	Reply     string         `json:"reply,omitempty"`
-	At        string         `json:"at"`
-	ReplyAt   string         `json:"reply_at,omitempty"`
+	ID             string         `json:"id"`
+	Text           string         `json:"text"`
+	System         bool           `json:"system,omitempty"`
+	State          string         `json:"state"` // queued|delivered|failed
+	Note           string         `json:"note,omitempty"`
+	Thinking       string         `json:"thinking,omitempty"`
+	ThinkingActive bool           `json:"thinking_active,omitempty"`
+	ToolCalls      []ToolCallView `json:"tool_calls,omitempty"`
+	Advices        []AdviceView   `json:"advices,omitempty"` // 本条消息内提交的建议(内联呈现)
+	Reply          string         `json:"reply,omitempty"`
+	At             string         `json:"at"`
+	ReplyAt        string         `json:"reply_at,omitempty"`
 }
 
 // AdviceView 一条对主宰的建议(纳谏轨迹)。
@@ -844,7 +845,8 @@ func (s *Service) viewOf(ctx context.Context, taskID string, match func(rings.Sh
 			}
 		case rings.ShepherdRecThinking:
 			if i, ok := msgIdx[rec.MessageID]; ok {
-				v.Messages[i].Thinking = rec.Text
+				v.Messages[i].Thinking += rec.Text
+				v.Messages[i].ThinkingActive = rec.State != "finished" && rec.Text != ""
 			}
 		case rings.ShepherdRecToolCall:
 			if i, ok := msgIdx[rec.MessageID]; ok {

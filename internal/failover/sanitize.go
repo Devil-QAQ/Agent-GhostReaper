@@ -2,6 +2,8 @@ package failover
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"strings"
 
 	"ghostreaper/internal/runlog"
@@ -104,15 +106,55 @@ func flattenBlocksText(blocks []llm.ContentBlock) string {
 	return s
 }
 
-// sanitizeReq 请求出站清洗入口:发生清洗时落一条运行日志(422 形态
-// 出站前拦截,诊断可见)。
-func sanitizeReq(ctx context.Context, req llm.CompletionRequest) llm.CompletionRequest {
+// sanitizeReq repairs every outgoing view, while logging only newly observed
+// malformed entries as warnings. Original transcript messages stay unchanged.
+func (c *Chain) sanitizeReq(ctx context.Context, req llm.CompletionRequest) llm.CompletionRequest {
 	msgs, dropped, patched := sanitizeMessages(req.Messages)
 	if dropped == 0 && patched == 0 {
 		return req
 	}
-	runlog.Warnf("出站消息清洗: 任务 %s 剔除 %d 条空消息、补 %d 个空工具结果(422 坏消息根治)",
-		TaskFromContext(ctx), dropped, patched)
+	newDrop, newPatch := c.newSanitizeEntries(ctx, req.Messages)
+	if newDrop > 0 || newPatch > 0 {
+		runlog.Warnf("出站消息清洗: 任务 %s 新发现 %d 条空消息、%d 个空工具结果；当前请求剔除 %d 条、补位 %d 个", TaskFromContext(ctx), newDrop, newPatch, dropped, patched)
+	}
+	if dropped > newDrop || patched > newPatch {
+		runlog.Debugf("出站消息清洗复用: 任务 %s 处理历史空消息 %d 条、历史空工具结果 %d 个，不计新故障", TaskFromContext(ctx), dropped-newDrop, patched-newPatch)
+	}
 	req.Messages = msgs
 	return req
+}
+
+func (c *Chain) newSanitizeEntries(ctx context.Context, msgs []llm.Message) (dropped, patched int) {
+	task, session := TaskFromContext(ctx), sessionKeyOf(ctx)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sanitizeSeen == nil {
+		c.sanitizeSeen = map[[32]byte]bool{}
+	}
+	mark := func(identity string) bool {
+		// Without attribution, do not merge unrelated callers' diagnostics.
+		if task == "" && session == "" {
+			return true
+		}
+		key := sha256.Sum256([]byte(task + "\x00" + session + "\x00" + identity))
+		if c.sanitizeSeen[key] {
+			return false
+		}
+		if len(c.sanitizeSeen) >= 4096 {
+			clear(c.sanitizeSeen)
+		}
+		c.sanitizeSeen[key] = true
+		return true
+	}
+	for i, m := range msgs {
+		if !messageUsable(m) && mark(fmt.Sprintf("empty:%s:%d", m.Role, i)) {
+			dropped++
+		}
+		for _, b := range m.Content {
+			if b.Type == llm.BlockToolResult && strings.TrimSpace(flattenBlocksText(b.Content)) == "" && mark("tool:"+b.ToolUseID) {
+				patched++
+			}
+		}
+	}
+	return
 }

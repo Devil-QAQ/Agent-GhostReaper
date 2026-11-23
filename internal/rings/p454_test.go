@@ -172,7 +172,7 @@ func TestP454SuspendRecordValidationAndProjection(t *testing.T) {
 	// 合法挂起:投影 pending_reason + 时间线。
 	if _, err := s.Append(ctx, task,
 		Event{Kind: EventNodeStateChanged, Actor: "shepherd",
-			Payload: NodeStateChanged{NodeID: "tc1", Status: TestClaimPending, Note: "方向被收窄"}},
+			Payload: NodeStateChanged{NodeID: "tc1", Status: "pending", Note: "方向被收窄"}},
 		Event{Kind: EventTestClaimRecord, Actor: "shepherd",
 			Payload: TestClaimRecord{ClaimID: "tc1", Type: TestClaimRecSuspend, Reason: "方向被收窄"}},
 	); err != nil {

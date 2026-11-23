@@ -3,18 +3,10 @@ package report
 import "strings"
 
 // 确定性知识库(第五章 §6 + Q10 初始条目,P2-10 落地):修复建议按
-// vulnclass 查预置模板,事实成果类按陈述关键词分类——零 LLM、纯查表
+// vulnclass 查预置模板——零 LLM、纯查表
 // (R17 同源纪律),面板详情抽屉与报告导出共用本文件,同进同出。
 // 未命中的输入不编造:修复建议返回空(读侧如实呈现"无预置建议"),
-// 成果类返回空串(读侧归"普通观察")。
-
-// LootClass 成果类(P2-10 事实页签的红队战果清单维度)。
-const (
-	LootCredential = "credential" // 凭据
-	LootData       = "data"       // 数据
-	LootPermission = "permission" // 权限
-	LootFoothold   = "foothold"   // 立足点
-)
+// 事实结果类型由账本独立记录，不在此处从文本猜测。
 
 // remediationKB 修复建议模板表:Aliases 为可命中的 vulnclass 词形
 // (模型自由填写的漏洞类型,取词形并集),Items 为逐条可执行建议。
@@ -111,32 +103,4 @@ func Remediation(vulnclass string) []string {
 		}
 	}
 	return nil
-}
-
-// lootRules 成果类关键词规则:按声明顺序首个命中生效(陈述同时含多类
-// 线索时,取战果价值更高的类——凭据先于立足点先于权限先于数据)。
-// 取词避开歧义词:「会话」不进凭据(普通会话/会话固定是泛用词,只收
-// 英文 session)、「授权」不进权限(几乎总以"未授权"否定形出现)。
-var lootRules = []struct {
-	Class string
-	Words []string
-}{
-	{LootCredential, []string{"密码", "口令", "凭据", "凭证", "密钥", "私钥", "token", "session", "cookie", "jwt", "apikey", "api key", "账号密码"}},
-	{LootFoothold, []string{"webshell", "getshell", "shell", "反弹", "后门", "命令执行", "rce", "持久化", "落脚", "立足"}},
-	{LootPermission, []string{"管理员", "越权", "提权", "横向", "权限", "admin", "root"}},
-	{LootData, []string{"数据", "记录", "个人信息", "手机号", "身份证", "邮箱", "导出", "泄露"}},
-}
-
-// LootClass 事实成果类分类(P2-10 事实页签红队战果清单):按陈述关键词
-// 确定性分类,零 LLM;无命中返回空串(普通观察,不属战果清单)。
-func LootClass(statement string) string {
-	s := strings.ToLower(statement)
-	for _, r := range lootRules {
-		for _, w := range r.Words {
-			if strings.Contains(s, w) {
-				return r.Class
-			}
-		}
-	}
-	return ""
 }

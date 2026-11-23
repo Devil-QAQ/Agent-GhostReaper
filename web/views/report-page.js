@@ -17,7 +17,7 @@ import { postJSON, usePolling } from "@/lib/api";
 
 // 报告页(8.3 交付域 [P1],P1-10 点亮;P2-13 升级为完整报告;P3-02 增
 // 报告存档):本任务展示 + 导出 + 存档——正文含聚合摘要(级别分布)、
-// Confirmed/待确认每条的完整反证时间线与复现步骤(Burp 可验证原文),
+// 已确认与证据不足每条的完整时间线与复现步骤(Burp 可验证原文),
 // 纯模板零 LLM(R17),相同账本状态字节级一致。存档(P3-02)把当前
 // 渲染固化为带证据版本的快照:证据更新(绑定/补绑/收割定稿)后旧存档
 // 自动标"待更新",按旧证据版本存档被拒(409)。跨任务导出在一级导航
@@ -58,10 +58,10 @@ export function ReportPage({ currentTask }) {
 
   if (!tid) {
     return (
-      <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-3">
         <PageHeader
           title="报告"
-          subtitle="本任务完整报告 · 反证链与复现步骤随发现呈现 · 零 LLM"
+          subtitle="已确认漏洞、影响与复现记录"
         />
         <EmptyState
           icon="fileText"
@@ -74,12 +74,12 @@ export function ReportPage({ currentTask }) {
   }
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-3">
       <PageHeader
         title="报告"
-        subtitle="本任务完整报告 · 反证链与复现步骤随发现呈现 · 零 LLM"
+        subtitle="已确认漏洞、影响与复现记录"
       >
-        <Button onClick={() => setExportOpen(true)}>
+        <Button size="sm" onClick={() => setExportOpen(true)}>
           {React.createElement(iconOf("download"), { className: "size-4" })}
           导出
         </Button>
@@ -92,14 +92,14 @@ export function ReportPage({ currentTask }) {
           <ReportMarkdown>{md}</ReportMarkdown>
         </div>
       ) : (
-        <EmptyState icon="fileText" title="报告读取中" hint="年轮账本读取中…" />
+        <EmptyState icon="fileText" title="报告读取中" hint="正在读取报告" />
       )}
 
       <ExportDialog
         open={exportOpen}
         onOpenChange={setExportOpen}
         title="导出本任务报告"
-        description="报告由账本确定性组装,零 LLM;zip 含逐发现分文件与流量证据包。"
+        description="导出当前报告，ZIP包含各条漏洞及其证据包。"
         scopes={[["all", "全部发现"]]}
         urlOf={(format) => `/api/tasks/${tid}/report/export?format=${format}`}
         fallbackName={`report-${tid}.md`}

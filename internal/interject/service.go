@@ -287,7 +287,7 @@ func (s *Service) worker(ctx context.Context, taskID, key string, c *conversatio
 
 // answer 应答一条问话(快照直问,P2-08f):目标最近一次请求的不可变
 // 上下文快照(身份/系统提示/工具目录/消息重放)+ 此前问答(追问链)
-// + 问题,单次 Complete 直问模型——不建会话、不进目标 transcript、
+// + 问题,单次流式直问模型——不建会话、不进目标 transcript、
 // 单次限时;进程并发受 MaxInFlight 约束(每目标工作线自身串行)。
 // 用量独立记账(agent=interject:<key>,信息条同源)。
 func (s *Service) answer(ctx context.Context, taskID, key, messageID, question string) {
@@ -319,6 +319,7 @@ func (s *Service) answer(ctx context.Context, taskID, key, messageID, question s
 		packet.WriteString("\n")
 		packet.WriteString(prior)
 	}
+	packet.WriteString(s.currentLedgerState(ctx, taskID))
 	packet.WriteString("\n【造物主的插话】")
 	packet.WriteString(question)
 
@@ -332,27 +333,51 @@ func (s *Service) answer(ctx context.Context, taskID, key, messageID, question s
 		time.Duration(s.turnSeconds())*time.Second)
 	defer cancel()
 
-	usage := &swarm.UsageTracker{
-		Store: s.Store, TaskID: taskID, Agent: agentName(key),
-		Model: s.Model, ModelOf: failover.ModelNow(s.Provider, taskID, transcriptID(key)), Transcript: transcriptID(key),
-	}
 	_ = s.appendRec(context.Background(), taskID, ActorInterject, rings.InterjectRecord{
 		Target: target, SessionID: sessionID, MessageID: messageID,
 		Type: rings.InterjectRecMessageState, State: rings.InterjectMsgDelivered,
 	})
-	msg, _, u, err := s.Provider.Complete(cctx, llm.CompletionRequest{
+	provider := swarm.MeterProvider(s.Provider, s.Store, rings.TokenUsage{TaskID: taskID, Agent: agentName(key), Model: s.Model, TranscriptID: transcriptID(key)})
+	think := rings.NewThinkingWriter(func(delta string, done bool) error {
+		state := ""
+		if done {
+			state = "finished"
+		}
+		return s.appendRec(context.Background(), taskID, ActorInterject, rings.InterjectRecord{
+			Target: target, SessionID: sessionID, MessageID: messageID, Type: rings.InterjectRecThinking, Text: delta, State: state,
+		})
+	})
+	defer func() { _ = think.Finish() }()
+	acc := llm.NewAccumulator()
+	for ev, err := range provider.Stream(cctx, llm.CompletionRequest{
 		System: InterjectPromptSpec.Assemble(ctx, s.Store),
 		Messages: []llm.Message{
-			{Role: "user", Content: []llm.ContentBlock{{Type: llm.BlockText, Text: packet.String()}}},
+			{Role: "user", Content: []llm.ContentBlock{{Type: llm.BlockText, Text: swarm.HumanReplyPrompt(packet.String())}}},
 		},
 		MaxTokens: s.maxTokens(),
-	})
-	if err != nil {
-		fail("应答中断: " + clip(err.Error(), 300))
+	}) {
+		if err != nil {
+			fail("应答中断: " + clip(err.Error(), 300))
+			return
+		}
+		acc.Add(ev)
+		if ev.Type == llm.SEThinkingDelta {
+			if err := think.Write(ev.Text); err != nil {
+				fail("思考记录失败")
+				return
+			}
+		} else if ev.Type == llm.SETextDelta || ev.Type == llm.SEToolUseStart || ev.Type == llm.SEMessageStop {
+			if err := think.Finish(); err != nil {
+				fail("思考记录失败")
+				return
+			}
+		}
+	}
+	if err := think.Finish(); err != nil {
+		fail("思考记录失败")
 		return
 	}
-	_ = usage.OnUsage(u)
-	replyText := strings.TrimSpace(msg.Text())
+	replyText := strings.TrimSpace(acc.Message().Text())
 	if replyText == "" {
 		fail("回复为空(模型未产出正文;可重发)")
 		return

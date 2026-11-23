@@ -1,237 +1,85 @@
 "use client";
 
 import * as React from "react";
-import "@xyflow/react/dist/style.css";
-import {
-  Background,
-  BackgroundVariant,
-  Handle,
-  Position,
-  ReactFlow,
-} from "@xyflow/react";
+import { Button } from "@/components/ui/button";
+import { usePolling } from "@/lib/api";
+import { ClaimChainEngine } from "@/lib/claim-chain-engine";
 
-import { NodeRefButton } from "@/components/node-ref-button";
-import { iconOf } from "@/components/icons";
-import { EDGE_LABELS, assetSourceMeta, nodeTypeMeta, usePolling } from "@/lib/api";
-import { cn } from "@/lib/utils";
-
-// 攻击链条节点图(P3-02 审核迭代 3):从统一图投影(/api/tasks/{id}/graph,
-// 与进度图/年轮图同一数据源)抠出声明的血缘邻域——资产/步骤/事实 → 漏洞
-// 的节点连接图,在成果卡「攻击链条」二层内呈现。节点点击走跳转协议
-//(换抽屉下钻),不自建第二套图数据。
-// P4-12:图下补「对象出生」区——链上每个资产的来源与出生血缘(发现型
-// 带发现单位/步骤/事实引用),链路从成果反向走通到对象最初入图;引用
-// 下钻沿用既有节点抽屉。
-
-// 链条图的列序(渲染从左到右):资产 → 步骤 → 事实 → 漏洞。
-const COLUMN_RANK = { asset: 0, goal: 0, step: 1, hypothesis: 2, fact: 2, testclaim: 3 };
-const COL_X = 240; // 列距
-const ROW_H = 104; // 行距
-const NODE_W = 200;
-
-// ChainNode 链条节点卡:类型图标 + 类型名 + 标题(截断两行)。
-function ChainNode({ data }) {
-  const meta = nodeTypeMeta(data.node.type);
-  const Icon = iconOf(meta.icon);
-  return (
-    <div
-      className={cn(
-        "flex w-[200px] cursor-pointer flex-col gap-1 rounded-lg border border-border/55 bg-card px-3 py-2 text-left shadow-card transition-colors duration-150 hover:bg-hover-lift",
-        data.focused && "border-primary/60",
-      )}
-      title={`${meta.label} ${data.node.id}:${data.node.title || ""}`}
-    >
-      <Handle type="target" position={Position.Left} className="!size-1.5 !border-0 !bg-transparent" />
-      <div className="flex items-center gap-1.5">
-        <Icon className={cn("size-3.5 shrink-0", `text-status-${meta.tone === "running" ? "running" : meta.tone}`)} />
-        <span className="text-[10px] text-muted-foreground">{meta.label}</span>
-      </div>
-      <div className="line-clamp-2 text-xs leading-snug font-medium break-all">
-        {data.node.title || data.node.id}
-      </div>
-      <Handle type="source" position={Position.Right} className="!size-1.5 !border-0 !bg-transparent" />
-    </div>
-  );
-}
-
-const NODE_TYPES = { chainNode: ChainNode };
-
-// claimChainSubgraph 从统一图投影抠声明的血缘邻域:自声明出发沿
-// derived_from/about/covers/produces/goal/falsify 双向走两跳,收集节点与边。
-function claimChainSubgraph(graph, claimID) {
-  if (!graph) return { nodes: [], edges: [] };
-  const byID = new Map(graph.nodes?.map((n) => [n.id, n]));
-  if (!byID.has(claimID)) return { nodes: [], edges: [] };
-  const WALK = new Set(["derived_from", "about", "covers", "produces", "goal", "falsify"]);
-  const edges = graph.edges?.filter((e) => WALK.has(e.type)) || [];
-  const adj = new Map();
-  for (const e of edges) {
-    for (const [a, b] of [
-      [e.from, e],
-      [e.to, e],
-    ]) {
-      if (!adj.has(a)) adj.set(a, []);
-      adj.get(a).push(e);
-    }
-  }
-  // 两跳 BFS。
-  const seen = new Set([claimID]);
-  const keptEdges = [];
-  let frontier = [claimID];
-  for (let hop = 0; hop < 2; hop++) {
-    const next = [];
-    for (const id of frontier) {
-      for (const e of adj.get(id) || []) {
-        const other = e.from === id ? e.to : e.from;
-        if (!byID.has(other)) continue;
-        const key = `${e.type}|${e.from}|${e.to}`;
-        if (!keptEdges.some((k) => k.key === key)) keptEdges.push({ key, edge: e });
-        if (!seen.has(other)) {
-          seen.add(other);
-          next.push(other);
-        }
-      }
-    }
-    frontier = next;
-  }
-  const nodes = [...seen].map((id) => byID.get(id));
-  return { nodes, edges: keptEdges.map((k) => k.edge) };
-}
-
-// 分层布局:列 = 类型序(资产→步骤→事实→漏洞),列内按稳定序堆叠。
-function chainLayout(nodes, claimID) {
-  const cols = new Map();
-  for (const n of nodes) {
-    const rank = COLUMN_RANK[n.type] ?? 1;
-    if (!cols.has(rank)) cols.set(rank, []);
-    cols.get(rank).push(n);
-  }
-  const pos = new Map();
-  for (const rank of [...cols.keys()].sort((a, b) => a - b)) {
-    const col = cols.get(rank).sort((a, b) => (a.id < b.id ? -1 : 1));
-    col.forEach((n, i) => {
-      pos.set(n.id, { x: rank * COL_X, y: i * ROW_H });
-    });
-  }
-  return pos;
-}
-
-// AssetBirthRows 对象出生区(P4-12):链上每个资产一行——资产引用 + 来源
-// 陈述;发现型带发现单位与出生引用(步骤/事实,可下钻),种子/手动如实
-// 陈列入图方式,无出生记录不编造。出生词与资产抽屉同一份。
-function AssetBirthRows({ assets, onSelectNode }) {
-  if (!assets.length) return null;
-  return (
-    <div className="flex flex-col gap-1.5">
-      <div className="text-xs font-medium tracking-wide text-muted-foreground">对象出生</div>
-      {assets.map((a) => {
-        const src = assetSourceMeta(a.source);
-        return (
-          <div key={a.id} className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-border/55 bg-card px-3 py-2 text-xs">
-            <NodeRefButton meta={{ id: a.id, type: "asset", typeLabel: "资产" }} onSelectNode={onSelectNode} />
-            {React.createElement(iconOf(src.icon), { className: "size-3 text-muted-foreground" })}
-            {a.source === "discovered" ? (
-              <>
-                <span>发现入图</span>
-                {a.birth_unit && (
-                  <span className="text-muted-foreground">
-                    单位 <span className="num">{a.birth_unit}</span>
-                  </span>
-                )}
-                {a.birth_step && (
-                  <NodeRefButton meta={{ id: a.birth_step, type: "step", typeLabel: "步骤" }} onSelectNode={onSelectNode} />
-                )}
-                {a.birth_fact && (
-                  <NodeRefButton meta={{ id: a.birth_fact, type: "fact", typeLabel: "事实" }} onSelectNode={onSelectNode} />
-                )}
-              </>
-            ) : a.source === "manual" ? (
-              <span>手动补入(面板新增)</span>
-            ) : (
-              <span>建任务种子入图</span>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ClaimChainGraph 成果卡「攻击链条」二层的内容:血缘邻域节点图 + 对象
-// 出生区。onSelectNode 缺省时节点不可下钻(纯浏览)。
 export function ClaimChainGraph({ tid, claimID, onSelectNode }) {
-  const { data: graph } = usePolling(
-    tid ? `/api/tasks/${tid}/graph` : "/api/healthz",
-    15000,
-    { immediate: Boolean(tid) },
-  );
-  const { nodes: subNodes, edges: subEdges } = React.useMemo(
-    () => claimChainSubgraph(graph, claimID),
-    [graph, claimID],
-  );
-  const chainAssets = React.useMemo(
-    () => subNodes.filter((n) => n.type === "asset").sort((a, b) => (a.id < b.id ? -1 : 1)),
-    [subNodes],
-  );
+  return <ClaimChainTask key={`${tid}:${claimID}`} tid={tid} claimID={claimID} onSelectNode={onSelectNode}/>;
+}
 
-  if (!graph) {
-    return <div className="text-xs text-muted-foreground">图数据读取中…</div>;
-  }
-  if (subNodes.length <= 1) {
-    return (
-      <span className="text-xs text-muted-foreground">
-        (无链条血缘:判断未挂发现步骤/资产关联)
-      </span>
-    );
-  }
-
-  const pos = chainLayout(subNodes, claimID);
-  const rfNodes = subNodes.map((n) => ({
-    id: n.id,
-    type: "chainNode",
-    position: pos.get(n.id) || { x: 0, y: 0 },
-    data: { node: n, focused: n.id === claimID },
-    draggable: false,
-    selectable: false,
-  }));
-  const rfEdges = subEdges.map((e, i) => {
-    const [x1, y1] = [pos.get(e.from)?.x ?? 0, pos.get(e.from)?.y ?? 0];
-    const [x2, y2] = [pos.get(e.to)?.x ?? 0, pos.get(e.to)?.y ?? 0];
-    // 渲染方向恒从左到右(链的阅读向),关系词随边标注。
-    const leftFirst = x1 <= x2;
-    return {
-      id: `${e.type}-${e.from}-${e.to}-${i}`,
-      source: leftFirst ? e.from : e.to,
-      target: leftFirst ? e.to : e.from,
-      label: EDGE_LABELS[e.type] || e.type,
-      style: { stroke: "var(--muted-foreground)", strokeWidth: 1.2 },
-      labelStyle: { fill: "var(--muted-foreground)", fontSize: "var(--text-micro)" },
-      labelBgStyle: { fill: "var(--card)" },
-      markerEnd: { type: "arrowclosed", width: 14, height: 14, color: "var(--muted-foreground)" },
+function ClaimChainTask({ tid, claimID, onSelectNode }) {
+  const canvasRef = React.useRef(null), engineRef = React.useRef(null), workerRef = React.useRef(null), sequenceRef = React.useRef(0);
+  const selectRef = React.useRef(onSelectNode);
+  selectRef.current = onSelectNode;
+  const [layout, setLayout] = React.useState(null), [failed, setFailed] = React.useState(false), [retry, setRetry] = React.useState(0), [selected, setSelected] = React.useState(null);
+  const { data: skeleton, error } = usePolling(tid ? `/api/tasks/${tid}/pview/skeleton?read=${retry}` : "/api/healthz", 30000, { immediate: Boolean(tid), live: tid ? [`pview:${tid}`] : null });
+  React.useEffect(() => {
+    const worker = new Worker(new URL("../lib/claim-chain.worker.mjs", import.meta.url), { type: "module" });
+    workerRef.current = worker;
+    worker.onmessage = ({ data }) => {
+      if (data.sequence !== sequenceRef.current) return;
+      if (data.error) { setFailed(true); return; }
+      setLayout(data.layout); setFailed(false);
     };
-  });
-
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="h-72 overflow-hidden rounded-lg border border-border/55 bg-card">
-        <ReactFlow
-          nodes={rfNodes}
-          edges={rfEdges}
-          nodeTypes={NODE_TYPES}
-          onNodeClick={onSelectNode ? (_, n) => onSelectNode({ id: n.id, type: n.data.node.type }) : undefined}
-          nodesDraggable={false}
-          nodesConnectable={false}
-          elementsSelectable={false}
-          fitView
-          fitViewOptions={{ padding: 0.18, maxZoom: 1.1 }}
-          minZoom={0.2}
-          maxZoom={2}
-          proOptions={{ hideAttribution: true }}
-        >
-          <Background variant={BackgroundVariant.Dots} gap={22} size={1.1} color="var(--border)" />
-        </ReactFlow>
-      </div>
-      <AssetBirthRows assets={chainAssets} onSelectNode={onSelectNode} />
+    worker.onerror = () => setFailed(true);
+    return () => { sequenceRef.current++; workerRef.current = null; worker.terminate(); };
+  }, []);
+  React.useEffect(() => {
+    if (!skeleton || !tid || !claimID) return;
+    const controller = new AbortController(), sequence = ++sequenceRef.current;
+    setFailed(false);
+    (async () => {
+      try {
+        let current = skeleton;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const response = await fetch(`/api/tasks/${tid}/pview/links/${encodeURIComponent(claimID)}`, { signal: controller.signal });
+          if (!response.ok) throw new Error();
+          const links = await response.json();
+          const check = await fetch(`/api/tasks/${tid}/pview/skeleton`, { signal: controller.signal });
+          if (!check.ok) throw new Error();
+          const latest = await check.json();
+          if (latest.rev !== current.rev) { current = latest; continue; }
+          if (sequence === sequenceRef.current && !controller.signal.aborted) workerRef.current?.postMessage({ sequence, skeleton: current, links });
+          return;
+        }
+        throw new Error();
+      } catch { if (!controller.signal.aborted && sequence === sequenceRef.current) setFailed(true); }
+    })();
+    return () => controller.abort();
+  }, [skeleton, tid, claimID, retry]);
+  const ready = Boolean(layout?.nodes?.length);
+  React.useEffect(() => {
+    if (!ready || !canvasRef.current) return;
+    const engine = new ClaimChainEngine(canvasRef.current, null, {
+      initialFocus: claimID,
+      onNodeClick: n => { engine.select(n.id); setSelected(n); },
+      onOpenDetail: target => selectRef.current?.({ ...target, panorama: target.type === "step" }),
+    });
+    engineRef.current = engine;
+    return () => { engine.destroy(); engineRef.current = null; };
+  }, [ready, claimID]);
+  React.useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine || !layout) return;
+    engine.setData(layout); engine.select(engine.focus || claimID);
+    setSelected(engine.byId.get(engine.focus));
+  }, [layout, ready, claimID]);
+  return <div className="flex min-w-0 flex-col gap-3">
+    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+      <span>箭头：来源 → 产出</span>
+      <Button variant="outline" size="sm" onClick={() => engineRef.current?.fitAll()}>查看全景</Button>
+      <Button variant="ghost" size="sm" aria-label="缩小链路" onClick={() => engineRef.current?.zoomBy(1 / 1.3)}>−</Button>
+      <Button variant="ghost" size="sm" aria-label="放大链路" onClick={() => engineRef.current?.zoomBy(1.3)}>＋</Button>
+      {selected && onSelectNode && <Button variant="outline" size="sm" onClick={() => onSelectNode({ id: selected.id, type: selected.t === "claim" ? "testclaim" : selected.t, panorama: selected.t === "step" })}>详情</Button>}
     </div>
-  );
+    <div className="relative h-72 min-w-0 overflow-hidden rounded-lg bg-background" data-claim-chain>
+      {ready && <canvas ref={canvasRef} className="absolute inset-0 size-full touch-none" aria-label="攻击链条图"/>}
+      {!ready && !failed && !error && <div className="flex flex-col gap-4 p-6" aria-label="读取链路"><div className="h-12 w-48 animate-pulse rounded-lg bg-card"/><div className="h-12 w-32 animate-pulse rounded-lg bg-card"/></div>}
+      {(failed || error) && <div className="absolute inset-x-0 bottom-0 flex items-center gap-2 bg-background p-3 text-xs" role="status">读取链路失败<Button variant="ghost" size="sm" onClick={() => setRetry(n => n + 1)}>重试</Button></div>}
+      {layout && !ready && !failed && <div className="p-6 text-xs text-muted-foreground">暂无来源链路</div>}
+    </div>
+    {layout && layout.edges?.length === 0 && <span className="text-xs text-muted-foreground">未记录产生来源</span>}
+  </div>;
 }

@@ -123,7 +123,7 @@ func TestSelfRefGateFactAndClaim(t *testing.T) {
 		t.Fatalf("证据指向环回应拒收: %v", err)
 	}
 
-	// ③ 判断锚定发现型环回资产:不立判断、无判断节点。
+	// ③ 交卷锚定发现型环回资产:不立声明、无声明节点。
 	if _, err := store.Append(ctx, task, rings.Event{
 		Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
 			NodeID: "dloop", NodeType: rings.NodeAsset, Title: "127.0.0.1:60437",
@@ -131,44 +131,54 @@ func TestSelfRefGateFactAndClaim(t *testing.T) {
 			Detail: map[string]any{"source": rings.AssetSourceDiscovered}}}); err != nil {
 		t.Fatalf("种发现型环回资产失败: %v", err)
 	}
-	if _, err := env.SubmitTestClaim(ctx, "代理 60437 可改写响应", "本机请求链可被篡改",
-		"curl http://127.0.0.1:60437/ 返回 200", "dloop", "", nil); err == nil || !strings.Contains(err.Error(), "本机环回") {
-		t.Fatalf("发现型环回锚点的判断应拒收: %v", err)
+	if _, _, err := env.SubmitClaim(ctx, "代理 60437 可改写响应", "high",
+		[]string{"ms-x.1"}, "marker", "自查通过", "", "dloop", "", ""); err == nil || !strings.Contains(err.Error(), "本机环回") {
+		t.Fatalf("发现型环回锚点的交卷应拒收: %v", err)
 	}
 	if n := nodeCount(t, store, task, rings.NodeTestClaim); n != 0 {
-		t.Fatalf("拒收后不得有判断节点: %d", n)
+		t.Fatalf("拒收后不得有声明节点: %d", n)
 	}
 
-	// ④ 判断锚定真实靶标但证据指向环回非目标端口:拒收。
-	if _, err := env.SubmitTestClaim(ctx, "靶标响应被代理改写", "响应不可信",
-		"GET http://127.0.0.1:4481/ 经 127.0.0.1:60437 转发", "target", "", nil); err == nil || !strings.Contains(err.Error(), "本机环回") {
-		t.Fatalf("证据指向环回的判断应拒收: %v", err)
+	// ④ 交卷锚定真实靶标但证据引用命中的交换指向环回非目标端口
+	// (P5-01②:按引用回查镜摘要,selfRefEvidenceRef):拒收。
+	lpBlob, err := env.Executor.Blobs.Write([]byte(`{"response":{"status":200,"body":""}}`))
+	if err != nil {
+		t.Fatalf("写交换原文失败: %v", err)
+	}
+	if _, err := store.Append(ctx, task, rings.Event{
+		Kind: rings.EventMirrorRecord, Actor: "mirror", Payload: rings.MirrorRecord{
+			ExchangeID: "ms-lp.9", Type: rings.MirrorRecHTTP, StepID: "s1", UnitID: "u1",
+			Method: "GET", URL: "http://127.0.0.1:60437/probe", Status: 200, BlobRef: lpBlob}}); err != nil {
+		t.Fatalf("造环回镜留痕失败: %v", err)
+	}
+	if _, _, err := env.SubmitClaim(ctx, "靶标响应被代理改写", "high",
+		[]string{"ms-lp.9"}, "marker", "自查通过", "", "target", "", ""); err == nil || !strings.Contains(err.Error(), "本机环回") {
+		t.Fatalf("证据引用命中环回交换的交卷应拒收: %v", err)
 	}
 	if n := len(envObservations(t, store, task)); n != 4 {
 		t.Fatalf("①~④ 各应留 1 条环境观察,共 4: %d", n)
 	}
 
-	// ⑤ 回归无损:真实靶标(种子 127.0.0.1:4481)上的事实与判断照常入图,
-	//    localhost:4481 与种子同主机同端口,归一放行。
+	// ⑤ 回归无损:真实靶标(种子 127.0.0.1:4481)上的事实与交卷照常入图。
 	if _, err := env.SubmitCandidateFact(ctx, "靶标备份目录可列举",
 		"curl http://127.0.0.1:4481/old-backup/ 返回目录列举", "target", nil); err != nil {
 		t.Fatalf("真实靶标事实不得误拦: %v", err)
 	}
-	tcID, err := env.SubmitTestClaim(ctx, "备份目录可公开列举", "备份可被未授权下载",
-		"curl http://localhost:4481/old-backup/ 实测列举 db.sql.gz", "target", "信息暴露", nil)
+	tcID, _, err := env.SubmitClaim(ctx, "备份目录可公开列举", "high",
+		[]string{"ms-ok.1"}, "db.sql.gz", "自查通过", "备份可被未授权下载", "target", "信息暴露", "")
 	if err != nil {
-		t.Fatalf("真实靶标判断不得误拦: %v", err)
+		t.Fatalf("真实靶标交卷不得误拦: %v", err)
 	}
 	n, err := store.Node(ctx, task, tcID)
 	if err != nil || n.Status != rings.TestClaimCandidate {
-		t.Fatalf("真实靶标判断应入图为候选: %v %+v", err, n)
+		t.Fatalf("真实靶标交卷应入图为候选: %v %+v", err, n)
 	}
 	if got := len(envObservations(t, store, task)); got != 4 {
 		t.Fatalf("真实靶标提交不产生环境观察: %d", got)
 	}
 }
 
-func TestSelfRefGateHypothesisAndBareMention(t *testing.T) {
+func TestSelfRefGateBareMention(t *testing.T) {
 	// 远程靶标任务(无环回种子):裸环回提法(无端口)不是流量指向,
 	// 不拦——防误伤真实发现(如目标响应回显客户端地址)。
 	const remote = "selfref-remote"
@@ -197,18 +207,5 @@ func TestSelfRefGateHypothesisAndBareMention(t *testing.T) {
 		"请求经 127.0.0.1:60437 转发", "rt", nil); err == nil || !strings.Contains(err.Error(), "本机环回") {
 		t.Fatalf("环回端口提法应拒收: %v", err)
 	}
-	// 假设指向发现型环回资产:拒收(不作为发现对象)。
-	if _, err := store.Append(ctx, remote, rings.Event{
-		Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
-			NodeID: "dl", NodeType: rings.NodeAsset, Title: "localhost:8737",
-			Status: "active", AssetClass: rings.AssetService,
-			Detail: map[string]any{"source": rings.AssetSourceDiscovered}}}); err != nil {
-		t.Fatalf("种发现型环回资产失败: %v", err)
-	}
-	if _, err := env.SubmitHypothesis(ctx, "该服务可能是管理面板", "端口与面板一致", "dl"); err == nil || !strings.Contains(err.Error(), "本机环回") {
-		t.Fatalf("指向发现型环回资产的猜测应拒收: %v", err)
-	}
-	if n := nodeCount(t, store, remote, rings.NodeHypothesis); n != 0 {
-		t.Fatalf("拒收后不得有假设节点: %d", n)
-	}
+
 }

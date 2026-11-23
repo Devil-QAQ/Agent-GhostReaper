@@ -95,7 +95,7 @@ func demoPack() *TaskPack {
 		ExpectedObservation: "端口开放状态与 banner 证据",
 		ActionLevel:         "只读探测",
 		Assets:              []AssetBrief{{ID: "a1", Class: "service", Title: "演示站点"}},
-		Authorization:       RoE{DeniedTools: []string{"submit_hypothesis"}},
+		Authorization:       RoE{DeniedTools: []string{"web_search"}},
 		GraphVersion:        3,
 	}
 }
@@ -113,11 +113,11 @@ func assertWorkerSystem(t *testing.T, sys, editable, intent, observation, asset 
 	if !strings.Contains(sys, "凌驾于下方一切探索启发式") {
 		t.Fatalf("RoE 约束块须带凌驾声明")
 	}
-	if !strings.Contains(sys, "工具边界: 禁止 [submit_hypothesis]") {
+	if !strings.Contains(sys, "工具边界: 禁止 [web_search]") {
 		t.Fatalf("RoE 约束块须含领取时工具边界")
 	}
-	if !strings.Contains(sys, "审批门槛: 修改与持久化") {
-		t.Fatalf("RoE 约束块须含归一后的审批门槛")
+	if !strings.Contains(sys, "动作判定:") {
+		t.Fatalf("RoE 约束块须含当前动作判断与审批语义")
 	}
 	// 顺序:凌驾声明 → 意图块 → 锚定资产 → 启动指令(最后一句)。
 	roE := strings.Index(sys, "凌驾于下方一切探索启发式")
@@ -190,7 +190,7 @@ func TestWorkerSystemRoEOnTopE2E(t *testing.T) {
 	// RoE 带黑名单,约束块内容可断言。
 	if _, err := store.Append(ctx, task, rings.Event{
 		Kind: rings.EventRoeUpdated, Actor: "creator",
-		Payload: rings.RoeUpdated{DeniedTools: []string{"submit_hypothesis"}},
+		Payload: rings.RoeUpdated{DeniedTools: []string{"web_search"}},
 	}); err != nil {
 		t.Fatalf("种 RoE 失败: %v", err)
 	}
@@ -315,21 +315,21 @@ func TestIntentBlockSurvivesCompaction(t *testing.T) {
 // 摘除清单非空时追加"范围外资产(已从授权范围摘除,不测不派)"行并
 // 带资产标识与标题;空清单(历史语义)零新增行,虫群/主宰措辞不漂移。
 func TestRenderRoEConstraintExcluded(t *testing.T) {
-	base := RenderRoEConstraint("lead", nil, nil, "", nil, nil, "", nil)
+	base := RenderRoEConstraint("lead", nil, nil, nil, "")
 	if strings.Contains(base, "范围外") {
 		t.Fatalf("空摘除清单不应渲染范围外行:\n%s", base)
 	}
-	with := RenderRoEConstraint("lead", nil, nil, "", []rings.ExcludedAssetView{
+	with := RenderRoEConstraint("lead", nil, nil, []rings.ExcludedAssetView{
 		{ID: "a-1", Title: "10.10.0.6:8080"},
 		{ID: "a-2", Title: "old.example.com"},
-	}, nil, "", nil)
+	}, "")
 	for _, want := range []string{"范围外资产(已从授权范围摘除,不测不派)", "a-1(10.10.0.6:8080)", "a-2(old.example.com)"} {
 		if !strings.Contains(with, want) {
 			t.Fatalf("约束块缺 %q:\n%s", want, with)
 		}
 	}
 	// 基础行不因摘除清单漂移。
-	if !strings.Contains(with, "授权范围: 仅限本任务授权目标") || !strings.Contains(with, "审批门槛") {
+	if !strings.Contains(with, "授权范围: 仅限本任务授权目标") || !strings.Contains(with, "动作判定:") {
 		t.Fatalf("基础约束行缺失:\n%s", with)
 	}
 }

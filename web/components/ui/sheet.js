@@ -8,11 +8,22 @@ import { cn } from "@/lib/utils";
 import { FloatingLayer, useFloatingLayer, floatingShadow } from "@/components/ui/floating-layer";
 import { ErrorBoundary } from "@/components/error-boundary";
 
+// Opt-in navigation frames keep the previous asset-page card mounted while a
+// child slides in or out. Other Sheet callers retain their existing behavior.
+export const SheetNavigationContext = React.createContext(null);
+const SheetMotionContext = React.createContext(null);
+
 // Sheet 抽屉:大对象详情专用(发现详情/资产详情),右侧滑出不离开列表上下文。
-function Sheet({ nested = false, children, ...props }) {
+function Sheet({ nested = false, navigationFrame = false, children, ...props }) {
+  const frame = React.useContext(SheetNavigationContext);
+  const navigation = navigationFrame ? frame : null;
   return (
     <FloatingLayer nested={nested}>
-      <SheetPrimitive.Root {...props}>{children}</SheetPrimitive.Root>
+      <SheetNavigationContext.Provider value={null}>
+        <SheetMotionContext.Provider value={navigation}>
+          <SheetPrimitive.Root {...props} {...(navigation ? { open: navigation.open } : {})}>{children}</SheetPrimitive.Root>
+        </SheetMotionContext.Provider>
+      </SheetNavigationContext.Provider>
     </FloatingLayer>
   );
 }
@@ -21,11 +32,14 @@ const SheetClose = SheetPrimitive.Close;
 const SheetPortal = SheetPrimitive.Portal;
 
 function SheetOverlay({ className, ...props }) {
+  const motion = React.useContext(SheetMotionContext);
   return (
     <SheetPrimitive.Overlay
       data-slot="sheet-overlay"
       className={cn(
         "fixed inset-0 z-50 bg-black/60 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+        motion && "duration-250 motion-reduce:animate-none",
+        motion?.nested && "bg-transparent",
         className
       )}
       {...props}
@@ -35,10 +49,19 @@ function SheetOverlay({ className, ...props }) {
 
 function SheetContent({ className, children, side = "right", ...props }) {
   const depth = useFloatingLayer();
+  const motion = React.useContext(SheetMotionContext);
+  const content = React.useRef(null);
+  React.useEffect(() => {
+    if (!motion || motion.open || !content.current) return;
+    let alive = true;
+    Promise.allSettled(content.current.getAnimations().map(animation => animation.finished)).then(() => { if (alive) motion.onExited(); });
+    return () => { alive = false; };
+  }, [motion?.open]);
   return (
     <SheetPortal>
       <SheetOverlay />
       <SheetPrimitive.Content
+        ref={content}
         data-slot="sheet-content"
         data-layer-depth={depth}
         className={cn(
@@ -50,6 +73,7 @@ function SheetContent({ className, children, side = "right", ...props }) {
           side === "left" &&
             "inset-y-0 left-0 h-full w-[min(560px,100vw)] max-w-[560px] rounded-r-2xl border-y border-r border-border/55 data-[state=closed]:slide-out-to-left data-[state=open]:slide-in-from-left",
           floatingShadow(depth),
+          motion && "motion-reduce:animate-none motion-reduce:transition-none",
           className
         )}
         {...props}

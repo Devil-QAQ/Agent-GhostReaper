@@ -314,8 +314,8 @@ var migrations = [][]string{
 		`ALTER TABLE roe_state ADD COLUMN creator_notes TEXT NOT NULL DEFAULT ''`,
 	},
 	{
-		// v13:P4-56 发现区四页签(问题清单 #77):events 增加 (task_id,
-		// kind, revision) 索引——发现页锤炼显示态需要读舵杆终止记录
+		// v13:P4-56(问题清单 #77):events 增加 (task_id,
+		// kind, revision) 索引——步骤行显示态需要读舵杆终止记录
 		// (kill_work 送达集合,与 arbiter.operatorKilled 同口径),按
 		// kind 定向直查取代全量事件扫描(P4-36 列表禁全量纪律);舵杆
 		// 记录每任务屈指可数,索引扫描代价可忽略。IF NOT EXISTS:降级
@@ -358,6 +358,16 @@ var migrations = [][]string{
 		// 数组:host/basis/at)。指针语义(nil=本次不动,见 RoeUpdated),
 		// 旧库默认空 = 无信息源(历史任务行为不变,围栏照旧)。
 		`ALTER TABLE roe_state ADD COLUMN info_sources TEXT NOT NULL DEFAULT ''`,
+	},
+	{
+		// v17:辅助模型请求进入同一用量表;与会话轮次分开,不影响图投影。
+		`ALTER TABLE token_usage ADD COLUMN purpose TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE token_usage ADD COLUMN usage_missing INTEGER NOT NULL DEFAULT 0`,
+	},
+	{
+		// v18: ownership checks use existing session events without ledger scans.
+		`CREATE INDEX idx_events_execution ON events(task_id,json_extract(payload,'$.step_id'),revision)
+		 WHERE kind='swarm.record' AND json_extract(payload,'$.type') IN ('session_started','session_finished')`,
 	},
 }
 

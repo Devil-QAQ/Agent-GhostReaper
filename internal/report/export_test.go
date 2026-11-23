@@ -32,7 +32,7 @@ func TestTaskExportMatrix(t *testing.T) {
 	if out.Filename != "report-"+task+".md" || !strings.Contains(out.MimeType, "text/markdown") {
 		t.Fatalf("md 文件名/类型不符: %+v", out)
 	}
-	for _, want := range []string{"反证记录:", "复现步骤(检查归纳定稿", "GET /old-backup/ HTTP/1.1", "Host: 10.10.0.5:8080"} {
+	for _, want := range []string{"时间线:", "复现步骤(检查归纳定稿", "GET /old-backup/ HTTP/1.1", "Host: 10.10.0.5:8080"} {
 		if !strings.Contains(string(out.Body), want) {
 			t.Fatalf("md 缺 %q", want)
 		}
@@ -110,11 +110,11 @@ func TestTaskExportMatrix(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("csv 应表头 + 2 行,实际 %d 行", len(rows))
 	}
-	if rows[0][1] != "发现ID" || rows[0][10] != "复现步骤数" {
+	if rows[0][1] != "发现ID" || rows[0][9] != "复现步骤数" {
 		t.Fatalf("csv 表头不符: %v", rows[0])
 	}
 	// 级别序:tc-1(high)在前,tc-2(未定级)沉底。
-	if rows[1][1] != "tc-1" || rows[1][3] != "high" || rows[1][10] != "1" {
+	if rows[1][1] != "tc-1" || rows[1][3] != "high" || rows[1][9] != "1" {
 		t.Fatalf("tc-1 行不符: %v", rows[1])
 	}
 	if rows[2][1] != "tc-2" {
@@ -198,7 +198,7 @@ func TestClaimExport(t *testing.T) {
 	if md.Filename != "finding-tc-1.md" {
 		t.Fatalf("文件名规约不符: %s", md.Filename)
 	}
-	for _, want := range []string{"# 漏洞报告 · /old-backup/ 备份目录可公开匿名列举", "判断标识:`tc-1`", "反证记录:", "来龙去脉:单位 u1 执行「审计主站敏感路径」", "复现步骤(检查归纳定稿", "GET /old-backup/ HTTP/1.1"} {
+	for _, want := range []string{"# 漏洞报告 · /old-backup/ 备份目录可公开匿名列举", "判断标识:`tc-1`", "时间线:", "来龙去脉:单位 u1 执行「审计主站敏感路径」", "复现步骤(检查归纳定稿", "GET /old-backup/ HTTP/1.1"} {
 		if !strings.Contains(string(md.Body), want) {
 			t.Fatalf("漏洞级 md 缺 %q:\n%s", want, md.Body)
 		}

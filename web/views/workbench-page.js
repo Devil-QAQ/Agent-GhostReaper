@@ -33,22 +33,10 @@ import {
   taskStatusBadge,
   usePolling,
 } from "@/lib/api";
-import { GraphCanvas } from "@/views/progress-page";
 import { NodeSheetHost } from "@/views/node-sheets";
 import { cn } from "@/lib/utils";
 
-// 任务空间·工作台(P2-10,8.3"总览"落点;P2-14b② 信息重组):单任务
-// 「概要 → 关键数据 → 详情」三层——概要卡(任务名主视觉 + 状态 + 描述
-// + 目标,ID 弱化为复制入口)、关键数据 KPI 行(#40 即导航)、详情层
-// 四区同屏(目标 × 进度图 × 执行流 × 发现,布局按 8.9 §7 主次约 7:3):
-// 左列目标区 + 内嵌进度图(GraphCanvas 复用进度图页全套,含节点抽屉
-// 与聚焦),右列执行流(虫群紧凑视图,一行一单位【状态图标+意图摘要】,
-// 点击跳该单位完整会话页——复用 P2-08b 会话页)与发现(Confirmed
-// 战果,点击开详情抽屉)。
-// P4-09:概要卡尾部三条并排细进度条(目标达成 n/m · 步骤 完成/在跑/
-// 排队 · 资产覆盖 范围内已测/未测)——图载荷派生,资产入图/步骤迁移/
-// 目标达成都落 node 事件,经 tasks 实时主题事件驱动刷新,零新增采集;
-// 三条各自陈述,不做加权综合百分比。
+// 工作台保留概要、目标与覆盖进度、执行流和发现详情。
 
 // 单位状态 → 图标键(与虫群会话页状态词同源;无专属图标的终因用圆点)。
 const UNIT_ICON = {
@@ -63,12 +51,17 @@ const UNIT_ICON = {
   blocked: "shieldAlert",
 };
 
-export function WorkbenchPage({ currentTask, focus }) {
+export function WorkbenchPage({ currentTask }) {
   const tid = currentTask?.id;
-  // P3-08:进度图(目标/步骤态,受阻步骤在其中)与发现走实时推送驱动
+  // P3-08:工作台目标/步骤与覆盖与发现走实时推送驱动
   // 刷新(主题 tasks = 图上节点迁移);推送未连接时按原节奏轮询降级。
   // 单位列表是执行器进程态(无账本单射),维持轮询。
-  const { data: graph } = usePolling(tid ? `/api/tasks/${tid}/graph` : "/api/healthz", 3000, {
+  const { data: overview } = usePolling(tid ? `/api/tasks/${tid}/workbench` : "/api/healthz", 3000, {
+    immediate: Boolean(tid),
+    live: tid ? ["tasks"] : null,
+  });
+  // 水位独立读取；完整来源关系仅在详情打开时读取。
+  const { data: water } = usePolling(tid ? `/api/tasks/${tid}/watermark` : "/api/healthz", 3000, {
     immediate: Boolean(tid),
     live: tid ? ["tasks"] : null,
   });
@@ -80,6 +73,10 @@ export function WorkbenchPage({ currentTask, focus }) {
     live: tid ? [`claims:${tid}`] : null,
   });
   const [sheet, setSheet] = React.useState(null);
+  // Full lineage is read only while a formal detail is open.
+  const { data: graph } = usePolling(tid && sheet ? `/api/tasks/${tid}/graph` : "/api/healthz", 30000, {
+    immediate: Boolean(tid && sheet), live: tid && sheet ? ["tasks"] : null,
+  });
   const [recovering, setRecovering] = React.useState(false);
   // 收口提醒配置入口(审核迭代 1):概要卡右侧按钮 + 小弹窗改任务级配置。
   const [closureOpen, setClosureOpen] = React.useState(false);
@@ -147,10 +144,17 @@ export function WorkbenchPage({ currentTask, focus }) {
     );
   }
 
-  const nodes = graph?.nodes || [];
-  const edges = graph?.edges || [];
+  const nodes = overview?.nodes || [];
+  const edges = overview?.edges || [];
   const goals = nodes.filter((n) => n.type === "goal");
-  const units = (unitsBody?.units || []).slice().reverse(); // 最新在先
+  // 执行流最新在先:P5-06 起 /units 行序改四段供数(排队段按上位序殿
+  // 后),不再倒序读数组——按最后活动时间自排(缺 last_active 的排队
+  // 条目退开始/步骤位,自然沉底)。
+  const units = (unitsBody?.units || [])
+    .slice()
+    .sort((a, b) =>
+      (b.last_active || b.started_at || "").localeCompare(a.last_active || a.started_at || "")
+    );
   const claimList = Array.isArray(claims) ? claims : [];
   const wins = claimList
     .filter((c) => c.status === "confirmed")
@@ -186,12 +190,12 @@ export function WorkbenchPage({ currentTask, focus }) {
   const nodeByID = new Map(nodes.map((n) => [n.id, n]));
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-3">
       {/* 概要(P2-14b②):任务名主视觉,状态与目标随行;ID 只留复制入口 */}
       <Card>
         <CardContent className="flex flex-col gap-4 p-5">
-          <div className="flex flex-wrap items-center gap-3">
-            <h1 className="t-page">{currentTask.title || tid}</h1>
+          <div className="flex min-h-8 flex-wrap items-center gap-2" data-page-header="compact">
+            <h1 className="sr-only">{currentTask.title || tid}</h1>
             <Badge variant={st.variant} title={st.title}>
               {st.label}
             </Badge>
@@ -199,7 +203,7 @@ export function WorkbenchPage({ currentTask, focus }) {
                 取态见 taskStatusBadge 全状态矩阵;受阻步骤数走行内
                 「受阻 N 步」计数与恢复按钮) */}
             <CopyIDButton id={tid} />
-            <span className="ml-auto flex items-center gap-2">
+            <span className="ml-auto flex flex-wrap items-center gap-2">
               {currentTask.blocked_steps > 0 && (
                 <Button variant="outline" size="sm" disabled={recovering} onClick={recover}
                   title="重开本任务受阻的步骤并恢复执行(模型故障解除后用)">
@@ -216,13 +220,14 @@ export function WorkbenchPage({ currentTask, focus }) {
               )}
             </span>
           </div>
-          {/* P4-43 ③ 终态任务隐藏水位行:清点后执行中/排队/等前置已清零,
-              还可新增/派发上限对已收场的任务无意义(隐藏而非清零,避免
-              "还可新增 8"误导)。 */}
-          {graph?.queue && currentTask?.status !== "stopped" && currentTask?.status !== "completed" && (
-            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground num" title="排队只计可领取步骤，等前置步骤预留容量；反证、假设验证与急活不受派发上限限制。反证优先领取下一个空位，不能保证立即起飞。">
-              <span>执行中 {graph.queue.running}</span><span>排队 {graph.queue.queued}</span><span>等前置 {graph.queue.waiting}</span><span>还可新增 {graph.queue.available}</span><span>派发上限 {graph.queue.limit}</span>
-              {graph.queue.available === 0 && <span>等待单位结果</span>}
+          {/* P4-43 ③ 终态任务隐藏水位行:清点后执行中/排队/等前置/等待已
+              清零,还可新增/派发上限对已收场的任务无意义(隐藏而非清零,避免
+              "还可新增 8"误导)。P5-06 ③:数据源改水位轻量接口(watermark),
+              补"等待 N"(挂等让位趴窝数,不计排队不占容量)。 */}
+          {water && currentTask?.status !== "stopped" && currentTask?.status !== "completed" && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground num" title="排队只计可领取步骤，等前置步骤预留容量；等待为让出名额的挂起单位，解除后优先上位。急活不受派发上限限制。已批准待上位与补做证据优先领取下一个空位。">
+              <span>执行中 {water.running}</span><span>排队 {water.queued}</span><span>等前置 {water.waiting}</span><span>等待 {water.hold}</span><span>还可新增 {water.available}</span><span>派发上限 {water.limit}</span>
+              {water.available === 0 && <span>等待单位结果</span>}
             </div>
           )}
           {currentTask.description && (
@@ -311,9 +316,9 @@ export function WorkbenchPage({ currentTask, focus }) {
         />
       </div>
 
-      {/* 详情层:目标 × 进度图 × 执行流 × 发现 */}
+      {/* 详情层:目标 × 执行流 × 发现 */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,7fr)_minmax(0,3fr)]">
-        {/* 左列(主):目标区 + 内嵌进度图 */}
+        {/* 左列(主):目标区 */}
         <div className="flex min-w-0 flex-col gap-4">
           <div className="rounded-xl border border-border/55 bg-card px-4 py-3">
             <div className="mb-2 text-xs font-medium tracking-wide text-muted-foreground">目标</div>
@@ -351,23 +356,7 @@ export function WorkbenchPage({ currentTask, focus }) {
               </div>
             )}
           </div>
-          {/* 进度区:内嵌进度图(节点点击抽屉、?focus= 聚焦,全同进度图页;
-              抽屉与本页发现区共用同一状态,不叠双层) */}
-          {nodes.length === 0 ? (
-            <div className="flex h-64 items-center justify-center rounded-xl border border-border/55 bg-card text-sm text-muted-foreground">
-              主宰派发步骤后,血缘图在此生长
-            </div>
-          ) : graph ? (
-            <GraphCanvas
-              data={{ ...graph, tid }}
-              focus={focus}
-              heightClass="h-[520px]"
-              sheet={sheet}
-              onSheetChange={setSheet}
-            />
-          ) : (
-            <div className="skeleton h-[520px] rounded-xl" />
-          )}
+
         </div>
 
         {/* 右列(辅):执行流 + 发现 */}
@@ -385,12 +374,12 @@ export function WorkbenchPage({ currentTask, focus }) {
                   const paused = u.paused;
                   const label = u.status === "approval_denied" ? denyStatusLabel(u) : unitWord(u.status);
                   const ust = paused
-                    ? { label: "冬眠中", icon: "moon" }
+                    ? { label: "已暂停", icon: "moon" }
                     : { label, icon: UNIT_ICON[u.status] || "circle" };
                   const Icon = iconOf(ust.icon);
                   return (
                     <button
-                      key={u.session_id}
+                      key={u.session_id || `q-${u.step_id}`}
                       className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left transition-colors duration-150 hover:bg-hover-lift cursor-pointer"
                       title={`${u.unit_id} ${u.step_id} · ${u.step_title || ""}${u.status === "approval_denied" ? "\n" + (u.deny_reason || label) : ""}`}
                       onClick={() => {
@@ -427,7 +416,7 @@ export function WorkbenchPage({ currentTask, focus }) {
             </div>
             <div className="max-h-[300px] overflow-y-auto px-2 pb-2">
               {wins.length === 0 ? (
-                <div className="px-2 py-4 text-sm text-muted-foreground">暂无锤炼完成成果</div>
+                <div className="px-2 py-4 text-sm text-muted-foreground">暂无已确认漏洞</div>
               ) : (
                 wins.map((c) => {
                   const sev = severityMeta(c.severity);
@@ -443,7 +432,7 @@ export function WorkbenchPage({ currentTask, focus }) {
                       ) : (
                         <StatusBadge meta={CLAIM_STATUS.confirmed} />
                       )}
-                      <span className="min-w-0 flex-1 truncate text-xs">{c.statement}</span>
+                      <span className="min-w-0 flex-1 truncate text-xs">{c.title || c.statement}</span>
                     </button>
                   );
                 })
@@ -490,8 +479,8 @@ export function WorkbenchPage({ currentTask, focus }) {
 // WorkbenchPlainHeader 未选任务时的页面头(选任务后由概要卡承担)。
 function WorkbenchPlainHeader() {
   return (
-    <div className="border-b pb-4">
-      <h1 className="t-page">工作台</h1>
+    <div className="sr-only">
+      <h1>工作台</h1>
     </div>
   );
 }

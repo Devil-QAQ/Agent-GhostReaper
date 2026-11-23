@@ -360,16 +360,19 @@ func TestHelmKillClearsPending(t *testing.T) {
 		t.Fatalf("置步骤 running 失败: %v", err)
 	}
 
+	if _, err := store.Append(ctx, task, rings.Event{Kind: rings.EventSwarmRecord, Actor: "swarm:u1", Payload: rings.SwarmRecord{Type: rings.SwarmRecSessionStarted, StepID: "s1", UnitID: "u1", TranscriptID: "swarm-u1"}}); err != nil {
+		t.Fatal(err)
+	}
 	helm := NewHelm(store)
 	var killedStep string
-	helm.attachTask(task, func(taskID, stepID string) (string, bool) {
+	helm.attachTask(task, func(taskID, stepID, _ string) (string, bool) {
 		killedStep = stepID
 		return "u1", true
 	})
 	if _, err := helm.SteerWork(ctx, task, "s1", "第一条", "creator"); err != nil {
 		t.Fatalf("排队失败: %v", err)
 	}
-	if len(helm.take(task, "s1")) != 1 {
+	if dirs, err := helm.takeForUnit(task, "s1", "u1"); err != nil || len(dirs) != 1 {
 		t.Fatalf("排队后应可取到指令")
 	}
 	if _, err := helm.SteerWork(ctx, task, "s1", "第二条", "creator"); err != nil {
@@ -381,7 +384,7 @@ func TestHelmKillClearsPending(t *testing.T) {
 	if killedStep != "s1" {
 		t.Fatalf("止损钩子应命中 s1,实际 %q", killedStep)
 	}
-	if left := helm.take(task, "s1"); len(left) != 0 {
+	if left, err := helm.takeForUnit(task, "s1", "u1"); err != nil || len(left) != 0 {
 		t.Fatalf("kill 后未送达指令应被清空,剩 %d 条", len(left))
 	}
 }

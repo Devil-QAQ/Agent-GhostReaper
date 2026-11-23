@@ -21,11 +21,11 @@ export const NAV_ITEMS = [
 
 // 任务空间顶部标签(进入任务后)。顺序按 8.3
 // "总览 → 驾驶 → 图 → 成果 → 基础数据 → 约束 → 交付"。
+// 唯一任务图页为全景图。
 export const TASK_TABS = [
   { id: "workbench", title: "工作台", phase: "P2-10", enabled: true },
   { id: "sessions", title: "会话", phase: "P2-07 牧者+布局 / P2-08/08b 补全", enabled: true },
-  { id: "progress", title: "进度图", phase: "P2-09", enabled: true },
-  { id: "annulus", title: "年轮图", phase: "P2-11", enabled: true },
+  { id: "panorama", title: "全景图", phase: "P5-09", enabled: true },
   { id: "findings", title: "发现", phase: "P1 迁入", enabled: true },
   { id: "assets", title: "资产", phase: "P1 迁入", enabled: true },
   { id: "roe", title: "RoE", phase: "P1 迁入", enabled: true },
@@ -40,10 +40,6 @@ export function enabledTaskTabs() {
 
 export function defaultTaskTab() {
   return enabledTaskTabs()[0]?.id || "findings";
-}
-
-export function isTaskTabEnabled(id) {
-  return TASK_TABS.some((t) => t.id === id && t.enabled);
 }
 
 // P2-06g 前的平铺路由(四页已迁入任务空间)——旧书签/旧链接按当前

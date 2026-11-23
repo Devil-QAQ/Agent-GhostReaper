@@ -58,11 +58,6 @@ var (
 	ErrAltResultMissingID         = errors.New("rings: alternative result missing id")
 	ErrUnknownMirrorRecType       = errors.New("rings: unknown mirror record type")
 	ErrMirrorRecMissingField      = errors.New("rings: mirror record missing required field")
-	ErrUnknownHypothesisRecType   = errors.New("rings: unknown hypothesis record type")
-	ErrUnknownHypothesisDecision  = errors.New("rings: unknown hypothesis evaluation decision")
-	ErrUnknownHypothesisVerdict   = errors.New("rings: unknown hypothesis result verdict")
-	ErrHypothesisRecMissingField  = errors.New("rings: hypothesis record missing required field")
-	ErrHypothesisEvalNoReason     = errors.New("rings: hypothesis evaluation requires reason")
 	ErrUnknownBlackboxRecType     = errors.New("rings: unknown blackbox record type")
 	ErrTokenUsageMissingField     = errors.New("rings: token usage row missing task or agent")
 	ErrUnknownSteerCommand        = errors.New("rings: unknown steer command")
@@ -145,6 +140,9 @@ func (s *Store) SetOnCommit(fn func(taskID string, events []Event)) {
 
 type writeRequest struct {
 	expectedRevision *int64
+	owner            *ExecutionOwner
+	claim            *ClaimSubmissionVersion
+	display          bool
 	taskID           string
 	events           []Event
 	tokens           []TokenUsage
@@ -246,6 +244,10 @@ func (s *Store) appendChecked(ctx context.Context, taskID string, expected *int6
 		return nil, ErrEmptyTaskID
 	}
 	req := writeRequest{taskID: taskID, events: events, expectedRevision: expected, resp: make(chan writeResult, 1)}
+	return s.enqueueEvents(ctx, req)
+}
+
+func (s *Store) enqueueEvents(ctx context.Context, req writeRequest) ([]int64, error) {
 	select {
 	case s.writes <- req:
 	case <-ctx.Done():
@@ -743,7 +745,7 @@ func (s *Store) handle(req writeRequest) writeResult {
 		}
 		return writeResult{rows: rows, err: err}
 	default:
-		revs, err := s.appendTx(req.taskID, req.events, req.expectedRevision)
+		revs, err := s.appendTx(req)
 		return writeResult{revisions: revs, err: err}
 	}
 }
@@ -789,11 +791,11 @@ func insertTokenRows(tx *sql.Tx, rows []TokenUsage) error {
 		}
 		if _, err := tx.Exec(
 			`INSERT INTO token_usage (task_id, agent, model, transcript_id, turn,
-			   input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, occurred_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			   input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, occurred_at, purpose, usage_missing)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			r.TaskID, r.Agent, r.Model, r.TranscriptID, r.Turn,
 			r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheWriteTokens,
-			occurred.Format(time.RFC3339Nano),
+			occurred.Format(time.RFC3339Nano), r.Purpose, r.UsageMissing,
 		); err != nil {
 			return fmt.Errorf("rings: 写入 token 用量第 %d 行: %w", i+1, err)
 		}
@@ -806,13 +808,32 @@ func insertTokenRows(tx *sql.Tx, rows []TokenUsage) error {
 // (单调递增),重复或回退一律拒绝,UNIQUE(task_id, revision) 为物理兜底。
 // 已特权清除的任务拒收(P4-40 ⑥:清除后迟到的异步写入不得让已销毁的
 // 数据复活)。
-func (s *Store) appendTx(taskID string, events []Event, expected *int64) ([]int64, error) {
+func (s *Store) appendTx(req writeRequest) ([]int64, error) {
+	taskID, events, expected, owner, claim := req.taskID, req.events, req.expectedRevision, req.owner, req.claim
 	if s.purged[taskID] {
 		return nil, ErrTaskPurged
 	}
 	var revisions []int64
 	err := s.withTx(func(tx *sql.Tx) error {
 		revisions = nil
+		if req.display {
+			if err := validateGeneratedDisplay(tx, taskID, events); err != nil {
+				return err
+			}
+		}
+		if claim != nil {
+			if err := validateClaimSubmission(tx, taskID, *claim, events); err != nil {
+				return err
+			}
+		}
+		if owner != nil {
+			if err := validateExecutionBusiness(tx, taskID, *owner); err != nil {
+				return err
+			}
+			if err := validateSwarmSubmissions(tx, taskID, events); err != nil {
+				return err
+			}
+		}
 		var next int64
 		if err := tx.QueryRow(
 			`SELECT COALESCE(MAX(revision), 0) FROM events WHERE task_id = ?`, taskID,

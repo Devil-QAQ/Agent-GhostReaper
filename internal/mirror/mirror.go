@@ -231,9 +231,6 @@ func (s *Session) trackTunnel(c net.Conn) func() {
 	}
 }
 
-// Lost 留痕失败计数(blob/账本写入失败;审计侧应关注非零会话)。
-func (s *Session) Lost() int64 { return s.lost.Load() }
-
 func (s *Session) nextID() string {
 	return fmt.Sprintf("%s.%d", s.id, s.seq.Add(1))
 }

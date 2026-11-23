@@ -204,7 +204,7 @@ func TestGoalAchieveCompletesTask(t *testing.T) {
 // (P3-14b ④):目标写成可判定条件 + pred 判定口径,反向规则(不编造)保留。
 func TestTaskExtractPromptDecidable(t *testing.T) {
 	s := taskExtractSystem()
-	for _, want := range []string{"可判定的完成条件", `"pred"`, "判定口径", "不编造"} {
+	for _, want := range []string{"可核验完成条件", `"pred"`, "完成判据", "不补造"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("提取提示词应含 %q:\n%s", want, s)
 		}

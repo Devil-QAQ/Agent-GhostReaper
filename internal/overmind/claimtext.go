@@ -1,25 +1,5 @@
 package overmind
 
-// P4-64 全站文风·发现族过程态(问题清单 #82,统一规则"模型文本的冻结
-// 时点＝校对时点"):发现族各对象的显示层包装文本在各自的业务时点生成
-// 并独立事件冻结——
-//   - ① 反证时间线逐轮生成:每轮 falsify 记录入账时同链生成该轮三段
-//     人话(经 swarm 钩子 RoundHumanGen,与机器记录同批落账;定稿批次
-//     不再重复生成;重开后新轮次增量补);
-//   - ② 声明摘要立账即生成:收割立判断批次(候选声明派反证时)按
-//     genClaimSummary 同管线生成,锤炼中声明读侧即有摘要;定稿随新
-//     定稿重新生成(repro 覆盖,取代语义既有);
-//   - ③ 事实描述收割确认时生成(不限于已定稿判断链上的事实);
-//   - ④⑧ 假设文本评估时生成:收割评估批次对每条被评估假设改写冻结
-//     (标题/依据/评估理由同批),未评估"等待验证"瞬时态保持原文;
-//   - ⑥ 事实/假设标题:事实确认时、假设评估时同批按短句标准校对
-//     (不套报告级四段锚);
-//   - ⑦ 复测结论 note:入账时过通道(经 swarm 钩子 RetestNotePolisher)。
-// 全族同规矩(P4-59 包装分离先例):机器记录与节点原文一字不动(机器
-// 判定/任务包/仲裁全走原文);包装稿独立事件冻结、投影 latest-wins,
-// 读侧优先链退原文;生成失败回退(拼句/不冻结)不阻塞业务;报告导出
-// 与面板渲染零 LLM(R17 不破);存量旧账本不回填。
-
 import (
 	"context"
 	"encoding/json"
@@ -33,150 +13,9 @@ import (
 // titleShortStandard 标题短句标准(P4-64 ⑥):标题是短句不是叙述,不套
 // 报告级四段锚——术语门槛+完整可读资产标识(P4-27 裸引用规则)+机器语
 // 特征闸门。锚例自身须过闸(改标准先跑 machinegate_test 的锚例用例)。
-const titleShortStandard = `标题标准(短句,不超过 40 字):平实书面白话;主语用完整标识(域名或 IP 起头、host:port 形态,如 jkysd.cn:9902),不用裸端口、裸路径;写事实本身(是什么/拿到了什么),不写"发现""疑似""成功"这类过程词;数字写实际值;无 emoji;不写工具名与实现细节。
-正例:"example.com:8080 的备份接口无需登录即可下载""10.0.0.5 的备份包内带有后台管理员明文口令"。
-反例:"发现 Get /backup 200 OK 高危漏洞"(机器语堆砌);"疑似存在未授权访问问题"(过程词、不置可否)。`
+const titleShortStandard = `名称是一小句，供列表辨认这项观察或猜测。资产地址由页面单列，不必在名称中重复完整地址；必要的验证前提和确定性不能改变，不写成截断的执行记录。`
 
-// ---- ① 反证时间线逐轮生成 ----
-
-// GenRoundHumanFor 单轮人话生成(P4-64 ①:随 falsify 记录入账同链,
-// 每轮一次模型调用,反证轮有界):素材即机器记录本身(解释标签自判断
-// 冻结清单反查),先落确定性拼句,模型成功覆盖三段并过校对+闸门;零
-// Provider 或任何失败保留拼句——回退拼句不阻塞轮次入账。导出面供
-// swarm 钩子(main.go 经注册表路由)调用。
-func (l *Loop) GenRoundHumanFor(ctx context.Context, claimID string, rec *rings.TestClaimRecord) *rings.ClaimRoundHuman {
-	m := l.roundMaterialOf(ctx, claimID, rec)
-	h := deterministicRoundHuman(m)
-	out := &rings.ClaimRoundHuman{
-		ClaimID: claimID, Round: m.Round,
-		Doubt: h.Doubt, How: h.How, Conclusion: h.Conclusion,
-	}
-	if l.Provider == nil {
-		return out
-	}
-	gs := l.newGenSession(roundHumanSystem)
-	defer gs.close()
-	pack := &roundHumanPack{Rounds: []roundMaterial{m}}
-	if claim, err := l.Store.Node(ctx, l.TaskID, claimID); err == nil {
-		pack.Statement = claim.Title
-		pack.Impact, _ = claim.Detail["impact"].(string)
-	}
-	payload, err := json.Marshal(pack)
-	if err != nil {
-		return out
-	}
-	text, err := gs.ask(ctx, string(payload))
-	if err != nil {
-		runlog.Warnf("反证时间线人话生成失败: 任务 %s 判断 %s 第 %d 轮 原因 %s(回退确定性拼句)",
-			l.TaskID, claimID, m.Round, clipEval(err.Error()))
-		return out
-	}
-	rounds, perr := parseRoundHumans(text, m.Round)
-	if perr != nil {
-		runlog.Warnf("反证时间线人话解析失败: 任务 %s 判断 %s 第 %d 轮 原因 %s(回退确定性拼句)",
-			l.TaskID, claimID, m.Round, clipEval(perr.Error()))
-		return out
-	}
-	if r, ok := rounds[m.Round]; ok {
-		if s := strings.TrimSpace(r.Doubt); s != "" {
-			out.Doubt = clipLine(s, roundHumanClip)
-		}
-		if s := strings.TrimSpace(r.How); s != "" {
-			out.How = clipLine(s, roundHumanClip)
-		}
-		if s := strings.TrimSpace(r.Conclusion); s != "" {
-			out.Conclusion = clipLine(s, roundHumanClip)
-		}
-	}
-	l.polishRoundHumanFor(ctx, claimID, gs, out)
-	return out
-}
-
-// roundMaterialOf 机器记录 → 单轮素材(解释标签自判断冻结清单反查,
-// 与既有定稿批次装配同口径)。
-func (l *Loop) roundMaterialOf(ctx context.Context, claimID string, rec *rings.TestClaimRecord) roundMaterial {
-	labels := map[string]string{}
-	if claim, err := l.Store.Node(ctx, l.TaskID, claimID); err == nil {
-		labels = altLabels(claim)
-	}
-	m := roundMaterial{
-		Round:            rec.Round,
-		UnitID:           rec.UnitID,
-		ExistenceRefuted: rec.ExistenceRefuted,
-		ImpactSupported:  rec.ImpactSupported,
-		EvidenceHead:     clipLine(rec.EvidenceHead, 200),
-		Note:             clipLine(rec.Note, 200),
-	}
-	for _, a := range rec.Alternatives {
-		m.Alternatives = append(m.Alternatives, narrativeAlt{ID: a.ID, Label: labels[a.ID], Refuted: a.Refuted})
-	}
-	return m
-}
-
-// deterministicRoundHuman 单轮拼句兜底(deterministicRoundHumans 的单
-// 轮版,词形同源)。
-func deterministicRoundHuman(r roundMaterial) rings.FalsifyRoundHuman {
-	h := rings.FalsifyRoundHuman{Round: r.Round}
-	var doubts []string
-	for _, a := range r.Alternatives {
-		if a.Label == "" {
-			continue
-		}
-		doubts = append(doubts, "会不会是「"+a.Label+"」造成的假象?")
-	}
-	h.Doubt = strings.Join(doubts, "")
-	h.How = "独立单位 " + r.UnitID + " 反证;证据:" + orDash(r.EvidenceHead)
-	switch {
-	case r.ExistenceRefuted:
-		h.Conclusion = "推翻"
-	case len(r.Alternatives) > 0 && allRefuted(r.Alternatives):
-		h.Conclusion = "已排除"
-	default:
-		h.Conclusion = "未排除"
-	}
-	return h
-}
-
-// polishRoundHumanFor 单轮人话的校对+闸门链(polishRoundHumans 的单轮
-// 版:校对续问 → 特征扫描 → 退回重写一次 → 仍命中如实标注 Unpolished)。
-func (l *Loop) polishRoundHumanFor(ctx context.Context, claimID string, gs *genSession, out *rings.ClaimRoundHuman) {
-	if text, err := gs.ask(ctx, roundHumanProofreadAsk); err != nil {
-		runlog.Warnf("反证时间线人话校对失败: 任务 %s 判断 %s 第 %d 轮 原因 %s(保留生成稿)",
-			l.TaskID, claimID, out.Round, clipEval(err.Error()))
-	} else if rounds, perr := parseRoundHumans(text, out.Round); perr == nil {
-		if r, ok := rounds[out.Round]; ok {
-			out.Doubt = clipLine(r.Doubt, roundHumanClip)
-			out.How = clipLine(r.How, roundHumanClip)
-			out.Conclusion = clipLine(r.Conclusion, roundHumanClip)
-		}
-	}
-	rh := rings.FalsifyRoundHuman{Round: out.Round, Doubt: out.Doubt, How: out.How, Conclusion: out.Conclusion}
-	hits := roundHumanHits(rh)
-	if len(hits) == 0 {
-		return
-	}
-	if err := l.rewriteRoundHuman(ctx, gs, &rh, hits); err != nil {
-		runlog.Warnf("反证时间线人话改写失败: 任务 %s 判断 %s 第 %d 轮 原因 %s(如实标注)",
-			l.TaskID, claimID, out.Round, clipEval(err.Error()))
-	} else {
-		hits = roundHumanHits(rh)
-	}
-	out.Doubt, out.How, out.Conclusion = rh.Doubt, rh.How, rh.Conclusion
-	if len(hits) > 0 {
-		out.Unpolished = true
-		runlog.Warnf("反证时间线人话未过文风校验,按原文保留: 任务 %s 判断 %s 第 %d 轮(%s)",
-			l.TaskID, claimID, out.Round, strings.Join(talkHitLines(hits), ";"))
-	}
-}
-
-// roundHumanHits 单轮三段的机器语特征扫描。
-func roundHumanHits(r rings.FalsifyRoundHuman) []talkHit {
-	var hits []talkHit
-	for _, text := range []string{r.Doubt, r.How, r.Conclusion} {
-		hits = append(hits, ScanMachineTalk(text)...)
-	}
-	return hits
-}
+// ---- 声明摘要 ----
 
 // ---- ② 声明摘要立账即生成 ----
 
@@ -208,44 +47,19 @@ func (l *Loop) genClaimSummaryText(ctx context.Context, claimID string) rings.Cl
 	} else {
 		runlog.Warnf("判断摘要解析失败: 任务 %s 判断 %s(读侧按原文呈现)", l.TaskID, claimID)
 	}
-	out.Statement, out.Impact, out.Facts = rec.Statement, rec.Impact, rec.Facts
+	out.Title, out.Statement, out.Impact, out.Facts = rec.Title, rec.Statement, rec.Impact, rec.Facts
 	return out
-}
-
-// polishClaimLaunchSummaries 收割立判断批次(P4-64 ②):本轮刚派反证
-// 的候选声明逐条生成摘要并落 claim.summary 事件——锤炼中(未定稿)声明
-// 读侧即有摘要;确认定稿由 genClaimSummary 随新定稿重新生成覆盖(投影
-// 同列 latest-wins,取代语义既有)。
-func (l *Loop) polishClaimLaunchSummaries(ctx context.Context, claimIDs []string) {
-	for _, id := range claimIDs {
-		s := l.genClaimSummaryText(ctx, id)
-		if s.Statement == "" && s.Impact == "" && len(s.Facts) == 0 {
-			continue
-		}
-		if _, err := l.Store.Append(ctx, l.TaskID, rings.Event{
-			Kind: rings.EventClaimSummaryPol, Actor: ActorOvermind, Payload: s,
-		}); err != nil {
-			runlog.Warnf("判断摘要写入失败: 任务 %s 判断 %s 原因 %s(读侧按原文呈现)",
-				l.TaskID, id, clipEval(err.Error()))
-		}
-	}
 }
 
 // ---- ③⑥ 事实描述与标题(收割确认批次) ----
 
-// factTextSystem 事实文本生成的系统段:标题走短句标准、描述走报告级
-// 描述口径(一句话本质+影响对象)。
-const factTextSystem = `为渗透测试确认的事实改写两段文本,写给不懂技术的读者也能读懂。输入是每条事实的陈述原文与证据摘要。任务:
+// displayExplanationStandard 详情概览的阅读目标与真实性边界。
+// 具体组织交给模型，响应细节留在独立证据区。
+const displayExplanationStandard = `依据给定材料写完整、平实的中文，内容组织由你决定。这是操作者展开详情时先读的概览。像向同事交代结果一样，先用一两句通俗话讲清主要意思；响应码对照、协议字段和载荷清单留在证据中。必要时再另起短段交代关键条件。观察、推断、未验证和已证实的边界不能改变；没有发现问题只适用于本次验证范围。不要补造事实，也不要逐项复述响应头、载荷、工具输出或内部编号，它们保留在证据与完整原文中。`
 
-1. title(标题):按标题标准写一句短句——陈述事实本身,主语用完整标识。
-2. statement(描述):一句话本质+影响对象;事实不好懂时补一句通俗原理,用"就是…从而…"句式。正例:"10.0.0.5 的备份文件无需登录即可下载,包内带有后台管理员的明文口令"。
-
-规则:
-1. 只改文风,事实一字不动:目标、路径、数字、凭据有无全照抄;不编造原文没有的信息;证据摘要只是改写依据,不写进正文。
-2. 平实书面白话;短句;无 emoji;不写工具名与实现细节。
-3. fact_id 原样返回。
-
-只输出 JSON:{"facts":[{"fact_id":"…","title":"…","statement":"…"},…]},facts 只含输入里给出的条目。`
+const factTextSystem = `为安全测试面板整理事实的名称和说明。名称是方便辨认的一小句；说明让人看懂实际观察到什么，以及这个结果能说明什么。识别到的服务名、版本号等若就是本条结果，应直接写出材料中的实际值，不能只说“已取得服务名与版本”而让人去证据里找答案；协议明细与结果本身要分清。普通公开信息如实称为公开信息，不因为取到了它就写成泄露或攻击成功。资产地址在界面单列，不必在名称与正文反复写完整地址。事实已确认只表示这项观察有记录，不等于漏洞成立、凭据有效或攻击成功；不要替漏洞裁决定级。通常一两句就能讲清结果，不要另加泛泛的提醒。
+` + displayExplanationStandard + `
+只输出 JSON:{"facts":[{"fact_id":"…","title":"…","statement":"…"},…]}，条目标识与输入一致。`
 
 // factTextAsk 事实文本的生成续问。
 func factTextAsk(facts []factTextMaterial) string {
@@ -273,6 +87,15 @@ type factTextReply struct {
 // 会话(生成→校对→闸门重写一次→标题仍脏如实标注、描述仍脏不冻结);
 // 零 Provider 零外呼。
 func (l *Loop) polishConfirmedFacts(ctx context.Context, factIDs []string) {
+	sources, err := l.Store.NodeTextSourceRevs(ctx, l.TaskID)
+	if err != nil {
+		l.setErr(err)
+		return
+	}
+	l.polishFactsAt(ctx, factIDs, sources)
+}
+
+func (l *Loop) polishFactsAt(ctx context.Context, factIDs []string, sources map[string]int64) {
 	if len(factIDs) == 0 || l.Provider == nil {
 		return
 	}
@@ -300,6 +123,7 @@ func (l *Loop) polishConfirmedFacts(ctx context.Context, factIDs []string) {
 		if !ok {
 			continue // 该条未生成或描述未过闸:读侧退节点原文
 		}
+		p.SourceRev = sources[m.FactID]
 		events = append(events, rings.Event{
 			Kind: rings.EventFactText, Actor: ActorOvermind, Payload: p,
 		})
@@ -307,9 +131,10 @@ func (l *Loop) polishConfirmedFacts(ctx context.Context, factIDs []string) {
 	if len(events) == 0 {
 		return
 	}
-	if _, err := l.Store.Append(ctx, l.TaskID, events...); err != nil {
-		runlog.Warnf("事实文本写入失败: 任务 %s 原因 %s(读侧按原文呈现)",
-			l.TaskID, clipEval(err.Error()))
+	for _, event := range events {
+		if _, err := l.Store.AppendDisplay(ctx, l.TaskID, event); err != nil {
+			l.setErr(err)
+		}
 	}
 }
 
@@ -335,22 +160,14 @@ func (l *Loop) genFactTexts(ctx context.Context, materials []factTextMaterial) m
 	for id, p := range parsed {
 		out[id] = p
 	}
-	// 校对续问(同会话,模型可见自己刚写的全部条目)。
-	if text, err := gs.ask(ctx, factTextProofreadAsk); err == nil {
-		if reparsed := parseFactTexts(text, known); len(reparsed) > 0 {
-			out = reparsed
-		}
-	} else {
-		runlog.Warnf("事实文本校对失败: 任务 %s 原因 %s(保留生成稿)", l.TaskID, clipEval(err.Error()))
-	}
 	// 闸门:标题命中 → 同会话重写一次 → 仍命中如实标注;描述命中 →
 	// 重写一次 → 仍命中该条描述不冻结(读侧退节点标题,原文在位)。
 	dirty := map[string][]talkHit{}
 	for id, p := range out {
-		if hits := ScanMachineTalk(p.Title); len(hits) > 0 {
+		if hits := scanDisplayText(p.Title); len(hits) > 0 {
 			dirty[id] = append(dirty[id], hits...)
 		}
-		if hits := ScanMachineTalk(p.Statement); len(hits) > 0 {
+		if hits := scanDisplayText(p.Statement); len(hits) > 0 {
 			dirty[id] = append(dirty[id], hits...)
 		}
 	}
@@ -360,13 +177,13 @@ func (l *Loop) genFactTexts(ctx context.Context, materials []factTextMaterial) m
 		}
 	}
 	for id, p := range out {
-		titleHits := ScanMachineTalk(p.Title)
+		titleHits := scanDisplayText(p.Title)
 		if len(titleHits) > 0 {
 			p.Unpolished = true
 			runlog.Warnf("事实标题未过文风校验,按原文保留: 任务 %s 事实 %s(%s)",
 				l.TaskID, id, strings.Join(talkHitLines(titleHits), ";"))
 		}
-		if hits := ScanMachineTalk(p.Statement); len(hits) > 0 {
+		if hits := scanDisplayText(p.Statement); len(hits) > 0 {
 			runlog.Warnf("事实描述未过文风校验,该字段按原文呈现: 任务 %s 事实 %s(%s)",
 				l.TaskID, id, strings.Join(talkHitLines(hits), ";"))
 			p.Statement = ""
@@ -376,7 +193,7 @@ func (l *Loop) genFactTexts(ctx context.Context, materials []factTextMaterial) m
 	return out
 }
 
-// parseFactTexts 宽容解析事实文本回复(未知名条目丢弃,字段按字符截断)。
+// parseFactTexts 丢弃未知条目，保留完整句子与结论边界，不裁断显示稿。
 func parseFactTexts(text string, known map[string]bool) map[string]rings.FactTextPolish {
 	body := strings.TrimSpace(text)
 	if m := jsonFenceRe.FindStringSubmatch(body); m != nil {
@@ -398,7 +215,7 @@ func parseFactTexts(text string, known map[string]bool) map[string]rings.FactTex
 		}
 		p := rings.FactTextPolish{
 			FactID: f.FactID,
-			Title:  clipRunes(f.Title, 80), Statement: clipRunes(f.Statement, summaryFactClip),
+			Title:  strings.TrimSpace(f.Title), Statement: strings.TrimSpace(f.Statement),
 		}
 		if p.Title != "" || p.Statement != "" {
 			out[f.FactID] = p
@@ -418,7 +235,7 @@ func (l *Loop) rewriteFactTexts(ctx context.Context, gs *genSession, out map[str
 			b.WriteString("- " + line + "\n")
 		}
 	}
-	b.WriteString(talkRewriteReferralNote + titleShortStandard + "\n")
+	b.WriteString(talkRewriteReferralNote + displayExplanationStandard + "\n")
 	b.WriteString(`只输出 JSON:{"facts":[{"fact_id":"…","title":"…","statement":"…"},…]},只含上面点名的条目。`)
 	text, err := gs.ask(ctx, b.String())
 	if err != nil {
@@ -435,191 +252,8 @@ func (l *Loop) rewriteFactTexts(ctx context.Context, gs *genSession, out map[str
 	return nil
 }
 
-// factTextProofreadAsk 事实文本的校对续问。
-const factTextProofreadAsk = `校对改写你刚写的全部事实文本:只改文风,事实一字不动(目标、路径、数字、凭据有无全照抄);标题仍是短句,描述仍是一句话本质+影响对象,fact_id 与上一轮一致。
-` + titleShortStandard + `
-只输出 JSON:{"facts":[{"fact_id":"…","title":"…","statement":"…"},…]},覆盖全部条目。`
-
-// ---- ④⑥⑧ 假设文本(收割评估批次) ----
-
-// hypoTextSystem 假设文本生成的系统段:标题短句、依据与评估理由报告
-// 级口径。
-const hypoTextSystem = `为渗透测试的待验证猜测改写三段文本,写给不懂技术的读者也能读懂。输入是每条猜测的陈述原文、依据原文与主宰本次评估的理由原文。任务:
-
-1. title(标题):按标题标准写一句短句。
-2. basis(依据):把依据改写为通顺的话,事实一字不动;依据为空则留空。
-3. reason(评估理由):把评估理由改写为通顺的话,裁决含义不变(转验证/挂账/废弃各是各),事实一字不动;理由为空则留空。
-
-规则:
-1. 只改文风,不编造原文没有的信息;目标、数字、结论全照抄。
-2. 平实书面白话;短句;无 emoji;不写工具名与实现细节。
-3. hypothesis_id 原样返回。
-
-只输出 JSON:{"hypotheses":[{"hypothesis_id":"…","title":"…","basis":"…","reason":"…"},…]},hypotheses 只含输入里给出的条目。`
-
-// hypoTextMaterial 单条假设素材。
-type hypoTextMaterial struct {
-	HypothesisID string `json:"hypothesis_id"`
-	Statement    string `json:"statement"`
-	Basis        string `json:"basis,omitempty"`
-	Reason       string `json:"reason,omitempty"`
-}
-
-// hypoTextReply 模型回复契约。
-type hypoTextReply struct {
-	Hypotheses []rings.HypoTextPolish `json:"hypotheses"`
-}
-
-// polishHypoTexts 假设文本生成(P4-64 ④⑥⑧:收割评估批次同批,只覆盖
-// 本次被评估的假设):标题/依据/评估理由一次会话生成→校对→闸门;未
-// 评估(等待验证瞬时态)不生成,读侧保持原文。返回 hypothesis_id →
-// 包装(随评估记录同批落账)。
-func (l *Loop) polishHypoTexts(ctx context.Context, plans []hypoEvalPlan) map[string]rings.HypoTextPolish {
-	out := map[string]rings.HypoTextPolish{}
-	if l.Provider == nil || len(plans) == 0 {
-		return out
-	}
-	materials := make([]hypoTextMaterial, 0, len(plans))
-	for _, p := range plans {
-		h, err := l.Store.Node(ctx, l.TaskID, p.HypothesisID)
-		if err != nil || h.Type != rings.NodeHypothesis {
-			continue
-		}
-		m := hypoTextMaterial{HypothesisID: p.HypothesisID, Statement: h.Title, Reason: strings.TrimSpace(p.Reason)}
-		m.Basis, _ = h.Detail["basis"].(string)
-		materials = append(materials, m)
-	}
-	if len(materials) == 0 {
-		return out
-	}
-	gs := l.newGenSession(hypoTextSystem)
-	defer gs.close()
-	payload, err := json.Marshal(materials)
-	if err != nil {
-		return out
-	}
-	text, err := gs.ask(ctx, "猜测原文与评估理由:\n"+string(payload))
-	if err != nil {
-		runlog.Warnf("假设文本生成失败: 任务 %s 原因 %s(读侧按原文呈现)", l.TaskID, clipEval(err.Error()))
-		return out
-	}
-	known := map[string]bool{}
-	for _, m := range materials {
-		known[m.HypothesisID] = true
-	}
-	parsed := parseHypoTexts(text, known)
-	if len(parsed) == 0 {
-		runlog.Warnf("假设文本解析失败: 任务 %s(读侧按原文呈现)", l.TaskID)
-		return out
-	}
-	out = parsed
-	if text, err := gs.ask(ctx, hypoTextProofreadAsk); err == nil {
-		if reparsed := parseHypoTexts(text, known); len(reparsed) > 0 {
-			out = reparsed
-		}
-	} else {
-		runlog.Warnf("假设文本校对失败: 任务 %s 原因 %s(保留生成稿)", l.TaskID, clipEval(err.Error()))
-	}
-	// 闸门:标题命中 → 重写一次 → 仍命中如实标注;依据/理由命中 →
-	// 重写一次 → 仍命中该字段不冻结(读侧退原文)。
-	dirty := map[string][]talkHit{}
-	for id, p := range out {
-		for _, text := range []string{p.Title, p.Basis, p.Reason} {
-			dirty[id] = append(dirty[id], ScanMachineTalk(text)...)
-		}
-	}
-	if len(dirty) > 0 {
-		if err := l.rewriteHypoTexts(ctx, gs, out, dirty); err != nil {
-			runlog.Warnf("假设文本改写失败: 任务 %s 原因 %s(如实标注)", l.TaskID, clipEval(err.Error()))
-		}
-	}
-	for id, p := range out {
-		if hits := ScanMachineTalk(p.Title); len(hits) > 0 {
-			p.Unpolished = true
-			runlog.Warnf("假设标题未过文风校验,按原文保留: 任务 %s 假设 %s(%s)",
-				l.TaskID, id, strings.Join(talkHitLines(hits), ";"))
-		}
-		if hits := ScanMachineTalk(p.Basis); len(hits) > 0 {
-			p.Basis = ""
-		}
-		if hits := ScanMachineTalk(p.Reason); len(hits) > 0 {
-			p.Reason = ""
-		}
-		out[id] = p
-	}
-	return out
-}
-
-// parseHypoTexts 宽容解析假设文本回复。
-func parseHypoTexts(text string, known map[string]bool) map[string]rings.HypoTextPolish {
-	body := strings.TrimSpace(text)
-	if m := jsonFenceRe.FindStringSubmatch(body); m != nil {
-		body = strings.TrimSpace(m[1])
-	}
-	if i := strings.Index(body, "{"); i >= 0 {
-		if j := strings.LastIndex(body, "}"); j > i {
-			body = body[i : j+1]
-		}
-	}
-	var r hypoTextReply
-	if json.Unmarshal([]byte(body), &r) != nil {
-		return nil
-	}
-	out := map[string]rings.HypoTextPolish{}
-	for _, h := range r.Hypotheses {
-		if !known[h.HypothesisID] {
-			continue
-		}
-		p := rings.HypoTextPolish{
-			HypothesisID: h.HypothesisID,
-			Title:        clipRunes(h.Title, 80),
-			Basis:        clipRunes(h.Basis, summaryFactClip),
-			Reason:       clipRunes(h.Reason, summaryFactClip),
-		}
-		if p.Title != "" || p.Basis != "" || p.Reason != "" {
-			out[h.HypothesisID] = p
-		}
-	}
-	return out
-}
-
-// rewriteHypoTexts 闸门退回重写(命中条目与特征喂回同会话)。
-func (l *Loop) rewriteHypoTexts(ctx context.Context, gs *genSession, out map[string]rings.HypoTextPolish, dirty map[string][]talkHit) error {
-	var b strings.Builder
-	b.WriteString("你写的猜测文本里有机器语,逐处改写掉,事实一字不动:\n")
-	for id, hits := range dirty {
-		p := out[id]
-		fmt.Fprintf(&b, "猜测 %s(标题:%s / 依据:%s / 理由:%s):\n",
-			id, clipLine(p.Title, 40), clipLine(p.Basis, 60), clipLine(p.Reason, 60))
-		for _, line := range talkHitLines(hits) {
-			b.WriteString("- " + line + "\n")
-		}
-	}
-	b.WriteString(talkRewriteReferralNote + titleShortStandard + "\n")
-	b.WriteString(`只输出 JSON:{"hypotheses":[{"hypothesis_id":"…","title":"…","basis":"…","reason":"…"},…]},只含上面点名的条目。`)
-	text, err := gs.ask(ctx, b.String())
-	if err != nil {
-		return err
-	}
-	known := map[string]bool{}
-	for id := range dirty {
-		known[id] = true
-	}
-	for id, p := range parseHypoTexts(text, known) {
-		out[id] = p
-	}
-	return nil
-}
-
-// hypoTextProofreadAsk 假设文本的校对续问。
-const hypoTextProofreadAsk = `校对改写你刚写的全部猜测文本:只改文风,事实一字不动(目标、数字、结论全照抄);标题仍是短句,裁决含义不变,hypothesis_id 与上一轮一致。
-` + titleShortStandard + `
-只输出 JSON:{"hypotheses":[{"hypothesis_id":"…","title":"…","basis":"…","reason":"…"},…]},覆盖全部条目。`
-
-// ---- ⑦ 复测结论 note ----
-
-// retestNoteSystem 复测备注校对的系统段。
-const retestNoteSystem = `校对改写渗透测试复测的备注:只改文风,事实一字不动(目标、路径、数字、状态码全照抄);写成一句或几句通顺的话,说清这轮复测看到了什么;平实书面白话,无 emoji,不写工具名与实现细节;提到目标一律用完整标识(域名或 IP 起头,host:port 形态)。
+const retestNoteSystem = `把本轮复测结果写成简短说明，先说实际结果，再说明影响结论的前提或限制。保留真实结论，不把未复现直接说成已修复，不逐项复述报文与参数。
+` + displayExplanationStandard + `
 只输出 JSON:{"note":"…"}`
 
 // PolishRetestNote 复测结论 note 校对(P4-64 ⑦:入账时过通道;随
@@ -645,7 +279,7 @@ func (l *Loop) PolishRetestNote(ctx context.Context, claimID string, round int, 
 		runlog.Warnf("复测备注解析失败: 任务 %s 判断 %s 第 %d 轮(按原文呈现)", l.TaskID, claimID, round)
 		return nil
 	}
-	if hits := ScanMachineTalk(out); len(hits) > 0 {
+	if hits := scanDisplayText(out); len(hits) > 0 {
 		// 退回重写一次;仍命中如实标注(原文保留)。
 		var b strings.Builder
 		b.WriteString("你改写的备注里有机器语,逐处改写掉,事实一字不动:\n")
@@ -656,7 +290,7 @@ func (l *Loop) PolishRetestNote(ctx context.Context, claimID string, round int, 
 		if text, err := gs.ask(ctx, b.String()); err == nil {
 			out = parseSingleText(text, "note")
 		}
-		if hits := ScanMachineTalk(out); len(hits) > 0 {
+		if hits := scanDisplayText(out); len(hits) > 0 {
 			runlog.Warnf("复测备注未过文风校验,按原文保留: 任务 %s 判断 %s 第 %d 轮(%s)",
 				l.TaskID, claimID, round, strings.Join(talkHitLines(hits), ";"))
 			return nil
@@ -665,7 +299,7 @@ func (l *Loop) PolishRetestNote(ctx context.Context, claimID string, round int, 
 	if out == "" {
 		return nil
 	}
-	return &rings.RetestNotePolish{ClaimID: claimID, Round: round, Note: clipRunes(out, summaryFactClip)}
+	return &rings.RetestNotePolish{ClaimID: claimID, Round: round, Note: strings.TrimSpace(out)}
 }
 
 // parseSingleText 宽容解析 {"<key>":"…"} 形态的单文本回复。
@@ -684,4 +318,48 @@ func parseSingleText(text, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(r[key])
+}
+
+// polishClaimTextAsync 为待核验/证据不足的漏洞补显示稿，独立于机器判定。
+// 已确认分支的名称与说明由同批定稿摘要生成；此处亦供历史副本的正式
+// 显示生成重跑使用，生成结果直接记账，不经人工替换。
+func (l *Loop) polishClaimTextAsync(parent context.Context, claimID string) {
+	if l.Provider == nil {
+		return
+	}
+	source, err := l.Store.ClaimTextSourceRev(parent, l.TaskID, claimID)
+	if err != nil {
+		l.setErr(err)
+		return
+	}
+	l.queueDisplay(parent, []string{displayKey("claim", claimID, source)}, func(ctx context.Context, _ map[string]bool) { l.polishClaimTextAt(ctx, claimID, source) })
+}
+
+func (l *Loop) polishClaimText(ctx context.Context, claimID string) {
+	source, err := l.Store.ClaimTextSourceRev(ctx, l.TaskID, claimID)
+	if err != nil {
+		return
+	}
+	l.polishClaimTextAt(ctx, claimID, source)
+}
+
+func (l *Loop) polishClaimTextAt(ctx context.Context, claimID string, source int64) {
+	if current, err := l.Store.ClaimTextSourceRev(ctx, l.TaskID, claimID); err != nil || current != source {
+		return
+	}
+	p := l.genClaimSummaryText(ctx, claimID)
+	if p.Title == "" || p.Statement == "" {
+		return
+	}
+	if _, err := l.Store.AppendDisplay(ctx, l.TaskID, rings.Event{Kind: rings.EventClaimText, Actor: ActorOvermind, Payload: rings.ClaimTextPolish{ClaimID: claimID, SourceRev: source, Title: p.Title, Statement: p.Statement, Impact: p.Impact}}); err != nil {
+		runlog.Warnf("漏洞显示稿未保存: 任务 %s 判断 %s 原因 %s", l.TaskID, claimID, clipEval(err.Error()))
+	}
+}
+
+func clipEval(s string) string {
+	s = strings.ReplaceAll(strings.TrimSpace(s), "\n", " ")
+	if len(s) > 160 {
+		return s[:160] + "…"
+	}
+	return s
 }

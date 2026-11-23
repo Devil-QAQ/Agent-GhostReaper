@@ -136,14 +136,14 @@ func seedReportScenario(t *testing.T, store *rings.Store, task string) {
 			EdgeType: rings.EdgeAbout, FromNode: "tc-1", ToNode: "web1"}},
 		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
 			EdgeType: rings.EdgeDerivedFrom, FromNode: "tc-1", ToNode: "s1"}},
-		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "overmind", Payload: rings.NodeStateChanged{NodeID: "tc-1", Status: rings.TestClaimTesting}},
+		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "overmind", Payload: rings.NodeStateChanged{NodeID: "tc-1", Status: "testing"}},
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
 			NodeID: "s2", NodeType: rings.NodeStep, Title: "反证: 备份目录列举", Status: "dispatched",
 			Detail: map[string]any{"goal_id": "g1", "kind": "falsify", "testclaim_id": "tc-1", "action_level": rings.ActionReadOnly}}},
 		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "swarm:u2", Payload: rings.NodeStateChanged{NodeID: "s2", Status: "done"}},
 		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "swarm:u2", Payload: rings.TestClaimRecord{
 			ClaimID: "tc-1", StepID: "s2", UnitID: "u2", Type: rings.TestClaimRecFalsify,
-			ExistenceRefuted: false, ImpactSupported: true, ImpactLevel: "high", EvidenceRef: "sha256:aa", EvidenceHead: "独立重放仍返回列举"}},
+			EvidenceRef: "sha256:aa", EvidenceHead: "独立重放仍返回列举"}},
 		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "arbiter", Payload: rings.TestClaimRecord{
 			ClaimID: "tc-1", StepID: "s2", UnitID: "u2", Type: rings.TestClaimRecVerdict, Satisfied: true,
 			EvaluatedRev: 17, Conditions: []rings.ArbiterConditionResult{
@@ -158,14 +158,14 @@ func seedReportScenario(t *testing.T, store *rings.Store, task string) {
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u1", Payload: claim("tc-2", "/api/version 公开暴露服务版本号")},
 		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1", Payload: rings.EdgeAdded{
 			EdgeType: rings.EdgeAbout, FromNode: "tc-2", ToNode: "web1"}},
-		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "overmind", Payload: rings.NodeStateChanged{NodeID: "tc-2", Status: rings.TestClaimTesting}},
+		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "overmind", Payload: rings.NodeStateChanged{NodeID: "tc-2", Status: "testing"}},
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
 			NodeID: "s3", NodeType: rings.NodeStep, Title: "反证: 版本暴露", Status: "dispatched",
 			Detail: map[string]any{"goal_id": "g1", "kind": "falsify", "testclaim_id": "tc-2", "action_level": rings.ActionReadOnly}}},
 		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "swarm:u3", Payload: rings.NodeStateChanged{NodeID: "s3", Status: "done"}},
 		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "swarm:u3", Payload: rings.TestClaimRecord{
 			ClaimID: "tc-2", StepID: "s3", UnitID: "u3", Type: rings.TestClaimRecFalsify,
-			ExistenceRefuted: false, ImpactSupported: false, EvidenceHead: "重放仅返回版本号"}},
+			EvidenceHead: "重放仅返回版本号"}},
 		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "arbiter", Payload: rings.TestClaimRecord{
 			ClaimID: "tc-2", StepID: "s3", UnitID: "u3", Type: rings.TestClaimRecVerdict, Satisfied: false,
 			PendingReason: "反证未推翻存在性,但影响面证据不足以支撑所声明的实际影响",
@@ -175,7 +175,7 @@ func seedReportScenario(t *testing.T, store *rings.Store, task string) {
 				{Kind: "impact_supported", Required: 1, Actual: 0, Satisfied: false},
 				{Kind: "verifier_independent", Required: 1, Actual: 1, Satisfied: true},
 			}}},
-		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "arbiter", Payload: rings.NodeStateChanged{NodeID: "tc-2", Status: rings.TestClaimPending}},
+		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "arbiter", Payload: rings.NodeStateChanged{NodeID: "tc-2", Status: rings.TestClaimInsufficient}},
 	)
 	// 审批留痕 + 目标达成 + 完成终态。
 	must(
@@ -270,15 +270,15 @@ func TestRenderTaskReport(t *testing.T) {
 		}
 	}
 
-	// Confirmed 条目:声明、影响面、锚点(带标题)、发现/验证单位 R12、
+	// Confirmed 条目:声明、影响面、锚点(带标题)、发现单位、
 	// 来龙去脉(P4-13:定稿冻结的模型叙述,读定稿零 LLM)。
 	for _, want := range []string{
 		"### C-1 /old-backup/ 备份目录可公开匿名列举 · 信息暴露 · 级别 high",
 		"存在性判断:/old-backup/ 备份目录可公开匿名列举",
 		"影响面判断:敏感数据可被未授权访问",
 		"资产锚点:`web1`(http://10.10.0.5:8080)",
-		"发现单位 `u1` · 发现步骤 `s1`;验证单位 `u2`(验证者 ≠ 发现者)",
-		"仲裁者机器判定已确认",
+		"发现单位 `u1` · 发现步骤 `s1`",
+		"机器核验已确认(三查全部通过)",
 		"来龙去脉:单位 u1 执行「审计主站敏感路径」时,在 /old-backup/ 的 200 响应正文里发现备份列举",
 	} {
 		if !strings.Contains(md, want) {
@@ -286,18 +286,17 @@ func TestRenderTaskReport(t *testing.T) {
 		}
 	}
 
-	// P2-13 完整报告:级别分布 + 反证时间线 + 复现步骤(Burp 可验证
-	// 原文,与面板同源装配)。P4-08 ⑤:操作方法撤下报告正文(证据包
-	// 收);⑥:请求行 origin-form(Host 头承载)。
+	// P2-13 完整报告:级别分布 + 时间线(交卷/核验;P5-03③ 起旧反证
+	// 写回条目不再呈现)+ 复现步骤(Burp 可验证原文,与面板同源装配)。
+	// P4-08 ⑤:操作方法撤下报告正文(证据包收);⑥:请求行 origin-form
+	//(Host 头承载)。
 	for _, want := range []string{
 		"级别分布(已确认,跟影响面证据走):high 1",
 		// P4-56:零在途不输出"判断在途"行;退役词零出现由闸门保证。
-		"机器判定:已确认",
-		"反证记录:",
-		"判断已记录，等待安排反证(发现单位 `u1`)",
-		"反证(单位 `u2`):存在性未推翻 · 影响面:证据充分(high)",
-		"机器判定:已确认",
-		"其他可能原因(创建时冻结):",
+		"机器核验:已确认",
+		"时间线:",
+		"漏洞已交卷，等待核验(单位 `u1`)",
+		"机器核验:已确认",
 		"复现步骤(检查归纳定稿",
 		"HTTP 原文(Burp 可验证):",
 		"GET /old-backup/ HTTP/1.1",
@@ -398,7 +397,7 @@ func TestRenderEdgeStates(t *testing.T) {
 	}
 	for _, want := range []string{
 		"任务状态:运行中(started)",
-		"本轮无经独立反证与机器判定确认的发现。",
+		"本轮无经机器核验确认的发现。",
 		"无证据不足发现。",
 		"资产覆盖:0 / 0",
 	} {

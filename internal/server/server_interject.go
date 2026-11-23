@@ -40,6 +40,7 @@ type UnitRow struct {
 	Status      string          `json:"status"` // running|done|exhausted|failed|aborted|approval_denied|blocked
 	Running     bool            `json:"running"`
 	Paused      bool            `json:"paused"`
+	CanResume   bool            `json:"can_resume,omitempty"`
 	Finish      *finishView     `json:"finish,omitempty"` // P4-06 ② 收场信息(note 原文不出账本)
 	StartedAt   string          `json:"started_at"`
 	FinishedAt  string          `json:"finished_at,omitempty"`
@@ -49,6 +50,14 @@ type UnitRow struct {
 	// P4-02 ① 排队中条目:派发未领取的 dispatched 步骤(Queued=true,
 	// 无会话锚——Status 为步骤真实状态,点击看步骤详情)。
 	Queued bool `json:"queued,omitempty"`
+	// P5-05 挂等宽限期的等待种类(approval=等待审批/model=等待模型;
+	// 空=活动中;已暂停走既有 Paused 标记)——面板状态词数据源,宽限
+	// 内解除即回执行中。仅 Running 行有值。
+	Wait string `json:"wait,omitempty"`
+	// P5-06 ② 最后一次活动时间(本地格式,字典序即时序):会话最近一次
+	// 模型调用、开始与收场时刻三者的最大值——执行中/等待/已完成段内
+	// 活动时间倒序的排序键(活跃老单位不沉底)。排队条目无值。
+	LastActive string `json:"last_active,omitempty"`
 	// P4-02 ② 拒绝来源:approval_denied 终态的单位带上终结它的拒绝线
 	// 类别与原因(硬规则的规则名从原因里解析,面板区分呈现)。
 	DenyLine   string `json:"deny_line,omitempty"`
@@ -58,10 +67,13 @@ type UnitRow struct {
 	BillableSec float64 `json:"billable_seconds"`
 }
 
-// handleUnitsList 虫群单位列表(会话 Started 升序;面板自上而下取最新
-// 即倒序读)。paused/running 是进程内活状态(重启后按账本如实呈现)。
-// P4-02:末尾追加"排队中"条目(dispatched 步骤,派发即可见);拒绝线
-// 与 billable 随行携带。
+// handleUnitsList 虫群单位列表(会话 Started 升序)。paused/running 是
+// 进程内活状态(重启后按账本如实呈现)。
+// P4-02:排队条目(派发未领取的 dispatched 步骤)与拒绝线/billable 随行。
+// P5-06 ①② 四段式供数:行序 = 非排队会话(Started 升序)在前、排队段
+// (让位停等/已唤醒会话行 + dispatched 排队条目)统一按 StepLaunchLess
+// 上位序殿后——面板执行中/等待/已完成段内自按 LastActive 倒序,排队段
+// 原样保序(队首最上,不自算档序)。
 // P4-36 起读 unit_sessions 投影(session_started/finished 由写侧同事务
 // 维护,note 的终态/轮次/终因/计费在写入时机器解析入列)——不再扫描
 // 事件流,巨账本任务的虫群列表秒开。
@@ -84,6 +96,21 @@ func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
+	}
+	latestSession := map[string]string{}
+	pauseSession := map[string]bool{}
+	for _, sess := range sessions {
+		latestSession[sess.StepID] = sess.Transcript
+		pauseSession[sess.Transcript] = sess.EndStatus == rings.StepPauseWait
+	}
+	controlsAvailable := s.swarmExec() != nil
+	if task, err := s.Store.Task(r.Context(), taskID); err == nil {
+		switch task.Status {
+		case "hibernated", "checkpointed", "paused", "stopped", "completed", "settling":
+			controlsAvailable = false
+		}
+	} else {
+		controlsAvailable = false
 	}
 	// 拒绝来源(P4-02 ②):步骤 → 最近一次 denied 记录(approval_records
 	// 投影,rev 升序留最后即最新)。
@@ -109,17 +136,24 @@ func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 		if sess.EndStatus != "" {
 			row.Status, row.Running, row.FinishedAt = sess.EndStatus, false, sess.FinishedAt
 			row.Finish = &finishView{Turns: sess.Turns, Reason: sess.Reason}
-			// P4-51 ①:范围等待批准的会话,显示态随步骤现值走——步骤还
-			// 在 scope_wait = 等待批准;已被裁决唤醒回 dispatched = 排队
-			// 中(重领后 session_started 清 end_status 回执行中);被禁
-			// 止测试收口 = 中止。
-			if sess.EndStatus == rings.StepScopeWait {
+			// P4-51 ①→P5-05:挂等让位停等态的会话,显示态随步骤现值走
+			// ——步骤还在停等(scope_wait/gate_wait/pause_wait/model_wait)
+			// = 排队中(显示层一律"排队中"不标原因);已被解除唤醒回
+			// dispatched = 已入队待领取;让位重领上位(步骤回 running,
+			// 原会话续跑——投影行残留收场列) = 回执行中(Running/Finish
+			// 随现值复位,在飞计费与等待字段随后续 Clock 补数);被收口
+			// = 中止等终态。
+			if sess.EndStatus == rings.StepScopeWait || sess.EndStatus == rings.StepGateWait ||
+				sess.EndStatus == rings.StepPauseWait || sess.EndStatus == rings.StepModelWait {
 				if st, ok := steps[sess.StepID]; ok {
 					switch st.Status {
-					case rings.StepScopeWait:
-						row.Status = rings.StepScopeWait
+					case rings.StepScopeWait, rings.StepGateWait, rings.StepPauseWait, rings.StepModelWait:
+						row.Status = st.Status
 					case "dispatched":
-						row.Status, row.Finish = "dispatched", nil // 已批准,排队中
+						row.Status, row.Finish = "dispatched", nil // 已解除,排队中
+					case "running":
+						row.Status, row.Running, row.FinishedAt = "running", true, ""
+						row.Finish = nil // 让位重领上位,原会话续跑中
 					default:
 						row.Status = st.Status // aborted(禁止测试/任务收场)等终态
 					}
@@ -140,26 +174,58 @@ func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 			out[i].DenyReason = ar.Reason
 		}
 	}
-	// P4-02 ① 排队中条目:当前 dispatched 的步骤(派发未领取 / 受阻
-	// 重开 / 断点存档回可领取),追加在会话行之后(面板排在列表尾段)。
-	// P4-08 ①:排序与调度器同源(overmind.StepLaunchLess)——面板排队
-	// 次序即领取次序,high 探索与反证并存时反证在前可直接在面板核对。
-	var queued []rings.NodeFull
+	// P5-06 ①② 四段式数据面:会话行分两股——排队段股(Status ∈
+	// {dispatched, 停等态四族}:让位趴窝单位与已唤醒待领取的会话行,
+	// 显示一律"排队中"不标原因)与其余股(执行中/等待/已完成,段内排序
+	// 归面板按 LastActive)。排队段股与 dispatched 排队条目合并成单一
+	// 上位序(StepLaunchLess 同源——已批准待上位/补做证据压队首的调度
+	// 序,展示与操作同源);同步骤以会话锚行呈现(保留插话/标记/置顶
+	// 锚点),不再另出排队条目双行。
+	queueState := func(st string) bool {
+		switch st {
+		case "dispatched", rings.StepScopeWait, rings.StepGateWait, rings.StepPauseWait, rings.StepModelWait:
+			return true
+		}
+		return false
+	}
+	rows := make([]UnitRow, 0, len(out)+len(steps))
+	queueSessByStep := map[string]UnitRow{}
+	for _, row := range out {
+		if queueState(row.Status) && row.SessionID != "" {
+			if _, ok := queueSessByStep[row.StepID]; !ok {
+				queueSessByStep[row.StepID] = row
+				continue
+			}
+			// 同步骤第二条停等/待领取会话(接力等历史形态):不代步骤,
+			// 原样随行(面板按状态自归排队段)。
+		}
+		rows = append(rows, row)
+	}
+	var flight []rings.NodeFull
 	for _, st := range steps {
-		if st.Status == "dispatched" {
-			queued = append(queued, st)
+		if queueState(st.Status) {
+			flight = append(flight, st)
 		}
 	}
-	sort.Slice(queued, func(i, j int) bool { return overmind.StepLaunchLess(queued[i], queued[j]) })
-	for _, st := range queued {
+	sort.Slice(flight, func(i, j int) bool { return overmind.StepLaunchLess(flight[i], flight[j]) })
+	for _, st := range flight {
+		if row, ok := queueSessByStep[st.ID]; ok {
+			rows = append(rows, row)
+			continue
+		}
 		title := st.Title
 		if t := stepTitlePolish[st.ID]; t != "" {
 			title = t
 		}
-		out = append(out, UnitRow{
+		rows = append(rows, UnitRow{
 			StepID: st.ID, StepTitle: title,
-			Status: "dispatched", Queued: true,
+			Status: st.Status, Queued: true,
 		})
+	}
+	out = rows
+	for i := range out {
+		row := &out[i]
+		row.CanResume = controlsAvailable && row.Status == rings.StepPauseWait && !row.Running && !row.Queued && pauseSession[row.SessionID] && latestSession[row.StepID] == row.SessionID
 	}
 	// 进程内活状态:暂停闩(会话已结束的行不标——闩随落地清理)。
 	if s.swarmExec() != nil {
@@ -168,7 +234,8 @@ func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 				out[i].Paused = true
 			}
 		}
-		// P4-02 ④ 在飞段的活动时钟读数(等待中冻结在已收拢值)。
+		// P4-02 ④ 在飞段的活动时钟读数(等待中冻结在已收拢值);
+		// P5-05 挂等宽限期的等待种类(等待审批/等待模型的面板状态词)。
 		for i := range out {
 			if !out[i].Running {
 				continue
@@ -176,11 +243,15 @@ func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 			if d, ok := s.swarmExec().ClockBillable(taskID, out[i].SessionID); ok {
 				out[i].BillableSec += d.Seconds()
 			}
+			out[i].Wait = s.swarmExec().ClockWait(taskID, out[i].SessionID)
 		}
 	}
 	// 每单位信息条数据(token 独立表按会话锚聚合;重启接力的同名单位
 	// token 行同属一个 transcript_id,自然合并——P2-06f 结论的消费面)。
-	if rows, err := s.Store.TokenUsageRows(r.Context(), taskID); err == nil {
+	// P5-06 ②:顺带收最近一次调用时刻(token 行 seq 升序,取最大),作
+	// LastActive 的活动信号——零新增查询。
+	lastCall := map[string]string{}
+	if usage, err := s.Store.TokenUsageRows(r.Context(), taskID); err == nil {
 		type lastUse struct {
 			model string
 			input int
@@ -190,7 +261,10 @@ func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 		for i := range out {
 			bySession[out[i].SessionID] = &out[i].Info
 		}
-		for _, x := range rows {
+		for _, x := range usage {
+			if la := x.OccurredAt.Local().Format("2006-01-02 15:04:05"); la > lastCall[x.TranscriptID] {
+				lastCall[x.TranscriptID] = la
+			}
 			info, ok := bySession[x.TranscriptID]
 			if !ok {
 				continue
@@ -199,6 +273,9 @@ func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 			info.OutputTokens += x.OutputTokens
 			info.CacheTokens += x.CacheReadTokens + x.CacheWriteTokens
 			info.Calls++
+			if !x.HasConversationInput() {
+				continue // 辅助请求或未知输入计入成本,不替换主会话上下文。
+			}
 			info.Model = x.Model
 			lu := last[x.TranscriptID]
 			if lu == nil {
@@ -223,6 +300,21 @@ func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 				info.ContextRatio = float64(lu.input) / float64(window)
 			}
 		}
+	}
+	// P5-06 ② 最后一次活动时间 = 最近模型调用、开始、收场三者最大值
+	//(本地格式定宽,字典序即时序);无 token 行的年轻单位退开始时刻,
+	// 已收场单位以收场时刻封顶。
+	for i := range out {
+		if out[i].Queued {
+			continue
+		}
+		la := lastCall[out[i].SessionID]
+		for _, t := range []string{out[i].StartedAt, out[i].FinishedAt} {
+			if t > la {
+				la = t
+			}
+		}
+		out[i].LastActive = la
 	}
 	if out == nil {
 		out = []UnitRow{}
@@ -314,8 +406,10 @@ func (s *Server) interjectInfo(r *http.Request, taskID, target, sessionID string
 		info.OutputTokens += x.OutputTokens
 		info.CacheTokens += x.CacheReadTokens + x.CacheWriteTokens
 		info.Calls++
-		lastModel, lastInput = x.Model, x.InputTokens
-		info.Model = x.Model
+		if x.HasConversationInput() {
+			lastModel, lastInput = x.Model, x.InputTokens
+			info.Model = x.Model
+		}
 	}
 	if info.Model == "" && s.Chain != nil {
 		info.Model = s.Chain.ActiveModel()
@@ -404,6 +498,11 @@ func (s *Server) unitControl(w http.ResponseWriter, r *http.Request, action stri
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
+	}
+	// P5-05:暂停让位停等步骤的继续唤醒已随 ResumeUnit 落账(回
+	// dispatched+队首档)——踢醒主宰循环即时领取。
+	if action == "resume" {
+		s.wake(taskID)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": action + "d"})
 }

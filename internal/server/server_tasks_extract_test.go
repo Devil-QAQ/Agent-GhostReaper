@@ -28,16 +28,11 @@ func TestTaskExtractAPI(t *testing.T) {
 	// (带判定口径)与裸字符串两种形态(P3-14b ④ 容错)。
 	content := "以下是提取结果:\n```json\n" + `{"title":"某授权目标测试","assets":[
 		{"class":"service","title":"http://10.10.0.5:8080"},
-		{"class":"service","title":"10.10.0.6"},
+		{"class":"host","title":"10.10.0.6"},
 		{"class":"乱类","title":"x.example.com"}],
 	"goals":[{"title":"提取 users 表全部账号与口令哈希","pred":"拿到 users 表全部行的账号与哈希"},
 		"确认登录面暴露情况"],
-	"constraints":[
-		{"action":"上传文件","disposition":"forbid","assets":["http://10.10.0.5:8080"],"patterns":["(?i)\\bcurl\\b[^|;&]*(\\s-T\\b|--upload-file)"],"basis":"不允许上传文件"},
-		{"action":"爆破","disposition":"allow","quota":20,"basis":"爆破类操作最多 20 次"},
-		{"action":"删库","disposition":"sometimes","basis":"坏处置"},
-		{"action":"读取","disposition":"forbid","quota":3,"basis":"禁止带次数"},
-		{"action":"探测","disposition":"forbid","patterns":["("],"basis":"坏正则"}]}
+	"creator_notes":["不允许上传文件；对象：http://10.10.0.5:8080","该操作最多20次"]}
 ` + "```"
 	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -62,37 +57,17 @@ func TestTaskExtractAPI(t *testing.T) {
 		t.Fatalf("标题应回填: %+v", res)
 	}
 	if len(res.Assets) != 2 || res.Assets[0].Class != "service" || res.Assets[1].Class != "host" {
-		// 注:脚本回复里第二资产类给的是 service,校验按模型输出原样收
-		//(类在 12 词表内即收,不替模型改判);只丢弃词表外的乱类。
-		if len(res.Assets) != 2 {
-			t.Fatalf("应恰 2 条资产(乱类丢弃): %+v", res.Assets)
-		}
+		t.Fatal("invalid extracted asset classes", res.Assets)
 	}
 	if len(res.Goals) != 2 || !strings.Contains(res.Goals[0].Title, "users 表") ||
 		!strings.Contains(res.Goals[0].Pred, "全部行") || !strings.Contains(res.Goals[1].Title, "登录面") {
 		t.Fatalf("目标应回填(对象带判定口径,裸串按无口径收): %+v", res.Goals)
 	}
-	if len(res.Constraints) != 4 {
-		t.Fatalf("应恰 4 条约束(坏处置丢弃;禁止带次数的去除次数后收;坏正则丢弃该条正则后收): %+v", res.Constraints)
+	if len(res.CreatorNotes) != 2 || !strings.Contains(res.CreatorNotes[0], "不允许上传文件") || !strings.Contains(res.CreatorNotes[1], "20") {
+		t.Fatal("operator requirement or number lost", res.CreatorNotes)
 	}
-	upload := res.Constraints[0]
-	if upload.Disposition != "forbid" || len(upload.Patterns) != 1 || !strings.Contains(upload.Basis, "不允许上传") {
-		t.Fatalf("上传约束不符: %+v", upload)
-	}
-	brute := res.Constraints[1]
-	if brute.Disposition != "allow" || brute.Quota != 20 {
-		t.Fatalf("爆破约束不符: %+v", brute)
-	}
-	// 修正后仍收的条目:读取(次数已去除)、探测(正则已丢弃)。
-	if res.Constraints[2].Action != "读取" || res.Constraints[2].Quota != 0 {
-		t.Fatalf("禁止约束不得携带次数: %+v", res.Constraints[2])
-	}
-	if res.Constraints[3].Action != "探测" || len(res.Constraints[3].Patterns) != 0 {
-		t.Fatalf("坏正则应整条丢弃只留约束: %+v", res.Constraints[3])
-	}
-	// issues:乱类资产 / 坏处置 / 禁止带次数 / 坏正则 = 4 条。
-	if len(res.Issues) != 4 {
-		t.Fatalf("应记 4 条 issues(不静默丢): %+v", res.Issues)
+	if len(res.Issues) != 1 {
+		t.Fatal("invalid asset class must be reported", res.Issues)
 	}
 
 	// 空描述 400;超长 400。

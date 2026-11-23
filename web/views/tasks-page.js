@@ -10,6 +10,7 @@ import { CheckpointButton } from "@/components/checkpoint-button";
 import { HibernateButton } from "@/components/hibernate-button";
 import { KpiCard } from "@/components/kpi-card";
 import { PageHeader } from "@/components/page-header";
+import { SearchInput } from "@/components/search-input";
 import { iconOf } from "@/components/icons";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -90,9 +91,9 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
   const [textFilter, setTextFilter] = React.useState("");
   const [selected, setSelected] = React.useState(() => new Set());
   const [recovering, setRecovering] = React.useState(false);
-  const [deleteTarget, setDeleteTarget] = React.useState(null); // 待确认删除的任务
-  const [batch, setBatch] = React.useState(null); // {action:"stop"|"delete"} 待确认
-  const [draftDelete, setDraftDelete] = React.useState(null); // 待确认删除的草稿(P4-40)
+  const [deleteTarget, setDeleteTarget] = React.useState(null); // 待删除确认的任务
+  const [batch, setBatch] = React.useState(null); // {action:"stop"|"delete"} 待删除确认
+  const [draftDelete, setDraftDelete] = React.useState(null); // 待删除确认的草稿(P4-40)
 
   const { data: catBody } = usePolling("/api/task-categories", 8000);
   const categories = Array.isArray(catBody?.categories) ? catBody.categories : [];
@@ -297,21 +298,21 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
   };
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-3">
       <PageHeader
         title="任务"
-        subtitle="年轮账本内的全部任务 · 主宰拆解派发、虫群单位执行"
+        subtitle="查看任务进度、发现和待处理事项"
       >
         <div className="flex gap-2">
-          <Button variant="outline" onClick={() => (location.hash = "/agent")}>
+          <Button size="sm" variant="outline" onClick={() => (location.hash = "/agent")}>
             {React.createElement(iconOf("settings"), { className: "size-4" })}
             并发设置
           </Button>
-          <Button variant="outline" onClick={() => setCategoryOpen(true)}>
+          <Button size="sm" variant="outline" onClick={() => setCategoryOpen(true)}>
             {React.createElement(iconOf("tags"), { className: "size-4" })}
             分类管理
           </Button>
-          <Button onClick={openCreate}>
+          <Button size="sm" onClick={openCreate}>
             {React.createElement(iconOf("plus"), { className: "size-4" })}
             新建任务
           </Button>
@@ -352,26 +353,16 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
         <EmptyState
           icon="listChecks"
           title="尚无任务"
-          hint="新建第一个任务,种子资产入图后主宰开始拆解"
+          hint="新建任务并填写目标资产"
           action={{ label: "新建任务", onClick: openCreate }}
         />
       ) : (
         <div className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
-            <div className="relative w-56">
-              {React.createElement(iconOf("search"), {
-                className: "absolute top-3 left-2 size-4 text-muted-foreground",
-              })}
-              <Input
-                className="pl-8"
-                placeholder="按名称或描述搜索"
-                value={textFilter}
-                onChange={(e) => setTextFilter(e.target.value)}
-              />
-            </div>
+            <SearchInput placeholder="按名称或描述搜索" value={textFilter} onChange={(e)=>setTextFilter(e.target.value)} />
             <div className="w-32">
               <Select value={statusFilter} onValueChange={setStatusFilter}>
-                <SelectTrigger>
+                <SelectTrigger className="h-8 text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -385,7 +376,7 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
             </div>
             <div className="w-36">
               <Select value={categoryFilter} onValueChange={setCategoryFilter}>
-                <SelectTrigger>
+                <SelectTrigger className="h-8 text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -552,12 +543,13 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
                               onClick={() => onReopenClosure?.(t.id)}
                             />
                           )}
-                          {/* 发现未读红点(P4-47 A):汇总位——成果或事实
-                              任一子页签有未读即亮,看过即消;点击进发现页 */}
-                          {(t.unread_claims > 0 || t.unread_facts > 0) && (
+                          {/* 发现未读红点(P5-08⑤ 三页签汇总):意图/
+                              事实/漏洞任一子页签有新即亮,三页全进过
+                              才灭;点击进发现页 */}
+                          {(t.unread_intents > 0 || t.unread_claims > 0 || t.unread_facts > 0) && (
                             <button
                               className="size-2 shrink-0 cursor-pointer rounded-full bg-status-danger transition-transform duration-150 hover:scale-125"
-                              title={`发现未读:成果 ${t.unread_claims} 条 · 事实 ${t.unread_facts} 条`}
+                              title={`发现未读:意图 ${t.unread_intents} 条 · 事实 ${t.unread_facts} 条 · 漏洞 ${t.unread_claims} 条`}
                               onClick={() => {
                                 location.hash = `/task/${t.id}/findings`;
                               }}
@@ -603,20 +595,6 @@ export function TasksPage({ tasks, currentTask, onReopenClosure }) {
                             >
                               {t.pending_approvals}
                             </span>
-                          )}
-                          {/* 待批红点+计数(P4-52 ⑤:与待审批同款形态,审批
-                              集中 RoE——点击进 RoE 审批区处理;处理即消) */}
-                          {t.pending_scope > 0 && (
-                            <button
-                              className="ml-1 inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold leading-none text-primary-foreground num cursor-pointer transition-transform duration-150 hover:scale-110"
-                              title={`待批 ${t.pending_scope} 项`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                location.hash = `/task/${t.id}/roe`;
-                              }}
-                            >
-                              {t.pending_scope}
-                            </button>
                           )}
                           {/* P2-14b①:随机 ID 弱化为悬停可见的复制入口,
                               不再作行内主信息 */}

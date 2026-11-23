@@ -84,10 +84,10 @@ export function AgentPage() {
   const closeDialog = () => setEditing(null);
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-3">
       <PageHeader
         title="Agent"
-        subtitle="牧者 / 主宰 / 虫群 / 插话子会话 · 提示词与运行参数"
+        subtitle="配置各类会话的提示词和运行参数"
       />
 
       {error && (
@@ -97,10 +97,10 @@ export function AgentPage() {
       )}
 
       {loading ? (
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className="grid auto-rows-fr grid-cols-1 gap-3 lg:grid-cols-2">
           {[0, 1].map((i) => (
             <Card key={i}>
-              <CardContent className="flex flex-col gap-4 p-5">
+              <CardContent className="flex flex-col gap-3 p-4">
                 <div className="skeleton h-5 w-36" />
                 <div className="skeleton h-4 w-48" />
                 <div className="skeleton h-3 max-w-72 w-full" />
@@ -111,7 +111,7 @@ export function AgentPage() {
           ))}
         </div>
       ) : (
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className="grid auto-rows-fr grid-cols-1 gap-3 lg:grid-cols-2">
           {ROLE_ORDER.filter(({ id }) => data?.roles?.[id]).map(({ id, icon }, i) => (
             <div key={id} className="animate-rise" style={{ animationDelay: `${Math.min(i, 6) * 40}ms` }}>
               <AgentCard
@@ -143,9 +143,9 @@ function AgentCard({ id, icon, view, params, onEdit }) {
   const paramLine = cardParamLine(id, params);
   const fixed = view.fixed || []; // 空固定段防崩(服务端恒非空,防患)
   return (
-    <Card className="h-full transition-shadow duration-150 hover:shadow-card">
-      <CardContent className="flex h-full flex-col gap-4 p-5">
-        <div className="flex items-center gap-3">
+    <Card data-card-kind="agent" className="h-full min-w-0 transition-shadow duration-150 hover:shadow-card">
+      <CardContent className="flex h-full min-w-0 flex-col gap-3 p-4">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="t-sec flex items-center gap-2 leading-none">
             {React.createElement(iconOf(icon), { className: "size-4 text-muted-foreground" })}
             {view.title}
@@ -172,7 +172,7 @@ function AgentCard({ id, icon, view, params, onEdit }) {
           )}
         </div>
 
-        <div className="mt-auto flex items-center gap-2 border-t pt-4">
+        <div className="mt-auto flex flex-wrap items-center gap-2 border-t pt-3">
           <span className="ml-auto">
             <Button variant="ghost" size="sm" onClick={onEdit}>
               编辑

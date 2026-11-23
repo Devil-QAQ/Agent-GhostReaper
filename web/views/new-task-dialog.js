@@ -25,9 +25,9 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { ASSET_CLASSES, postJSON, TASK_TYPES, usePolling } from "@/lib/api";
 import { toast } from "sonner";
+import { draftPolicyNotes } from "@/lib/policy-notes.mjs";
 
 const emptyRow = () => ({ cls: "domain", title: "", parent: "" });
-const emptyConstraint = () => ({ action: "", disposition: "forbid", quota: "", scope: [], patterns: [], basis: "" });
 
 // 批量粘贴识别(#9):启发式分类,识别结果进资产行。P4-16 起建任务表单
 // 资产框即粘贴口,提交前对框内残余文本兜底解析;P4-05 资产页"新增资产"
@@ -53,8 +53,8 @@ export function recognizeLines(text) {
       else if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(s)) cls = "service";
       else if (/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9-]+)+:\d+$/i.test(s)) cls = "service";
       else if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) cls = "host";
-      else if (/^\*\.[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9-]+)+$/i.test(s)) cls = "subdomain";
-      else if (/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9-]+)+$/i.test(s)) cls = "subdomain";
+      else if (/^\*\.[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9-]+)+$/i.test(s)) cls = "domain";
+      else if (/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9-]+)+$/i.test(s)) cls = "domain";
       rows.push({ cls, title: s, parent: "" });
     }
   }
@@ -197,7 +197,6 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
   // 从描述提取(P2-08f,描述框即提取源)。
   const [extracting, setExtracting] = React.useState(false);
   const [extractIssues, setExtractIssues] = React.useState([]);
-  const [constraints, setConstraints] = React.useState([]);
   // 资产一键优化整理(P4-16,守恒把关在服务端)。
   const [organizing, setOrganizing] = React.useState(false);
   const [organizeIssues, setOrganizeIssues] = React.useState([]);
@@ -216,7 +215,7 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
     setTaskType(src?.task_type === "redteam" ? "redteam" : "pentest");
     const goalsIn = src ? src.goals : Array.isArray(draft?.goals) ? draft.goals?.join("\n") : "";
     setGoalsText(typeof goalsIn === "string" ? goalsIn : "");
-    setNotes(src?.notes ?? "");
+    setNotes(draftPolicyNotes(src?.notes, src?.constraints));
     setExcluded(src?.excluded ?? "");
     const rowsIn = src?.rows ?? draft?.rows;
     setRows(
@@ -237,18 +236,6 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
     setCatOpen(false);
     setExtracting(false);
     setExtractIssues([]);
-    setConstraints(
-      Array.isArray(src?.constraints)
-        ? src.constraints.map((c) => ({
-            action: c.action || "",
-            disposition: c.disposition || "forbid",
-            quota: c.quota || "",
-            scope: Array.isArray(c.scope) ? c.scope : [],
-            patterns: Array.isArray(c.patterns) ? c.patterns : [],
-            basis: c.basis || "",
-          }))
-        : []
-    );
     setOrganizing(false);
     setOrganizeIssues([]);
     setDiscardAsk(false);
@@ -378,26 +365,13 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
         return [...lines, ...gotExcluded.filter((g) => !known.has(g))].join("\n");
       });
     }
-    setConstraints((cs) => [
-      ...cs,
-      ...(body.constraints || []).map((c) => ({
-        action: c.action,
-        disposition: c.disposition,
-        quota: c.quota > 0 ? String(c.quota) : "",
-        scope: Array.isArray(c.assets) ? c.assets : [],
-        patterns: Array.isArray(c.patterns) ? c.patterns : [],
-        basis: c.basis || "",
-      })),
-    ]);
     setExtractIssues(body.issues || []);
-    if ((body.constraints || []).length > 0) setAdvOpen(true);
     const parts = [
       filledTitle ? "任务名 1" : "",
       goals.length > 0 ? `目标 ${goals.length}` : "",
       gotNotes.length > 0 ? `注意事项 ${gotNotes.length}` : "",
       assets.length > 0 ? `资产 ${assets.length}` : "",
       gotExcluded.length > 0 ? `不要测 ${gotExcluded.length}` : "",
-      (body.constraints || []).length > 0 ? `拦截规则 ${body.constraints?.length}` : "",
     ].filter(Boolean);
     toast.success(parts.length > 0 ? `已回填：${parts.join(" · ")},逐条核对` : "描述里没有可提取的内容");
   };
@@ -426,18 +400,6 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
     toast.success(`已整理为 ${(body.assets || []).length} 条,逐条核对`);
   };
 
-  const toggleScope = (i, t) =>
-    setConstraints((cs) =>
-      cs.map((c, j) =>
-        j === i
-          ? { ...c, scope: c.scope.includes(t) ? c.scope.filter((x) => x !== t) : [...c.scope, t] }
-          : c
-      )
-    );
-
-  const setConstraint = (i, patch) =>
-    setConstraints((cs) => cs.map((c, j) => (j === i ? { ...c, ...patch } : c)));
-
   // 表单是否有内容(P4-40):任何字段非默认即算——取消前据此决定是否
   // 确认丢弃。
   const formHasContent = () =>
@@ -453,7 +415,6 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
         catID ||
         catText.trim() ||
         taskType !== "pentest" ||
-        constraints.some((c) => c.action.trim() || c.basis) ||
         rows.some((r) => r.title.trim() || r.parent.trim()) ||
         !closureOn ||
         closureRounds.trim() ||
@@ -485,14 +446,7 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
       timeout,
       anchor,
       closure: { on: closureOn, rounds: closureRounds, minutes: closureMinutes },
-      constraints: constraints.map((c) => ({
-        action: c.action,
-        disposition: c.disposition,
-        quota: c.quota,
-        scope: c.scope,
-        patterns: c.patterns,
-        basis: c.basis,
-      })),
+
     };
     const { ok, body } = await postJSON("/api/task-drafts", { id: taskDraft?.id || "", draft: payload });
     setBusy(false);
@@ -537,31 +491,6 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
       toast.error("收口信号间隔须为 1~1440 的整数（留空用全局默认）");
       return;
     }
-    // 拦截规则校验:动作描述非空;允许+次数须为正整数(不填 = 不限)。
-    const rules = [];
-    for (const c of constraints) {
-      const action = c.action.trim();
-      if (!action) {
-        toast.error("拦截规则的动作不能为空（删掉不用的规则行）");
-        return;
-      }
-      let quota = 0;
-      if (c.quota.trim() !== "") {
-        quota = parseInt(c.quota, 10);
-        if (!Number.isFinite(quota) || quota < 1) {
-          toast.error(`拦截规则「${action}」的次数上限须为正整数（不填 = 不限）`);
-          return;
-        }
-      }
-      rules.push({
-        action,
-        asset_ids: c.scope.filter((t2) => formIDs.includes(t2)),
-        disposition: c.disposition,
-        ...(quota > 0 ? { quota } : {}),
-        ...(c.patterns.length > 0 ? { patterns: c.patterns } : {}),
-        ...(c.basis ? { note: `从授权描述提取:${c.basis}` } : {}),
-      });
-    }
     // 摘除清单冲突校验(P4-53 ③):同一条既在资产栏又在"不要测的资产"
     // = 既授权又禁止,按主机锚点对比(x.com 与 https://x.com 同一对象),
     // 命中人话拒建。无锚点的写法(其他类)不参与判定。
@@ -588,13 +517,8 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
     if (!closureOn || cr > 0 || cm > 0) {
       body.closure = { enabled: closureOn, rounds: cr, minutes: cm };
     }
-    // 注意事项随 roe 快照提交(P4-49):有规则或有注意事项才带 roe 对象;
-    // 注意事项为空时不带该键(服务端省略 = 保持语义,建任务即无)。
     const notesTrim = notes.trim();
-    if (rules.length > 0 || notesTrim !== "") {
-      body.roe = { intent_rules: rules };
-      if (notesTrim !== "") body.roe.creator_notes = notesTrim;
-    }
+    if (notesTrim !== "") body.roe = { creator_notes: notesTrim };
     // 来源草稿(P4-40):创建成功后服务端删除对应草稿。
     if (taskDraft?.id) body.draft_id = taskDraft.id;
     const { ok, body: resp } = await postJSON("/api/tasks", body);
@@ -608,7 +532,6 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
       `目标 ${goalTitles.length} 个`,
       `资产 ${assets.length} 个`,
       excludedLines.length > 0 ? `不要测 ${excludedLines.length} 条` : "",
-      rules.length > 0 ? `拦截规则 ${rules.length} 条` : "",
     ].filter(Boolean);
     toast.success(`已建任务 · ${extra.join(",")},主宰已唤醒`);
     if (onCreated) onCreated(resp.id);
@@ -936,87 +859,6 @@ export function NewTaskDialog({ open, onOpenChange, onCreated, draft, taskDraft,
                       value={timeout}
                       onChange={(e) => setTimeoutSecs(e.target.value)}
                     />
-                  </div>
-
-                  <div className="grid gap-2">
-                    <FieldLabel>拦截规则</FieldLabel>
-                    <div className="flex max-h-56 flex-col gap-2 overflow-y-auto rounded-xl pr-1">
-                      {constraints.length === 0 && (
-                        <div className="text-xs text-muted-foreground">未添加，默认按授权边界与审批门槛执行</div>
-                      )}
-                      {constraints.map((c, i) => (
-                        <div key={i} className="flex flex-col gap-1 rounded-md border border-border/50 p-2">
-                          <div className="flex items-center gap-2">
-                            <Input
-                              className="h-8 flex-1 text-xs"
-                              placeholder="动作(如 上传文件 / 数据读取)"
-                              value={c.action}
-                              onChange={(e) => setConstraint(i, { action: e.target.value })}
-                            />
-                            <div className="w-24 shrink-0">
-                              <Select value={c.disposition} onValueChange={(v) => setConstraint(i, { disposition: v })}>
-                                <SelectTrigger className="h-8 text-xs">
-                                  <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value="forbid">禁止</SelectItem>
-                                  <SelectItem value="allow">允许</SelectItem>
-                                </SelectContent>
-                              </Select>
-                            </div>
-                            {c.disposition === "allow" && (
-                              <Input
-                                className="h-8 w-28 shrink-0 text-xs"
-                                inputMode="numeric"
-                                placeholder="次数上限"
-                                value={c.quota}
-                                onChange={(e) => setConstraint(i, { quota: e.target.value })}
-                              />
-                            )}
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              title="删除此规则"
-                              onClick={() => setConstraints((cs) => cs.filter((_, j) => j !== i))}
-                            >
-                              {React.createElement(iconOf("x"), { className: "size-4" })}
-                            </Button>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-1">
-                            <span className="text-xs text-muted-foreground">范围:</span>
-                            {formIDs.length === 0 && <span className="text-xs text-muted-foreground">全部资产</span>}
-                            {formIDs.map((t2) => (
-                              <button
-                                key={t2}
-                                type="button"
-                                className={`rounded-full border px-2 py-0.5 num text-xs ${
-                                  c.scope.includes(t2) ? "border-primary/60 bg-primary/15 text-foreground" : "text-muted-foreground"
-                                }`}
-                                onClick={() => toggleScope(i, t2)}
-                              >
-                                {t2}
-                              </button>
-                            ))}
-                            {c.scope.filter((t2) => !formIDs.includes(t2)).length > 0 && (
-                              <span className="text-xs text-status-warning">
-                                {c.scope.filter((t2) => !formIDs.includes(t2)).length} 个范围引用不在资产内,创建时按全部资产处理
-                              </span>
-                            )}
-                          </div>
-                          {c.basis && <div className="text-xs text-muted-foreground">描述原句:{c.basis}</div>}
-                        </div>
-                      ))}
-                    </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="w-fit"
-                      onClick={() => setConstraints((cs) => [...cs, emptyConstraint()])}
-                    >
-                      添加拦截规则
-                    </Button>
                   </div>
 
                   <div className="grid gap-2">

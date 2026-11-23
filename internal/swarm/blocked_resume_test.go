@@ -57,7 +57,7 @@ func TestBlockedSessionKeptResumable(t *testing.T) {
 	if finished == nil || !finished.Resumable {
 		t.Fatalf("受阻收场的 session_finished 应带 Resumable: %+v", finished)
 	}
-	tid, kind := ex.pendingSession(context.Background(), task, "s1")
+	tid, kind, _ := ex.pendingSession(context.Background(), task, "s1")
 	if tid != res.TranscriptID || kind != resumeBlocked {
 		t.Fatalf("受阻会话应可续: got (%q,%v) want (%q,%v)", tid, kind, res.TranscriptID, resumeBlocked)
 	}
@@ -70,7 +70,7 @@ func TestBlockedSessionKeptResumable(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("铺收场失败: %v", err)
 	}
-	if tid, kind := ex.pendingSession(context.Background(), task, "s1"); tid != "" || kind != resumeNone {
+	if tid, kind, _ := ex.pendingSession(context.Background(), task, "s1"); tid != "" || kind != resumeNone {
 		t.Fatalf("非受阻收场不应可续: got (%q,%v)", tid, kind)
 	}
 }

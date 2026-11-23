@@ -268,10 +268,15 @@ func TestRestartAdoptionConcurrencyOverflow(t *testing.T) {
 		t.Fatalf("等待队列次序应为 old-2,old-3,实际 %v", order)
 	}
 	// 名额守恒:逐一释放,两个溢出任务先后拉起,无死锁。先排干 old-1
-	// 的初始收养唤醒缓冲,再观察 retire 拉起队首。
+	// 的初始收养唤醒通知,再观察 retire 拉起队首。不能非阻塞排空:
+	// New 返回时工作 goroutine 未必已发送通知,会把晚到的 old-1 误认成队首。
 	select {
-	case <-woken:
-	default:
+	case id := <-woken:
+		if id != "old-1" {
+			t.Fatalf("初始应拉起 old-1,实际 %s", id)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("old-1 初始启动通知未到达")
 	}
 	if err := m.Stop("old-1"); err != nil {
 		t.Fatalf("熔断 old-1: %v", err)

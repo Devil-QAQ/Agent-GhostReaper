@@ -247,27 +247,6 @@ func p458SeedLarge(t *testing.T, srv *Server, task string) {
 				EvaluatedRev: int64(i * 3), QAccess: "无新增", Dispatched: 1}})
 		}
 	}
-	// 假设 300 个 + 评估/结论记录与验证边。
-	for i := 0; i < 300; i++ {
-		hid := fmt.Sprintf("h%d", i)
-		push(rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
-			NodeID: hid, NodeType: rings.NodeHypothesis, Title: fmt.Sprintf("假设 %d", i), Status: "candidate"}})
-		push(rings.Event{Kind: rings.EventHypothesisRecord, Actor: "overmind", Payload: rings.HypothesisRecord{
-			HypothesisID: hid, Type: rings.HypothesisRecEvaluation,
-			Decision: rings.HypothesisVerify, Reason: "值得跟"}})
-		if i == 0 {
-			// 供详情直查的验证步骤 + 验证边 + 结论。
-			push(rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
-				NodeID: "sv0", NodeType: rings.NodeStep, Title: "验证假设 0", Status: "done"}})
-			push(rings.Event{Kind: rings.EventEdgeAdded, Actor: "overmind",
-				Payload: rings.EdgeAdded{EdgeType: rings.EdgeVerifies, FromNode: "sv0", ToNode: hid}})
-			push(rings.Event{Kind: rings.EventSwarmRecord, Actor: "swarm:u9", Payload: rings.SwarmRecord{
-				StepID: "sv0", UnitID: "u9", TranscriptID: "tr-sv0", Type: rings.SwarmRecSessionStarted}})
-			push(rings.Event{Kind: rings.EventHypothesisRecord, Actor: "swarm:u9", Payload: rings.HypothesisRecord{
-				HypothesisID: hid, Type: rings.HypothesisRecResult, StepID: "sv0", UnitID: "u9",
-				Verdict: "supported", EvidenceHead: "证据截头"}})
-		}
-	}
 	flush()
 	total, err := srv.Store.CurrentRevision(ctx, task)
 	if err != nil {
@@ -290,13 +269,11 @@ func TestP458LargeLedgerFast(t *testing.T) {
 		{"研判轨迹(会话页主宰)", "/api/tasks/" + task + "/overmind"},
 		{"舵杆列表", "/api/tasks/" + task + "/steers"},
 		{"系统事件(会话页)", "/api/tasks/" + task + "/blackbox"},
-		{"假设列表(发现页)", "/api/tasks/" + task + "/hypotheses"},
-		{"假设详情(发现页)", "/api/tasks/" + task + "/hypotheses/h0"},
 		{"观测·工具流水", "/api/obs/tools?task=" + task + "&limit=200"},
 		{"观测·吞吐", "/api/obs/throughput?task=" + task},
 		{"观测·拦截命中", "/api/obs/intercepts?task=" + task},
 		{"流量·单条详情", "/api/mirror/exchanges/ex-p458-probe?task=" + task},
-		{"统一图投影(进度图/年轮图/工作台)", "/api/tasks/" + task + "/graph"},
+		{"统一图投影(任务投影/全景图/工作台)", "/api/tasks/" + task + "/graph"},
 		{"插话视图(会话页子窗)", "/api/tasks/" + task + "/interject?target=overmind"},
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -408,9 +385,9 @@ func TestP458ReadPathBeforeAfter(t *testing.T) {
 		kindScan(rings.EventApprovalRecord, rings.EventNodeAdded,
 			rings.EventNodeStateChanged, rings.EventTaskLifecycle, rings.EventSwarmRecord))
 	run("假设详情(四类合并)", fullScan(rings.EventNodeAdded, rings.EventNodeStateChanged,
-		rings.EventHypothesisRecord, rings.EventSwarmRecord),
+		rings.EventSwarmRecord),
 		kindScan(rings.EventNodeAdded, rings.EventNodeStateChanged,
-			rings.EventHypothesisRecord, rings.EventSwarmRecord))
+			rings.EventSwarmRecord))
 	run("研判轨迹(五类合并)", fullScan(rings.EventOvermindRecord, rings.EventOperatorDive,
 		rings.EventNodeAdded, rings.EventNodeStateChanged, rings.EventEdgeAdded),
 		kindScan(rings.EventOvermindRecord, rings.EventOperatorDive,

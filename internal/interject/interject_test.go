@@ -530,7 +530,9 @@ func TestAskOvermindSnapshot(t *testing.T) {
 			Payload: rings.TaskLifecycle{Action: "created", Title: "主宰快照"}},
 		rings.Event{Kind: rings.EventOvermindRecord, Actor: "overmind",
 			Payload: rings.OvermindRecord{Type: rings.OvermindRecAssessment,
-				QAccess: "无新身份", Dispatched: 2}},
+				QAccess: "无新身份", Note: "目标已达成", Dispatched: 2}},
+		rings.Event{Kind: rings.EventNodeAdded, Actor: "creator",
+			Payload: rings.NodeAdded{NodeID: "g-current", NodeType: rings.NodeGoal, Title: "实际尚未达成的目标", Status: "active"}},
 	); err != nil {
 		t.Fatalf("造数失败: %v", err)
 	}
@@ -551,6 +553,7 @@ func TestAskOvermindSnapshot(t *testing.T) {
 	for _, want := range []string{
 		"主宰(计划权威)", "研判 #1", "【目标的系统提示", "唯一计划权威",
 		"【会话消息重放(最近一次研判请求", "overmind-" + task + "-d2", "最新一轮态势快照",
+		"【答复时的账本状态】", "任务状态:created", "目标已达成:0/1", "历史研判的完成叙述不改变这里的实际状态",
 	} {
 		if !strings.Contains(gotPrompt, want) {
 			t.Fatalf("主宰快照缺要素 %q:\n%s", want, gotPrompt)

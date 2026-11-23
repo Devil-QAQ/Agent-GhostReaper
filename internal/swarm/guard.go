@@ -97,7 +97,23 @@ func (w *wrappedTool) CheckPermissions(ctx context.Context, in json.RawMessage, 
 }
 
 func (w *wrappedTool) Call(ctx context.Context, in json.RawMessage, tc *tool.ToolContext) (tool.Result, error) {
-	return w.guard.call(w.inner, ctx, in, tc)
+	if !w.guard.env.beginCallback(ctx) {
+		return tool.Errorf("所属执行已结束，本次调用未执行"), nil
+	}
+	defer w.guard.env.endCallback()
+	res, err := w.guard.call(w.inner, ctx, in, tc)
+	text := res.Flatten()
+	if err != nil {
+		text += "\n" + err.Error()
+	}
+	id := ""
+	if tc != nil {
+		id = tc.ToolUseID
+	}
+	if auditErr := w.guard.env.recordActualToolResult(id, w.inner.Name(), in, text, res.IsError || err != nil); auditErr != nil {
+		return res, auditErr
+	}
+	return res, err
 }
 
 // wrapAll 包装工具全集。
@@ -142,12 +158,14 @@ const ActorOvermindHelm = "overmind"
 // 边界兜住,触达目标的工具全部逐次判定;非只读工具(bash)已在审批门
 // 判过,此处不重复(防配额双重计数)。回流入口(submit_*)只写自家
 // 账本不碰目标,豁免(防证据原文里的破坏性字样误伤)。P4-63:硬规则
-// 确定性拒绝只拒本次动作(单位存活换路),同规则累计 3 次升级杀;
+// 确定性拒绝只拒本次动作(单位存活换路;P5-03③ 起无连拒计数升级杀),
 // 模糊形态弹门人审。
 func (g *toolGuard) call(inner tool.CoreTool, ctx context.Context, in json.RawMessage, tc *tool.ToolContext) (tool.Result, error) {
 	if g.env.Executor.unitShouldPark(g.env) {
+		g.env.reviewMu.Lock()
 		g.env.parkArmed = true
 		g.env.fuseSegment()
+		g.env.reviewMu.Unlock()
 		return tool.Errorf(pauseDeferNote), nil
 	}
 	g.mu.Lock()
@@ -156,16 +174,24 @@ func (g *toolGuard) call(inner tool.CoreTool, ctx context.Context, in json.RawMe
 	fireAnchor := n%g.everyN == 0
 	var dirs []rings.SteerRecord
 	if g.helm != nil {
-		dirs = g.helm.take(g.env.TaskID, g.env.StepID)
+		var err error
+		dirs, err = g.helm.takeForUnit(g.env.TaskID, g.env.StepID, g.env.UnitID)
+		if err != nil {
+			g.mu.Unlock()
+			return tool.Result{}, fmt.Errorf("纠偏指令核对失败: %w", err)
+		}
 	}
 	g.mu.Unlock()
 
 	// ---- 舵杆生效点:下一次工具调用之前注入 ----
 	if len(dirs) > 0 {
+		if err := g.recordDeliveredBatch(dirs, n); err != nil {
+			g.helm.returnPending(g.env.TaskID, g.env.StepID, dirs)
+			return tool.Result{}, fmt.Errorf("纠偏送达记录失败: %w", err)
+		}
 		res := tool.Errorf(deferNote)
 		for _, d := range dirs {
 			res.Extra = append(res.Extra, llm.UserText(g.steerMessage(d)))
-			g.recordDelivered(d, n)
 		}
 		if fireAnchor {
 			res.Extra = append(res.Extra, llm.UserText(g.anchorMessage(n)))
@@ -175,8 +201,16 @@ func (g *toolGuard) call(inner tool.CoreTool, ctx context.Context, in json.RawMe
 
 	// ---- 拦截判定补口(只读工具)----
 	if inner.IsReadOnly(in) {
-		if reason := g.guardReadOnlyCall(inner.Name(), in); reason != "" {
+		if reason := g.guardReadOnlyCall(ctx, inner.Name(), in); reason != "" {
 			return tool.Errorf(reason), nil
+		}
+	}
+	if tc != nil && tc.ToolUseID != "" {
+		if _, err := g.env.appendBusiness(ctx, rings.Event{Kind: rings.EventSwarmRecord, Actor: "swarm:" + g.env.UnitID, Payload: rings.SwarmRecord{
+			Type: rings.SwarmRecToolStarted, StepID: g.env.StepID, UnitID: g.env.UnitID, TranscriptID: g.env.TranscriptID,
+			ToolCallID: tc.ToolUseID, ToolName: inner.Name(), ToolArgs: in,
+		}}); err != nil {
+			return tool.Result{}, fmt.Errorf("工具开始记录失败: %w", err)
 		}
 	}
 
@@ -196,69 +230,25 @@ func (g *toolGuard) call(inner tool.CoreTool, ctx context.Context, in json.RawMe
 // 账本、不触达目标环境——拦它没有安全收益,只会让证据原文里的破坏性
 // 字样(DROP TABLE 等)误伤正常写回。
 func guardExemptTool(toolName string) bool {
-	return strings.HasPrefix(toolName, "submit_")
+	if strings.HasPrefix(toolName, "submit_") {
+		return true
+	}
+	// These registered tools only read this task's ledger. They cannot execute
+	// a command or contact a target; another model decision would review the
+	// same policy information while accomplishing no environmental action.
+	switch toolName {
+	case "search_facts", "list_assets", "search_trails", "list_claims", "traffic_search", "traffic_get", "traffic_blob":
+		return true
+	}
+	return false
 }
 
-// guardReadOnlyCall 只读工具的拦截判定(P2-08e 判定链②③):命中拒绝
-// 返回原因(调用方以错误结果回给模型);放行返回空串。P4-63:硬规则
-// 确定性拒绝只拒本次动作不熔断单位(denyHardAction,同规则累计 3 次
-// 升级杀),模糊形态与弹门处置走人审(与审批门 ② 同款挂起——段收拢
-// 后停在票上等裁决,批准后模型重发同调用按放行配额通过)。允许 + 次
-// 数上限在此计数入账(与审批门同一条入账路径)。
-func (g *toolGuard) guardReadOnlyCall(toolName string, in json.RawMessage) string {
-	if guardExemptTool(toolName) {
-		return ""
-	}
-	if r, m, tier, hit := matchHardRule(guardLedgerCtx, g.env.Executor.Store, toolName, in); hit {
-		if r.Action == HardActionGate || tier == hardTierAmbiguous {
-			if a := g.env.allowance; a != nil && a.toolName == toolName && jsonEquiv(a.args, string(in)) {
-				g.env.allowance = nil
-				return ""
-			}
-			// P4-17:代理旁路组单位级放行——同组任何命中直接执行、逐次
-			// 留痕,不再弹门(与审批门 ② 分支同款)。
-			if g.env.bypassPass != nil && r.Group == HardGroupProxyBypass {
-				g.env.recordGateGroupPass(g.pack, r, m, toolName, in)
-				return ""
-			}
-			if g.env.Executor.Gate == nil {
-				return g.env.denyHardAction(g.pack, toolName, in, r, m, rings.DenyLineNoGate,
-					"无审批门可用(fail-safe):命中拦截规则(需人审处置)的动作无人在环,本次调用拒绝")
-			}
-			note := hardRuleGateNote(r, m)
-			if tier == hardTierAmbiguous {
-				note += " · 判位模糊,待批准或拒绝"
-			}
-			ticket, err := g.env.Executor.Gate.Enter(ApprovalRequest{
-				TaskID: g.pack.TaskID, StepID: g.pack.StepID, UnitID: g.env.UnitID,
-				Intent: g.pack.StepIntent, ActionLevel: g.pack.ActionLevel, HarmClass: g.pack.HarmClass,
-				ToolName: toolName, ToolArgs: string(in), Note: note,
-				GateGroup: r.Group,
-			})
-			if err != nil {
-				return "审批请求登记失败(fail-safe): " + err.Error()
-			}
-			g.env.park = ticket
-			g.env.fuseSegment()
-			return fmt.Sprintf("%s(请求 %s):命令命中拦截规则(%s · %s),已提交面板审批,批准后继续执行",
-				approvalPendingNote, ticket.Req.ID, r.Group, strings.TrimPrefix(r.Name, HardRuleBuiltinPrefix))
-		}
-		return g.env.denyHardAction(g.pack, toolName, in, r, m, rings.DenyLineHardRule, "")
-	}
-	// P4-51 ① 范围外拦截(渗透任务):只读探测的目标不在种子闭包内
-	// ——denyScope 内部分流(出待决卡＋单位冻结收场让位/已排除直接拒;
-	// 与审批门 ②b 同一挂点纪律)。P4-67:批准续跑的单次放行配额查在拦
-	// 前(攻击行为卡批准后的重发目标仍是范围外,同审批门 ②b)。
-	if a := g.env.allowance; a != nil && a.toolName == toolName && jsonEquiv(a.args, string(in)) {
-		g.env.allowance = nil
-		return ""
-	}
-	if reason := g.env.denyScope(g.pack, toolName, in); reason != "" {
-		return reason
-	}
-	if reason, rid, deny := g.env.checkIntentRules(g.pack, toolName, in); deny {
-		// 任务级拦截:只拒本次调用并留痕(P4-63 B:同规则累计 3 次升级杀)。
-		return g.env.denyIntentAction(g.pack, toolName, in, reason, rid)
+// guardReadOnlyCall uses the same decision chain as non-read-only tools.
+// The harness skips CanUseTool for read-only tools, so this is its one entry.
+func (g *toolGuard) guardReadOnlyCall(ctx context.Context, toolName string, in json.RawMessage) string {
+	d := g.env.approvalGate(g.pack)(ctx, toolName, in, permission.Context{})
+	if d.Behavior == permission.Deny {
+		return d.Message
 	}
 	return ""
 }
@@ -343,11 +333,13 @@ func (g *toolGuard) anchorMessage(nthBoundary int) string {
 
 // recordDelivered 送达记账:每条指令独立落 delivered(回指排队记录的
 // SteerID,消息原文随行——单条查询自足)。
-func (g *toolGuard) recordDelivered(d rings.SteerRecord, atBoundary int) {
-	d.State = rings.SteerStateDelivered
-	d.UnitID = g.env.UnitID
-	d.Note = fmt.Sprintf("已在该单位第 %d 个工具调用边界注入(该次调用被暂缓)", atBoundary)
-	_, _ = g.env.Executor.Store.Append(steerCtx, g.env.TaskID, rings.Event{
-		Kind: rings.EventSteerRecord, Actor: "swarm:" + g.env.UnitID, Payload: d,
-	})
+func (g *toolGuard) recordDeliveredBatch(dirs []rings.SteerRecord, atBoundary int) error {
+	events := make([]rings.Event, 0, len(dirs))
+	for _, d := range dirs {
+		d.State, d.UnitID = rings.SteerStateDelivered, g.env.UnitID
+		d.Note = fmt.Sprintf("已交该单位第 %d 个工具调用边界返回，等待单位处理；该次调用未执行", atBoundary)
+		events = append(events, rings.Event{Kind: rings.EventSteerRecord, Actor: "swarm:" + g.env.UnitID, Payload: d})
+	}
+	_, err := g.env.appendBusiness(steerCtx, events...)
+	return err
 }

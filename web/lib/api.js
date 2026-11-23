@@ -146,35 +146,26 @@ export {
   taskBlockedDot,
 } from "./task-status.mjs";
 
-// 发现区四页签词表(P4-56,问题清单 #77):假设→事实→锤炼→成果漏斗,
-// 条目往右迁、左边不留。显示键由服务端按"机器状态+反证/验证步骤现值"
-// 推导(rings.ClaimDisplay 同键),颜色三档全站统一:过程色动画=在动 /
-// 过程色静止(含暂停)=等批准 / 暗黄=挂起可复活(搁置、证据不足) /
-// 灰=终了只可追溯(已废弃、被推翻);红色唯一用途=严重级。
 export const CLAIM_DISPLAY = {
-  wait_falsify: {
-    label: "等待反证", variant: "running",
-    hint: "已提交，等待安排独立单位反证或排队中",
-  },
-  falsifying: {
-    label: "反证中", variant: "running", live: true,
-    hint: "独立单位正在反证",
-  },
-  falsify_paused: {
-    label: "反证暂停", variant: "running", paused: true,
-    hint: "反证单位等待范围批准，批准后继续",
+  candidate: {
+    label: "待机器核验", variant: "running",
+    hint: "已交卷，等待机器三查",
   },
   insufficient: {
     label: "证据不足", variant: "warning",
-    hint: "反证已完成但证据不足，有新证据自动重验",
+    hint: "机器核验未过且补考用尽，有新证据可重开",
+  },
+  refuted: {
+    label: "被推翻", variant: "info",
+    hint: "重验推翻，账本留痕",
   },
   discarded: {
     label: "已废弃", variant: "info",
-    hint: "不再锤炼，理由留档可追溯",
+    hint: "关联目标摘除，理由留档可追溯",
   },
   confirmed: {
     label: "已确认", variant: "success",
-    hint: "反证未推翻且证据充分，判定成立",
+    hint: "机器三查通过，判定成立",
   },
   fixed: {
     label: "已修复", variant: "success",
@@ -182,43 +173,24 @@ export const CLAIM_DISPLAY = {
   },
 };
 
-// 显示键的悬停细分(P4-56 ③ 中断与审批流转:服务端 display_hint 下发
-// 细分键,此处取词;空=无细分)。
-export const CLAIM_HINT = {
-  redispatch: "已重派，换新单位继续本轮反证",
-  redispatch_alt: "已重派换法：原动作方法被拒，换新方法重验",
-  ruling_wait: "等待主宰判定去留",
-  task_done: "任务完成时验证中断",
-};
-
-// 显示键 → 徽标 meta(带步骤现值的精确口径;claim.display 命中即用)。
+// 显示键 → 徽标 meta(claim.display 命中即用;P5-07⑧ 起无悬停细分)。
 export function claimDisplayMeta(claim) {
   if (claim?.display && CLAIM_DISPLAY[claim.display]) {
-    const meta = CLAIM_DISPLAY[claim.display];
-    const hint = claim.display_hint ? CLAIM_HINT[claim.display_hint] : "";
-    return hint ? { ...meta, hint: `${meta.hint}；${hint}` } : meta;
+    return CLAIM_DISPLAY[claim.display];
   }
   return null;
 }
 
-// 发现(TestClaim)机器状态 → 徽标变体(无步骤现值的粗口径:图页节点卡、
-// 工具摘要同词;testing 粗显反证中,精确暂停/重派细分在发现页与详情)。
-// fixed 为 P3-06 复测确认已修复(锤炼态之上的修复标记,成果与报告不
-// 消失)。与 rings.ClaimStatusWord 同词同口径。
+// 发现(TestClaim)机器状态 → 徽标变体(粗口径:图页节点卡、会话页
+// NodeChip、工具摘要同词)。与 rings.ClaimStatusWord 同词同口径;旧
+// 过程态(testing 等)不再产生,未知状态原样呈现(存量账本如实退回,
+// P5-07⑧ 选 A:不做旧态映射)。
 export const CLAIM_STATUS = {
-  candidate: CLAIM_DISPLAY.wait_falsify,
-  testing: CLAIM_DISPLAY.falsifying,
-  awaiting_round: {
-    label: "等待反证", variant: "running",
-    hint: "本轮疑点未排完，等下一轮反证",
-  },
+  candidate: CLAIM_DISPLAY.candidate,
   confirmed: CLAIM_DISPLAY.confirmed,
-  refuted: {
-    label: "已废弃", variant: "info",
-    hint: "被反证推翻，判定已废弃；新证据可重开再证",
-  },
+  insufficient: CLAIM_DISPLAY.insufficient,
+  refuted: CLAIM_DISPLAY.refuted,
   discarded: CLAIM_DISPLAY.discarded,
-  pending: CLAIM_DISPLAY.insufficient,
   fixed: CLAIM_DISPLAY.fixed,
 };
 
@@ -235,67 +207,6 @@ export const REPLAY_VERDICT = {
   reproduced: { label: "重放一致", variant: "success" },
   diverged: { label: "重放有变化", variant: "warning" },
   unreachable: { label: "重放不可达", variant: "danger" },
-};
-
-// 假设(Hypothesis)显示键词表(P4-56 四页签:等待验证/验证中/验证
-// 暂停/搁置/已废弃;验证成立迁入事实页带"由假设升级",本页不留)。
-// 已废弃为三种出局合一(未验丢弃/验证被推翻/证据不够),理由在详情。
-export const HYP_DISPLAY = {
-  wait_verify: {
-    label: "等待验证", variant: "running",
-    hint: "已提交，等待安排验证或排队中",
-  },
-  verifying: {
-    label: "验证中", variant: "running", live: true,
-    hint: "独立单位正在验证",
-  },
-  verify_paused: {
-    label: "验证暂停", variant: "running", paused: true,
-    hint: "验证单位等待范围批准，批准后继续",
-  },
-  held: {
-    label: "搁置", variant: "warning",
-    hint: "评估存疑暂留，唤醒后重新评估",
-  },
-  discarded: {
-    label: "已废弃", variant: "info",
-    hint: "不再验证，理由留档可追溯",
-  },
-  confirmed: {
-    label: "成立", variant: "success",
-    hint: "验证成立，已迁入事实页",
-  },
-};
-
-// 假设机器状态 → 徽标变体(无步骤现值的粗口径,图页节点卡同词;
-// testing 粗显验证中,暂停细分在假设页签与详情)。与 rings.HypStatusWord
-// 同词同口径。
-export const HYP_STATUS = {
-  candidate: HYP_DISPLAY.wait_verify,
-  testing: HYP_DISPLAY.verifying,
-  held: HYP_DISPLAY.held,
-  confirmed: HYP_DISPLAY.confirmed,
-  discarded: HYP_DISPLAY.discarded,
-};
-
-// 假设显示键 → 徽标 meta(带验证步骤现值的精确口径)。
-export function hypDisplayMeta(h) {
-  return h?.display && HYP_DISPLAY[h.display] ? HYP_DISPLAY[h.display] : null;
-}
-
-// 假设评估三去向(主宰检查归纳后的判定;P4-56:挂账改搁置)。
-export const HYP_DECISION = {
-  verify: { label: "转验证", tone: "running" },
-  hold: { label: "搁置", tone: "warning" },
-  discard: { label: "废弃", tone: "info" },
-};
-
-// 假设验证结论(验证单位结构化写回;variant 供 StatusBadge)。P4-56:
-// "不成立"退役——验证推翻显示"被推翻"(灰,终了档;红色只留给严重级)。
-export const HYP_VERDICT = {
-  supported: { label: "成立", variant: "success", hint: "验证取得支持证据，猜测成立" },
-  refuted: { label: "被推翻", variant: "info", hint: "验证推翻了这条猜测" },
-  inconclusive: { label: "未能定论", variant: "warning", hint: "验证过但证据不足，可再验" },
 };
 
 // 严重级别(critical/high/medium/low)→ 徽标变体。级别只来自反证轮的
@@ -397,22 +308,17 @@ export const HARM_CLASS_LABELS = {
 // 资产 12 类(rings.AssetClass 词汇表):键为落账值,值为面板标签与图标 key。
 export const ASSET_CLASSES = [
   ["domain", "域名", "globe"],
-  ["subdomain", "子域名", "link"],
-  ["host", "主机", "server"],
-  ["service", "服务", "plug"],
-  ["api", "API 接口", "braces"],
-  ["organization", "组织", "building2"],
-  ["miniprogram", "小程序", "appWindow"],
+  ["host", "IP", "server"],
+  ["service", "服务入口", "plug"],
   ["app", "应用", "appWindow"],
-  ["wechat_account", "微信公众号", "megaphone"],
-  ["person", "人员", "user"],
-  ["leak_info", "泄露信息", "fileWarning"],
-  ["other", "其他", "circleHelp"],
+  ["miniprogram", "小程序", "appWindow"],
 ];
 
 export function assetClassMeta(cls) {
-  const hit = ASSET_CLASSES.find(([v]) => v === cls);
-  return hit ? { value: hit[0], label: hit[1], icon: hit[2] } : { value: cls, label: cls, icon: "circleHelp" };
+  const value = ({ subdomain: "domain", api: "service" })[cls] || cls;
+  const hit = ASSET_CLASSES.find(([v]) => v === value);
+  const history = { organization: "组织", person: "人员", wechat_account: "微信公众号", leak_info: "泄露信息", other: "其他" };
+  return hit ? { value: hit[0], label: hit[1], icon: hit[2] } : { value, label: history[value] || "其他", icon: "circleHelp" };
 }
 
 // 资产来源三态(P4-05):seed=种子(建任务表单)/ manual=手动(面板
@@ -434,24 +340,32 @@ export function assetSourceMeta(source) {
 // #73⑤ 造物主 2026-11-07 定稿,逐字):渗透与红队各一句,"禁止"与
 // 范围卡按钮"禁止测试"同词对应。
 export const TASK_TYPES = {
-  pentest: { label: "渗透任务", hint: "范围外的新资产先拦下，批准后才测" },
-  redteam: { label: "红队任务", hint: "范围外的新资产直接测，可随时禁止" },
+  pentest: { label: "渗透任务", hint: "按任务边界判断动作，新资产由你决定是否加入" },
+  redteam: { label: "红队任务", hint: "按任务目标判断动作，新资产由你决定是否加入" },
 };
 
 export function taskTypeMeta(type) {
-  return TASK_TYPES[type] || { label: "未标", hint: "旧任务未记录类型:发现的相邻资产直接可测" };
+  return TASK_TYPES[type] || { label: "未标", hint: "旧任务未记录类型" };
 }
 
-// 六类图节点(账本 NodeType,P2-09 进度图/跳转协议共用):标签为操作者
-// 语言;icon 为节点视觉语言的图标配号;shape 为 CSS 形状徽记类
-//(globals.css,P2-11 年轮图卡片沿用同一套形状语义)。
+// 事实结果类型只读账本明确记录；缺少类型的旧记录不能按标题猜成果。
+export const FACT_RESULT_META = {
+ credential: { label: "凭据", variant: "critical", hint: "实际取得可用的账号密码、密钥或令牌" },
+ data: { label: "数据", variant: "high", hint: "实际取得敏感数据，如用户资料或源码" },
+ permission: { label: "权限", variant: "medium", hint: "实际取得可用的访问或操作能力" },
+ foothold: { label: "立足点", variant: "warning", hint: "实际建立可用的目标内立足点" },
+ plain: { label: "普通观察", variant: "outline", hint: "一般观察或未发现上述成果" },
+ unclassified: { label: "未分类", variant: "outline", hint: "尚未记录结果类型" },
+};
+
+// 账本节点的详情与引用共用词表：标签为操作者
+// 语言，icon 为详情图标配号。
 export const NODE_TYPES = {
-  goal: { label: "目标", icon: "flag", tone: "running", shape: "gr-shape-goal" },
-  step: { label: "步骤", icon: "arrowRight", tone: "high", shape: "gr-shape-step" },
-  fact: { label: "事实", icon: "check", tone: "success", shape: "gr-shape-fact" },
-  testclaim: { label: "判断", icon: "shieldAlert", tone: "critical", shape: "gr-shape-claim" },
-  hypothesis: { label: "假设", icon: "sparkles", tone: "warning", shape: "gr-shape-hypo" },
-  asset: { label: "资产", icon: "server", tone: "info", shape: "gr-shape-asset" },
+  goal: { label: "目标", icon: "flag", tone: "running" },
+  step: { label: "意图", icon: "arrowRight", tone: "high" },
+  fact: { label: "事实", icon: "check", tone: "success" },
+  testclaim: { label: "判断", icon: "shieldAlert", tone: "critical" },
+  asset: { label: "资产", icon: "server", tone: "info" },
 };
 
 export function nodeTypeMeta(type) {
@@ -461,6 +375,9 @@ export function nodeTypeMeta(type) {
 // 步骤状态 → 操作者语言(原 findings-page 局部词汇,P2-09 起多页共用)。
 // P4-46 ② 对齐状态总表:dispatched 显示"排队中"(与虫群列表排队条目、
 // 工作台水位同词;等前置是行内标注非状态)、aborted 显示"已中止"。
+// P5-05 挂等让位停等态(scope_wait/gate_wait/pause_wait/model_wait)
+// 一律"排队中"不标原因(2026-11-16 造物主定);挂等宽限期的等待词
+// (等待审批/等待模型)是会话行状态,不走本表。
 export const STEP_STATUS = {
   dispatched: "排队中",
   running: "执行中",
@@ -472,13 +389,25 @@ export const STEP_STATUS = {
   cancelled: "已取消",
   blocked: "受阻",
   approval_denied: "审批拒绝终止",
-  scope_wait: "等待批准",
+  scope_wait: "排队中",
+  gate_wait: "排队中",
+  pause_wait: "排队中",
+  model_wait: "排队中",
 };
 
-// 事实状态(P4-56 ②:候选改标"新"——新进短暂标记,主宰收割确认后
-// 自动转已确认;被推翻为翻案历史的终了档,灰色只可追溯)。
+// 挂等宽限期的等待种类 → 操作者语言(P5-05,词表 v1.3.0;会话行 Wait
+// 字段的翻译;已暂停走既有 Paused 标记)。
+export const WAIT_KINDS = {
+  approval: "等待审批",
+  model: "等待模型",
+};
+
+// 事实状态(P5-07① 起事实页只列已确认真结论——落页=确认时刻;候选
+// 与被推翻不展示,账本留痕)。候选词面"未确认"(P5-08②:P4-77 候选标
+// "新"退役,新落页提醒改由条目淡红点承载);本表服务图节点卡与资产
+// 详情等粗口径消费面(图重构归 P5-09/10 随批收口)。
 export const FACT_STATUS = {
-  candidate: { label: "新", variant: "info", hint: "新进，待主宰检查归纳确认" },
+  candidate: { label: "未确认", variant: "info", hint: "待主宰检查归纳确认" },
   confirmed: { label: "已确认", variant: "success", hint: "已经主宰检查归纳确认" },
   refuted: { label: "被推翻", variant: "info", hint: "翻案历史，只可追溯" },
 };
@@ -505,53 +434,26 @@ export const TRAFFIC_TYPES = {
   tunnel: "隧道",
 };
 
-// 六类节点状态 → 徽标 {label, variant}(P2-11 起自进度页局部映射提为
-// 共用词汇;asset 无状态语义时为 null——卡片/节点不渲染状态徽标)。
-export function nodeStatusMeta(type, status) {
-  switch (type) {
-    case "goal":
-      return GOAL_STATUS[status] || null;
-    case "step":
-      return {
-        label: STEP_STATUS[status] || status,
-        variant: status === "done" ? "success" : status === "running" ? "running" : "paused",
-      };
-    case "fact": {
-      const f = FACT_STATUS[status];
-      return f || { label: status, variant: "info" };
-    }
-    case "testclaim":
-      return CLAIM_STATUS[status] || null;
-    case "hypothesis":
-      return HYP_STATUS[status] || null;
-    default:
-      return null;
-  }
-}
-
-// 终止且无产出的节点状态:进度图灰显保留(R10 废案可视化的分支态)。
-export const DEAD_STATUSES = new Set(["discarded", "cancelled", "aborted", "approval_denied", "failed"]);
-
-// 类型化边 → 操作者语言(goal / falsify 为图投影派生边,血缘上标
-// "派生"/"反证";sub_of 仅资产树视图消费,进度图不画)。
+// 类型化边 → 操作者语言(goal 为图投影派生边,血缘上标"派生";sub_of
+// 仅资产树视图消费,任务投影不画;旧 falsify 反证派生边已随反证流程
+// 退役删除 P5-03③,verifies 为存量旧账本边)。
 export const EDGE_LABELS = {
+	observed_asset: "观察对象",
+	 sourced_from: "来源",
   goal: "派生",
   produces: "产出",
   derived_from: "派生自",
   about: "关于",
   covers: "覆盖",
   depends_on: "依赖",
-  verifies: "验证",
-  falsify: "反证",
   sub_of: "子级",
 };
 
 // 跳转协议(P2-09):节点点击 → Sheet 详情;「在图中查看」跳节点对应
 // 视图并携带 URL 定位参数(?focus=,可直达)。对应视图:资产 → 资产树,
-// 其余五类 → 年轮图(P2-11 起,全图总览是它们的图上家;进度图看过程,
-// 从标签直达)。
+// 意图、事实别名与漏洞 → 全景图。
 export function nodeHomeView(type) {
-  return type === "asset" ? "assets" : "annulus";
+  return type === "asset" ? "assets" : "panorama";
 }
 
 export function jumpToNodeView(tid, nodeID, type) {

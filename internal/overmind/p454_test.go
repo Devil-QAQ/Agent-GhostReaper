@@ -54,7 +54,7 @@ func p454Task(t *testing.T, store *rings.Store, task string) {
 	}
 }
 
-// TestP454FocusDispatchGuard 方向聚焦派发守卫:非聚焦方向的探索与反证
+// TestP454FocusDispatchGuard 方向聚焦派发守卫:非聚焦方向的探索
 // 拒收(ErrFocusOutside)、急活豁免;已删目标拒收(ErrGoalDiscarded);
 // 解除聚焦后恢复。
 func TestP454FocusDispatchGuard(t *testing.T) {
@@ -87,9 +87,6 @@ func TestP454FocusDispatchGuard(t *testing.T) {
 	if _, err := stepEvents(ctx, store, task, "s-bad", "探测", mk("g2", sourceExplore)); !errors.Is(err, ErrFocusOutside) {
 		t.Fatalf("聚焦期间 g2 探索应被拒(ErrFocusOutside): %v", err)
 	}
-	if _, err := stepEvents(ctx, store, task, "s-fal", "反证", mk("g2", sourceFalsify)); !errors.Is(err, ErrFocusOutside) {
-		t.Fatalf("聚焦期间 g2 反证应被拒: %v", err)
-	}
 	// 急活豁免:操作者指令高于聚焦纪律。
 	if _, err := stepEvents(ctx, store, task, "s-urg", "急活", mk("g2", sourceUrgent)); err != nil {
 		t.Fatalf("聚焦期间急活应豁免: %v", err)
@@ -99,7 +96,7 @@ func TestP454FocusDispatchGuard(t *testing.T) {
 		t.Fatalf("聚焦方向 g1 不应被拒: %v", err)
 	}
 	// 解除聚焦后恢复。
-	if _, err := UnfocusGoal(ctx, store, task, "shepherd"); err != nil {
+	if err := UnfocusGoal(ctx, store, task, "shepherd"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := stepEvents(ctx, store, task, "s-ok2", "探测", mk("g2", sourceExplore)); err != nil {
@@ -136,7 +133,7 @@ func TestP454WildcardExclusionDispatchGuard(t *testing.T) {
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
 			NodeID: "a-ok", NodeType: rings.NodeAsset, Title: "fine.example.com", Status: "active",
 			AssetClass: rings.AssetDomain,
-			Detail:     map[string]any{"source": rings.AssetSourceDiscovered, "scope": rings.AssetScopeOut}}},
+			Detail:     map[string]any{"source": rings.AssetSourceDiscovered, "scope": rings.AssetScopeIn}}},
 		rings.Event{Kind: rings.EventRoeUpdated, Actor: "shepherd",
 			Payload: rings.RoeUpdated{ExcludedAssets: []string{"a-wild"}, Note: "摘除 *.banned.org"}},
 	); err != nil {
@@ -163,8 +160,8 @@ func TestP454WildcardExclusionDispatchGuard(t *testing.T) {
 }
 
 // TestP454FocusGoalStopsOthers 停聚焦:非聚焦方向排队步骤取消留痕、
-// 反证声明挂起(证据不足语义:pending+理由「方向被收窄」)、聚焦方向
-// 照常;解除聚焦唤醒(经 reopen 派新一轮反证)。
+// 聚焦方向照常;判断不再随停向挂起(P5-03①:立判断链退役,声明不挂
+// 反证流程,停向不牵动声明状态)。
 func TestP454FocusGoalStopsOthers(t *testing.T) {
 	store := openStore(t)
 	ctx := context.Background()
@@ -173,7 +170,7 @@ func TestP454FocusGoalStopsOthers(t *testing.T) {
 	p454Goal(t, store, task, "g1", "只做这个", nil)
 	p454Goal(t, store, task, "g2", "其他方向", nil)
 
-	// g1 的排队步骤 + g2 的排队步骤 + g2 名下发现步骤/判断/反证步骤。
+	// g1 的排队步骤 + g2 的排队步骤 + g2 名下一条存量判断(停原状态)。
 	p454Step(t, store, task, "s1", "聚焦方向探测", "dispatched", "g1", nil)
 	p454Step(t, store, task, "s2", "其他方向探测", "dispatched", "g2", nil)
 	p454Step(t, store, task, "s-disc2", "发现步骤", "done", "g2", nil)
@@ -182,15 +179,10 @@ func TestP454FocusGoalStopsOthers(t *testing.T) {
 			NodeID: "tc1", NodeType: rings.NodeTestClaim, Title: "其他方向的判断", Status: "testing"}},
 		rings.Event{Kind: rings.EventEdgeAdded, Actor: ActorOvermind, Payload: rings.EdgeAdded{
 			EdgeType: rings.EdgeDerivedFrom, FromNode: "tc1", ToNode: "s-disc2"}},
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "creator", Payload: rings.NodeAdded{
-			NodeID: "a-x", NodeType: rings.NodeAsset, Title: "x.example.com", Status: "active",
-			AssetClass: rings.AssetDomain, Detail: map[string]any{"source": rings.AssetSourceSeed}}},
-		rings.Event{Kind: rings.EventEdgeAdded, Actor: ActorOvermind, Payload: rings.EdgeAdded{
-			EdgeType: rings.EdgeAbout, FromNode: "tc1", ToNode: "a-x"}},
 	); err != nil {
 		t.Fatal(err)
 	}
-	p454Step(t, store, task, "s2f", "反证(第 1 轮)", "dispatched", "g2",
+	p454Step(t, store, task, "s2f", "反证(第 1 轮·存量)", "dispatched", "g2",
 		map[string]any{"kind": "falsify", "testclaim_id": "tc1", "round": 1})
 
 	res, err := FocusGoal(ctx, store, nil, task, "g1", "shepherd")
@@ -198,10 +190,7 @@ func TestP454FocusGoalStopsOthers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(res.AbortedSteps) != 2 {
-		t.Fatalf("应取消 g2 的 2 条排队步骤(探测+反证): %+v", res.AbortedSteps)
-	}
-	if len(res.SuspendedClaims) != 1 || res.SuspendedClaims[0] != "tc1" {
-		t.Fatalf("应挂起判断 tc1: %+v", res.SuspendedClaims)
+		t.Fatalf("应取消 g2 的 2 条排队步骤: %+v", res.AbortedSteps)
 	}
 	if st, _ := store.Node(ctx, task, "s1"); st.Status != "dispatched" {
 		t.Fatalf("聚焦方向的步骤不应被动: %+v", st)
@@ -209,72 +198,29 @@ func TestP454FocusGoalStopsOthers(t *testing.T) {
 	if st, _ := store.Node(ctx, task, "s2"); st.Status != "cancelled" {
 		t.Fatalf("其他方向排队步骤应取消留痕: %+v", st)
 	}
-	tc, _ := store.Node(ctx, task, "tc1")
-	if tc.Status != rings.TestClaimPending {
-		t.Fatalf("被取消反证的判断应挂起: %+v", tc)
+	// P5-03①:停向不再牵动声明状态(挂起机制随立判断链退役)。
+	if tc, _ := store.Node(ctx, task, "tc1"); tc.Status != "testing" {
+		t.Fatalf("停向不得改声明状态: %+v", tc)
 	}
 	if FocusGoalID(ctx, store, task) != "g1" {
 		t.Fatal("聚焦标记应在 g1")
 	}
-	// 收割跳过:聚焦期间 HarvestClaims 对 g2 名下的合格候选不再派反证
-	// ——按聚焦跳过不报错,候选停在原地。
-	if _, err := store.Append(ctx, task,
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u1", Payload: rings.NodeAdded{
-			NodeID: "tc2", NodeType: rings.NodeTestClaim, Title: "候选判断", Status: "candidate",
-			Detail: map[string]any{
-				"unit_id":  "u1",
-				"standard": map[string]any{"kind": "full_falsify", "require_impact": false},
-			}}},
-		rings.Event{Kind: rings.EventEdgeAdded, Actor: ActorOvermind, Payload: rings.EdgeAdded{
-			EdgeType: rings.EdgeDerivedFrom, FromNode: "tc2", ToNode: "s-disc2"}},
-		rings.Event{Kind: rings.EventEdgeAdded, Actor: ActorOvermind, Payload: rings.EdgeAdded{
-			EdgeType: rings.EdgeAbout, FromNode: "tc2", ToNode: "a-x"}},
-	); err != nil {
-		t.Fatal(err)
-	}
-	hres, herr := HarvestClaims(ctx, store, task)
-	if herr != nil {
-		t.Fatalf("聚焦期间收割不应报错: %v", herr)
-	}
-	skipped := false
-	for _, sk := range hres.Skipped {
-		if sk.FactID == "tc2" && strings.Contains(sk.Reason, "方向聚焦中") {
-			skipped = true
-		}
-	}
-	if !skipped {
-		t.Fatalf("g2 候选应按聚焦跳过: %+v", hres.Skipped)
-	}
-	if tc2, _ := store.Node(ctx, task, "tc2"); tc2.Status != "candidate" {
-		t.Fatalf("跳过的候选应停在原地: %+v", tc2)
-	}
 
-	// 解除聚焦:挂起判断经 reopen 唤醒(回反证中,新一轮反证派发)。
-	if _, err := UnfocusGoal(ctx, store, task, "shepherd"); err != nil {
+	// 解除聚焦:只清聚焦标记(P5-03①:无挂起唤醒通道)。
+	if err := UnfocusGoal(ctx, store, task, "shepherd"); err != nil {
 		t.Fatal(err)
 	}
-	tc, _ = store.Node(ctx, task, "tc1")
-	if tc.Status != rings.TestClaimTesting {
-		t.Fatalf("解除聚焦后挂起判断应回反证中: %+v", tc)
+	if FocusGoalID(ctx, store, task) != "" {
+		t.Fatal("解除聚焦后应无聚焦标记")
 	}
-	steps, _ := store.NodesByType(ctx, task, rings.NodeStep, "")
-	round2 := false
-	for _, s := range steps {
-		if id, _ := s.Detail["testclaim_id"].(string); id == "tc1" {
-			if r, _ := s.Detail["round"].(float64); int(r) >= 2 {
-				round2 = true
-			}
-		}
-	}
-	if !round2 {
-		t.Fatal("reopen 应派新一轮反证")
+	if tc, _ := store.Node(ctx, task, "tc1"); tc.Status != "testing" {
+		t.Fatalf("解除聚焦不得改声明状态: %+v", tc)
 	}
 }
 
 // TestP454DeleteGoalStopsDirection 目标删除:该方向排队步骤取消、目标
-// 转已删除、影响预览计数、后续零新派;受影响判断程序不动状态(P4-55
-// 审核迭代:交主宰判定,禁止连坐)——被取消的反证轮成待裁决中断,
-// 声明留锤炼中,收割不重派,快照「待裁决判断」区可见。
+// 转已删除、影响预览计数、后续零新派;声明状态程序不动(P5-03①:立
+// 判断链退役,停向不牵动声明)。
 func TestP454DeleteGoalStopsDirection(t *testing.T) {
 	store := openStore(t)
 	ctx := context.Background()
@@ -294,15 +240,10 @@ func TestP454DeleteGoalStopsDirection(t *testing.T) {
 			}}},
 		rings.Event{Kind: rings.EventEdgeAdded, Actor: ActorOvermind, Payload: rings.EdgeAdded{
 			EdgeType: rings.EdgeDerivedFrom, FromNode: "tc1", ToNode: "s-disc2"}},
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "creator", Payload: rings.NodeAdded{
-			NodeID: "a-x", NodeType: rings.NodeAsset, Title: "x.example.com", Status: "active",
-			AssetClass: rings.AssetDomain, Detail: map[string]any{"source": rings.AssetSourceSeed}}},
-		rings.Event{Kind: rings.EventEdgeAdded, Actor: ActorOvermind, Payload: rings.EdgeAdded{
-			EdgeType: rings.EdgeAbout, FromNode: "tc1", ToNode: "a-x"}},
 	); err != nil {
 		t.Fatal(err)
 	}
-	p454Step(t, store, task, "s2f", "反证(第 1 轮)", "dispatched", "g2",
+	p454Step(t, store, task, "s2f", "反证(第 1 轮·存量)", "dispatched", "g2",
 		map[string]any{"kind": "falsify", "testclaim_id": "tc1", "round": 1})
 
 	// 影响预览:1 排队探测 + 1 排队反证。
@@ -318,8 +259,8 @@ func TestP454DeleteGoalStopsDirection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.AbortedSteps) != 2 || len(res.SuspendedClaims) != 0 {
-		t.Fatalf("删除应取消 2 条排队且程序不挂起判断(P4-55 审核迭代): %+v", res)
+	if len(res.AbortedSteps) != 2 {
+		t.Fatalf("删除应取消 2 条排队: %+v", res)
 	}
 	g2, _ := store.Node(ctx, task, "g2")
 	if g2.Status != GoalStatusDiscarded {
@@ -328,42 +269,24 @@ func TestP454DeleteGoalStopsDirection(t *testing.T) {
 	if st, _ := store.Node(ctx, task, "s1"); st.Status != "dispatched" {
 		t.Fatalf("其他方向不受影响: %+v", st)
 	}
-	// 受影响判断零程序改态:留锤炼中;被取消的反证轮成待裁决中断——
-	// 收割不重派、裁决不落终态,快照「待裁决判断」区可见。
+	// 声明状态程序不动(P5-03①:停向不牵动声明,存量 testing 停原状态)。
 	tc, _ := store.Node(ctx, task, "tc1")
-	if tc.Status != rings.TestClaimTesting {
-		t.Fatalf("删除后判断应留锤炼(交主宰判定,禁止连坐): %+v", tc)
-	}
-	hres, err := HarvestClaims(ctx, store, task)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(hres.Redispatched) != 0 {
-		t.Fatalf("操作者取消的反证轮不应程序重派: %+v", hres.Redispatched)
+	if tc.Status != "testing" {
+		t.Fatalf("删除后声明应停原状态: %+v", tc)
 	}
 	l := &Loop{TaskID: task, Store: store}
-	if n, err := l.judgeClaims(ctx); err != nil || n != 0 {
-		t.Fatalf("待裁决中断不应产生裁决: n=%d err=%v", n, err)
+	if n, err := l.checkPendingClaims(ctx); err != nil || n != 0 {
+		t.Fatalf("存量 testing 不产生裁决: n=%d err=%v", n, err)
 	}
-	goals, _ := store.NodesByType(ctx, task, rings.NodeGoal, "")
-	steps, _ := store.NodesByType(ctx, task, rings.NodeStep, "")
-	abouts, _ := store.Edges(ctx, task, rings.EdgeAbout)
-	lines, err := l.pendingRulingBriefs(ctx, goals, steps, abouts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(lines) != 1 || !strings.Contains(lines[0], "tc1") || !strings.Contains(lines[0], "已无进行中目标覆盖") {
-		t.Fatalf("待裁决判断应入快照(资产无人需要事实行): %+v", lines)
-	}
-	// 聚焦别的方向再解除:判断仍留锤炼(不是聚焦挂起,不受聚焦唤醒影响)。
+	// 聚焦别的方向再解除:声明同样不受牵动。
 	if _, err := FocusGoal(ctx, store, nil, task, "g1", "shepherd"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := UnfocusGoal(ctx, store, task, "shepherd"); err != nil {
+	if err := UnfocusGoal(ctx, store, task, "shepherd"); err != nil {
 		t.Fatal(err)
 	}
-	if tc, _ = store.Node(ctx, task, "tc1"); tc.Status != rings.TestClaimTesting {
-		t.Fatalf("待裁决判断不受聚焦切换影响: %+v", tc)
+	if tc, _ = store.Node(ctx, task, "tc1"); tc.Status != "testing" {
+		t.Fatalf("声明不受聚焦切换影响: %+v", tc)
 	}
 	// 重复删除:如实拒绝。
 	if _, err := DeleteGoal(ctx, store, nil, task, "g2", "", "shepherd"); err == nil {

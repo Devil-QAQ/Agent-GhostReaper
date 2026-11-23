@@ -32,15 +32,6 @@ const (
 	FormatJSON = "json"
 )
 
-// ExportFormat 支持的格式表(白名单校验)。
-func ExportFormat(f string) bool {
-	switch f {
-	case FormatMD, FormatZip, FormatCSV, FormatJSON:
-		return true
-	}
-	return false
-}
-
 // Exported 导出产物:内容 + 文件名规约 + 下载类型。
 type Exported struct {
 	Body     []byte
@@ -238,7 +229,7 @@ func taskZipInto(zw *zip.Writer, ctx context.Context, store *rings.Store, blobs 
 		case rings.TestClaimConfirmed, rings.TestClaimFixed:
 			cn++
 			idx, tag = strconv.Itoa(cn), "C"
-		case rings.TestClaimPending:
+		case rings.TestClaimInsufficient:
 			pn++
 			idx, tag = strconv.Itoa(pn), "P"
 		default:
@@ -447,8 +438,9 @@ func scopedClaims(ctx context.Context, store *rings.Store, blobs *swarm.BlobStor
 	return claims, cases, nil
 }
 
-// csvHeader 发现清单 csv 固定列(中文表头,操作者语言)。
-var csvHeader = []string{"任务ID", "发现ID", "状态", "级别", "类型", "存在性判断", "影响面判断", "资产锚点", "发现单位", "验证单位", "复现步骤数", "搁置理由"}
+// csvHeader 发现清单 csv 固定列(中文表头,操作者语言)。P5-02⑥:
+// 验证单位列已随验证者独立条款退役(R12 修订)删除。
+var csvHeader = []string{"任务ID", "发现ID", "状态", "级别", "类型", "存在性判断", "影响面判断", "资产锚点", "发现单位", "复现步骤数", "搁置理由"}
 
 // findingsCSV 发现清单 csv(范围口径;级别序 critical→low、未定级沉底,
 // 同级按入账序——与面板成果视图同序)。BOM 头保证 Excel 中文不乱码。
@@ -494,6 +486,11 @@ func findingsCSVRows(ctx context.Context, store *rings.Store, taskID string, sco
 		if cases[c.ID] != nil && cases[c.ID].ReportExcluded {
 			continue
 		}
+		// 页可见口径(P5-07⑦):已确认(含已修复)与证据不足;被推翻/
+		// 已废弃/瞬时候选不进导出(账本留痕)。
+		if !reportVisibleStatus(c.Status) {
+			continue
+		}
 		ordered = append(ordered, c)
 	}
 	sort.SliceStable(ordered, func(i, j int) bool {
@@ -514,13 +511,15 @@ func findingsCSVRows(ctx context.Context, store *rings.Store, taskID string, sco
 			reproN = len(cs.Repro.Steps)
 		}
 		vulnclass, _ := c.Detail["vulnclass"].(string)
-		impact, _ := c.Detail["impact"].(string)
+		// 影响面列 = 交卷申报的影响列点(P5-07⑦b:列点并入一格,换行
+		// 分隔;空 = 未申报)。
+		impact := cases[c.ID].ImpactNoteOf()
 		unit, _ := c.Detail["unit_id"].(string)
 		rows = append(rows, []string{
 			taskID, c.ID, claimStatusWord(c.Status), cs.Severity(),
 			vulnclass, c.Title, impact,
 			strings.Join(anchors, " "),
-			unit, cs.Verifier(), strconv.Itoa(reproN),
+			unit, strconv.Itoa(reproN),
 			cs.PendingReason(),
 		})
 	}
@@ -558,9 +557,7 @@ func reportJSON(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore,
 		Impact        string      `json:"impact,omitempty"`
 		Assets        []string    `json:"assets,omitempty"`
 		Discoverer    string      `json:"discoverer_unit,omitempty"`
-		Verifier      string      `json:"verifier_unit,omitempty"`
 		PendingReason string      `json:"pending_reason,omitempty"`
-		Alternatives  []AltView   `json:"alternatives,omitempty"`
 		Timeline      []CaseEntry `json:"timeline"`
 		Repro         *ReproFinal `json:"repro,omitempty"`
 		Remediation   []string    `json:"remediation,omitempty"`
@@ -571,8 +568,11 @@ func reportJSON(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore,
 	}{Task: taskInfo{ID: task.ID, Title: task.Title, Status: task.Status, Rev: task.UpdatedRev}}
 	for _, c := range claims {
 		// 复核标记不纳入报告的(P4-30 ③,信息性)不进 json——报告零
-		// 信息条目与 md/csv 同口径。
+		// 信息条目与 md/csv 同口径;页可见口径同 csv(P5-07⑦)。
 		if cases[c.ID] != nil && cases[c.ID].ReportExcluded {
+			continue
+		}
+		if !reportVisibleStatus(c.Status) {
 			continue
 		}
 		cs := cases[c.ID]
@@ -581,9 +581,9 @@ func reportJSON(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore,
 			Severity: cs.Severity(), Statement: c.Title,
 		}
 		f.Vulnclass, _ = c.Detail["vulnclass"].(string)
-		f.Impact, _ = c.Detail["impact"].(string)
+		// 影响 = 交卷申报的影响列点(P5-07⑦b;多条换行分隔)。
+		f.Impact = cs.ImpactNoteOf()
 		f.Discoverer, _ = c.Detail["unit_id"].(string)
-		f.Verifier = cs.Verifier()
 		f.PendingReason = cs.PendingReason()
 		for _, e := range abouts {
 			if e.From == c.ID {
@@ -591,7 +591,6 @@ func reportJSON(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore,
 			}
 		}
 		if cs != nil {
-			f.Alternatives = cs.Alternatives
 			f.Timeline = cs.Timeline
 			f.Repro = cs.Repro
 		}
@@ -611,6 +610,17 @@ func reportJSON(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore,
 // 显示层合并口径 P4-28,与面板 CLAIM_STATUS 同词)。
 func claimStatusWord(status string) string {
 	return rings.ClaimStatusWord(status)
+}
+
+// reportVisibleStatus 导出与漏洞页同口径的可见性(P5-07⑦):已确认
+// (含已修复)与证据不足进导出;被推翻/已废弃不进(账本留痕);瞬时候选
+// (交卷到机器三查之间,秒级)不进——在途计数行照实交代。
+func reportVisibleStatus(status string) bool {
+	switch status {
+	case rings.TestClaimConfirmed, rings.TestClaimFixed, rings.TestClaimInsufficient:
+		return true
+	}
+	return false
 }
 
 func severityRank(sev string) int {

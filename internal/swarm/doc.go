@@ -3,8 +3,8 @@
 // 受控入口实时入账(R8/R18)。设计依据:《设计决策关键思想》第四章;
 // 实施于 P1-04;P1-05 增设起飞临界区与 RunStep 并发入口(供主宰循环
 // 并发调度,单位间记账互不误判 R14 过期);P1-08 增设 TestClaim 受控
-// 入口(submit_test_claim 可证伪声明 / submit_falsify_result 反证写回,
-// R12 发现者不得自证)与反证任务包上下文;P3-03 增设只读辅助三工具
+// 入口(v1.3.0 起为 submit_claim 交卷,旧 submit_test_claim /
+// submit_falsify_result 已随三段流水线退役);P3-03 增设只读辅助三工具
 // (read 本机文件 / web_search 外网搜索(配置见 internal/websearch)/
 // web_fetch 外网取文·强制经镜留痕),攻击动作仍全由 bash 自由组合;
 // P3-05 bash 限时放开(模型自调 timeout_ms、默认 120 秒封顶 600 秒、
@@ -16,7 +16,7 @@
 // 会话保留,恢复重开该步骤后新单位优先经转录 Resume 原会话原地续跑
 // (上下文零重建,与审批续跑/冬眠/重启收养同语义);转录缺失/为空降级
 // 回全新会话接力(exhausted 同款);预算耗尽的接力语义不变;P3-06 增设
-// 复测会话(retest.go):对锤炼完成的发现(confirmed/pending/fixed)发起
+// 复测会话(retest.go):对已确认的发现(confirmed/fixed)发起
 // 修复状态复核——自动首条消息绑定漏洞上下文、专用受限工具集(bash/
 // 只读探测/read + submit_retest_result,结论写回目标服务端定死防串号)、
 // 结论 fixed/unfixed 自动迁移声明状态(inconclusive 只入记录);复测不

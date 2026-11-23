@@ -34,6 +34,7 @@ type smodel struct {
 	script func(rr *srecorded) sreply
 	mu     sync.Mutex
 	reqs   []srecorded
+	review func(*srecorded) string
 	// unitGate 非 nil 时,虫群请求(有工具广告)在此挂起直到通道关闭,
 	// 或客户端放弃(r.Context() 结束)——供 E2E 控制"在飞单位"时序
 	// (如熔断打断在飞请求)。拆解请求不受影响。
@@ -122,6 +123,16 @@ func (m *smodel) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, t := range body.Tools {
 		rr.ToolsOffered = append(rr.ToolsOffered, t.Function.Name)
+	}
+	if strings.Contains(rr.System, "你负责判断任务中一次实际工具调用") {
+		decision := "allow"
+		if m.review != nil {
+			decision = m.review(&rr)
+		}
+		content, _ := json.Marshal(map[string]string{"decision": decision, "reason": "测试中的动作判断"})
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": string(content)}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 40, "completion_tokens": 10}})
+		return
 	}
 	m.mu.Lock()
 	m.reqs = append(m.reqs, rr)
@@ -333,9 +344,13 @@ func TestServerApprovalGateE2E(t *testing.T) {
 	model := newSModel(func(rr *srecorded) sreply {
 		if len(rr.ToolsOffered) == 0 {
 			if m := uncoveredRe.FindStringSubmatch(rr.LastUser); m != nil {
+				goal := regexp.MustCompile(`(?m)^\s*-\s+(\S+) \[active\] 验证主动测试审批链路$`).FindStringSubmatch(rr.LastUser)
+				if goal == nil {
+					return sreply{Text: `{"new_intents":[]}`}
+				}
 				return sreply{Text: fmt.Sprintf(
-					`{"new_intents":[{"intent":"对 %s 所在主机写入落地标记文件验证写权限","expected_observation":"标记文件写入成功","action_level":"修改与持久化","covers":["web1"]}]}`,
-					m[2])}
+					`{"new_intents":[{"goal_id":%q,"intent":"对 %s 所在主机写入落地标记文件验证写权限","expected_observation":"标记文件写入成功","action_level":"修改与持久化","covers":["web1"]}]}`,
+					goal[1], m[2])}
 			}
 			return sreply{Text: `{"new_intents":[]}`}
 		}
@@ -380,6 +395,13 @@ func TestServerApprovalGateE2E(t *testing.T) {
 			return sreply{Text: "写入完成,标记文件已落地。"}
 		}
 	})
+	model.review = func(rr *srecorded) string {
+		var in swarm.ActionReviewInput
+		if json.Unmarshal([]byte(rr.LastUser), &in) == nil && in.Tool == "bash" {
+			return "approval"
+		}
+		return "allow"
+	}
 	t.Cleanup(model.Close)
 	prov, err := model.provider()
 	if err != nil {
@@ -475,7 +497,9 @@ func TestServerApprovalGateE2E(t *testing.T) {
 		if err := json.Unmarshal(ev.Payload, &r); err != nil {
 			t.Fatalf("解码 approval.record: %v", err)
 		}
-		recs = append(recs, r)
+		if r.Type == rings.ApprovalRecRequested || r.Type == rings.ApprovalRecApproved {
+			recs = append(recs, r)
+		}
 	}
 	if len(recs) != 2 || recs[0].Type != rings.ApprovalRecRequested ||
 		recs[1].Type != rings.ApprovalRecApproved || recs[1].DecidedBy != "creator" {

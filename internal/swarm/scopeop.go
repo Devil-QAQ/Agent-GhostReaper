@@ -60,7 +60,7 @@ func ScopeImpactOf(ctx context.Context, store *rings.Store, taskID string, asset
 		switch h.status {
 		case "running":
 			out.Units = append(out.Units, h.hit)
-		case "dispatched":
+		case "dispatched", rings.StepScopeWait, rings.StepGateWait, rings.StepPauseWait, rings.StepModelWait:
 			out.Queued = append(out.Queued, h.hit)
 		}
 	}
@@ -73,11 +73,6 @@ type scopeHitStep struct {
 	status string
 }
 
-// stepsCoveringAssets 步骤清单里意图锚定命中资产集合的条目(按步骤 ID
-// 稳定排序)。P4-68 ②(拒绝分族):意图覆盖判定＝图查询——covers 边直接
-// 锚定 ∪ verifies→假设→about 锚定(验证类步骤的假设锚点＝其指向的
-// 目标资产),与被摘除资产求交(直接 ID 命中,或锚定资产的写法粒度落
-// 在摘除面内——ExcludedCoversTarget 同口径);零文本匹配。
 func stepsCoveringAssets(ctx context.Context, store *rings.Store, taskID string, steps []rings.NodeFull, assetIDs []string) ([]scopeHitStep, error) {
 	assets, err := store.NodesByType(ctx, taskID, rings.NodeAsset, "")
 	if err != nil {
@@ -121,7 +116,6 @@ func stepsCoveringAssetsOf(ctx context.Context, store *rings.Store, taskID strin
 	if len(want) == 0 {
 		return nil, nil
 	}
-	// 意图锚定资产集:covers 直接锚定 + verifies→假设→about 锚定。
 	anchored := map[string]map[string]bool{} // stepID -> 锚定资产 ID 集
 	addAnchors := func(from, to string) {
 		if anchored[from] == nil {
@@ -135,21 +129,6 @@ func stepsCoveringAssetsOf(ctx context.Context, store *rings.Store, taskID strin
 		}
 	} else {
 		return nil, fmt.Errorf("swarm: 范围影响查 covers 边: %w", err)
-	}
-	// 验证类步骤(Step→verifies→Hypothesis→about→Asset):假设的 about
-	// 锚点＝提议时指向的目标资产,同为该步骤的意图锚定。
-	if verifies, verr := store.Edges(ctx, taskID, rings.EdgeVerifies); verr == nil && len(verifies) > 0 {
-		hypAssets := map[string][]string{}
-		if abouts, aerr := store.Edges(ctx, taskID, rings.EdgeAbout); aerr == nil {
-			for _, e := range abouts {
-				hypAssets[e.From] = append(hypAssets[e.From], e.To)
-			}
-		}
-		for _, e := range verifies {
-			for _, a := range hypAssets[e.To] {
-				addAnchors(e.From, a)
-			}
-		}
 	}
 	// 锚定命中:直接 ID ∈ 摘除集,或锚定资产的写法粒度落在摘除面内
 	//(同 host 不同端口的兄弟资产同样命中——与围栏/摘除的写法粒度
@@ -210,46 +189,61 @@ func EnsureScopeAsset(ctx context.Context, store *rings.Store, taskID, ident str
 	if ident == "" {
 		return "", false, errors.New("swarm: 资产标识为空")
 	}
-	assets, err := store.NodesByType(ctx, taskID, rings.NodeAsset, "")
-	if err != nil {
-		return "", false, fmt.Errorf("swarm: 查图上资产: %w", err)
-	}
-	for _, a := range assets {
-		if a.ID == ident || a.Title == ident {
-			return a.ID, false, nil
+	for ctx.Err() == nil {
+		rev, err := store.CurrentRevision(ctx, taskID)
+		if err != nil {
+			return "", false, err
 		}
-	}
-	if anchor, ok := rings.ScopeAnchorOf(ident); ok {
+		assets, err := store.NodesByType(ctx, taskID, rings.NodeAsset, "")
+		if err != nil {
+			return "", false, err
+		}
 		for _, a := range assets {
-			if a2, ok2 := rings.ScopeAnchorOf(strings.TrimSpace(a.Title)); ok2 &&
-				a2.Host == anchor.Host && a2.Port == anchor.Port &&
-				a2.Wildcard == anchor.Wildcard {
+			if a.ID == ident || a.Title == ident {
 				return a.ID, false, nil
 			}
 		}
+		anchor, ok := rings.ScopeAnchorOf(ident)
+		if !ok {
+			return "", false, errors.New("资产标识须为域名、IP或服务入口")
+		}
+		class := rings.AssetDomain
+		if strings.Contains(ident, "://") || anchor.Port != "" {
+			class = rings.AssetService
+		} else if anchor.IsIP {
+			class = rings.AssetHost
+		}
+		class, title, key, err := rings.AssetIdentity(class, ident)
+		if err != nil {
+			return "", false, err
+		}
+		for _, a := range assets {
+			_, _, existing, e := rings.AssetIdentity(a.AssetClass, a.Title)
+			if e == nil && existing == key {
+				return a.ID, false, nil
+			}
+		}
+		scope := rings.AssetScopeIn
+		if source == rings.AssetSourceDiscovered {
+			scope = rings.AssetScopeOut
+		}
+		id := "a-" + scopeAssetIDSuffix()
+		node := rings.NodeAdded{NodeID: id, NodeType: rings.NodeAsset, Title: title, Status: "active", AssetClass: class, Detail: map[string]any{"source": source, "scope": scope}}
+		events := []rings.Event{{Kind: rings.EventNodeAdded, Actor: actor, Payload: node}}
+		if source == rings.AssetSourceManual {
+			bindings, err := store.AssetJoinEvents(ctx, taskID, []rings.NodeAdded{node}, actor)
+			if err != nil {
+				return "", false, err
+			}
+			events = append(events, bindings...)
+		}
+		_, err = store.AppendAtRevision(ctx, taskID, rev, events...)
+		if errors.Is(err, rings.ErrStaleRevision) {
+			continue
+		}
+		return id, true, err
 	}
-	class := rings.AssetDomain
-	if anchor, ok := rings.ScopeAnchorOf(ident); ok && anchor.IsIP {
-		class = rings.AssetHost
-	}
-	scope := rings.AssetScopeIn
-	if source == rings.AssetSourceDiscovered {
-		// 发现形态入图默认范围外(与范围卡目标入图同口径,归属随裁决
-		// 或放行转范围);手动形态天然范围内。
-		scope = rings.AssetScopeOut
-	}
-	id := "a-" + scopeAssetIDSuffix()
-	detail := map[string]any{"source": source, "scope": scope}
-	if _, err := store.Append(ctx, taskID, rings.Event{
-		Kind: rings.EventNodeAdded, Actor: actor,
-		Payload: rings.NodeAdded{
-			NodeID: id, NodeType: rings.NodeAsset, Title: ident,
-			Status: "active", AssetClass: class, Detail: detail,
-		},
-	}); err != nil {
-		return "", false, fmt.Errorf("swarm: 资产入图: %w", err)
-	}
-	return id, true, nil
+	return "", false, ctx.Err()
 }
 
 // scopeAssetIDSuffix 资产 ID 的随机后缀(同秒多条不撞 ID;与收割入图
@@ -384,14 +378,10 @@ func ExcludeAssets(ctx context.Context, store *rings.Store, helm *Helm, taskID s
 		if res.KilledUnits, res.AbortedSteps, serr = StopLossForAssets(ctx, store, helm, taskID, res.Excluded, actor); serr != nil {
 			return res, serr
 		}
-		// 摘除连坐废弃(P4-55 审核迭代,造物主 2026-11-08 定案:动"对象"
-		// 摘资产→声明/假设程序确定性全废弃):摘除覆盖资产上锚定的非终态
-		// 声明与假设批量转已废弃(理由"目标已摘除"),不问主宰、不挂起;
-		// 幂等,零命中零落笔;失败如实跳过可重入(勾回不自动复活)。
-		if dClaims, dHypos, derr := rings.DiscardAnchoredFindings(ctx, store, taskID, rings.DiscardReasonExcluded, actor); derr != nil {
+		if dClaims, derr := rings.DiscardAnchoredFindings(ctx, store, taskID, rings.DiscardReasonExcluded, actor); derr != nil {
 			runlog.Warnf("摘除连坐废弃失败(如实跳过,可重入): %s %v", taskID, derr)
-		} else if len(dClaims) > 0 || len(dHypos) > 0 {
-			runlog.Infof("摘除连坐废弃: %s 判断 %d 个,假设 %d 个转已废弃(目标已摘除)", taskID, len(dClaims), len(dHypos))
+		} else if len(dClaims) > 0 {
+			runlog.Infof("摘除连坐废弃: %s 判断 %d 个转已废弃(目标已摘除)", taskID, len(dClaims))
 		}
 	}
 	return res, nil
@@ -411,12 +401,6 @@ func IncludeAssets(ctx context.Context, store *rings.Store, taskID string, asset
 	if err != nil {
 		return nil, fmt.Errorf("swarm: 纳入读当前范围: %w", err)
 	}
-	pendingSet := map[string]bool{}
-	if pending, perr := store.PendingScopeAssets(ctx, taskID); perr == nil {
-		for _, p := range pending {
-			pendingSet[p.ID] = true
-		}
-	}
 	excluded := st.ExcludedAssetSet()
 	// P4-71 ①:图上资产的退役态——纳入遇 retired 一律复活(写法粒度,
 	// 同 host 其余退役节点不连带),retired 不再落 AlreadyIn 误答。
@@ -424,6 +408,7 @@ func IncludeAssets(ctx context.Context, store *rings.Store, taskID string, asset
 	if err != nil {
 		return nil, fmt.Errorf("swarm: 纳入查图上资产: %w", err)
 	}
+	members := rings.InventoryAssetIDs(assets, st)
 	retiredSet := map[string]bool{}
 	for _, a := range assets {
 		if a.Status == rings.AssetStatusRetired {
@@ -442,7 +427,7 @@ func IncludeAssets(ctx context.Context, store *rings.Store, taskID string, asset
 			// AllowScopeAccess 不动排除清单的写侧对称),不落 Reincluded
 			// 分支漏复活。
 			res.Revived = append(res.Revived, id)
-		case pendingSet[id]:
+		case !members[id] && !excluded[id]:
 			res.Approved = append(res.Approved, id)
 		case excluded[id]:
 			res.Reincluded = append(res.Reincluded, id)
@@ -467,7 +452,7 @@ func IncludeAssets(ctx context.Context, store *rings.Store, taskID string, asset
 		}
 	}
 	nextApproved := append([]string{}, st.ScopeApproved...)
-	for _, id := range res.Approved {
+	for _, id := range append(append([]string{}, res.Approved...), res.Reincluded...) {
 		if !idIn(nextApproved, id) {
 			nextApproved = append(nextApproved, id)
 		}
@@ -487,7 +472,7 @@ func IncludeAssets(ctx context.Context, store *rings.Store, taskID string, asset
 		parts = append(parts, "纳入 "+assetTitleOf(ctx, store, taskID, id))
 	}
 	for _, id := range res.Approved {
-		parts = append(parts, "放行 "+assetTitleOf(ctx, store, taskID, id))
+		parts = append(parts, "加入资产 "+assetTitleOf(ctx, store, taskID, id))
 	}
 	if _, err := store.Append(ctx, taskID, rings.Event{
 		Kind: rings.EventRoeUpdated, Actor: actor,
@@ -547,79 +532,6 @@ func ReviveRetiredAssets(ctx context.Context, store *rings.Store, taskID string,
 	return revived, nil
 }
 
-// ---- 范围卡第三键"允许访问"(P4-68 ①,问题清单 #86 B) ----
-
-// ParseInfoSourceHost 标记入口的地址归一:host[:port] → 裸 host(小写;
-// 访问权与信息源清单同为 host 级);非主机形态返回 false。
-func ParseInfoSourceHost(s string) (string, bool) {
-	if a, ok := rings.ScopeAnchorOf(strings.TrimSpace(s)); ok {
-		return a.Host, true
-	}
-	return "", false
-}
-
-// AllowScopeAccess 授访问权(host 入信息源清单)的统一入口——卡上手授
-// ＝分诊自动授＝牧者标记＝RoE 面板标记,一个机制多种入口(P4-67 信息源
-// 清单同一状态):
-//   - GrantInfoSource:host 入任务信息源清单(后续访问零出卡;撤销恢复
-//     拦截——RevokeInfoSource 既有);
-//   - 图上同主机资产退役(rings.AssetStatusRetired,状态迁移留痕不删
-//     节点):资产图/待批清单/主宰快照/报告等读面一律过滤——不入资产
-//     图、不进范围闭包、不算覆盖、不被规划测试、不进资产树分组;
-//   - 不触发止损、不动排除清单(允许访问不是拒绝:红队照常可测、渗透
-//     访问放行;对它的攻击行为仍走攻击行为卡——denyScope 清单命中
-//     分支按动作复查)。
-//
-// 挂等该目标的冻结单位由调用方对账唤醒(overmind.ResolveScopeWaits
-// 信息源分支:回可领取插队队首,原会话续跑)。
-func AllowScopeAccess(ctx context.Context, store *rings.Store, taskID, host, basis, actor string) error {
-	host = strings.ToLower(strings.TrimSpace(host))
-	if a, ok := rings.ScopeAnchorOf(host); ok {
-		host = a.Host // 端口无关:访问权与信息源清单同为 host 级
-	}
-	if err := GrantInfoSource(ctx, store, taskID, host, basis, actor); err != nil {
-		return err
-	}
-	retireAssetsOfHost(ctx, store, taskID, host, actor)
-	return nil
-}
-
-// retireAssetsOfHost 图上同主机资产的退役(host 级:同 host 不同端口的
-// 资产一并退役——访问权 host 级,资产图呈现同步消失)。幂等(已退役
-// 跳过);退役留痕失败如实记档不回滚(访问权已授,账本只追加)。
-func retireAssetsOfHost(ctx context.Context, store *rings.Store, taskID, host, actor string) {
-	assets, err := store.NodesByType(ctx, taskID, rings.NodeAsset, "")
-	if err != nil {
-		runlog.Warnf("允许访问:查资产失败(退役跳过,如实记档): %s %s: %v", taskID, host, err)
-		return
-	}
-	var evs []rings.Event
-	for _, a := range assets {
-		if a.Status == rings.AssetStatusRetired {
-			continue
-		}
-		anchor, ok := rings.ScopeAnchorOf(strings.TrimSpace(a.Title))
-		if !ok || anchor.Host != host {
-			continue
-		}
-		evs = append(evs, rings.Event{
-			Kind: rings.EventNodeStateChanged, Actor: actor,
-			Payload: rings.NodeStateChanged{
-				NodeID: a.ID, Status: rings.AssetStatusRetired,
-				Note: "允许访问:转信息源,不收编",
-			},
-		})
-	}
-	if len(evs) == 0 {
-		return
-	}
-	if _, err := store.Append(ctx, taskID, evs...); err != nil {
-		runlog.Warnf("允许访问:资产退役落账失败(如实记档): %s %s: %v", taskID, host, err)
-		return
-	}
-	runlog.Infof("允许访问: %s %s 资产退役 %d 个(转信息源,不收编)", taskID, host, len(evs))
-}
-
 // StopLossForAssets 在途止损本体(P4-45 ①b;roe.updated 已落账后调用,
 // 面板与牧者两路共用):
 //   - 意图覆盖任一已摘除资产的在跑步骤 → 舵杆 kill(与熔断单位同款真
@@ -677,7 +589,7 @@ func StopLossForAssets(ctx context.Context, store *rings.Store, helm *Helm, task
 		var running []ScopeHit
 		for _, h := range hits {
 			switch h.status {
-			case "dispatched":
+			case "dispatched", rings.StepScopeWait, rings.StepGateWait, rings.StepPauseWait, rings.StepModelWait:
 				abortEvs = append(abortEvs, rings.Event{
 					Kind: rings.EventNodeStateChanged, Actor: actor,
 					Payload: rings.NodeStateChanged{NodeID: h.hit.StepID, Status: "aborted", Note: "范围摘除"},

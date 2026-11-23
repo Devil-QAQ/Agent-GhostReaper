@@ -12,7 +12,6 @@ package rings
 //	alternatives/alt_killed ← arbiter 冻结清单与战役内排除(reopen 清战役);
 //	evidence  ← ClaimEvidence 首绑次序 + EvidenceVersions 计数;
 //	origin    ← claimOriginOf 的发现单位锚(含会话锚回退查 unit_sessions);
-//	timing    ← claimTimingOf 的战役步骤状态段游标(reopen 清战役)。
 //
 // 写入按"读-改-写 + 小语句按列更新"(单写者事务内无竞态;每类事件只
 // 触碰涉及的列)。
@@ -42,24 +41,24 @@ type CaseTimelineEntry struct {
 // ReproDigest 最新定稿的投影形态:小字段 + 步骤(不含 Op——面板/报告
 // 正文不显,完整参数在事件流与证据包;不含 Variants/Process 大数组,
 // 计数在案,过程明细由证据包导出按 rev 定向读事件)。Rounds 为定稿
-// 冻结的反证时间线人话三段(P4-56 ⑤;旧定稿为空,读侧退机器层)。
 type ReproDigest struct {
-	Rev                 int64               `json:"rev"`
-	Severity            string              `json:"severity,omitempty"`
-	Narrative           string              `json:"narrative,omitempty"`
-	NarrativeUnpolished bool                `json:"narrative_unpolished,omitempty"`
-	Rounds              []FalsifyRoundHuman `json:"rounds,omitempty"`
-	Steps               []ReproStep         `json:"steps,omitempty"`
-	NoReproReason       string              `json:"no_repro_reason,omitempty"`
-	StepsIncomplete     string              `json:"steps_incomplete,omitempty"`
-	ProcessCount        int                 `json:"process_count,omitempty"`
-	VariantsCount       int                 `json:"variants_count,omitempty"`
+	Rev                 int64       `json:"rev"`
+	Severity            string      `json:"severity,omitempty"`
+	Narrative           string      `json:"narrative,omitempty"`
+	NarrativeUnpolished bool        `json:"narrative_unpolished,omitempty"`
+	Steps               []ReproStep `json:"steps,omitempty"`
+	ProofSeqs           []int       `json:"proof_seqs,omitempty"`
+	NoReproReason       string      `json:"no_repro_reason,omitempty"`
+	StepsIncomplete     string      `json:"steps_incomplete,omitempty"`
+	ProcessCount        int         `json:"process_count,omitempty"`
+	VariantsCount       int         `json:"variants_count,omitempty"`
 }
 
 // SummaryDigest 定稿校对后的声明摘要(P4-59 ①,问题清单 #80①③):
 // statement 存在性描述 / impact 影响面 / facts 链上事实描述,报告级
 // 文风锚生成,随 repro 事件同批冻结;空字段 = 未生成,读侧退节点原文。
 type SummaryDigest struct {
+	Title     string          `json:"title,omitempty"`
 	Rev       int64           `json:"rev,omitempty"`
 	Statement string          `json:"statement,omitempty"`
 	Impact    string          `json:"impact,omitempty"`
@@ -115,11 +114,9 @@ type claimCaseRow struct {
 	discoverer           string
 	discoverStep         string
 	discoverSess         string
-	timing               TimingDigest
 	summary              *SummaryDigest
-	// roundHumans 逐轮人话(P4-64 ①)/retestNotes 复测备注校对稿(P4-64 ⑦):
+	// retestNotes 复测备注校对稿(P4-64 ⑦):
 	// 显示层包装列,按轮 upsert(轮号全局续号),存储 JSON 键为轮号字符串。
-	roundHumans map[int]ClaimRoundHuman
 	retestNotes map[int]string
 	// changed* 脏列标记(save 只写触碰过的列组)。
 	changedDigest   bool
@@ -128,9 +125,7 @@ type claimCaseRow struct {
 	changedRepro    bool
 	changedEvidence bool
 	changedOrigin   bool
-	changedTiming   bool
 	changedSummary  bool
-	changedRounds   bool
 	changedNotes    bool
 }
 
@@ -138,14 +133,14 @@ type claimCaseRow struct {
 func loadClaimCase(tx *sql.Tx, taskID, claimID string) (*claimCaseRow, error) {
 	row := &claimCaseRow{claimID: claimID, altKilled: map[string]bool{}}
 	var hasEvidence, reportExcluded int
-	var rawTimeline, rawAlts, rawKilled, rawRepro, rawEvidence, rawTiming, rawSummary string
-	var rawRounds, rawNotes string
+	var rawTimeline, rawAlts, rawKilled, rawRepro, rawEvidence, rawSummary string
+	var rawNotes string
 	err := tx.QueryRow(
 		`SELECT falsify_step, verifier, pending_reason, verdict_rev, severity, repro_steps,
 		   retest_verdict, retest_round, retest_at, replay_verdict, replay_round, replay_at,
 		   has_evidence, report_excluded, report_excluded_reason, evidence_binds, repro_events,
 		   timeline, alternatives, alt_killed, repro, evidence, discoverer, discover_step,
-		   discover_session, timing, summary, round_humans, retest_notes
+		   discover_session, summary, retest_notes
 		 FROM claim_cases WHERE task_id = ? AND claim_id = ?`, taskID, claimID,
 	).Scan(&row.falsifyStep, &row.verifier, &row.pendingReason, &row.verdictRev, &row.severity,
 		&row.reproSteps, &row.retestVerdict, &row.retestRound, &row.retestAt,
@@ -153,8 +148,8 @@ func loadClaimCase(tx *sql.Tx, taskID, claimID string) (*claimCaseRow, error) {
 		&hasEvidence, &reportExcluded, &row.reportExcludedReason,
 		&row.evidenceBinds, &row.reproEvents,
 		&rawTimeline, &rawAlts, &rawKilled, &rawRepro, &rawEvidence,
-		&row.discoverer, &row.discoverStep, &row.discoverSess, &rawTiming, &rawSummary,
-		&rawRounds, &rawNotes,
+		&row.discoverer, &row.discoverStep, &row.discoverSess, &rawSummary,
+		&rawNotes,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		if _, err := tx.Exec(
@@ -192,27 +187,10 @@ func loadClaimCase(tx *sql.Tx, taskID, claimID string) (*claimCaseRow, error) {
 	if rawEvidence != "" {
 		_ = json.Unmarshal([]byte(rawEvidence), &row.evidence)
 	}
-	if rawTiming != "" {
-		_ = json.Unmarshal([]byte(rawTiming), &row.timing)
-	}
-	if row.timing.Steps == nil {
-		row.timing.Steps = map[string]TimingStepDigest{}
-	}
 	if rawSummary != "" {
 		row.summary = &SummaryDigest{}
 		if json.Unmarshal([]byte(rawSummary), row.summary) != nil {
 			row.summary = nil
-		}
-	}
-	if rawRounds != "" {
-		var m map[string]ClaimRoundHuman
-		if json.Unmarshal([]byte(rawRounds), &m) == nil {
-			row.roundHumans = map[int]ClaimRoundHuman{}
-			for k, v := range m {
-				if n, err := strconv.Atoi(k); err == nil {
-					row.roundHumans[n] = v
-				}
-			}
 		}
 	}
 	if rawNotes != "" {
@@ -321,18 +299,6 @@ func (r *claimCaseRow) save(tx *sql.Tx, taskID string) error {
 			return fmt.Errorf("rings: 投影写入溯源: %w", err)
 		}
 	}
-	if r.changedTiming {
-		b, err := json.Marshal(r.timing)
-		if err != nil {
-			return fmt.Errorf("rings: 序列化耗时态: %w", err)
-		}
-		if _, err := tx.Exec(
-			`UPDATE claim_cases SET timing = ? WHERE task_id = ? AND claim_id = ?`,
-			string(b), taskID, r.claimID,
-		); err != nil {
-			return fmt.Errorf("rings: 投影写入耗时态: %w", err)
-		}
-	}
 	if r.changedSummary {
 		summary := []byte("")
 		if r.summary != nil {
@@ -346,18 +312,6 @@ func (r *claimCaseRow) save(tx *sql.Tx, taskID string) error {
 			string(summary), taskID, r.claimID,
 		); err != nil {
 			return fmt.Errorf("rings: 投影写入判断摘要: %w", err)
-		}
-	}
-	if r.changedRounds {
-		b, err := marshalRoundKeyed(r.roundHumans)
-		if err != nil {
-			return fmt.Errorf("rings: 序列化逐轮人话: %w", err)
-		}
-		if _, err := tx.Exec(
-			`UPDATE claim_cases SET round_humans = ? WHERE task_id = ? AND claim_id = ?`,
-			string(b), taskID, r.claimID,
-		); err != nil {
-			return fmt.Errorf("rings: 投影写入逐轮人话: %w", err)
 		}
 	}
 	if r.changedNotes {
@@ -431,8 +385,7 @@ func applyClaimNodeAdded(tx *sql.Tx, taskID string, rev int64, p NodeAdded, occu
 	}
 	row.alternatives = ParseAlternatives(p.Detail["alternatives"])
 	row.appendTimeline(rev, occurredAt, "created", nil)
-	row.timing.LandedAt = fmtTimeUTC(occurredAt)
-	row.changedAlts, row.changedOrigin, row.changedTiming = true, true, true
+	row.changedAlts, row.changedOrigin = true, true
 	return row.save(tx, taskID)
 }
 
@@ -478,28 +431,10 @@ func ParseAlternatives(raw any) []Alternative {
 	return out
 }
 
-// applyStepNodeAdded node.added(step 带归属判断)→ 耗时态战役登记
-// (初始 dispatched,与 claimTimingOf 的事件回放同口径)。
-func applyStepNodeAdded(tx *sql.Tx, taskID string, p NodeAdded, occurredAt time.Time) error {
-	claimID, _ := p.Detail["testclaim_id"].(string)
-	if claimID == "" {
-		return nil
-	}
-	row, err := loadClaimCase(tx, taskID, claimID)
-	if err != nil {
-		return err
-	}
-	if row.timing.Steps == nil {
-		row.timing.Steps = map[string]TimingStepDigest{}
-	}
-	row.timing.Steps[p.NodeID] = TimingStepDigest{State: "dispatched", At: fmtTimeUTC(occurredAt)}
-	row.changedTiming = true
-	return row.save(tx, taskID)
-}
+// (旧 applyStepNodeAdded 步骤耗时态战役登记已随反证轮耗时链路退役
+// 删除,P5-03③。)
 
-// applyCaseStateChanged node.state_changed → 判断侧时间线 state 与耗时
-// 终态;步骤侧(归属判断)按状态段累加排队/执行(重开清战役,旧战役
-// 步骤不在游标表内自然忽略——与 claimTimingOf 的 inCampaign 口径一致)。
+// applyCaseStateChanged node.state_changed → 判断侧时间线 state。
 func applyCaseStateChanged(tx *sql.Tx, taskID string, rev int64, p NodeStateChanged, occurredAt time.Time) error {
 	nt, err := nodeTypeOf(tx, taskID, p.NodeID)
 	if err != nil {
@@ -513,43 +448,9 @@ func applyCaseStateChanged(tx *sql.Tx, taskID string, rev int64, p NodeStateChan
 		}
 		payload, _ := json.Marshal(map[string]string{"status": p.Status})
 		row.appendTimeline(rev, occurredAt, "state", payload)
-		if p.Status == TestClaimConfirmed || p.Status == TestClaimPending {
-			row.timing.TerminalAt = fmtTimeUTC(occurredAt)
-			row.changedTiming = true
-		}
 		return row.save(tx, taskID)
 	case NodeStep:
-		var detail string
-		if err := tx.QueryRow(
-			`SELECT detail FROM nodes WHERE task_id = ? AND node_id = ?`, taskID, p.NodeID,
-		).Scan(&detail); err != nil {
-			return nil
-		}
-		var d struct {
-			TestClaimID string `json:"testclaim_id"`
-		}
-		if json.Unmarshal([]byte(detail), &d) != nil || d.TestClaimID == "" {
-			return nil
-		}
-		row, err := loadClaimCase(tx, taskID, d.TestClaimID)
-		if err != nil {
-			return err
-		}
-		cur, ok := row.timing.Steps[p.NodeID]
-		if !ok {
-			return nil // 非当前战役步骤(重开前旧战役),与读侧同口径忽略
-		}
-		from, fromAt := cur.State, parseTimeCol(cur.At)
-		seg := occurredAt.Sub(fromAt).Seconds()
-		switch {
-		case from == "dispatched" && p.Status == "running":
-			row.timing.QueueSec += seg
-		case from == "running" && p.Status != "running":
-			row.timing.ExecSec += seg
-		}
-		row.timing.Steps[p.NodeID] = TimingStepDigest{State: p.Status, At: fmtTimeUTC(occurredAt)}
-		row.changedTiming = true
-		return row.save(tx, taskID)
+		// (旧步骤侧耗时游标累加已随反证轮耗时链路退役删除,P5-03③。)
 	}
 	return nil
 }
@@ -562,16 +463,17 @@ func applyClaimRecord(tx *sql.Tx, taskID string, rev int64, p TestClaimRecord, p
 		return err
 	}
 	switch p.Type {
+	case TestClaimRecSubmit:
+		// 交卷单(P5-01②):六字段随事件原文进时间线;摘要/状态归机器
+		// 三查与收割定稿(P5-02 起接管),投影侧先标脏摘要与时间线。
+		row.changedDigest = true
+		row.appendTimeline(rev, occurredAt, "submit", payload)
 	case TestClaimRecFalsify:
+		// 旧反证写回:结构化结论字段已删(P5-01③),旧记录解码按空值
+		// 处理——altKilled 不再累积(存量任务升级删除路线,P5-03④)。
 		row.falsifyStep, row.verifier = p.StepID, p.UnitID
 		row.changedDigest = true
 		row.appendTimeline(rev, occurredAt, "falsify", payload)
-		for _, a := range p.Alternatives {
-			if a.Refuted {
-				row.altKilled[a.ID] = true
-				row.changedAlts = true
-			}
-		}
 	case TestClaimRecVerdict:
 		row.pendingReason, row.verdictRev = p.PendingReason, rev
 		if p.StepID != "" {
@@ -585,9 +487,7 @@ func applyClaimRecord(tx *sql.Tx, taskID string, rev int64, p TestClaimRecord, p
 	case TestClaimRecReopen:
 		row.appendTimeline(rev, occurredAt, "reopen", payload)
 		row.altKilled = map[string]bool{}
-		row.timing.QueueSec, row.timing.ExecSec = 0, 0
-		row.timing.Steps = map[string]TimingStepDigest{}
-		row.changedAlts, row.changedTiming = true, true
+		row.changedAlts = true
 	case TestClaimRecRepro:
 		row.severity, row.reproSteps = p.Severity, len(p.Steps)
 		row.reproEvents++
@@ -597,17 +497,32 @@ func applyClaimRecord(tx *sql.Tx, taskID string, rev int64, p TestClaimRecord, p
 			st.Op = "" // 面板/报告正文不显,完整参数在事件流与证据包
 			steps[i] = st
 		}
+		if len(p.ProofSeqs) > 0 && p.StepsIncomplete == "流程步骤整理中" {
+			proof := map[int]bool{}
+			for _, seq := range p.ProofSeqs {
+				proof[seq] = true
+			}
+			selected := steps[:0]
+			for _, step := range steps {
+				if proof[step.Seq] {
+					selected = append(selected, step)
+				}
+			}
+			steps = selected
+			row.reproSteps = len(steps)
+		}
 		row.repro = &ReproDigest{
 			Rev: rev, Severity: p.Severity, Narrative: p.Narrative,
-			NarrativeUnpolished: p.NarrativeUnpolished, Rounds: p.Rounds, Steps: steps,
+			NarrativeUnpolished: p.NarrativeUnpolished, Steps: steps,
+			ProofSeqs:     p.ProofSeqs,
 			NoReproReason: p.NoReproReason, StepsIncomplete: p.StepsIncomplete,
 			ProcessCount: len(p.Process), VariantsCount: len(p.Variants),
 		}
 		row.changedRepro = true
 		// 声明摘要(P4-59 ①):字段全空 = 本次定稿未生成校对摘要,摘要列
 		// 一并清空(取代语义——重开后再确认的新定稿为准,不残留旧摘要)。
-		if p.Statement != "" || p.Impact != "" || len(p.Facts) > 0 {
-			row.summary = &SummaryDigest{Rev: rev, Statement: p.Statement, Impact: p.Impact, Facts: p.Facts}
+		if p.Title != "" || p.Statement != "" || p.Impact != "" || len(p.Facts) > 0 {
+			row.summary = &SummaryDigest{Rev: rev, Title: p.Title, Statement: p.Statement, Impact: p.Impact, Facts: p.Facts}
 		} else {
 			row.summary = nil
 		}
@@ -661,67 +576,27 @@ func applyClaimRecord(tx *sql.Tx, taskID string, rev int64, p TestClaimRecord, p
 	return row.save(tx, taskID)
 }
 
-// applyClaimRoundHuman claim.round_human → 卷宗逐轮人话(P4-64 ①):
-// 按轮 upsert(轮号全局续号,重开后新轮次增量补);机器 falsify 记录
-// 原文一字不动。
-func applyClaimRoundHuman(tx *sql.Tx, taskID string, rev int64, p ClaimRoundHuman) error {
-	if p.ClaimID == "" || p.Round <= 0 ||
-		(p.Doubt == "" && p.How == "" && p.Conclusion == "") {
-		return fmt.Errorf("rings: claim.round_human 缺判断、轮次不合法或三段全空(不落空事件)")
-	}
-	row, err := loadClaimCase(tx, taskID, p.ClaimID)
-	if err != nil {
-		return err
-	}
-	if row.roundHumans == nil {
-		row.roundHumans = map[int]ClaimRoundHuman{}
-	}
-	row.roundHumans[p.Round] = ClaimRoundHuman{
-		ClaimID: p.ClaimID, Round: p.Round,
-		Doubt: p.Doubt, How: p.How, Conclusion: p.Conclusion, Unpolished: p.Unpolished,
-	}
-	row.changedRounds = true
-	return row.save(tx, taskID)
-}
+// (旧 applyClaimSummaryPolish(claim.summary 立账批次事件)已随立账
+// 批次退役删除,P5-03③——定稿摘要随 repro 记录直接写 summary 列,
+// 独立事件通道无写入方;存量旧账本该类事件重放按未知种类忽略。)
 
-// applyClaimSummaryPolish claim.summary → 摘要列(P4-64 ②:立账即生成
-// 的声明摘要)。与 repro 事件的 summary 写入同列 latest-wins——立账在
-// 先、定稿在后(账本次序),重定稿覆盖立账稿(取代语义既有);全空
-// 字段不入账(生成侧控制,不落空事件)。
-func applyClaimSummaryPolish(tx *sql.Tx, taskID string, rev int64, p ClaimSummaryPolish) error {
-	if p.ClaimID == "" {
-		return fmt.Errorf("rings: claim.summary 缺判断")
-	}
-	if p.Statement == "" && p.Impact == "" && len(p.Facts) == 0 {
-		return fmt.Errorf("rings: claim.summary 字段全空(不落空事件)")
-	}
-	row, err := loadClaimCase(tx, taskID, p.ClaimID)
-	if err != nil {
-		return err
-	}
-	row.summary = &SummaryDigest{Rev: rev, Statement: p.Statement, Impact: p.Impact, Facts: p.Facts}
-	row.changedSummary = true
-	return row.save(tx, taskID)
-}
-
-// applyNodePolish fact.text / hypo.text → node_polish(P4-64 ③④⑥⑧):
+// applyNodePolish fact.text / step.title → node_polish(P4-64 ③④⑥⑧):
 // 节点显示层包装 latest-wins(每类节点只来自自己的生成批次,整行覆盖
 // 无半覆盖);节点原文一字不动。unpolished 为标题未过闸的如实标注。
-func applyNodePolish(tx *sql.Tx, taskID string, rev int64, nodeID, title, statement, basis, reason string, unpolished bool) error {
+func applyNodePolish(tx *sql.Tx, taskID string, rev int64, nodeID, title, statement string, unpolished bool) error {
 	if nodeID == "" {
 		return fmt.Errorf("rings: 节点文本包装缺节点")
 	}
-	if title == "" && statement == "" && basis == "" && reason == "" {
+	if title == "" && statement == "" {
 		return fmt.Errorf("rings: 节点文本包装字段全空(不落空事件)")
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO node_polish (task_id, node_id, title, statement, basis, reason, unpolished, rev)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO node_polish (task_id, node_id, title, statement, unpolished, rev)
+		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(task_id, node_id) DO UPDATE SET
 		   title = excluded.title, statement = excluded.statement,
-		   basis = excluded.basis, reason = excluded.reason,
 		   unpolished = excluded.unpolished, rev = excluded.rev`,
-		taskID, nodeID, title, statement, basis, reason, boolNum(unpolished), rev,
+		taskID, nodeID, title, statement, boolNum(unpolished), rev,
 	); err != nil {
 		return fmt.Errorf("rings: 投影写入节点文本包装: %w", err)
 	}
@@ -729,7 +604,6 @@ func applyNodePolish(tx *sql.Tx, taskID string, rev int64, nodeID, title, statem
 }
 
 // applyRetestNotePolish claim.retest_note → 复测备注校对稿(P4-64 ⑦):
-// 按轮 upsert;机器 retest 记录 Note 原文一字不动。
 func applyRetestNotePolish(tx *sql.Tx, taskID string, rev int64, p RetestNotePolish) error {
 	if p.ClaimID == "" || p.Round <= 0 || p.Note == "" {
 		return fmt.Errorf("rings: claim.retest_note 缺判断/轮次/备注")

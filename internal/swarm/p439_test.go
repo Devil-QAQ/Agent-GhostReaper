@@ -2,7 +2,7 @@
 // (超阈值落 blob+对话内截头引用、黑匣子 tool_spill 记账、阈值内原样、
 // 错误结果同治、元数据透传)② read 按存档引用分段读回 ③ 宿主微压缩
 // (保最近 5 条、submit_* 不清、幂等、门限、黑匣子 micro_compact、
-// 窗口未配置不挂、超长判定委托)。
+// 无窗口且无存档不挂、超长判定委托)。
 package swarm
 
 import (
@@ -295,11 +295,12 @@ func TestP439MicroCompactKeepsRecentFive(t *testing.T) {
 	names := []string{
 		"bash", "read", "http_probe", "port_probe", "web_search",
 		"web_fetch", "list_claims", "bash",
-		"submit_test_claim", "submit_candidate_fact", // 受控入口:不清
+		"submit_claim", "submit_candidate_fact", // 受控入口:不清
 		"read", "bash",
 	}
-	msgs := p439Turns(names, 500)
-	out, cleared, freed := microCompactGR(msgs)
+	env, _ := p439Env(t)
+	msgs := p439Turns(names, 2000)
+	out, cleared, freed, _ := microCompactGR(msgs, microCandidates(msgs), env.Executor.Blobs.Write)
 	// 可压缩 10 条,保最近 5 条 → 清 5 条(最旧的 bash/read/http_probe/port_probe/web_search)。
 	if cleared != 5 {
 		t.Fatalf("应清出 5 条,实际 %d", cleared)
@@ -318,25 +319,25 @@ func TestP439MicroCompactKeepsRecentFive(t *testing.T) {
 			}
 			single := len(b.Content) == 1 && b.Content[0].Type == llm.BlockText
 			if clearedIDs[b.ToolUseID] {
-				if !single || b.Content[0].Text != microClearedText {
-					t.Fatalf("旧轮结果应清为占位: %s", b.ToolUseID)
+				if !single || !strings.HasPrefix(b.Content[0].Text, microPrefix) {
+					t.Fatalf("旧轮结果应保留摘录与存档引用: %s", b.ToolUseID)
 				}
-			} else if single && b.Content[0].Text == microClearedText {
+			} else if single && strings.HasPrefix(b.Content[0].Text, microPrefix) {
 				t.Fatalf("近 5 条与受控入口不应被清: %s", b.ToolUseID)
 			}
 		}
 	}
 	// 原数组不动(非破坏:调用方拿返回值)。
-	if msgs[1].Content[0].Content[0].Text == microClearedText {
+	if strings.HasPrefix(msgs[1].Content[0].Content[0].Text, microPrefix) {
 		t.Fatalf("原消息数组不应被就地改写")
 	}
 	// 幂等:再跑一遍零清出。
-	if _, again, _ := microCompactGR(out); again != 0 {
+	if _, again, _, _ := microCompactGR(out, microCandidates(out), env.Executor.Blobs.Write); again != 0 {
 		t.Fatalf("重复清理应幂等,实际清 %d", again)
 	}
 	// 可压缩条数 ≤ 5:零清出。
-	small := p439Turns([]string{"bash", "bash", "bash", "submit_test_claim"}, 100)
-	if _, n, _ := microCompactGR(small); n != 0 {
+	small := p439Turns([]string{"bash", "bash", "bash", "submit_claim"}, 100)
+	if _, n, _, _ := microCompactGR(small, microCandidates(small), env.Executor.Blobs.Write); n != 0 {
 		t.Fatalf("≤5 条可压缩不应清,实际 %d", n)
 	}
 }
@@ -344,7 +345,7 @@ func TestP439MicroCompactKeepsRecentFive(t *testing.T) {
 func TestP439UnitCompactorPreGateAndLedger(t *testing.T) {
 	env, store := p439Env(t)
 	// 窗口 50000、摘要预留 4096 → 微压缩线 (50000-4096)*6/10 = 27442。
-	c := newUnitCompactor(store, env.TaskID, env.StepID, env.UnitID, 50000, 4096, nil)
+	c := newUnitCompactor(store, env.Executor.Blobs, env.TaskID, env.StepID, env.UnitID, 50000, 4096, nil)
 	if c == nil {
 		t.Fatalf("窗口已配置应挂压缩器")
 	}
@@ -372,10 +373,10 @@ func TestP439UnitCompactorPreGateAndLedger(t *testing.T) {
 
 	// 过线(lastInputTokens 超线):清出 3 条(8-5),黑匣子明细对账。
 	out = c.Pre(context.Background(), msgs, c.microThreshold()+1000)
-	if out[1].Content[0].Content[0].Text != microClearedText {
-		t.Fatalf("过线应清最旧结果体")
+	if !strings.HasPrefix(out[1].Content[0].Content[0].Text, microPrefix) {
+		t.Fatalf("过线应归档最旧结果体")
 	}
-	if out[len(out)-1].Content[0].Content[0].Text == microClearedText {
+	if strings.HasPrefix(out[len(out)-1].Content[0].Content[0].Text, microPrefix) {
 		t.Fatalf("最近 5 条应保留")
 	}
 	recs := p439Blackbox(t, store, env.TaskID)
@@ -406,15 +407,15 @@ func TestP439UnitCompactorPreGateAndLedger(t *testing.T) {
 	}
 }
 
-func TestP439UnitCompactorNilWithoutWindow(t *testing.T) {
-	if c := newUnitCompactor(nil, "t", "i1", "u1", 0, 4096, nil); c != nil {
-		t.Fatalf("窗口未配置应返回 nil")
+func TestP439UnitCompactorNilWithoutWindowOrArchive(t *testing.T) {
+	if c := newUnitCompactor(nil, nil, "t", "i1", "u1", 0, 4096, nil); c != nil {
+		t.Fatalf("窗口及归档均不可用时应返回 nil")
 	}
 }
 
 func TestP439UnitCompactorIsOverflowDelegates(t *testing.T) {
 	env, store := p439Env(t)
-	c := newUnitCompactor(store, env.TaskID, env.StepID, env.UnitID, 50000, 4096, nil)
+	c := newUnitCompactor(store, env.Executor.Blobs, env.TaskID, env.StepID, env.UnitID, 50000, 4096, nil)
 	if !c.IsOverflow(errors.New("request too long for model context length")) {
 		t.Fatalf("超长错误判定应委托引擎")
 	}

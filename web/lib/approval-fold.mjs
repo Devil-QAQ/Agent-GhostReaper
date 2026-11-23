@@ -11,6 +11,7 @@
 
 // 机器放行留痕类型(折叠对象):连续段合成一行"×N"计数行。
 export const FOLDABLE_RECORD_TYPES = {
+	 action_review: "动作判断",
   step_pass: "同步骤放行",
   group_pass: "同组放行",
   triage: "性质判定",

@@ -184,9 +184,9 @@ func TestMirrorForcedTakeoverE2E(t *testing.T) {
 		t.Fatalf("模型收口文本不符(工具结果未受接管影响): %q", res.FinalText)
 	}
 
-	// ---- P4-73 ① 交换编号可见性:http_probe 结果带 exchange= 行,编号
-	// 与镜留痕逐字一致(反证结论据此引用证明交换;curl 结果无此行,引用
-	// 走 URL 回查)。
+	// ---- P4-73 ①(+P5-01② bash 同款)交换编号可见性:http_probe 结果带
+	// exchange=<id> 行、bash(curl)结果带 exchange=<id> <url> 行,编号
+	// 与镜留痕逐字一致(交换单 evidence_refs 据此引用证明交换)。
 	probeExIDs := map[string]bool{}
 	for _, rr := range reqs {
 		for _, msg := range rr.Messages {
@@ -195,18 +195,22 @@ func TestMirrorForcedTakeoverE2E(t *testing.T) {
 			}
 			for _, line := range strings.Split(msg.Content, "\n") {
 				if strings.HasPrefix(line, "exchange=") {
-					probeExIDs[strings.TrimPrefix(line, "exchange=")] = true
+					// P5-01②:bash 标注行带 URL 后缀,编号取首字段。
+					id := strings.TrimPrefix(line, "exchange=")
+					if i := strings.IndexAny(id, " \t"); i >= 0 {
+						id = id[:i]
+					}
+					probeExIDs[id] = true
 				}
 			}
 		}
 	}
-	if len(probeExIDs) != 2 {
-		t.Fatalf("两次 http_probe 各应标注 1 个交换编号: %+v", probeExIDs)
+	if len(probeExIDs) != 3 { // 两次 http_probe + 一次 bash curl
+		t.Fatalf("三次流量命令各应标注 1 个交换编号: %+v", probeExIDs)
 	}
 	for _, rec := range recs {
-		shouldTag := pathOf(rec.URL) != "/robots.txt" // curl 无编号
-		if _, tagged := probeExIDs[rec.ExchangeID]; tagged != shouldTag {
-			t.Fatalf("交换编号标注与镜留痕不一致: %s 标注=%v 应标注=%v", rec.ExchangeID, tagged, shouldTag)
+		if _, tagged := probeExIDs[rec.ExchangeID]; !tagged {
+			t.Fatalf("交换编号标注与镜留痕不一致: %s 未标注", rec.ExchangeID)
 		}
 	}
 }

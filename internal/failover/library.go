@@ -82,7 +82,7 @@ type ModelConfig struct {
 	// StreamDisabled 关流式:请求以非流式(整段一次)发出,面板与会话
 	// 逻辑无感知。默认流式。
 	StreamDisabled bool `json:"stream_disabled,omitempty"`
-	// Thinking 思考开关:""(随端点默认)|enabled|disabled;ThinkingEffort
+	// Thinking 思考开关:""(默认开启)|enabled|disabled;ThinkingEffort
 	// 思考强度:""|low|medium|high|max。ThinkingPassback 思考回传规则
 	// (P4-57 ①):""=按端点推断(平台预设匹配/未知剔除)|passback 传回
 	// |strip 剔除|none 不干预——历史 assistant 思考内容按当前服务腿的
@@ -97,6 +97,14 @@ type ModelConfig struct {
 	RetryEmpty   int `json:"retry_empty,omitempty"`   // ②空响应重试
 	RetryReplay  int `json:"retry_replay,omitempty"`  // ③零交付重放
 	RetryBreaker int `json:"retry_breaker,omitempty"` // ④熔断阈值(连续失败开闸次数)
+}
+
+// EffectiveThinking keeps an explicit saved off setting; unset defaults on.
+func (c ModelConfig) EffectiveThinking() string {
+	if c.Thinking == "" {
+		return "enabled"
+	}
+	return c.Thinking
 }
 
 // MaskedConfig 对外视图:Key 打码、代理去凭据,其余原样(API 永不回显
@@ -173,12 +181,21 @@ func MaskProxy(proxy string) string {
 // 多条取首个非零;未命中退主用激活配置的窗口;再退 0(未配置)。
 // 配置读失败退默认记 WARN(P3-13b ③)——按错误去重,防轮询刷屏。
 func ContextWindowFor(ctx context.Context, store *rings.Store, model string) int {
+	return modelLimitFor(ctx, store, model, func(c ModelConfig) int { return c.ContextWindow }, false)
+}
+
+// OutputTokensFor 返回服务模型的输出上限；未配置返回零，由压缩器采用默认预留。
+func OutputTokensFor(ctx context.Context, store *rings.Store, model string) int {
+	return modelLimitFor(ctx, store, model, func(c ModelConfig) int { return c.MaxTokens }, true)
+}
+
+func modelLimitFor(ctx context.Context, store *rings.Store, model string, limit func(ModelConfig) int, allowUnset bool) int {
 	if store == nil {
 		return 0
 	}
 	cfgs, err := ListModelConfigs(ctx, store)
 	if err != nil {
-		warnOnce(fmt.Sprintf("读模型库失败,窗口按未配置处理: %v", err))
+		warnOnce(fmt.Sprintf("读模型库失败,模型限制按未配置处理: %v", err))
 		return 0
 	}
 	fallback := 0
@@ -187,11 +204,11 @@ func ContextWindowFor(ctx context.Context, store *rings.Store, model string) int
 		activePrimary = p
 	}
 	for _, c := range cfgs {
-		if model != "" && c.Model == model && c.ContextWindow > 0 {
-			return c.ContextWindow
+		if model != "" && c.Model == model && (limit(c) > 0 || allowUnset) {
+			return limit(c)
 		}
-		if c.Name == activePrimary && c.ContextWindow > 0 && fallback == 0 {
-			fallback = c.ContextWindow
+		if c.Name == activePrimary && limit(c) > 0 && fallback == 0 {
+			fallback = limit(c)
 		}
 	}
 	return fallback
@@ -437,28 +454,6 @@ func ActiveName(ctx context.Context, store *rings.Store, role string) (string, b
 		return "", false, nil // 指向已删配置:视同未激活(fail-safe)
 	}
 	return name, true, nil
-}
-
-// SetTaskOverride 任务级主备覆盖(第七章 §5「任务级可覆盖」);空名 =
-// 清除该角色回全局。
-func SetTaskOverride(ctx context.Context, store *rings.Store, taskID, role, name, by string) error {
-	if taskID == "" {
-		return fmt.Errorf("failover: 任务 ID 不能为空")
-	}
-	key := keyTaskPrefix + taskID + "." + RolePrimary
-	if role == RoleBackup {
-		key = keyTaskPrefix + taskID + "." + RoleBackup
-	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return store.DeleteSetting(ctx, key)
-	}
-	if _, ok, err := ModelConfigByName(ctx, store, name); err != nil {
-		return err
-	} else if !ok {
-		return fmt.Errorf("failover: 模型 %q 不在库内", name)
-	}
-	return store.SetSetting(ctx, key, name, by)
 }
 
 // TaskOverrideName 任务级覆盖读取(未绑定返回 false;P4-41 起导出供

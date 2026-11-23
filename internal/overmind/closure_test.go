@@ -286,7 +286,7 @@ func TestClosurePromptFromCycle(t *testing.T) {
 	}
 	l := &Loop{TaskID: task, Store: store, Provider: prov}
 
-	if l.cycle(ctx) {
+	if l.cycle(ctx, true) {
 		t.Fatal("目标未达成,cycle 不应报告任务完成")
 	}
 	if ps := closurePrompts(t, store, task); len(ps) != 0 {
@@ -296,7 +296,7 @@ func TestClosurePromptFromCycle(t *testing.T) {
 	if _, err := store.Append(ctx, task, rings.Event{Kind: rings.EventRoeUpdated, Actor: "creator", Payload: rings.RoeUpdated{}}); err != nil {
 		t.Fatal(err)
 	}
-	if l.cycle(ctx) {
+	if l.cycle(ctx, true) {
 		t.Fatal("目标未达成,cycle 不应报告任务完成")
 	}
 	ps := closurePrompts(t, store, task)
@@ -313,7 +313,7 @@ func TestClosurePromptFromCycle(t *testing.T) {
 		}
 	}
 	// 第三次机器唤醒无新输入：不再规划，已有待决提醒仍唯一。
-	if l.cycle(ctx) {
+	if l.cycle(ctx, true) {
 		t.Fatal("目标未达成,cycle 不应报告任务完成")
 	}
 	if ps := closurePrompts(t, store, task); len(ps) != 1 {

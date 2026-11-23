@@ -111,12 +111,13 @@ func (m *mockLLM) handle(w http.ResponseWriter, r *http.Request) {
 	if req.ToolsOffered == 0 {
 		// 拆解会话(无工具广告)。已有同名意图在图上(重启后的在飞/已派
 		// 发工作)→ 空产物不新增;全新任务 → 派一条只读意图。
-		if strings.Contains(string(raw), intentMarker) {
+		goal := regexp.MustCompile(`(?m)^\s*-\s+(\S+) \[active\] 确认靶标暴露面$`).FindStringSubmatch(req.LastUser)
+		if strings.Contains(string(raw), intentMarker) || goal == nil {
 			text = `{"new_intents":[]}`
 		} else {
 			asset := assetRe.FindString(string(raw))
-			text = fmt.Sprintf(`{"new_intents":[{"intent":"%s 对靶标域名做一次确认观察","action_level":"只读探测","covers":["%s"],"expected_observation":"域名解析可达"}]}`,
-				intentMarker, asset)
+			text = fmt.Sprintf(`{"new_intents":[{"goal_id":%q,"intent":"%s 对靶标域名做一次确认观察","action_level":"只读探测","covers":["%s"],"expected_observation":"域名解析可达"}]}`,
+				goal[1], intentMarker, asset)
 		}
 	} else if strings.Contains(req.LastUser, "重启接管 · 续跑") {
 		text = "步骤完成:确认观察已写回,本步骤意图达成。"

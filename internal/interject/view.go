@@ -99,18 +99,20 @@ func matchTarget(rec rings.InterjectRecord, target, sessionID string) bool {
 
 // MessageView 一条插话发言(问/改及其回答与回执关联)。
 type MessageView struct {
-	ID        string `json:"id"`
-	Mode      string `json:"mode"` // ask|steer
-	Text      string `json:"text"`
-	State     string `json:"state"` // ask: queued|delivered|replied|failed;steer: issued
-	Note      string `json:"note,omitempty"`
-	Reply     string `json:"reply,omitempty"`
-	RefID     string `json:"ref_id,omitempty"`       // 改向关联:st-*(舵杆)|av-*(建议)
-	RefKind   string `json:"ref_kind,omitempty"`     // steer|advice
-	AdvState  string `json:"advice_state,omitempty"` // advice: pending|adopted|rejected
-	AdvReason string `json:"advice_reason,omitempty"`
-	At        string `json:"at"`
-	ReplyAt   string `json:"reply_at,omitempty"`
+	ID             string `json:"id"`
+	Mode           string `json:"mode"` // ask|steer
+	Text           string `json:"text"`
+	State          string `json:"state"` // ask: queued|delivered|replied|failed;steer: issued
+	Note           string `json:"note,omitempty"`
+	Reply          string `json:"reply,omitempty"`
+	Thinking       string `json:"thinking,omitempty"`
+	ThinkingActive bool   `json:"thinking_active,omitempty"`
+	RefID          string `json:"ref_id,omitempty"`       // 改向关联:st-*(舵杆)|av-*(建议)
+	RefKind        string `json:"ref_kind,omitempty"`     // steer|advice
+	AdvState       string `json:"advice_state,omitempty"` // advice: pending|adopted|rejected
+	AdvReason      string `json:"advice_reason,omitempty"`
+	At             string `json:"at"`
+	ReplyAt        string `json:"reply_at,omitempty"`
 }
 
 // SteerView 一条改向的回执状态(汇合 steer.record 的最新态)。
@@ -183,6 +185,11 @@ func (s *Service) View(ctx context.Context, taskID, target, sessionID string) (*
 			case rings.InterjectRecMessageState:
 				if i, ok := msgIdx[rec.MessageID]; ok && v.Messages[i].State != "replied" {
 					v.Messages[i].State, v.Messages[i].Note = rec.State, rec.Note
+				}
+			case rings.InterjectRecThinking:
+				if i, ok := msgIdx[rec.MessageID]; ok {
+					v.Messages[i].Thinking += rec.Text
+					v.Messages[i].ThinkingActive = rec.State != "finished" && rec.Text != ""
 				}
 			case rings.InterjectRecReply:
 				if i, ok := msgIdx[rec.MessageID]; ok {

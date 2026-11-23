@@ -251,7 +251,7 @@ func TestOvermindLoopE2E(t *testing.T) {
 	if peak := model.maxInflight.Load(); peak != 3 {
 		t.Fatalf("全程并发峰值应恰为 3(上限生效且真并发),实际 %d", peak)
 	}
-	if err := loop.LastErr(); err != nil {
+	if err := loopErr(loop); err != nil {
 		t.Fatalf("干净运行不应残留错误: %v", err)
 	}
 }
@@ -455,7 +455,7 @@ func TestDecomposeResumeRepairThroughEngine(t *testing.T) {
 			if got := len(model.decomposeRequests()); got < 2 {
 				t.Fatalf("截断会话应发生续写第二轮请求,实际 %d 次", got)
 			}
-			if err := loop.LastErr(); err != nil {
+			if err := loopErr(loop); err != nil {
 				t.Fatalf("续写修复后不应残留错误: %v", err)
 			}
 		})
@@ -630,7 +630,7 @@ func TestLoopSurvivesBadDecomposeReply(t *testing.T) {
 	// 坏回复:不派发任何意图,错误可查,循环存活。
 	tk.Wake()
 	waitFor(t, 10*time.Second, "坏拆解请求到达", func() bool { return len(model.decomposeRequests()) == 1 })
-	waitFor(t, 5*time.Second, "坏回复记入 LastErr", func() bool { return loop.LastErr() != nil })
+	waitFor(t, 5*time.Second, "坏回复记入 LastErr", func() bool { return loopErr(loop) != nil })
 	if got := countNodes(t, store, task, rings.NodeStep, ""); got != 0 {
 		t.Fatalf("坏回复不得派发任何意图,实际 %d 步", got)
 	}
@@ -694,7 +694,7 @@ func TestLoopNoDispatchSpin(t *testing.T) {
 	}
 
 	tk.Wake()
-	waitFor(t, 30*time.Second, "坏意图已拆解且派发失败留痕", func() bool { return loop.LastErr() != nil })
+	waitFor(t, 30*time.Second, "坏意图已拆解且派发失败留痕", func() bool { return loopErr(loop) != nil })
 	if got := len(model.decomposeRequests()); got != 1 {
 		t.Fatalf("派发全败应恰拆解 1 次即回静默,实际 %d 次(热循环)", got)
 	}
@@ -781,3 +781,6 @@ func TestSnapshotShowsApprovalDenials(t *testing.T) {
 		t.Fatalf("closeout 结案不得进审批拒绝节:\n%s", sec)
 	}
 }
+
+// loopErr 仅供测试在互斥锁下检查错误回流，生产不暴露测试专用出口。
+func loopErr(l *Loop) error { l.mu.Lock(); defer l.mu.Unlock(); return l.lastErr }

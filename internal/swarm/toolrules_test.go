@@ -62,21 +62,15 @@ func TestToolDescriptionsEmbedRules(t *testing.T) {
 
 	// 参数描述埋数据质量要求(§11:证据类参数必须教什么叫合格证据)。
 	for name, want := range map[string][]string{
-		"submit_candidate_fact":    {"可独立复核", "只写结论不附原文"},
-		"submit_test_claim":        {"可独立重放", "只写结论不算证据"},
-		"submit_falsify_result":    {"只写结论不参与机器判定"},
-		"submit_hypothesis_result": {"只写结论不算证据"},
+		"submit_candidate_fact": {"可独立复核", "只写结论不附原文"},
+		"submit_claim":          {"关键证明物", "子串匹配"},
 	} {
 		var tt tool.CoreTool
 		switch name {
 		case "submit_candidate_fact":
 			tt = env.submitCandidateFactTool()
-		case "submit_test_claim":
-			tt = env.submitTestClaimTool()
-		case "submit_falsify_result":
-			tt = env.submitFalsifyResultTool()
-		case "submit_hypothesis_result":
-			tt = env.submitHypothesisResultTool()
+		case "submit_claim":
+			tt = env.submitClaimTool()
 		}
 		s := schemaText(t, name, tt)
 		for _, w := range want {
@@ -119,18 +113,18 @@ func TestToolErrorsTeachRoutes(t *testing.T) {
 	}
 }
 
-// TestClaimFieldStyleClause P4-11 ①:声明一句话摘要同款收口——
-// submit_test_claim 的 statement/impact 参数描述引用共用文风句
+// TestClaimFieldStyleClause P4-11 ①(P5-01② 改型):交卷单声明一句话
+// 摘要同款收口——submit_claim 的 summary 参数描述引用共用文风句
 // (swarm.StructuredFieldStyle,与主宰拆解契约同一份,防两处漂移)。
 func TestClaimFieldStyleClause(t *testing.T) {
 	env := toolrulesEnv(t)
-	s := schemaText(t, "submit_test_claim", env.submitTestClaimTool())
-	if n := strings.Count(s, StructuredFieldStyle); n != 2 {
-		t.Fatalf("statement 与 impact 两个参数描述应各带一次共用文风句(实际 %d 次): %s", n, s)
+	s := schemaText(t, "submit_claim", env.submitClaimTool())
+	if n := strings.Count(s, StructuredFieldStyle); n != 1 {
+		t.Fatalf("summary 参数描述应带一次共用文风句(实际 %d 次): %s", n, s)
 	}
-	for _, want := range []string{"存在性判断", "影响面判断"} {
+	for _, want := range []string{"实际问题与影响对象", "必要的访问前提与结论范围保留", "证明证据引用"} {
 		if !strings.Contains(s, want) {
-			t.Fatalf("判断参数描述缺 %q", want)
+			t.Fatalf("交卷参数描述缺 %q", want)
 		}
 	}
 }

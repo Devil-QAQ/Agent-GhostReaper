@@ -54,9 +54,12 @@ func p445ScopeEnv(t *testing.T) (*rings.Store, *Helm, string) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.Append(ctx, task, rings.Event{Kind: rings.EventSwarmRecord, Actor: "swarm:u9", Payload: rings.SwarmRecord{Type: rings.SwarmRecSessionStarted, StepID: "s-run", UnitID: "u9", TranscriptID: "swarm-u9"}}); err != nil {
+		t.Fatal(err)
+	}
 	helm := NewHelm(store)
 	stopped := map[string]bool{}
-	helm.attachTask(task, func(taskID, stepID string) (string, bool) {
+	helm.attachTask(task, func(taskID, stepID, _ string) (string, bool) {
 		if taskID != task || stepID != "s-run" || stopped[stepID] {
 			return "", false
 		}
@@ -111,13 +114,23 @@ func TestP445StopLossForAssets(t *testing.T) {
 	}
 	// 止损留痕:kill 舵杆记录 + aborted 状态事件(Note=范围摘除)。
 	evs, _ := store.Events(ctx, task, 0, 0)
-	var killRec, abortNote int
+	var killQueued, killDelivered, abortNote int
 	for _, ev := range evs {
 		switch ev.Kind {
 		case rings.EventSteerRecord:
 			var r rings.SteerRecord
 			if jsonUnmarshal(ev.Payload, &r) == nil && r.Command == rings.SteerCommandKill {
-				killRec++
+				switch r.State {
+				case rings.SteerStateQueued:
+					killQueued++
+				case rings.SteerStateDelivered:
+					killDelivered++
+				default:
+					t.Fatalf("unexpected kill state %s", r.State)
+				}
+				if r.UnitID != "u9" {
+					t.Fatalf("kill not bound to actual unit: %+v", r)
+				}
 				if !strings.Contains(r.Reason, "范围摘除止损") {
 					t.Fatalf("kill 理由应含范围摘除止损: %q", r.Reason)
 				}
@@ -132,8 +145,8 @@ func TestP445StopLossForAssets(t *testing.T) {
 			}
 		}
 	}
-	if killRec != 1 || abortNote != 1 {
-		t.Fatalf("留痕笔数不符: kill=%d abort=%d", killRec, abortNote)
+	if killQueued != 1 || killDelivered != 1 || abortNote != 1 {
+		t.Fatalf("留痕笔数不符: queued=%d delivered=%d abort=%d", killQueued, killDelivered, abortNote)
 	}
 	// 幂等:重复止损零新落笔(已终态不动)。
 	killed, aborted, err = StopLossForAssets(ctx, store, helm, task, []string{"a-x"}, "creator")
@@ -231,7 +244,7 @@ func TestP445IncludeAssets(t *testing.T) {
 	if len(roe.ScopeApproved) != 1 || roe.ScopeApproved[0] != "a-disc" {
 		t.Fatalf("放行清单应含 a-disc: %+v", roe.ScopeApproved)
 	}
-	if !strings.Contains(roe.Note, "放行") || !strings.Contains(roe.Note, "api.other.com") {
+	if !strings.Contains(roe.Note, "加入资产") || !strings.Contains(roe.Note, "api.other.com") {
 		t.Fatalf("备注应含放行明细: %q", roe.Note)
 	}
 	// 全部本就范围内:零落账(如实在 AlreadyIn)。
@@ -275,8 +288,16 @@ func TestP445IncludeAssetsExcludedReinclude(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.AlreadyIn) != 1 {
-		t.Fatalf("红队未摘除资产应归 AlreadyIn: %+v", res)
+	if len(res.Approved) != 1 {
+		t.Fatalf("legacy unjoined discovery must be explicitly adopted: %+v", res)
+	}
+	res, err = IncludeAssets(ctx, store, task, []string{"a-x"}, "shepherd")
+	if err != nil || len(res.AlreadyIn) != 1 {
+		t.Fatal("repeated adoption was not idempotent", res, err)
+	}
+	ag, err := store.AssetGraph(ctx, task)
+	if err != nil || len(ag.Assets) != 2 {
+		t.Fatal("rejoined asset remains outside inventory", ag, err)
 	}
 }
 

@@ -52,7 +52,10 @@ const AGENT_GROUP_LABELS = {
   overmind: "主宰",
   shepherd: "牧者",
   interject: "插话",
+  creator: "造物主",
 };
+
+const PURPOSE_LABELS = { interrupted: "未完成请求", triage: "边界判断", compaction: "会话摘要", rule_patterns: "规则生成" };
 
 function agentGroupLabel(g) {
   return AGENT_GROUP_LABELS[g] || g;
@@ -186,8 +189,8 @@ export function ObservePage({ tasks }) {
   const [hitDrill, setHitDrill] = React.useState(null); // 拒绝类命中(后续轨迹)
 
   return (
-    <div className="flex flex-col gap-8">
-      <PageHeader title="观测" subtitle="Token 成本 · 工具执行流水 · 吞吐指标 · 拦截命中" />
+    <div className="flex flex-col gap-3">
+      <PageHeader title="观测" subtitle="查看模型用量、执行记录与拦截情况" />
 
       {(tokenErr || tpErr || toolErr || icErr) && (
         <div className="rounded-md bg-status-danger-soft px-3 py-2 text-sm text-status-danger">
@@ -239,7 +242,7 @@ function TokenSection({ body, onDrillTask }) {
 
   return (
     <section className="flex flex-col gap-4">
-      <SectionTitle icon="coins" title="Token 成本" note="读逐次记账表,一行一次模型调用" />
+      <SectionTitle icon="coins" title="Token 成本" note="任务内模型调用与用量" />
       {loading ? (
         <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
           {[0, 1, 2, 3, 4].map((i) => (
@@ -255,6 +258,7 @@ function TokenSection({ body, onDrillTask }) {
         />
       ) : (
         <>
+          {totals.usage_missing > 0 && <div className="text-xs text-muted-foreground">{totals.usage_missing} 次调用未返回用量，合计仅含已返回部分</div>}
           <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
             <KpiCard label="调用次数" value={fmtNum(totals.calls)} hint={`${totals.tasks} 个任务`} />
             <KpiCard label="输入 token" value={fmtNum(totals.input)} />
@@ -276,7 +280,7 @@ function TokenSection({ body, onDrillTask }) {
           </Card>
 
           <div className="grid gap-4 xl:grid-cols-3">
-            <Card className="xl:col-span-2">
+            <Card className="min-w-0 xl:col-span-2">
               <CardHeader>
                 <CardTitle>按任务</CardTitle>
                 <CardDescription>点击行看该任务明细</CardDescription>
@@ -296,7 +300,7 @@ function TokenSection({ body, onDrillTask }) {
                 />
               </CardContent>
             </Card>
-            <div className="flex flex-col gap-4">
+            <div className="flex min-w-0 flex-col gap-4">
               <Card>
                 <CardHeader>
                   <CardTitle>按模型</CardTitle>
@@ -384,9 +388,11 @@ function TaskTokenDrawer({ drill, onClose }) {
   const agg = React.useMemo(() => {
     const byModel = {};
     const byAgent = {};
-    const t = { calls: 0, input: 0, output: 0, cache_read: 0, cache_write: 0 };
+    const byPurpose = {};
+    const t = { calls: 0, input: 0, output: 0, cache_read: 0, cache_write: 0, missing: 0 };
     for (const r of list) {
       t.calls++;
+      if (r.usage_missing) t.missing++;
       t.input += r.input_tokens;
       t.output += r.output_tokens;
       t.cache_read += r.cache_read_tokens;
@@ -400,8 +406,13 @@ function TaskTokenDrawer({ drill, onClose }) {
       a.calls++;
       a.input += r.input_tokens;
       a.output += r.output_tokens;
+      const purpose = PURPOSE_LABELS[r.purpose] || "会话";
+      const p = (byPurpose[purpose] ||= { calls: 0, input: 0, output: 0 });
+      p.calls++;
+      p.input += r.input_tokens;
+      p.output += r.output_tokens;
     }
-    return { t, byModel, byAgent };
+    return { t, byModel, byAgent, byPurpose };
   }, [list]);
 
   return (
@@ -411,15 +422,17 @@ function TaskTokenDrawer({ drill, onClose }) {
           <SheetTitle>{drill?.title || drill?.id} · token 明细</SheetTitle>
           <SheetDescription>
             {fmtNum(agg.t.calls)} 次调用 · 输入 {fmtNum(agg.t.input)} · 输出 {fmtNum(agg.t.output)} · 缓存读 {fmtNum(agg.t.cache_read)} · 缓存写 {fmtNum(agg.t.cache_write)}
+            {agg.t.missing > 0 && ` · ${agg.t.missing} 次未返回用量，合计仅含已返回部分`}
           </SheetDescription>
         </SheetHeader>
         <div className="flex-1 overflow-y-auto px-5 pb-5">
           {list.length === 0 ? (
-            <div className="py-12 text-center text-xs text-muted-foreground">该任务尚无记账</div>
+            <div className="py-6 text-center text-xs text-muted-foreground">该任务尚无记账</div>
           ) : (
             <div className="flex flex-col gap-5">
               <SubAggTable title="按模型" rows={agg.byModel} />
               <SubAggTable title="按角色" rows={agg.byAgent} nameKey />
+              <SubAggTable title="按用途" rows={agg.byPurpose} nameKey />
               <div>
                 <div className="mb-1 text-xs text-muted-foreground">逐次明细(最近 50 次)</div>
                 <Table>
@@ -428,7 +441,7 @@ function TaskTokenDrawer({ drill, onClose }) {
                       <TableHead>时间</TableHead>
                       <TableHead>角色</TableHead>
                       <TableHead>模型</TableHead>
-                      <TableHead>轮次</TableHead>
+                      <TableHead>用途</TableHead>
                       <TableHead className="text-right">输入</TableHead>
                       <TableHead className="text-right">输出</TableHead>
                     </TableRow>
@@ -436,12 +449,12 @@ function TaskTokenDrawer({ drill, onClose }) {
                   <TableBody>
                     {list.slice(-50).reverse().map((r, i) => (
                       <TableRow key={i}>
-                        <TableCell className="num text-xs">{r.occurred_at?.slice(5)}</TableCell>
+                        <TableCell className="num text-xs">{r.occurred_at?.slice(5, 10)}<br />{r.occurred_at?.slice(11)}</TableCell>
                         <TableCell>{agentLabel(r.agent)}</TableCell>
                         <TableCell className="num text-xs">{r.model || "—"}</TableCell>
-                        <TableCell className="num">{r.turn}</TableCell>
-                        <TableCell className="text-right num">{fmtNum(r.input_tokens)}</TableCell>
-                        <TableCell className="text-right num">{fmtNum(r.output_tokens)}</TableCell>
+                        <TableCell>{PURPOSE_LABELS[r.purpose] || (r.turn ? `会话 · ${r.turn}` : "会话")}</TableCell>
+                        <TableCell className="text-right num">{r.usage_missing ? "未返回" : fmtNum(r.input_tokens)}</TableCell>
+                        <TableCell className="text-right num">{r.usage_missing ? "未返回" : fmtNum(r.output_tokens)}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -515,7 +528,7 @@ function ThroughputSection({ body, taskList, tpTask, onTask }) {
         <EmptyState
           icon="activity"
           title="尚无派发记录"
-          hint="任务跑起来后,等待时长与队列深度在此出曲线"
+          hint="任务运行后显示等待时长与排队数量"
           action={{ label: "去任务列表", href: "/tasks" }}
         />
       ) : (
@@ -576,7 +589,7 @@ function ToolSection({
           <div className="flex flex-wrap items-center gap-2">
             <TaskSelect taskList={taskList} value={fTask} onChange={onTask} />
             <Select value={fTool || "__all"} onValueChange={(v) => onTool(v === "__all" ? "" : v)}>
-              <SelectTrigger className="w-40" title="工具">
+              <SelectTrigger className="h-8 w-40 text-xs" title="工具">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -589,7 +602,7 @@ function ToolSection({
               </SelectContent>
             </Select>
             <Select value={fStatus || "__all"} onValueChange={(v) => onStatus(v === "__all" ? "" : v)}>
-              <SelectTrigger className="w-28" title="状态">
+              <SelectTrigger className="h-8 w-28 text-xs" title="状态">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -679,7 +692,7 @@ function ToolRowDrawer({ row, onClose }) {
                 <button
                   className="text-primary underline-offset-4 hover:underline cursor-pointer"
                   onClick={() =>
-                    (location.hash = `/task/${row.task_id}/annulus?focus=${encodeURIComponent(row.step_id)}`)
+                    (location.hash = `/task/${row.task_id}/panorama?focus=${encodeURIComponent(row.step_id)}`)
                   }
                 >
                   在图中查看 →
@@ -960,7 +973,7 @@ function SectionTitle({ icon, title, note, right }) {
 function TaskSelect({ taskList, value, onChange }) {
   return (
     <Select value={value || "__all"} onValueChange={(v) => onChange(v === "__all" ? "" : v)}>
-      <SelectTrigger className="w-44" title="任务">
+      <SelectTrigger className="h-8 w-44 text-xs" title="任务">
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
@@ -1030,7 +1043,7 @@ function ChartFrame({ x0, x1, yMax, children, unit }) {
 // TokenSeriesChart 用量柱状(输入 + 输出堆叠,色 = 品牌蓝 / 中性灰)。
 function TokenSeriesChart({ series }) {
   const list = (series || []).filter((b) => b.input + b.output > 0);
-  if (list.length === 0) return <div className="py-8 text-center text-xs text-muted-foreground">全区间零用量</div>;
+  if (list.length === 0) return <div className="py-4 text-center text-xs text-muted-foreground">全区间零用量</div>;
   const c = chartColors();
   const iw = CHART_W - CHART_PAD.l - CHART_PAD.r;
   const ih = CHART_H - CHART_PAD.t - CHART_PAD.b;
@@ -1081,7 +1094,7 @@ function Legend({ color, label }) {
 function WaitsChart({ waits }) {
   const list = waits || [];
   if (list.length === 0) {
-    return <div className="py-8 text-center text-xs text-muted-foreground">尚无领取</div>;
+    return <div className="py-4 text-center text-xs text-muted-foreground">尚无领取</div>;
   }
   const c = chartColors();
   const iw = CHART_W - CHART_PAD.l - CHART_PAD.r;
@@ -1109,7 +1122,7 @@ function WaitsChart({ waits }) {
 function QueueChart({ queue }) {
   const list = (queue || []).filter((p) => p.depth > 0);
   if (list.length === 0) {
-    return <div className="py-8 text-center text-xs text-muted-foreground">队列从未有积压</div>;
+    return <div className="py-4 text-center text-xs text-muted-foreground">队列从未有积压</div>;
   }
   const all = queue || [];
   const c = chartColors();

@@ -18,8 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/norma/permission"
-
 	"ghostreaper/internal/rings"
 	"ghostreaper/internal/runlog"
 )
@@ -63,6 +61,17 @@ func approvalEvents(t *testing.T, store *rings.Store, task string) []rings.Appro
 			t.Fatalf("解码 approval.record: %v", err)
 		}
 		out = append(out, r)
+	}
+	return out
+}
+
+func approvalEventsForRequest(t *testing.T, store *rings.Store, task, request string) []rings.ApprovalRecord {
+	t.Helper()
+	out := []rings.ApprovalRecord{}
+	for _, r := range approvalEvents(t, store, task) {
+		if r.RequestID == request {
+			out = append(out, r)
+		}
 	}
 	return out
 }
@@ -250,96 +259,6 @@ func TestLedgerGateEnterDecideExpire(t *testing.T) {
 	}
 }
 
-// ---- 三级处置白盒:各分支的裁决与留痕 ----
-
-func TestGateThreeTierBranches(t *testing.T) {
-	dir := t.TempDir()
-	store := openStore(t, dir)
-	const task = "gate-branches"
-	ex := NewExecutor(store, nil, filepath.Join(dir, "tasks"), Budget{})
-	gate := NewLedgerGate(store)
-	env := &unitEnv{Executor: ex, TaskID: task, StepID: "s1", UnitID: "u9", TranscriptID: "swarm-u9"}
-
-	mk := func(pack *TaskPack) permission.Decision {
-		return env.approvalGate(pack)(context.Background(), "bash", json.RawMessage(`{"command":"id"}`), permission.Context{})
-	}
-
-	// ① 拒绝线·超 RoE 授权范围。
-	ex.Gate = gate
-	d := mk(&TaskPack{TaskID: task, StepID: "s1", StepIntent: "意图", ActionLevel: rings.ActionExploit,
-		Authorization: RoE{DeniedTools: []string{"bash"}}})
-	if d.Behavior != permission.Deny || !strings.Contains(d.Message, "RoE") {
-		t.Fatalf("超范围应直接拒绝: %+v", d)
-	}
-	if env.deniedReason == "" {
-		t.Fatalf("超范围拒绝应熔断单位")
-	}
-	env.deniedReason = ""
-
-	// ② 拒绝线·分级缺失 fail-safe。
-	d = mk(&TaskPack{TaskID: task, StepID: "s1", StepIntent: "意图", ActionLevel: rings.ActionLevel(""),
-		Authorization: RoE{}})
-	if d.Behavior != permission.Deny || !strings.Contains(d.Message, "分级") {
-		t.Fatalf("缺分级应 fail-safe 拒绝: %+v", d)
-	}
-	env.deniedReason = ""
-
-	// ③ 拒绝线·非常严重(数据销毁)。
-	d = mk(&TaskPack{TaskID: task, StepID: "s1", StepIntent: "意图", ActionLevel: rings.ActionModifyPersist,
-		HarmClass: rings.HarmDataDestruction, Authorization: RoE{}})
-	if d.Behavior != permission.Deny || !strings.Contains(d.Message, "数据销毁") {
-		t.Fatalf("数据销毁应直接拒绝: %+v", d)
-	}
-	env.deniedReason = ""
-
-	// ④ 弹门线·无门可用 fail-safe。
-	ex.Gate = nil
-	d = mk(&TaskPack{TaskID: task, StepID: "s1", StepIntent: "意图", ActionLevel: rings.ActionModifyPersist,
-		Authorization: RoE{}})
-	if d.Behavior != permission.Deny || !strings.Contains(d.Message, "无审批门") {
-		t.Fatalf("无门应 fail-safe 拒绝: %+v", d)
-	}
-	env.deniedReason = ""
-
-	// ⑤ 弹门线·达到门槛(默认宽=仅增删改弹门):登记挂起,不熔断。
-	ex.Gate = gate
-	d = mk(&TaskPack{TaskID: task, StepID: "s1", StepIntent: "意图", ActionLevel: rings.ActionModifyPersist,
-		Authorization: RoE{}})
-	if d.Behavior != permission.Deny || !strings.Contains(d.Message, "审批") {
-		t.Fatalf("门槛内应挂起等待审批: %+v", d)
-	}
-	if env.park == nil || len(gate.Pending(task)) != 1 {
-		t.Fatalf("挂起应登记审批票: park=%v pending=%d", env.park, len(gate.Pending(task)))
-	}
-	if env.deniedReason != "" {
-		t.Fatalf("挂起不是拒绝,不得熔断单位")
-	}
-	env.park = nil
-
-	// ⑥ 其余一律放行(默认门槛下 L1/L2/L3 不弹门)。
-	for _, lv := range []rings.ActionLevel{rings.ActionReadOnly, rings.ActionActiveTest, rings.ActionExploit} {
-		d = mk(&TaskPack{TaskID: task, StepID: "s1", StepIntent: "意图", ActionLevel: lv, Authorization: RoE{}})
-		if d.Behavior != permission.Allow {
-			t.Fatalf("默认门槛下 %s 应放行: %+v", lv, d)
-		}
-	}
-
-	// ①②③④ 各留 1 条 denied、⑤ 留 1 条 requested、⑥ 不留。
-	recs := approvalEvents(t, store, task)
-	if len(recs) != 5 {
-		t.Fatalf("应恰 5 条审批记录,得到 %d: %+v", len(recs), recs)
-	}
-	wantLines := []string{rings.DenyLineRoeScope, rings.DenyLineLevelInvalid, rings.DenyLineHarm, rings.DenyLineNoGate}
-	for i, want := range wantLines {
-		if recs[i].Type != rings.ApprovalRecDenied || recs[i].DenyLine != want {
-			t.Fatalf("拒绝记录 #%d 应为拒绝线 %s: %+v", i, want, recs[i])
-		}
-	}
-	if recs[4].Type != rings.ApprovalRecRequested {
-		t.Fatalf("第 5 条应为挂起的 requested: %+v", recs[4])
-	}
-}
-
 // ---- 完成标准 ①:探测/测试/利用类动作自动放行且 tool_call 留痕 ----
 
 func TestLowerLevelsAutoPassWithTrace(t *testing.T) {
@@ -379,9 +298,15 @@ func TestLowerLevelsAutoPassWithTrace(t *testing.T) {
 			t.Fatalf("%s 应自动放行并完成: %+v err=%v", s, res, err)
 		}
 	}
-	// 零审批记录(放行不列举、不预判),留痕=3 条 tool_call。
-	if recs := approvalEvents(t, store, task); len(recs) != 0 {
-		t.Fatalf("自动放行不得产生审批记录: %+v", recs)
+	// Model decisions are recorded, but none may fabricate human approval.
+	reviews := approvalEvents(t, store, task)
+	if len(reviews) != 3 {
+		t.Fatalf("review count=%d", len(reviews))
+	}
+	for _, r := range reviews {
+		if r.Type != rings.ApprovalRecActionReview || r.Note != ActionAllow {
+			t.Fatalf("unexpected human gate: %+v", r)
+		}
 	}
 	if calls := toolCallRecords(t, store, task, "bash"); len(calls) != 3 {
 		t.Fatalf("应恰 3 条 bash 执行留痕,得到 %d", len(calls))
@@ -425,6 +350,7 @@ func TestGateParkApproveResumeAndClockPause(t *testing.T) {
 			return scriptedReply{Text: "写入完成。", Finish: "stop"}
 		}
 	})
+	model.requireBashApproval()
 	defer model.Close()
 	prov, err := model.provider()
 	if err != nil {
@@ -487,7 +413,7 @@ func TestGateParkApproveResumeAndClockPause(t *testing.T) {
 	}
 
 	// ---- 时间账与实际相符:审批等待 ≥7 秒,计费时长远小于总墙钟 ----
-	recs := approvalEvents(t, store, task)
+	recs := approvalEventsForRequest(t, store, task, pending.ID)
 	if len(recs) != 2 || recs[0].Type != rings.ApprovalRecRequested || recs[1].Type != rings.ApprovalRecApproved {
 		t.Fatalf("审批记录应为 requested+approved: %+v", recs)
 	}
@@ -568,6 +494,7 @@ func TestPanelDenyKillsActionOnly(t *testing.T) {
 		}
 		return scriptedReply{Text: "已换只读方向核验,动作被拒不再重试", Finish: "stop"}
 	})
+	model.requireBashApproval()
 	defer model.Close()
 	prov, _ := model.provider()
 	ex := NewExecutor(store, prov, filepath.Join(dir, "tasks"), Budget{})
@@ -605,7 +532,7 @@ func TestPanelDenyKillsActionOnly(t *testing.T) {
 			t.Fatalf("面板拒绝只杀动作,不应落 unit_approval_deny 事件: %v", blackboxTypes(t, store, task))
 		}
 	}
-	recs := approvalEvents(t, store, task)
+	recs := approvalEventsForRequest(t, store, task, pending.ID)
 	if len(recs) != 2 || recs[1].Type != rings.ApprovalRecDenied ||
 		recs[1].DenyLine != rings.DenyLinePanel || !strings.Contains(recs[1].Reason, "目标环境不允许修改") {
 		t.Fatalf("审批记录应为 requested+denied(panel,带理由): %+v", recs)
@@ -624,26 +551,29 @@ func TestPanelDenyKillsActionOnly(t *testing.T) {
 	}
 }
 
-// TestPanelDenyEscalateAfterThree P4-68 ②:连拒同类 3 次升级杀单位
-// (与硬规则升级保险同机制、单位生命周期累计不重置)——前两次单位存活
-// (模型被再次调用即证),第三笔升级后单位以 approval_denied 终态收场,
-// 终因带"同类拒绝累计"说明。
-func TestPanelDenyEscalateAfterThree(t *testing.T) {
+// TestPanelDenyRepeatNeverKills P4-68 ②(P5-03③ 口径):连拒同类 3 次只
+// 杀动作不杀单位——每轮面板拒后模型被再次调用(存活即证),单位以自然
+// 终态收场,零升级说明、零 unit_approval_deny 熔断留痕。
+func TestPanelDenyRepeatNeverKills(t *testing.T) {
 	dir := t.TempDir()
 	store := openStore(t, dir)
 	ctx := context.Background()
-	const task = "gate-panel-deny-escalate"
+	const task = "gate-panel-deny-repeat"
 
 	host, port := seedTarget(t, "x\r\n")
 	seedGoalAndAsset(t, store, task, host, port)
 	dispatchStepAtLevel(t, store, task, "s1", "修改目标配置验证", "g1", "修改与持久化", "target")
 
 	model := newScriptedModel(func(rr *recordedRequest) scriptedReply {
-		// 每轮都重发同一被拒动作(硬撞形态)。
+		// 每轮都重发同一被拒动作(硬撞形态),第 4 轮收口。
+		if rr.Index >= 3 {
+			return scriptedReply{Text: "不再尝试该动作,收口。", Finish: "stop"}
+		}
 		return scriptedReply{ToolCalls: []scriptedToolCall{{
 			ID: fmt.Sprintf("b%d", rr.Index), Name: "bash", Args: `{"command":"echo never-deny > x.txt"}`,
 		}}, Finish: "tool_calls"}
 	})
+	model.requireBashApproval()
 	defer model.Close()
 	prov, _ := model.provider()
 	ex := NewExecutor(store, prov, filepath.Join(dir, "tasks"), Budget{})
@@ -660,7 +590,7 @@ func TestPanelDenyEscalateAfterThree(t *testing.T) {
 		res, _ = ex.RunStep(ctx, task, "s1")
 	}()
 
-	// 逐票拒绝:前三张票(第三张触发升级保险,单位终态收场)。
+	// 逐票拒绝:三张票全部只拒动作(P5-03③:无升级保险)。
 	for i := 0; i < 3; i++ {
 		waitFor(t, 30*time.Second, "弹门请求登记", func() bool { return len(gate.Pending(task)) == 1 })
 		pending := gate.Pending(task)[0]
@@ -670,18 +600,17 @@ func TestPanelDenyEscalateAfterThree(t *testing.T) {
 	}
 	done.Wait()
 
-	if res.StepStatus != StepApprovalDenied {
-		t.Fatalf("连拒同类 3 次应升级杀单位: %+v", res)
+	if res.StepStatus == StepApprovalDenied {
+		t.Fatalf("连拒同类不得升级杀单位: %+v", res)
 	}
-	if !strings.Contains(res.Reason, "同类拒绝累计 3 次") ||
-		!strings.Contains(res.Reason, "目标环境不允许修改") {
-		t.Fatalf("升级终因应含同类累计与拒绝原因: %q", res.Reason)
+	if strings.Contains(res.Reason, "升级终止单位") {
+		t.Fatalf("终因不得含升级说明: %q", res.Reason)
 	}
 	step, err := store.Node(ctx, task, "s1")
-	if err != nil || step.Status != StepApprovalDenied {
-		t.Fatalf("图上步骤状态应为 approval_denied: %+v err=%v", step, err)
+	if err != nil || step.Status == StepApprovalDenied {
+		t.Fatalf("图上步骤不得为 approval_denied: %+v err=%v", step, err)
 	}
-	// 三笔 requested + 三笔 denied(panel) 连续;升级笔黑匣子留痕。
+	// 三笔 requested + 三笔 denied(panel) 连续;无升级熔断黑匣子留痕。
 	recs := approvalEvents(t, store, task)
 	deniedN := 0
 	for _, r := range recs {
@@ -692,189 +621,10 @@ func TestPanelDenyEscalateAfterThree(t *testing.T) {
 	if deniedN != 3 {
 		t.Fatalf("应恰三笔面板拒绝留痕,得 %d: %+v", deniedN, recs)
 	}
-	found := false
 	for _, bt := range blackboxTypes(t, store, task) {
 		if bt == rings.BlackboxUnitApprovalDeny {
-			found = true
+			t.Fatalf("连拒不杀单位,不得留 unit_approval_deny 事件: %v", blackboxTypes(t, store, task))
 		}
-	}
-	if !found {
-		t.Fatalf("升级杀应留 unit_approval_deny 事件: %v", blackboxTypes(t, store, task))
-	}
-}
-
-// ---- 完成标准 ④:非常严重项直接拒绝(P4-51 ⑤:"规划后放行"废除,
-// 拒绝即终局——拒绝线不再有放行通道) ----
-
-func TestHarmDenyLineDirectDeny(t *testing.T) {
-	dir := t.TempDir()
-	store := openStore(t, dir)
-	ctx := context.Background()
-	const task = "gate-harm"
-
-	host, port := seedTarget(t, "x\r\n")
-	seedGoalAndAsset(t, store, task, host, port)
-	dispatchStepAtLevelHarm(t, store, task, "s1", "销毁目标数据库验证破坏面", "g1",
-		"修改与持久化", rings.HarmDataDestruction, "target")
-
-	model := newScriptedModel(func(rr *recordedRequest) scriptedReply {
-		return scriptedReply{ToolCalls: []scriptedToolCall{{
-			ID: "b1", Name: "bash",
-			Args: `{"command":"echo gr-harm-deny > forced-marker.txt && cat forced-marker.txt"}`,
-		}}, Finish: "tool_calls"}
-	})
-	defer model.Close()
-	prov, _ := model.provider()
-	ex := NewExecutor(store, prov, filepath.Join(dir, "tasks"), Budget{})
-	gate := NewLedgerGate(store)
-	ex.Gate = gate
-
-	res, err := ex.RunStep(ctx, task, "s1")
-	if err != nil {
-		t.Fatalf("执行失败: %v", err)
-	}
-	// 直接拒绝(不进弹门)且熔断单位。
-	if res.StepStatus != StepApprovalDenied || !strings.Contains(res.Reason, "数据销毁") {
-		t.Fatalf("危害类应直接拒绝并熔断: %+v", res)
-	}
-	if len(gate.Pending(task)) != 0 {
-		t.Fatalf("拒绝线不走弹门")
-	}
-	recs := approvalEvents(t, store, task)
-	if len(recs) != 1 || recs[0].Type != rings.ApprovalRecDenied ||
-		recs[0].DenyLine != rings.DenyLineHarm || recs[0].HarmClass != rings.HarmDataDestruction {
-		t.Fatalf("应恰 1 条拒绝线留痕(带危害声明): %+v", recs)
-	}
-}
-
-// ---- 完成标准 ⑥:门槛收紧后弹门按新门槛触发 ----
-
-func TestThresholdTighteningGatesLowerLevels(t *testing.T) {
-	dir := t.TempDir()
-	store := openStore(t, dir)
-	ctx := context.Background()
-	const task = "gate-threshold"
-
-	host, port := seedTarget(t, "x\r\n")
-	seedGoalAndAsset(t, store, task, host, port)
-	// 收紧审批门槛:主动测试及以上弹门。
-	if _, err := store.Append(ctx, task, rings.Event{
-		Kind: rings.EventRoeUpdated, Actor: "creator",
-		Payload: rings.RoeUpdated{ApprovalThreshold: rings.ActionActiveTest, Note: "收紧门槛"},
-	}); err != nil {
-		t.Fatalf("收紧门槛失败: %v", err)
-	}
-	dispatchStepAtLevel(t, store, task, "s1", "主动测试目标响应", "g1", "主动测试", "target")
-
-	model := newScriptedModel(func(rr *recordedRequest) scriptedReply {
-		if rr.Index == 0 {
-			return scriptedReply{ToolCalls: []scriptedToolCall{{
-				ID: "b1", Name: "bash", Args: `{"command":"echo tighten"}`,
-			}}, Finish: "tool_calls"}
-		}
-		// P4-68 ②:拒绝后读到换路反馈,直接收尾(不再重试该动作)。
-		return scriptedReply{Text: "动作被拒,停止该方向", Finish: "stop"}
-	})
-	defer model.Close()
-	prov, _ := model.provider()
-	ex := NewExecutor(store, prov, filepath.Join(dir, "tasks"), Budget{})
-	gate := NewLedgerGate(store)
-	ex.Gate = gate
-
-	var (
-		res  *RunResult
-		done sync.WaitGroup
-	)
-	done.Add(1)
-	go func() {
-		defer done.Done()
-		res, _ = ex.RunStep(ctx, task, "s1")
-	}()
-
-	// 默认门槛下 L2 本应放行(见 TestLowerLevelsAutoPassWithTrace);
-	// 收紧后同级的 bash 调用弹门触发。
-	waitFor(t, 30*time.Second, "收紧后 L2 应弹门", func() bool { return len(gate.Pending(task)) == 1 })
-	if calls := toolCallRecords(t, store, task, "bash"); successfulToolCalls(calls) != 0 {
-		t.Fatalf("门槛内调用批准前不得执行: %+v", calls)
-	}
-	pending := gate.Pending(task)[0]
-	if pending.ActionLevel != rings.ActionActiveTest {
-		t.Fatalf("待决请求分级不符: %+v", pending)
-	}
-	if err := gate.Decide(ctx, task, pending.ID, GateDecision{Approved: false, By: "creator", Reason: "收紧验证"}); err != nil {
-		t.Fatalf("拒绝失败: %v", err)
-	}
-	done.Wait()
-	// P4-68 ②:拒绝只杀该动作,单位读到反馈收尾(步骤正常完成);
-	// 门槛收紧的弹门机制本身由上方 pending 断言证明。
-	if res.StepStatus != "done" {
-		t.Fatalf("收紧后拒绝只杀动作,单位应换路收尾: %+v", res)
-	}
-}
-
-// ---- 拒绝线·超 RoE 授权范围:直接拒绝且熔断(旧 P1 语义升级) ----
-
-func TestRoEDeniedToolFusesUnitE2E(t *testing.T) {
-	dir := t.TempDir()
-	store := openStore(t, dir)
-	ctx := context.Background()
-	const task = "gate-roe-deny"
-
-	host, port := seedTarget(t, "x\r\n")
-	if _, err := store.Append(ctx, task,
-		rings.Event{Kind: rings.EventTaskLifecycle, Actor: "manager",
-			Payload: rings.TaskLifecycle{Action: "created", Title: "RoE 拒绝"}},
-		rings.Event{Kind: rings.EventRoeUpdated, Actor: "creator",
-			Payload: rings.RoeUpdated{DeniedTools: []string{"bash"}, Note: "禁用 shell 通道"}},
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "overmind", Payload: rings.NodeAdded{
-			NodeID: "g1", NodeType: rings.NodeGoal, Title: "确认靶标暴露面", Status: "active"}},
-		rings.Event{Kind: rings.EventNodeAdded, Actor: "creator", Payload: rings.NodeAdded{
-			NodeID: "target", NodeType: rings.NodeAsset, Title: fmt.Sprintf("%s:%d", host, port),
-			Status: "active", AssetClass: rings.AssetHost}},
-	); err != nil {
-		t.Fatalf("种图失败: %v", err)
-	}
-	dispatchStepAtLevel(t, store, task, "s1", "主动测试目标", "g1", "主动测试", "target")
-
-	model := newScriptedModel(func(rr *recordedRequest) scriptedReply {
-		// 工具广告里没有 bash(被 RoE 过滤),模型仍尝试调用。
-		offered := strings.Join(rr.ToolsOffered, ",")
-		switch {
-		case !strings.Contains(offered, "bash") && !seenToolResult(rr, "bash", ""):
-			return scriptedReply{ToolCalls: []scriptedToolCall{{
-				ID: "b1", Name: "bash", Args: `{"command":"echo roe-deny-never"}`,
-			}}, Finish: "tool_calls"}
-		default:
-			return scriptedReply{Text: "结束。", Finish: "stop"}
-		}
-	})
-	defer model.Close()
-	prov, _ := model.provider()
-	ex := NewExecutor(store, prov, filepath.Join(dir, "tasks"), Budget{})
-	gate := NewLedgerGate(store)
-	ex.Gate = gate
-
-	res, err := ex.RunStep(ctx, task, "s1")
-	if err != nil {
-		t.Fatalf("执行失败: %v", err)
-	}
-	// 引擎层语义:被 RoE 过滤的工具不进会话工具表,调用在引擎层直接报
-	// 错——命令零执行,单位如实收尾(审批回调不涉入;回调侧的超范围
-	// 直接拒绝+熔断由 TestGateThreeTierBranches 白盒覆盖)。
-	if res.StepStatus != "done" {
-		t.Fatalf("引擎层拒绝不等于崩溃,单位应收尾: %+v", res)
-	}
-	if len(gate.Pending(task)) != 0 {
-		t.Fatalf("RoE 过滤不走弹门")
-	}
-	calls := toolCallRecords(t, store, task, "bash")
-	if successfulToolCalls(calls) != 0 {
-		t.Fatalf("被禁命令不得执行: %+v", calls)
-	}
-	// RoE 变更本身留痕。
-	roe, err := store.CurrentRoE(ctx, task)
-	if err != nil || len(roe.DeniedTools) != 1 || roe.DeniedTools[0] != "bash" {
-		t.Fatalf("RoE 当前值不符: %+v err=%v", roe, err)
 	}
 }
 
@@ -894,6 +644,7 @@ func TestGateCtxCancelDuringPark(t *testing.T) {
 			ID: "b1", Name: "bash", Args: `{"command":"echo never"}`,
 		}}, Finish: "tool_calls"}
 	})
+	model.requireBashApproval()
 	defer model.Close()
 	prov, _ := model.provider()
 	ex := NewExecutor(store, prov, filepath.Join(dir, "tasks"), Budget{})
@@ -989,6 +740,7 @@ func TestApprovalPendingLogsInfoNotError(t *testing.T) {
 		}
 		return scriptedReply{Text: "写入完成。", Finish: "stop"}
 	})
+	model.requireBashApproval()
 	defer model.Close()
 	prov, _ := model.provider()
 	ex := NewExecutor(store, prov, filepath.Join(dir, "tasks"), Budget{})

@@ -37,10 +37,12 @@ func p473SeedClaim(t *testing.T, store *rings.Store, task, claimID, assetID stri
 		rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u1",
 			Payload: rings.NodeAdded{NodeID: claimID, NodeType: rings.NodeTestClaim,
 				Title: claimID + " 存在性陈述", Status: rings.TestClaimCandidate,
+				// P5-01 过渡 fixture:结构化结论字段已删,判定按空值退化——
+				// 无冻结解释清单(存活恒空)+ 不要求影响面 → 有结论记录即可
+				// 确认,确认门槛(种子追溯)机制照测(判定收口三查归 P5-02)。
 				Detail: map[string]any{
-					"unit_id":      "u1",
-					"standard":     arbiter.DefaultClaimStandard(),
-					"alternatives": []any{map[string]any{"id": "alt1", "label": "缓存污染"}},
+					"unit_id":  "u1",
+					"standard": map[string]any{"kind": "full_falsify", "require_impact": false, "max_rounds": 3},
 				}}},
 		rings.Event{Kind: rings.EventEdgeAdded, Actor: "swarm:u1",
 			Payload: rings.EdgeAdded{EdgeType: rings.EdgeAbout, FromNode: claimID, ToNode: assetID}},
@@ -51,26 +53,29 @@ func p473SeedClaim(t *testing.T, store *rings.Store, task, claimID, assetID stri
 	}
 }
 
-// p473FalsifyRound 铺一轮反证(终态步骤 + 结构化结论)并置声明 testing。
-// evidence/evidenceExchanges 为结论依据;unit=u9(≠发现者 u1,R12)。
+// p473FalsifyRound 铺一轮交卷准备(执行步骤 + 交换单;P5-02 起三查
+// 即时判定,声明保持候选起步——由用例驱动 CheckClaimOnSubmit)。
+// evidence/refs 为交卷依据;marker 须出现在引用命中的响应体里(查一)。
 func p473FalsifyRound(t *testing.T, store *rings.Store, task, claimID, stepID string,
-	evidence string, evidenceExchanges []string) {
+	evidence string, evidenceExchanges []string, marker string) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := store.Append(ctx, task,
 		rings.Event{Kind: rings.EventNodeAdded, Actor: ActorOvermind,
 			Payload: rings.NodeAdded{NodeID: stepID, NodeType: rings.NodeStep, Status: "done",
 				Detail: map[string]any{"kind": "falsify", "testclaim_id": claimID, "round": 1,
-					"alternatives": []any{map[string]any{"id": "alt1", "label": "缓存污染"}},
 					"action_level": "只读探测"}}},
-		rings.Event{Kind: rings.EventNodeStateChanged, Actor: ActorOvermind,
-			Payload: rings.NodeStateChanged{NodeID: claimID, Status: rings.TestClaimTesting}},
 		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "swarm:u9",
 			Payload: rings.TestClaimRecord{
 				ClaimID: claimID, StepID: stepID, UnitID: "u9", Type: rings.TestClaimRecFalsify,
-				Round: 1, ImpactSupported: true, ImpactLevel: "high",
-				Alternatives: []rings.AltResult{{ID: "alt1", Refuted: true}},
-				EvidenceHead: evidence, EvidenceExchanges: evidenceExchanges,
+				Round: 1, EvidenceHead: evidence,
+			}},
+		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "swarm:u9",
+			Payload: rings.TestClaimRecord{
+				ClaimID: claimID, StepID: stepID, UnitID: "u9", Type: rings.TestClaimRecSubmit,
+				Summary: claimID + " 交卷(测试铺垫)", Severity: "high",
+				EvidenceRefs: evidenceExchanges, ProvingMarker: marker,
+				CountercheckNote: "测试铺垫自查",
 			}},
 	); err != nil {
 		t.Fatalf("铺反证轮 %s 失败: %v", stepID, err)
@@ -147,6 +152,12 @@ func p473LatestRepro(t *testing.T, store *rings.Store, task, claimID string) *ri
 		rr := r
 		out = &rr
 	}
+	if out != nil {
+		if row, ok, err := store.ClaimCaseOf(context.Background(), task, claimID); err == nil && ok && row.Repro != nil {
+			out.Steps, out.StepsIncomplete = row.Repro.Steps, row.Repro.StepsIncomplete
+			out.Narrative, out.NarrativeUnpolished = row.Repro.Narrative, row.Repro.NarrativeUnpolished
+		}
+	}
 	return out
 }
 
@@ -171,18 +182,19 @@ func TestP473SingleStepSeededPackage(t *testing.T) {
 	ref := p473ExchangeBlob(t, ex.Blobs, "ms-p1", "http://t.example:8080/api/user?phone=222",
 		`{"data":{"phone":"13800138000"}}`)
 	p473FalsifyRound(t, store, task, claim, "s-f",
-		"独立重放返回手机号 13800138000(交换引用在案)", []string{"ms-p1"})
+		"独立重放返回手机号 13800138000(交换引用在案)", []string{"ms-p1"}, "13800138000")
 	p473Mirror(t, store, task, "s-f", "ms-p1", "http://t.example:8080/api/user?phone=222", 200, ref)
 
 	reproJSON := `{"steps":[{"seq":1,"short":"查手机号","desc":"向 t.example:8080 发 GET /api/user?phone=222,无需凭据;返回 200 且响应含 13800138000 即复现","purpose":"直接复现该问题"}]}`
 	l, _ := p473LoopWithProvider(t, task, store, ex, reproJSON)
-	if _, err := l.judgeClaims(ctx); err != nil {
-		t.Fatalf("裁决失败: %v", err)
+	if _, err := l.CheckClaimOnSubmit(ctx, task, claim); err != nil {
+		t.Fatalf("交卷即查失败: %v", err)
 	}
 	node, _ := store.Node(ctx, task, claim)
 	if node.Status != rings.TestClaimConfirmed {
 		t.Fatalf("引用命中应确认: %s", node.Status)
 	}
+	l.polishWG.Wait()
 	rec := p473LatestRepro(t, store, task, claim)
 	if rec == nil {
 		t.Fatalf("确认应同批落定稿")
@@ -226,16 +238,20 @@ func TestP473ChainSeedModelAddsPrereq(t *testing.T) {
 	store, ex := p473Base(t, task, claim)
 	ctx := context.Background()
 	p473FalsifyRound(t, store, task, claim, "s-f",
-		"链路重放成立(引用最终接口)", []string{"ms-api"})
-	p473Mirror(t, store, task, "s-f", "ms-login", "http://t.example:8080/login", 200, "b-login")
-	p473Mirror(t, store, task, "s-f", "ms-api", "http://t.example:8080/api/report", 200, "b-api")
+		"链路重放成立(引用最终接口)", []string{"ms-api"}, "13800138000")
+	refLogin := p473ExchangeBlob(t, ex.Blobs, "ms-login", "http://t.example:8080/login", `{"token":"t"}`)
+	refAPI := p473ExchangeBlob(t, ex.Blobs, "ms-api", "http://t.example:8080/api/report",
+		`{"data":{"phone":"13800138000"}}`)
+	p473Mirror(t, store, task, "s-f", "ms-login", "http://t.example:8080/login", 200, refLogin)
+	p473Mirror(t, store, task, "s-f", "ms-api", "http://t.example:8080/api/report", 200, refAPI)
 
 	// 模型补前置(seq 1=login)并覆盖种子(seq 2=api)的三层说明。
 	reproJSON := `{"steps":[{"seq":1,"short":"登录取凭据","desc":"向 t.example:8080 发 POST /login;返回 200 即取得凭据","purpose":"取得后续请求所需的会话凭据"},{"seq":2,"short":"带凭据拉报表","desc":"带凭据请求 t.example:8080 的 /api/report;返回 200 即复现","purpose":"直接复现该问题"}]}`
 	l, _ := p473LoopWithProvider(t, task, store, ex, reproJSON)
-	if _, err := l.judgeClaims(ctx); err != nil {
-		t.Fatalf("裁决失败: %v", err)
+	if _, err := l.CheckClaimOnSubmit(ctx, task, claim); err != nil {
+		t.Fatalf("交卷即查失败: %v", err)
 	}
+	l.polishWG.Wait()
 	rec := p473LatestRepro(t, store, task, claim)
 	if rec == nil || len(rec.Steps) != 2 {
 		t.Fatalf("多步链型应含前置+证明交换两步: %+v", rec)
@@ -263,16 +279,17 @@ func TestP473ParamDiffSeedPicksDataExchange(t *testing.T) {
 	refData := p473ExchangeBlob(t, ex.Blobs, "ms-data", "http://t.example:8080/api/user?phone=222",
 		`{"data":{"phone":"13800138000"}}`)
 	p473FalsifyRound(t, store, task, claim, "s-f",
-		"phone=222 返回手机号、phone=111 为空(引用含数据那条)", []string{"ms-data"})
+		"phone=222 返回手机号、phone=111 为空(引用含数据那条)", []string{"ms-data"}, "13800138000")
 	p473Mirror(t, store, task, "s-f", "ms-null", "http://t.example:8080/api/user?phone=111", 200, refNull)
 	p473Mirror(t, store, task, "s-f", "ms-data", "http://t.example:8080/api/user?phone=222", 200, refData)
 
 	// 模型只覆盖种子(合并后 seq 2=含数据条),不补 data:null 对比交换。
 	reproJSON := `{"steps":[{"seq":2,"short":"查手机号","desc":"向 t.example:8080 发 GET /api/user?phone=222,无需凭据;返回 200 且响应含 13800138000 即复现","purpose":"直接复现该问题"}]}`
 	l, _ := p473LoopWithProvider(t, task, store, ex, reproJSON)
-	if _, err := l.judgeClaims(ctx); err != nil {
-		t.Fatalf("裁决失败: %v", err)
+	if _, err := l.CheckClaimOnSubmit(ctx, task, claim); err != nil {
+		t.Fatalf("交卷即查失败: %v", err)
 	}
+	l.polishWG.Wait()
 	rec := p473LatestRepro(t, store, task, claim)
 	if rec == nil {
 		t.Fatalf("确认应落定稿")
@@ -295,7 +312,7 @@ func TestP473DirectToolRecordSeed(t *testing.T) {
 	store, ex := p473Base(t, task, claim)
 	ctx := context.Background()
 	p473FalsifyRound(t, store, task, claim, "s-f",
-		"直连重放 http://t.example:8080/x 返回 200 含手机号(证据在命令输出)", nil)
+		"直连重放 http://t.example:8080/x 返回 200 含手机号(证据在命令输出)", []string{"http://t.example:8080/x"}, "13800138000")
 	result := "HTTP/1.1 200 OK\r\nServer: nginx\r\nContent-Type: application/json\r\n\r\n" +
 		`{"data":{"phone":"13800138000"}}`
 	ref, err := ex.Blobs.Write([]byte(result))
@@ -313,13 +330,14 @@ func TestP473DirectToolRecordSeed(t *testing.T) {
 
 	reproJSON := `{"steps":[{"seq":1,"short":"直连验证","desc":"向 t.example:8080 发 GET /x,无需凭据;返回 200 且响应含 13800138000 即复现","purpose":"直接复现该问题"}]}`
 	l, _ := p473LoopWithProvider(t, task, store, ex, reproJSON)
-	if _, err := l.judgeClaims(ctx); err != nil {
-		t.Fatalf("裁决失败: %v", err)
+	if _, err := l.CheckClaimOnSubmit(ctx, task, claim); err != nil {
+		t.Fatalf("交卷即查失败: %v", err)
 	}
 	node, _ := store.Node(ctx, task, claim)
 	if node.Status != rings.TestClaimConfirmed {
 		t.Fatalf("URL 回查命中工具记录应确认: %s", node.Status)
 	}
+	l.polishWG.Wait()
 	rec := p473LatestRepro(t, store, task, claim)
 	if rec == nil || len(rec.Steps) != 1 || rec.Steps[0].Source != reproToolSource {
 		t.Fatalf("直连形态种子应走工具记录组包: %+v", rec)
@@ -351,7 +369,7 @@ func TestP473MirrorURLFallback(t *testing.T) {
 	refData2 := p473ExchangeBlob(t, ex.Blobs, "ms-data2", "http://t.example:8080/api/user?phone=222",
 		`{"data":{"phone":"13800138000"}}`)
 	p473FalsifyRound(t, store, task, claim, "s-f",
-		"独立重放 http://t.example:8080/api/user?phone=222 返回手机号 13800138000,再重放 http://t.example:8080/api/user?phone=222 复核一致", nil)
+		"独立重放 http://t.example:8080/api/user?phone=222 返回手机号 13800138000,再重放 http://t.example:8080/api/user?phone=222 复核一致", []string{"ms-unknown.9"}, "13800138000")
 	p473Mirror(t, store, task, "s-f", "ms-null", "http://t.example:8080/api/user?phone=111", 200, refNull)
 	p473Mirror(t, store, task, "s-f", "ms-data", "http://t.example:8080/api/user?phone=222", 200, refData)
 	p473Mirror(t, store, task, "s-f", "ms-data2", "http://t.example:8080/api/user?phone=222", 200, refData2)
@@ -374,28 +392,29 @@ func TestP473UntraceableNotConfirmed(t *testing.T) {
 	store, ex := p473Base(t, task, claim)
 	ctx := context.Background()
 	p473FalsifyRound(t, store, task, claim, "s-f",
-		"独立重放确认成立(既无引用也无地址)", []string{"ms-ghost"})
+		"独立重放确认成立(既无引用也无地址)", []string{"ms-ghost"}, "13800138000")
 
 	reproJSON := `{"steps":[{"seq":1,"short":"x","desc":"y","purpose":"z"}]}`
 	l, _ := p473LoopWithProvider(t, task, store, ex, reproJSON)
-	if _, err := l.judgeClaims(ctx); err != nil {
-		t.Fatalf("裁决失败: %v", err)
+	if _, err := l.CheckClaimOnSubmit(ctx, task, claim); err != nil {
+		t.Fatalf("交卷即查失败: %v", err)
 	}
 	node, _ := store.Node(ctx, task, claim)
-	if node.Status != rings.TestClaimPending {
-		t.Fatalf("不可追溯不得确认: %s", node.Status)
+	if node.Status != rings.TestClaimCandidate {
+		t.Fatalf("不可追溯不得确认(三查不过回候选待补考): %s", node.Status)
 	}
 	digests, _ := store.ClaimDigests(ctx, task)
-	if got := digests[claim].PendingReason; got != arbiter.UntraceablePendingReason {
-		t.Fatalf("搁置理由须逐字'证据不足,理由:证据不可追溯': %q", got)
+	if got := digests[claim].PendingReason; got != arbiter.ReasonUntraceableEvidence {
+		t.Fatalf("失败原因须逐字'证据不可追溯/证明物不匹配': %q", got)
 	}
+	l.polishWG.Wait()
 	if rec := p473LatestRepro(t, store, task, claim); rec != nil {
 		t.Fatalf("不确认不得落定稿: %+v", rec)
 	}
 	var trace *rings.ArbiterConditionResult
 	for _, ev := range p473Events(t, store, task, rings.TestClaimRecVerdict, claim) {
-		if ev.Decision != rings.VerdictPending || !strings.Contains(ev.PendingReason, "证据不可追溯") {
-			t.Fatalf("裁决应改判待确认且理由入账: %+v", ev)
+		if ev.Decision != rings.VerdictRetake || ev.PendingReason != arbiter.ReasonUntraceableEvidence {
+			t.Fatalf("裁决应为 retake 且原因入账: %+v", ev)
 		}
 		for i := range ev.Conditions {
 			if ev.Conditions[i].Kind == arbiter.CondEvidenceTraceable {
@@ -415,43 +434,42 @@ func TestP473ReopenReseeds(t *testing.T) {
 	store, ex := p473Base(t, task, claim)
 	ctx := context.Background()
 	ref1 := p473ExchangeBlob(t, ex.Blobs, "ms-r1", "http://t.example:8080/api/user?phone=111", `{"data":null}`)
-	p473FalsifyRound(t, store, task, claim, "s-f1", "首轮成立(引用 ms-r1)", []string{"ms-r1"})
+	p473FalsifyRound(t, store, task, claim, "s-f1", "首轮成立(引用 ms-r1)", []string{"ms-r1"}, "null")
 	p473Mirror(t, store, task, "s-f1", "ms-r1", "http://t.example:8080/api/user?phone=111", 200, ref1)
 
 	reproJSON := `{"steps":[{"seq":1,"short":"查手机号","desc":"向 t.example:8080 发 GET /api/user?phone=222;返回 200 且响应含 13800138000 即复现","purpose":"直接复现该问题"}]}`
 	l, _ := p473LoopWithProvider(t, task, store, ex, reproJSON)
-	if _, err := l.judgeClaims(ctx); err != nil {
-		t.Fatalf("首轮裁决失败: %v", err)
+	if _, err := l.CheckClaimOnSubmit(ctx, task, claim); err != nil {
+		t.Fatalf("首轮交卷即查失败: %v", err)
 	}
+	l.polishWG.Wait()
 	if rec := p473LatestRepro(t, store, task, claim); rec == nil || len(rec.Steps) != 1 ||
 		rec.Steps[0].ExchangeID != "ms-r1" {
 		t.Fatalf("首轮定稿应含 ms-r1: %+v", rec)
 	}
 
-	// 重开 → 新战役(round 2)引用新交换 ms-r2。
+	// 重开 → 新战役(round 2)。P5-01⑤:ReopenClaim 不再派重开反证步骤,
+	// round-2 步骤由本测试自造(绑定声明,战役归 reopen 之后)——种子
+	// 重播逻辑的回归样本(重开再确认收口归 P5-02⑦)。
 	if err := ReopenClaim(ctx, store, task, claim, "manual", "复核证据", "creator"); err != nil {
 		t.Fatalf("重开失败: %v", err)
 	}
-	var newStep string
-	steps, _ := store.NodesByType(ctx, task, rings.NodeStep, "")
-	for _, s := range steps {
-		if id, _ := s.Detail["testclaim_id"].(string); id == claim && s.ID != "s-f1" {
-			newStep = s.ID
-		}
-	}
-	if newStep == "" {
-		t.Fatalf("重开应派新反证步骤")
-	}
+	newStep := "s-f2"
 	if _, err := store.Append(ctx, task,
-		rings.Event{Kind: rings.EventNodeStateChanged, Actor: "test",
-			Payload: rings.NodeStateChanged{NodeID: newStep, Status: "done"}},
+		rings.Event{Kind: rings.EventNodeAdded, Actor: "test", Payload: rings.NodeAdded{
+			NodeID: newStep, NodeType: rings.NodeStep, Status: "done",
+			Detail: map[string]any{"kind": "falsify", "testclaim_id": claim, "round": 2}}},
 		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "swarm:u9",
 			Payload: rings.TestClaimRecord{
 				ClaimID: claim, StepID: newStep, UnitID: "u9", Type: rings.TestClaimRecFalsify,
-				Round: 2, ImpactSupported: true, ImpactLevel: "high",
-				Alternatives:      []rings.AltResult{{ID: "alt1", Refuted: true}},
-				EvidenceHead:      "重开复核成立(引用 ms-r2)",
-				EvidenceExchanges: []string{"ms-r2"},
+				Round: 2, EvidenceHead: "重开复核成立(引用 ms-r2)",
+			}},
+		rings.Event{Kind: rings.EventTestClaimRecord, Actor: "swarm:u9",
+			Payload: rings.TestClaimRecord{
+				ClaimID: claim, StepID: newStep, UnitID: "u9", Type: rings.TestClaimRecSubmit,
+				Summary: claim + " 重开再交卷(测试铺垫)", Severity: "high",
+				EvidenceRefs: []string{"ms-r2"}, ProvingMarker: "13800138000",
+				CountercheckNote: "测试铺垫自查",
 			}},
 	); err != nil {
 		t.Fatalf("铺重开轮失败: %v", err)
@@ -460,14 +478,15 @@ func TestP473ReopenReseeds(t *testing.T) {
 		`{"data":{"phone":"13800138000"}}`)
 	p473Mirror(t, store, task, newStep, "ms-r2", "http://t.example:8080/api/user?phone=222", 200, ref2)
 
-	if _, err := l.judgeClaims(ctx); err != nil {
-		t.Fatalf("重开轮裁决失败: %v", err)
+	if _, err := l.CheckClaimOnSubmit(ctx, task, claim); err != nil {
+		t.Fatalf("重开轮交卷即查失败: %v", err)
 	}
 	node, _ := store.Node(ctx, task, claim)
 	if node.Status != rings.TestClaimConfirmed {
 		t.Fatalf("重开再确认应成立: %s", node.Status)
 	}
 	// 新机制:最新定稿种子=新战役交换;旧战役交换不再入选;历史 repro 在案。
+	l.polishWG.Wait()
 	rec := p473LatestRepro(t, store, task, claim)
 	if rec == nil || len(rec.Steps) != 1 || rec.Steps[0].ExchangeID != "ms-r2" {
 		t.Fatalf("重开定稿应只含新战役证明交换: %+v", rec)
@@ -491,14 +510,15 @@ func TestP473PickFailureKeepsSeeds(t *testing.T) {
 	ctx := context.Background()
 	ref := p473ExchangeBlob(t, ex.Blobs, "ms-p8", "http://t.example:8080/api/user?phone=222",
 		`{"data":{"phone":"13800138000"}}`)
-	p473FalsifyRound(t, store, task, claim, "s-f", "成立(引用在案)", []string{"ms-p8"})
+	p473FalsifyRound(t, store, task, claim, "s-f", "成立(引用在案)", []string{"ms-p8"}, "13800138000")
 	p473Mirror(t, store, task, "s-f", "ms-p8", "http://t.example:8080/api/user?phone=222", 200, ref)
 
 	t.Run("打桩模型失败仍出种子包", func(t *testing.T) {
 		l, model := p473LoopWithProvider(t, task, store, ex, "不是 JSON")
-		if _, err := l.judgeClaims(ctx); err != nil {
-			t.Fatalf("裁决失败: %v", err)
+		if _, err := l.CheckClaimOnSubmit(ctx, task, claim); err != nil {
+			t.Fatalf("交卷即查失败: %v", err)
 		}
+		l.polishWG.Wait()
 		rec := p473LatestRepro(t, store, task, claim)
 		if rec == nil || len(rec.Steps) != 1 || rec.Steps[0].ExchangeID != "ms-p8" {
 			t.Fatalf("挑选失败应仍出种子包: %+v", rec)
@@ -526,12 +546,15 @@ func TestP473PickFailureKeepsSeeds(t *testing.T) {
 	t.Run("模型不可用零外呼同款", func(t *testing.T) {
 		const claim2 = "tc-8b"
 		p473SeedClaim(t, store, task, claim2, "a-t")
-		p473FalsifyRound(t, store, task, claim2, "s-f2", "成立(引用在案)", []string{"ms-p8b"})
-		p473Mirror(t, store, task, "s-f2", "ms-p8b", "http://t.example:8080/api/user?phone=333", 200, "b-8b")
+		p473FalsifyRound(t, store, task, claim2, "s-f2", "成立(引用在案)", []string{"ms-p8b"}, "13800138000")
+		ref8b := p473ExchangeBlob(t, ex.Blobs, "ms-p8b", "http://t.example:8080/api/user?phone=333",
+			`{"data":{"phone":"13800138000"}}`)
+		p473Mirror(t, store, task, "s-f2", "ms-p8b", "http://t.example:8080/api/user?phone=333", 200, ref8b)
 		l := &Loop{TaskID: task, Store: store, Swarm: ex}
-		if _, err := l.judgeClaims(ctx); err != nil {
-			t.Fatalf("裁决失败: %v", err)
+		if _, err := l.CheckClaimOnSubmit(ctx, task, claim2); err != nil {
+			t.Fatalf("交卷即查失败: %v", err)
 		}
+		l.polishWG.Wait()
 		rec := p473LatestRepro(t, store, task, claim2)
 		if rec == nil || len(rec.Steps) != 1 || rec.Steps[0].ExchangeID != "ms-p8b" ||
 			rec.StepsIncomplete != reproFlowIncomplete {
@@ -550,7 +573,7 @@ func TestP473SeedBypassesPoolFilters(t *testing.T) {
 	// 锚定外的任务内资产(池 B② 会拦,种子不受限)。
 	p462SeedAsset(t, store, task, "a-other", "other.example:9000")
 	p473FalsifyRound(t, store, task, claim, "s-f",
-		"成立(引用在案)", []string{"ms-err", "ms-off"})
+		"成立(引用在案)", []string{"ms-err", "ms-off"}, "x")
 	// error 交换(镜记录带错误)与锚定外成功交换各一条。
 	if _, err := store.Append(ctx, task,
 		rings.Event{Kind: rings.EventMirrorRecord, Actor: "mirror",
@@ -580,22 +603,20 @@ func TestP473SeedBypassesPoolFilters(t *testing.T) {
 	// 池口径回归:同流量无引用时只进过程清单(诊断计数在案)。
 	const claim2 = "tc-9b"
 	p462SeedClaim(t, store, task, claim2, "a-t")
-	p473FalsifyRound(t, store, task, claim2, "s-f2", "独立重放确认成立(无引用无地址)", nil)
+	p473FalsifyRound(t, store, task, claim2, "s-f2", "独立重放确认成立(引用悬空)", []string{"ms-dangling.1"}, "x")
 	seeds2, err := ResolveEvidenceSeeds(ctx, store, nil, task, claim2)
 	if err != nil || len(seeds2) != 0 {
 		t.Fatalf("无引用无 URL 不构成种子: %+v err=%v", seeds2, err)
 	}
 }
 
-// TestP473ReferenceDedupSameURL 引用命中同址去重(活体实锤修正):同一
-// URL 的多次重放被逐条引用时按地址归并保最近(同一证明不重复进包);
-// 不同地址的引用各自保留(多步链各环节证明不受影响)。
-func TestP473ReferenceDedupSameURL(t *testing.T) {
+// Same URL does not mean the same proof observation.
+func TestP473SameURLRetainsEveryExplicitExchange(t *testing.T) {
 	const task, claim = "p473-refdedup", "tc-10"
 	store, _ := p473Base(t, task, claim)
 	ctx := context.Background()
 	p473FalsifyRound(t, store, task, claim, "s-f",
-		"重放成立(引用在案)", []string{"ms-a1", "ms-a2", "ms-b"})
+		"重放成立(引用在案)", []string{"ms-a1", "ms-a2", "ms-b"}, "x")
 	p473Mirror(t, store, task, "s-f", "ms-a1", "http://t.example:8080/api/user?phone=222", 200, "b-a1")
 	p473Mirror(t, store, task, "s-f", "ms-b", "http://t.example:8080/login", 200, "b-b")
 	p473Mirror(t, store, task, "s-f", "ms-a2", "http://t.example:8080/api/user?phone=222", 200, "b-a2")
@@ -604,11 +625,11 @@ func TestP473ReferenceDedupSameURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("种子解析失败: %v", err)
 	}
-	if len(seeds) != 2 {
-		t.Fatalf("同址重复引用应归并为 2 条种子(同址最近 1 条+异址 1 条): %+v", seeds)
+	if len(seeds) != 3 {
+		t.Fatalf("每个明确引用的交换均须保留，不能按URL合并: %+v", seeds)
 	}
-	if seeds[0].Mirror.ExchangeID != "ms-a2" || seeds[1].Mirror.ExchangeID != "ms-b" {
-		t.Fatalf("同址应保最近(ms-a2),异址照收(ms-b): %+v", seeds)
+	if seeds[0].Mirror.ExchangeID != "ms-a1" || seeds[1].Mirror.ExchangeID != "ms-a2" || seeds[2].Mirror.ExchangeID != "ms-b" {
+		t.Fatalf("引用顺序与每份原始证明必须保留: %+v", seeds)
 	}
 	for _, sd := range seeds {
 		if sd.Via != seedViaReference {

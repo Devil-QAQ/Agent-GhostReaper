@@ -1,6 +1,7 @@
 package rings
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -112,15 +113,6 @@ func applyEvent(tx *sql.Tx, taskID string, rev int64, kind EventKind, actor stri
 			return err
 		}
 		return applyMirrorBrief(tx, taskID, p)
-	case EventHypothesisRecord:
-		var p HypothesisRecord
-		if err := json.Unmarshal(payload, &p); err != nil {
-			return fmt.Errorf("rings: 解码 hypothesis.record 负载: %w", err)
-		}
-		if err := validateHypothesisRecord(p); err != nil {
-			return err
-		}
-		return applyHypState(tx, taskID, p)
 	case EventBlackboxRecord:
 		var p BlackboxRecord
 		if err := json.Unmarshal(payload, &p); err != nil {
@@ -199,30 +191,21 @@ func applyEvent(tx *sql.Tx, taskID string, rev int64, kind EventKind, actor stri
 			return fmt.Errorf("rings: 解码 operator.dive 负载: %w", err)
 		}
 		return validateOperatorDive(p)
-	case EventClaimRoundHuman:
-		var p ClaimRoundHuman
+	case EventClaimText:
+		var p ClaimTextPolish
 		if err := json.Unmarshal(payload, &p); err != nil {
-			return fmt.Errorf("rings: 解码 claim.round_human 负载: %w", err)
+			return fmt.Errorf("rings: 解码 claim.text 负载: %w", err)
 		}
-		return applyClaimRoundHuman(tx, taskID, rev, p)
-	case EventClaimSummaryPol:
-		var p ClaimSummaryPolish
-		if err := json.Unmarshal(payload, &p); err != nil {
-			return fmt.Errorf("rings: 解码 claim.summary 负载: %w", err)
-		}
-		return applyClaimSummaryPolish(tx, taskID, rev, p)
+		return applyClaimText(tx, taskID, rev, p)
 	case EventFactText:
 		var p FactTextPolish
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return fmt.Errorf("rings: 解码 fact.text 负载: %w", err)
 		}
-		return applyNodePolish(tx, taskID, rev, p.FactID, p.Title, p.Statement, "", "", p.Unpolished)
-	case EventHypoText:
-		var p HypoTextPolish
-		if err := json.Unmarshal(payload, &p); err != nil {
-			return fmt.Errorf("rings: 解码 hypo.text 负载: %w", err)
+		if err := validateNodeTextSource(tx, taskID, p.FactID, p.SourceRev, rev); err != nil {
+			return err
 		}
-		return applyNodePolish(tx, taskID, rev, p.HypothesisID, p.Title, "", p.Basis, p.Reason, p.Unpolished)
+		return applyNodePolish(tx, taskID, rev, p.FactID, p.Title, p.Statement, p.Unpolished)
 	case EventClaimRetextNote:
 		var p RetestNotePolish
 		if err := json.Unmarshal(payload, &p); err != nil {
@@ -243,7 +226,11 @@ func applyEvent(tx *sql.Tx, taskID string, rev int64, kind EventKind, actor stri
 		if err := validateStepTitle(p); err != nil {
 			return err
 		}
-		return applyNodePolish(tx, taskID, rev, p.StepID, p.Title, "", "", "", false)
+		if err := validateNodeTextSource(tx, taskID, p.StepID, p.SourceRev, rev); err != nil {
+			return err
+		}
+		// 每个事件是完整显示稿快照；旧事件缺说明时清空旧说明，避免新标题配旧说明。
+		return applyNodePolish(tx, taskID, rev, p.StepID, p.Title, p.Statement, false)
 	default:
 		return fmt.Errorf("%w: %s", ErrUnknownKind, string(kind))
 	}
@@ -257,7 +244,7 @@ func applyNodeAddedSide(tx *sql.Tx, taskID string, rev int64, actor string, p No
 	case NodeTestClaim:
 		return applyClaimNodeAdded(tx, taskID, rev, p, occurredAt)
 	case NodeStep:
-		return applyStepNodeAdded(tx, taskID, p, occurredAt)
+		return nil // (旧耗时态战役登记已随反证轮耗时链路退役删除,P5-03③)
 	case NodeFact:
 		return closureAnchorFinding(tx, taskID, occurredAt)
 	case NodeAsset:
@@ -469,6 +456,10 @@ func validateInterjectRecord(p InterjectRecord) error {
 		if strings.TrimSpace(p.Text) == "" || p.MessageID == "" {
 			return fmt.Errorf("%w: reply 缺正文或 message_id", ErrInterjectRecMissingField)
 		}
+	case InterjectRecThinking:
+		if p.MessageID == "" || (p.Text == "" && p.State != "finished") {
+			return fmt.Errorf("%w: thinking 缺内容或 message_id", ErrInterjectRecMissingField)
+		}
 	case InterjectRecMessageState:
 		if p.State != InterjectMsgDelivered && p.State != InterjectMsgFailed {
 			return fmt.Errorf("%w: %s", ErrUnknownInterjectMsgState, p.State)
@@ -537,10 +528,6 @@ func validateReportRecord(p ReportRecord) error {
 	return nil
 }
 
-// validateOvermindRecord 校验主宰研判记录。不进 nodes/edges 投影(审计流,
-// 同 hypothesis.record)。结构性强制:类型词汇受限;assessment 五问与
-// 五问外研判(Note)至少一项非空——全空的研判记录没有信息量,纯噪音,
-// 账本侧直接拒收(纯静默轮不落研判记录,由写入侧保证)。
 func validateOvermindRecord(p OvermindRecord) error {
 	if !overmindRecordTypes[p.Type] {
 		return fmt.Errorf("%w: %s", ErrUnknownOvermindRecType, p.Type)
@@ -596,12 +583,11 @@ func validateStepTitle(p StepTitlePolish) error {
 
 // validateTestClaimRecord 校验 TestClaim 状态机记录。不进 nodes/edges
 // 投影(审计流,同 swarm.record/arbiter.verdict)。结构性强制:
-//   - falsify_result 须绑反证 Step 与单位(写回无主即不可审计);逐条
-//     竞争解释结论必须有 ID;影响面定级只允许四级词汇——impact_supported
-//     =true 时必填(级别跟影响面证据走,发现者侧无级别通道);
+//   - falsify_result 须绑反证 Step 与单位(写回无主即不可审计);
+//     P5-01③ 起结构化结论字段已删,最小形状校验保留(旧账本回放不崩);
 //   - verdict 无论结论必须逐条列出依据条件(R2);非 confirm 裁决必须
-//     携带理由(R4:待确认/待下轮反证都是一等状态,理由缺失的"待确认"
-//     就是"偷懒的待确认",账本入口直接拒收);decision 与 satisfied
+//     携带理由(R4:证据不足/待补考都是一等状态,理由缺失的证据不足
+//     就是"偷懒的证据不足",账本入口直接拒收);decision 与 satisfied
 //     自洽(确认裁决不得 satisfied=false,反之亦然);
 //   - reopen 须带触发词与理由(重开必有可审计的"为何重开");
 //   - repro 的严重级别只允许四级词汇(空=未定级,如实呈现不造数据);
@@ -619,27 +605,38 @@ func validateTestClaimRecord(tx *sql.Tx, taskID string, p TestClaimRecord) error
 		return ErrTestClaimRecMissingField
 	}
 	switch p.Type {
-	case TestClaimRecFalsify:
+	case TestClaimRecSubmit:
+		// 交卷单(P5-01②):六字段齐全 + 级别词表受限 + 引用非空——
+		// 这是机器三查(P5-02)的判定输入,缺失字段在账本入口物理拦截。
+		// impact_note 可空(有则照实进报告,机器不校验)。
 		if p.StepID == "" || p.UnitID == "" {
 			return ErrTestClaimRecMissingField
 		}
-		for _, a := range p.Alternatives {
-			if strings.TrimSpace(a.ID) == "" {
-				return ErrAltResultMissingID
-			}
+		if strings.TrimSpace(p.Summary) == "" || strings.TrimSpace(p.ProvingMarker) == "" ||
+			strings.TrimSpace(p.CountercheckNote) == "" {
+			return ErrTestClaimRecMissingField
 		}
-		if p.ImpactLevel != "" && !impactLevels[p.ImpactLevel] {
-			return fmt.Errorf("%w: %s", ErrUnknownImpactLevel, p.ImpactLevel)
+		if !submitSeverities[p.Severity] {
+			return fmt.Errorf("%w: %s", ErrUnknownImpactLevel, p.Severity)
 		}
-		if p.ImpactSupported && p.ImpactLevel == "" {
-			return ErrTestClaimRecMissingField // 影响面成立必带定级(收割定稿的唯一级别来源)
+		if len(p.EvidenceRefs) == 0 {
+			return ErrTestClaimRecMissingField
+		}
+		return nil
+	case TestClaimRecFalsify:
+		// 旧反证写回:写点已退役(P5-01⑤),结构化结论字段已物理删除;
+		// 类型词与最小形状校验保留——旧账本回放/读侧不崩。
+		if p.StepID == "" || p.UnitID == "" {
+			return ErrTestClaimRecMissingField
 		}
 		return nil
 	case TestClaimRecVerdict:
 		if len(p.Conditions) == 0 {
 			return ErrTestClaimRecMissingField
 		}
-		if p.Decision != "" && p.Decision != VerdictConfirm && p.Decision != VerdictRefuted && p.Decision != VerdictPending && p.Decision != VerdictAdvanceRound {
+		if p.Decision != "" && p.Decision != VerdictConfirm && p.Decision != VerdictRefuted &&
+			p.Decision != VerdictRetake && p.Decision != VerdictInsufficient &&
+			p.Decision != VerdictPending && p.Decision != VerdictAdvanceRound {
 			return fmt.Errorf("%w: %s", ErrUnknownClaimDecision, p.Decision)
 		}
 		// 有效 decision:显式值优先;P1-08 旧数据无 Decision,按 Satisfied 推导。
@@ -652,7 +649,7 @@ func validateTestClaimRecord(tx *sql.Tx, taskID string, p TestClaimRecord) error
 			}
 		}
 		if (decision == VerdictConfirm) != p.Satisfied {
-			return fmt.Errorf("%w: decision/satisfied 不自洽(%s/%v)", ErrUnknownClaimDecision, decision, p.Satisfied)
+			return fmt.Errorf("%w: decision/satisfied 不自洽(%s/%v)", ErrUnknownClaimDecision, p.Decision, p.Satisfied)
 		}
 		if decision != VerdictConfirm && strings.TrimSpace(p.PendingReason) == "" {
 			return ErrTestClaimPendingNoReason
@@ -714,11 +711,6 @@ func validateTestClaimRecord(tx *sql.Tx, taskID string, p TestClaimRecord) error
 		}
 		return nil
 	case TestClaimRecDiscard:
-		// 程序确定性废弃(P4-55 审核迭代,造物主 2026-11-08 定案:摘除
-		// 资产→锚定声明/假设全废弃,理由"目标已摘除";主宰裁决放弃同用):
-		// 废弃理由必填;锚点必须是本任务图上的 TestClaim。状态迁移
-		// (锤炼中→discarded)由写入口同批落 node.state_changed,终态只
-		// 追加、历史不涂改;勾回资产不自动复活(再验走操作者深入)。
 		if strings.TrimSpace(p.Reason) == "" {
 			return fmt.Errorf("%w: 废弃理由为空", ErrTestClaimPendingNoReason)
 		}
@@ -927,39 +919,6 @@ func validateMirrorRecord(p MirrorRecord) error {
 		return ErrMirrorRecMissingField
 	}
 	return nil
-}
-
-// validateHypothesisRecord 校验假设回流记录。不进 nodes/edges 投影
-// (审计流,同 testclaim.record)。结构性强制:
-//   - evaluation 三去向词汇受限,理由必填——挂账与废弃都是一等去向,
-//     "为何跟/为何不跟"缺失即不可审计(R10:直觉有账、废案有理由);
-//   - result 结论词汇受限(supported|refuted|inconclusive),须绑验证
-//     Step 与单位(写回无主即不可审计)。
-func validateHypothesisRecord(p HypothesisRecord) error {
-	if !hypothesisRecordTypes[p.Type] {
-		return fmt.Errorf("%w: %s", ErrUnknownHypothesisRecType, p.Type)
-	}
-	if p.HypothesisID == "" {
-		return ErrHypothesisRecMissingField
-	}
-	switch p.Type {
-	case HypothesisRecEvaluation:
-		if !hypothesisDecisions[p.Decision] {
-			return fmt.Errorf("%w: %s", ErrUnknownHypothesisDecision, p.Decision)
-		}
-		if strings.TrimSpace(p.Reason) == "" {
-			return ErrHypothesisEvalNoReason
-		}
-		return nil
-	default: // result
-		if !hypothesisVerdicts[p.Verdict] {
-			return fmt.Errorf("%w: %s", ErrUnknownHypothesisVerdict, p.Verdict)
-		}
-		if p.StepID == "" || p.UnitID == "" {
-			return ErrHypothesisRecMissingField
-		}
-		return nil
-	}
 }
 
 // applyTaskLifecycle 维护 tasks 投影:created 插入行,其余动作更新 status。
@@ -1212,6 +1171,9 @@ func validateSwarmRecord(p SwarmRecord) error {
 	if p.Type == SwarmRecToolCall && p.ToolName == "" {
 		return ErrSwarmRecMissingField
 	}
+	if p.Type == SwarmRecToolStarted && (p.ToolName == "" || p.ToolCallID == "") {
+		return ErrSwarmRecMissingField
+	}
 	return nil
 }
 
@@ -1230,6 +1192,14 @@ func applyNodeAdded(tx *sql.Tx, taskID string, rev int64, p NodeAdded, occurredA
 		}
 		if !assetClasses[class] {
 			return fmt.Errorf("%w: %s", ErrUnknownAssetClass, p.AssetClass)
+		}
+	}
+	if nt == NodeFact {
+		if err := validateAssetRelationAssets(context.Background(), tx, taskID, p.Detail); err != nil {
+			return err
+		}
+		if err := ValidateFactResult(p.Detail); err != nil {
+			return err
 		}
 	}
 	if err := rejectExistingNode(tx, taskID, p.NodeID); err != nil {
@@ -1253,10 +1223,11 @@ func applyNodeAdded(tx *sql.Tx, taskID string, rev int64, p NodeAdded, occurredA
 // amendableKeys node.amended 按节点类型的 detail 键白名单(P4-54 受控
 // 入口:变更只开放操作面声明的字段,结构外一律拒——goal 的 predicate
 // 由写入口按仲裁受限结构校验后入账,focus 为布尔;step 的 priority 限
-// high|normal|low)。
+// high|normal|low；fact 只允许带依据更正结果类型）。
 var amendableKeys = map[NodeType]map[string]bool{
 	NodeGoal: {"predicate": true, "focus": true},
 	NodeStep: {"priority": true},
+	NodeFact: {"result_types": true},
 }
 
 // applyNodeAmended node.amended 投影(P4-54):节点标题(指针覆盖)与
@@ -1296,6 +1267,17 @@ func applyNodeAmended(tx *sql.Tx, taskID string, rev int64, p NodeAmended, occur
 			continue
 		}
 		m[k] = v
+	}
+	if NodeType(nt) == NodeFact {
+		if p.Title != nil {
+			return fmt.Errorf("%w: 分类不能改写事实原文", ErrAmendNotAllowed)
+		}
+		if _, ok := p.Detail["result_types"]; !ok || strings.TrimSpace(p.Note) == "" {
+			return fmt.Errorf("%w: 事实分类需要类型与依据", ErrAmendNotAllowed)
+		}
+		if err := ValidateFactResult(m); err != nil {
+			return err
+		}
 	}
 	nextTitle := title
 	if p.Title != nil {
@@ -1347,6 +1329,9 @@ func applyNodeStateChanged(tx *sql.Tx, taskID string, rev int64, p NodeStateChan
 			}
 		case p.Note == "scope_head":
 			m["scope_head"] = true
+			// P5-05:队首档进档序(head_seq=唤醒时图版本)——同档按解除
+			// 时间先后不抢;旧唤醒无值取 0 先来先上位(既有口径兼容)。
+			m["head_seq"] = rev
 		default:
 			m["blocked_class"] = p.Note
 		}
@@ -1412,6 +1397,30 @@ func applyEdgeAdded(tx *sql.Tx, taskID string, rev int64, p EdgeAdded) error {
 	}
 	if !rule.from[fromType] || !rule.to[toType] {
 		return fmt.Errorf("%w: %s(%s) ─%s→ %s(%s)", ErrEdgeRuleViolation, p.FromNode, fromType, et, p.ToNode, toType)
+	}
+	if et == EdgeObservedAsset {
+		if err := validateObservedAssetBinding(tx, taskID, p.FromNode, p.ToNode); err != nil {
+			return err
+		}
+	}
+	if et == EdgeSourcedFrom {
+		var status string
+		if err := tx.QueryRow(`SELECT status FROM nodes WHERE task_id=? AND node_id=?`, taskID, p.ToNode).Scan(&status); err != nil {
+			return err
+		}
+		if err := validSource(toType, status); err != nil {
+			return fmt.Errorf("%w: %s: %v", ErrEdgeRuleViolation, p.ToNode, err)
+		}
+		var cycle bool
+		if err := tx.QueryRow(`WITH RECURSIVE ancestors(id) AS (
+			SELECT ? UNION SELECT e.to_node FROM edges e JOIN ancestors a ON e.from_node=a.id
+			WHERE e.task_id=? AND e.edge_type=?
+		) SELECT EXISTS(SELECT 1 FROM ancestors WHERE id=?)`, p.ToNode, taskID, string(et), p.FromNode).Scan(&cycle); err != nil {
+			return err
+		}
+		if cycle {
+			return fmt.Errorf("%w: 来源引用形成循环", ErrEdgeRuleViolation)
+		}
 	}
 	var exists int
 	err = tx.QueryRow(
@@ -1538,7 +1547,12 @@ func rebuildProjections(tx *sql.Tx) error {
 			return fmt.Errorf("rings: 解析事件 occurred_at: %w", err)
 		}
 		if err := applyEvent(tx, taskID, rev, EventKind(kind), actor, []byte(payload), at); err != nil {
-			return fmt.Errorf("rings: 重放事件 task %s rev %d: %w", taskID, rev, err)
+			// 存量旧账本的退役事件种类(P5-03④ 升级删除路线):重放按
+			// 未知种类忽略不崩——不做翻译、不复活旧投影,事件行原样
+			// 留档;其余错误如实报出。
+			if !errors.Is(err, ErrUnknownKind) {
+				return fmt.Errorf("rings: 重放事件 task %s rev %d: %w", taskID, rev, err)
+			}
 		}
 	}
 	return rows.Err()

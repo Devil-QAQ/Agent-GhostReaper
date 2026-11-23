@@ -60,12 +60,27 @@ type TrafficRow struct {
 // 在 payload 里,SQL 抽不出可靠的 host 语义);其余过滤同样在 Go 侧逐行
 // 判定——单写者排队下事件表只增,读为快照语义,量级为单机面板,全扫
 // 可接受。
+// P5-04 防慢:host 过滤时先在 SQL 侧按 payload 子串做超集预筛(host
+// 必在 URL 内、URL 必在 payload 内,payload 不含该子串的行 host 必不
+// 命中,可安全跳过 JSON 解码)——大流量任务下虫群/牧者的流量查询秒回;
+// Go 侧精确判定仍是权威,预筛不改变语义。
 func (s *Store) TrafficRows(ctx context.Context, f TrafficFilter) ([]TrafficRow, int, error) {
 	q := `SELECT task_id, occurred_at, payload FROM events WHERE kind = ?`
 	args := []any{EventMirrorRecord}
 	if f.TaskID != "" {
 		q += ` AND task_id = ?`
 		args = append(args, f.TaskID)
+	}
+	hostWant := strings.ToLower(strings.TrimSpace(f.Host))
+	// 预筛(P5-04 防慢):payload 以 BLOB 落库(LIKE 对 BLOB 恒不命中),
+	// 用 instr(lower(payload), ?) 子串预筛——host 必在 URL 内、URL 必在
+	// payload 内,payload(小写化)不含该子串的行 host 必不命中,可安全
+	// 跳过 JSON 解码;大流量任务下流量查询秒回。预筛仅对纯 ASCII 的
+	// host 生效(SQL lower 只折 ASCII,与 Go 侧 ToLower 同口径;非 ASCII
+	// 输入退全扫保正确),Go 侧精确判定仍是权威,预筛不改变语义。
+	if isASCII(hostWant) {
+		q += ` AND instr(lower(payload), ?) > 0`
+		args = append(args, hostWant)
 	}
 	q += ` ORDER BY seq DESC`
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -81,7 +96,6 @@ func (s *Store) TrafficRows(ctx context.Context, f TrafficFilter) ([]TrafficRow,
 	if limit > TrafficFilterLimitMax {
 		limit = TrafficFilterLimitMax
 	}
-	hostWant := strings.ToLower(strings.TrimSpace(f.Host))
 	methodWant := strings.ToUpper(strings.TrimSpace(f.Method))
 	need := f.Offset + limit
 	var out []TrafficRow
@@ -146,6 +160,17 @@ func (f *TrafficFilter) match(rec *MirrorRecord, at time.Time, hostWant, methodW
 	}
 	if !f.Until.IsZero() && at.After(f.Until) {
 		return false
+	}
+	return true
+}
+
+// isASCII 是否全部为 ASCII 字节(预筛条件;空串按 ASCII 处理=不过滤
+// 空串时预筛不生效,与既有语义一致)。
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
 	}
 	return true
 }

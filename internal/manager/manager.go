@@ -103,11 +103,16 @@ type Config struct {
 //     让位,票不可再裁;零裁决记录——等价重启后的内存票据清空,账本
 //     requested 原样留痕);
 //   - ExpirePending:熔断冬眠任务时全部待决票按拒绝结案留痕(与挂起
-//     单位被任务收尾 cancel 的既有口径一致)。
+//     单位被任务收尾 cancel 的既有口径一致);
+//   - ReleaseGateWaits:唤醒时放行弹门/攻击卡让位的停等步骤(P5-05:
+//     gate_wait 步骤的票随 DropPending 清出,唤醒通道没了——回可领取,
+//     重领单位重新过门立新票;pause_wait/model_wait/scope_wait 解除
+//     通道不经票表,冬眠冻结原样保留、唤醒后各归其位)。
 type HibernateSink interface {
 	FlushSuspended(taskID string)
 	DropPending(taskID string)
 	ExpirePending(taskID, reason string)
+	ReleaseGateWaits(taskID string) int
 }
 
 // Manager 单进程多任务的管理者:持全局共享资源,管理任务生命周期与
@@ -1089,6 +1094,9 @@ func (m *Manager) Wake(taskID string, detail map[string]any) error {
 	// 的单位重新过门时重新立票)。
 	if m.cfg.HibernateSink != nil {
 		m.cfg.HibernateSink.DropPending(taskID)
+		// P5-05:弹门/攻击卡让位的停等步骤随清票放行回可领取(队列
+		// 首档)——票已清,停等无解除通道;重领单位重新过门立新票。
+		m.cfg.HibernateSink.ReleaseGateWaits(taskID)
 	}
 	m.cfg.Hiber.Exit(taskID) // 开闸(收场后无人挂起,纯状态复位)
 	m.mu.Lock()

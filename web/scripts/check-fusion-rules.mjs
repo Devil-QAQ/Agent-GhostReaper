@@ -18,7 +18,7 @@
 //   - 圆角:尺寸表 sm(6)/md(8)/lg(10)/xl(12)/2xl(16) + KPI 卡
 //     [14px] + 复选框 [4px] + full;其余任意值与 3xl 报错。
 //   - 色值:组件层零写死(文字色一律 var(--fg*) 族 token);画布取色
-//     例外仅 annulus/observe 两页(Cytoscape/uPlot 不吃 CSS 变量,
+//     例外仅 observe 页(uPlot 不吃 CSS 变量,
 //     值与 token 同源由 check-hardcoded-colors 把关);弹窗遮罩
 //     bg-black/NN 允许(遮罩语义,非主题色)。
 //   - design-*.html 为造物主审定 demo(验收基准),不参与扫描;
@@ -57,8 +57,10 @@ const RGB = /\brgba?\(/;
 const NAMED_BANNED = /\b(text|bg)-(white|black)\b(?!\S*\/)/; // bg-black/NN 遮罩放行
 const PALETTE = /\b(?:text|bg|border|fill|stroke)-(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d+\b/;
 const COLOR_FILE_WHITELIST = new Set([
-  "views/annulus-page.js",
   "views/observe-page.js",
+  // P5-09 全景图 Canvas 引擎(Canvas 不吃 CSS 变量,运行时读 token,
+  // 回退值与 token 同源由 check-hardcoded-colors 把关)。
+  "lib/panorama-engine.js",
 ]);
 
 function walk(dir, out) {

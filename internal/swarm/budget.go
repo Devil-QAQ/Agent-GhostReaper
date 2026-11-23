@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Autumn-27/norma/llm"
-
 	"ghostreaper/internal/blackbox"
 	"ghostreaper/internal/rings"
 )
@@ -49,71 +47,25 @@ func unitMaxDuration(maxDur time.Duration, deadline time.Time) time.Duration {
 	return maxDur
 }
 
-// ---- token 逐次记账 + 预算里程碑(第四章 §6 账本分工) ----
+// ---- 轮次预算里程碑(模型请求用量独立在 usage.go 记账) ----
 
-// UsageTracker 把引擎逐轮上报的累计用量(kind=usage,每模型轮一次)切成
-// 逐次增量行(token 独立表一行 = 一次模型调用);MaxTurns > 0 时在轮次
-// 过半时落一次聚合里程碑(blackbox budget_half,单位预算专用;主宰等
-// 规划会话置 0 关闭里程碑)。记账走独立 ctx:横切记账不随任务熔断断链。
-// swarm 单位与 overmind 会话共用(四类记录分工的统一记账器)。
-// P2-06e:ModelOf 非空时逐次行按"服务该次调用的模型"记账——主备切换
-// 后同会话的 token 按模型分开记账;nil 退静态 Model 字段。
-type UsageTracker struct {
-	Store      *rings.Store
-	TaskID     string
-	Agent      string // 记账归属(如 swarm:u1 / overmind)
-	Model      string
-	ModelOf    func() string // 按请求解析模型名(failover 链注入;nil=用 Model)
-	Transcript string        // 会话原文 JSONL 的文件名锚点
-	MaxTurns   int           // >0 时启用轮次过半里程碑
-	StepID     string        // 里程碑留痕锚点(单位侧填,规划会话留空)
-	UnitID     string
-
+// turnBudgetTracker 只消费引擎正常轮次通知,维护门卫读数与过半里程碑。
+// 失败尝试与辅助调用消耗记入用量表,不冒充完成轮次或占用该预算。
+type turnBudgetTracker struct {
+	Store        *rings.Store
+	TaskID       string
+	Agent        string
+	MaxTurns     int
+	StepID       string
+	UnitID       string
 	turns        int
 	halfRecorded bool
-	prev         llm.Usage
 }
 
-// Turns 已记账的模型轮次(P2-05 重锚定的剩余预算读数;与 OnUsage 同
-// goroutine 调用,无并发)。
-func (t *UsageTracker) Turns() int { return t.turns }
+func (t *turnBudgetTracker) Turns() int { return t.turns }
 
-// beginSegment 锚定新执行段的增量切分基线(P2-06f 修订):引擎的
-// KindUsage 是单次 Prompt 运行内的累计(每段从零起算,跨段/跨进程不
-// 连会计——Norma query 循环的 usage 不从会话恢复值起算),段首清零
-// 基线,保证每行恰为本次模型调用的真实增量:段间不产生负增量(审批
-// 续跑/模型重试段),重启收养的原会话续也不重复计历史(历史行的记账
-// 属上一进程的原单位)。
-func (t *UsageTracker) beginSegment() {
-	t.prev = llm.Usage{}
-}
-
-// modelOfThisCall 本次调用行的记账模型(动态优先,退静态)。
-func (t *UsageTracker) modelOfThisCall() string {
-	if t.ModelOf != nil {
-		if m := t.ModelOf(); m != "" {
-			return m
-		}
-	}
-	return t.Model
-}
-
-// OnUsage 处理一次累计用量事件:切增量入 token 独立表;轮次恰过半时记
-// 一次黑匣子里程碑。返回错误由调用方汇总暴露——不中断执行,也不静默
-// 吞掉审计缺口。
-func (t *UsageTracker) OnUsage(cur llm.Usage) error {
+func (t *turnBudgetTracker) OnTurn() error {
 	t.turns++
-	if err := t.Store.RecordTokens(context.Background(), rings.TokenUsage{
-		TaskID: t.TaskID, Agent: t.Agent, Model: t.modelOfThisCall(), TranscriptID: t.Transcript,
-		Turn:             t.turns,
-		InputTokens:      cur.InputTokens - t.prev.InputTokens,
-		OutputTokens:     cur.OutputTokens - t.prev.OutputTokens,
-		CacheReadTokens:  cur.CacheReadTokens - t.prev.CacheReadTokens,
-		CacheWriteTokens: cur.CacheWriteTokens - t.prev.CacheWriteTokens,
-	}); err != nil {
-		return fmt.Errorf("swarm: token 用量记账: %w", err)
-	}
-	t.prev = cur
 	if t.MaxTurns > 0 && !t.halfRecorded && t.turns >= (t.MaxTurns+1)/2 {
 		t.halfRecorded = true
 		if err := blackbox.Record(context.Background(), t.Store, t.TaskID, t.Agent,

@@ -186,7 +186,7 @@ func TestP454SetAssetScopeIdentifiersAndWildcard(t *testing.T) {
 	if isErr {
 		t.Fatalf("纳入新标识不应报错: %s", out)
 	}
-	if !strings.Contains(out, "无需纳入") {
+	if !strings.Contains(out, "无需重复加入") {
 		t.Fatalf("手动入图资产默认范围内,回执应如实: %s", out)
 	}
 	assets, _ := store.NodesByType(ctx, task, rings.NodeAsset, "")

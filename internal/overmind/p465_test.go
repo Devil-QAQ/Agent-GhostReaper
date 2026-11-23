@@ -38,9 +38,7 @@ func p465AssessRec() rings.OvermindRecord {
 func TestP465AnchorGateClean(t *testing.T) {
 	for _, text := range []string{
 		assessPolishSystem,
-		assessPolishProofreadAsk,
 		stepTitleSystem,
-		stepTitleProofreadAsk,
 		intentTitleStandard,
 		"10.0.0.5:8080 的管理接口凭 s2 拿到的口令可以登录,原判断不再成立;下一步验证该口令在 10.0.0.6 上的同一套后台是否通用。",
 		"对 10.0.0.5:8080 做目录枚举,找未授权入口",
@@ -58,12 +56,12 @@ func TestP465AssessPolishZeroProvider(t *testing.T) {
 	store := openStore(t)
 	l := &Loop{TaskID: p465Task(1), Store: store}
 	l.polishAssessmentAsync(context.Background(), 7, p465AssessRec())
-	l.WaitPolish()
+	l.polishWG.Wait()
 	if evs := p465PolishEvents(t, store, l.TaskID); len(evs) != 0 {
 		t.Fatalf("零 Provider 不应落校对稿事件: %d", len(evs))
 	}
 	l.polishStepTitlesAsync(context.Background(), []stepTitleMaterial{{StepID: "s1", Intent: "对 10.0.0.5:8080 做目录枚举"}})
-	l.WaitPolish()
+	l.polishWG.Wait()
 	if evs := p465TitleEvents(t, store, l.TaskID); len(evs) != 0 {
 		t.Fatalf("零 Provider 不应落标题校对稿事件: %d", len(evs))
 	}

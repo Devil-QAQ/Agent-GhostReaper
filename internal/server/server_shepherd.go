@@ -6,9 +6,13 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -86,6 +90,7 @@ func (s *Server) handleShepherdGet(w http.ResponseWriter, r *http.Request) {
 // 一条,标题取声明原文,面板截断呈现)。
 type shepherdFollowupRow struct {
 	ClaimID   string `json:"claim_id"`
+	Kind      string `json:"kind"`
 	Statement string `json:"statement"` // 声明原文(漏洞名称)
 	Status    string `json:"status"`    // 声明当前状态
 	Round     int    `json:"round"`
@@ -104,11 +109,14 @@ func (s *Server) shepherdFollowups(r *http.Request, taskID string) []shepherdFol
 		return []shepherdFollowupRow{}
 	}
 	claims := map[string]rings.NodeFull{}
-	if list, err := s.Store.NodesByType(r.Context(), taskID, rings.NodeTestClaim, ""); err == nil {
-		for _, c := range list {
-			claims[c.ID] = c
+	for _, typ := range []rings.NodeType{rings.NodeTestClaim, rings.NodeFact} {
+		if list, err := s.Store.NodesByType(r.Context(), taskID, typ, ""); err == nil {
+			for _, c := range list {
+				claims[c.ID] = c
+			}
 		}
 	}
+	titles := s.polishedNodeTitleOf(r.Context(), taskID)
 	out := make([]shepherdFollowupRow, 0, len(sessions))
 	for _, x := range sessions {
 		row := shepherdFollowupRow{
@@ -117,6 +125,13 @@ func (s *Server) shepherdFollowups(r *http.Request, taskID string) []shepherdFol
 		}
 		if c, ok := claims[x.ClaimID]; ok {
 			row.Statement, row.Status = c.Title, c.Status
+			row.Kind = "claim"
+			if c.Type == rings.NodeFact {
+				row.Kind = "fact"
+			}
+			if title := titles[c.ID]; title != "" {
+				row.Statement = title
+			}
 		}
 		out = append(out, row)
 	}
@@ -145,8 +160,10 @@ func (s *Server) shepherdInfoBySID(r *http.Request, taskID, sid string) shepherd
 		info.OutputTokens += x.OutputTokens
 		info.CacheTokens += x.CacheReadTokens + x.CacheWriteTokens
 		info.Calls++
-		lastModel, lastInput = x.Model, x.InputTokens
-		info.Model = x.Model
+		if x.HasConversationInput() {
+			lastModel, lastInput = x.Model, x.InputTokens
+			info.Model = x.Model
+		}
 	}
 	if info.Model == "" && s.Chain != nil {
 		info.Model = s.Chain.ActiveModel()
@@ -206,10 +223,13 @@ func (s *Server) handleShepherdClaimGet(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleShepherdClaimPost 成果追问发言入队(P4-14):一成果一会话、续接
-// 不新建;new_round=true 时下一问起新轮(旧轮留档)。会话开场的首问由
-// 服务端确定性装配成果链路预载包(与发现详情同源:定稿叙述 / 溯源 /
-// 耗时拆解),注入模型会话,面板消息流只呈问话原文。
+// handleShepherdClaimPost 锚定追问发言入队(P4-14 成果;P5-07② 单一
+// 追问入口扩到事实——锚定条目为漏洞或事实):一条目一会话、续接不
+// 新建;new_round=true 时下一问起新轮(旧轮留档)。会话开场首问由
+// 服务端确定性装配链路预载包(漏洞与发现详情同源;事实含陈述/资产
+// 锚点/确认时刻),注入模型会话,面板消息流只呈问话原文。问与吩咐
+// 同窗:问→牧者读账本作答;吩咐继续挖→牧者落实成动作(急活通道,
+// 最高权限操作面既有),全走对话记账。
 func (s *Server) handleShepherdClaimPost(w http.ResponseWriter, r *http.Request) {
 	taskID, claimID := r.PathValue("id"), r.PathValue("cid")
 	if !s.taskExists(taskID) {
@@ -228,11 +248,14 @@ func (s *Server) handleShepherdClaimPost(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	node, err := s.Store.Node(r.Context(), taskID, claimID)
-	if err != nil || node.Type != rings.NodeTestClaim {
-		writeErr(w, http.StatusNotFound, fmt.Errorf("发现 %s 不存在", claimID))
+	if err != nil || (node.Type != rings.NodeTestClaim && node.Type != rings.NodeFact) {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("条目 %s 不存在", claimID))
 		return
 	}
 	prelude := s.claimFollowupPrelude(r.Context(), taskID, node)
+	if node.Type == rings.NodeFact {
+		prelude = s.factFollowupPrelude(r.Context(), taskID, node)
+	}
 	id, round, err := s.Shepherd.EnqueueClaim(r.Context(), taskID, claimID,
 		req.Text, req.NewRound, prelude)
 	if err != nil {
@@ -250,11 +273,28 @@ func (s *Server) handleShepherdClaimPost(w http.ResponseWriter, r *http.Request)
 // 开场上下文——不空白开场,牧者第一答即锚定成果。
 func (s *Server) claimFollowupPrelude(ctx context.Context, taskID string, node *rings.NodeFull) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "【成果】%s:%s\n", node.ID, node.Title)
-	if impact, _ := node.Detail["impact"].(string); impact != "" {
+	title, statement := node.Title, node.Title
+	impact, _ := node.Detail["impact"].(string)
+	cs, caseErr := report.ClaimCaseOf(ctx, s.Store, s.blobStore(), taskID, node.ID)
+	if caseErr == nil && cs.Summary != nil {
+		if cs.Summary.Title != "" {
+			title = cs.Summary.Title
+		}
+		if cs.Summary.Statement != "" {
+			statement = cs.Summary.Statement
+		}
+		if cs.Summary.Impact != "" {
+			impact = cs.Summary.Impact
+		}
+	}
+	fmt.Fprintf(&b, "【成果】%s:%s\n", node.ID, title)
+	if statement != title {
+		fmt.Fprintf(&b, "说明:%s\n", statement)
+	}
+	if impact != "" {
 		fmt.Fprintf(&b, "影响面:%s\n", impact)
 	}
-	if cs, err := report.ClaimCaseOf(ctx, s.Store, s.blobStore(), taskID, node.ID); err == nil {
+	if caseErr == nil {
 		if cs.Repro != nil {
 			if sev := cs.Severity(); sev != "" {
 				fmt.Fprintf(&b, "严重级别:%s\n", sev)
@@ -281,20 +321,40 @@ func (s *Server) claimFollowupPrelude(ctx context.Context, taskID string, node *
 	} else {
 		b.WriteString("反证:无记录\n")
 	}
-	timing := s.claimTimingOf(ctx, taskID, node.ID)
-	if timing.TerminalAt != "" {
-		// "确认"措辞只给 Confirmed:待确认声明的终态是"待确认"裁决
-		// 时刻,不是确认(如实陈述,不编造)。
+	// 落地/终态时刻读卷宗时间线(旧耗时拆解投影已随反证轮耗时链路退役
+	// 删除,P5-03③;时刻语义不变)。
+	landedAt, terminalAt := "", ""
+	if proj, ok, perr := s.Store.ClaimCaseOf(ctx, taskID, node.ID); perr == nil && ok {
+		for _, ent := range proj.Timeline {
+			switch ent.K {
+			case "created":
+				landedAt = rings.FmtLocal(ent.At)
+			case "state":
+				var st struct {
+					Status string `json:"status"`
+				}
+				if json.Unmarshal(ent.P, &st) == nil {
+					switch st.Status {
+					case rings.TestClaimConfirmed, rings.TestClaimInsufficient, rings.TestClaimRefuted,
+						rings.TestClaimFixed, "pending", "testing", "awaiting_round":
+						terminalAt = rings.FmtLocal(ent.At)
+					}
+				}
+			}
+		}
+	}
+	if terminalAt != "" {
+		// "确认"措辞只给 Confirmed:其余终态按结束时刻如实陈述。
 		if node.Status == rings.TestClaimConfirmed {
-			fmt.Fprintf(&b, "确认时刻:%s\n", timing.TerminalAt)
+			fmt.Fprintf(&b, "确认时刻:%s\n", terminalAt)
 		} else {
-			fmt.Fprintf(&b, "结束时刻:%s\n", timing.TerminalAt)
+			fmt.Fprintf(&b, "结束时刻:%s\n", terminalAt)
 		}
 	} else {
-		fmt.Fprintf(&b, "结束时刻:进行中(开始 %s)\n", timing.LandedAt)
+		fmt.Fprintf(&b, "结束时刻:进行中(开始 %s)\n", landedAt)
 	}
 	fmt.Fprintf(&b, "判断当前状态:%s\n", node.Status)
-	b.WriteString("应答纪律:围绕该成果回答造物主的追问;事实先查账本(read_findings / read_progress),人话陈述、数字精确;引用图上节点带编号(如 claim:ID、step:ID、fact:ID、asset:ID),造物主可点击核对;账本里没有的不编造。")
+	b.WriteString("应答纪律:围绕该条目接待造物主。造物主问:先查账本(read_findings / read_progress)再答,人话陈述、数字精确,引用图上节点带编号(如 claim:ID、step:ID、fact:ID、asset:ID),造物主可点击核对,账本里没有的不编造。造物主吩咐(如\"继续深入\"\"方向拿账号\"):用 urgent_intent 登记高优先级意图落实成动作,并在答复里说明派发了什么。")
 	return b.String()
 }
 
@@ -344,10 +404,20 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 		"id": n.ID, "type": string(n.Type), "title": n.Title, "status": n.Status,
 		"asset_class": string(n.AssetClass), "detail": n.Detail,
 		"created_rev": n.CreatedRev, "updated_rev": n.UpdatedRev,
+		// 落页时刻(P5-07③:追问窗事实预载等读侧用;事实=确认时刻,
+		// 未确认退入账时刻)。
+		"added_at": n.AddedAt, "confirmed_at": n.ConfirmedAt,
+	}
+	if n.Type == rings.NodeFact || n.Type == rings.NodeStep {
+		if np, err := s.Store.NodePolish(r.Context(), taskID); err == nil {
+			if p := np[n.ID]; p.Title != "" || p.Statement != "" {
+				view["polished_title"], view["polished_statement"] = p.Title, p.Statement
+			}
+		}
 	}
 	switch n.Type {
 	case rings.NodeFact:
-		view["dive_disabled"] = s.diveDisabledOf(r.Context(), taskID)
+		view["result_types"] = rings.FactResultsOf(*n)
 		// 关联资产(about 边直查,带标题)。
 		if abouts, aerr := s.Store.Edges(r.Context(), taskID, rings.EdgeAbout); aerr == nil {
 			assets := []map[string]string{}
@@ -365,12 +435,20 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 			}
 			view["assets"] = assets
 		}
-		// 事实文本包装(P4-64 ③⑥:标题短句+描述;读侧优先,节点原文仍在
-		// 标题区与原始数据)。
-		if np, nerr := s.Store.NodePolish(r.Context(), taskID); nerr == nil {
-			if p := np[n.ID]; p.Title != "" || p.Statement != "" {
-				view["polished_title"] = p.Title
-				view["polished_statement"] = p.Statement
+		// 追问摘要(P5-07②:事实详情追问按钮的数据面,与漏洞详情同源)。
+		if s.Shepherd != nil {
+			if sessions, serr := s.Shepherd.ClaimQASessions(r.Context(), taskID); serr == nil {
+				round, rounds, questions := 0, 0, 0
+				for _, x := range sessions {
+					if x.ClaimID != n.ID {
+						continue
+					}
+					rounds++
+					if x.Round > round {
+						round, questions = x.Round, x.Questions
+					}
+				}
+				view["followup"] = map[string]int{"round": round, "rounds": rounds, "questions": questions}
 			}
 		}
 	case rings.NodeStep:
@@ -381,4 +459,114 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+// handleNodeEvidence 仅取该任务事实实际引用的证据，不接受任意内容引用。
+// 大证据保留在文件层，详情只加载摘要；按需下载完整原文。
+func (s *Server) handleNodeEvidence(w http.ResponseWriter, r *http.Request) {
+	task, id := r.PathValue("id"), r.PathValue("nid")
+	if !s.taskExists(task) {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("任务不存在"))
+		return
+	}
+	n, err := s.Store.Node(r.Context(), task, id)
+	if err != nil || n.Type != rings.NodeFact {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("事实不存在"))
+		return
+	}
+	download := func(modTime time.Time, content io.ReadSeeker) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": "evidence-" + id + ".txt"}))
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		http.ServeContent(w, r, "", modTime, content)
+	}
+	if ref, _ := n.Detail["evidence_ref"].(string); ref != "" {
+		path, err := s.blobStore().Path(ref)
+		if err != nil {
+			writeErr(w, http.StatusNotFound, fmt.Errorf("证据原文不可用"))
+			return
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			writeErr(w, http.StatusNotFound, fmt.Errorf("证据原文不可用"))
+			return
+		}
+		defer file.Close()
+		stat, err := file.Stat()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, fmt.Errorf("证据读取失败"))
+			return
+		}
+		download(stat.ModTime(), file)
+		return
+	}
+	text, _ := n.Detail["evidence"].(string)
+	if text == "" {
+		text, _ = n.Detail["evidence_head"].(string)
+	}
+	if text == "" {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("未记录证据原文"))
+		return
+	}
+	download(time.Time{}, strings.NewReader(text))
+}
+
+// factFollowupPrelude 事实链路预载包(P5-07② 单一追问入口·事实锚定;
+// 确定性装配,零 LLM):事实陈述与推断标记、关联资产、发现单位、确认
+// 时刻、证据截头,外加与漏洞预载同款的应答纪律。窗内问与吩咐同走
+// 牧者——问读账本作答,吩咐继续挖落实成急活动作。
+func (s *Server) factFollowupPrelude(ctx context.Context, taskID string, node *rings.NodeFull) string {
+	var b strings.Builder
+	title, statement := node.Title, node.Title
+	if polishes, err := s.Store.NodePolish(ctx, taskID); err == nil {
+		if p := polishes[node.ID]; !p.Unpolished {
+			if p.Title != "" {
+				title = p.Title
+			}
+			if p.Statement != "" {
+				statement = p.Statement
+			}
+		}
+	}
+	fmt.Fprintf(&b, "【事实】%s:%s\n", node.ID, title)
+	if statement != title {
+		fmt.Fprintf(&b, "说明:%s\n", statement)
+	}
+	b.WriteString("本轮追问锚定以上这一条事实。其他漏洞或事实仅作相关背景，不将它们的成果归给本条；没有直接关系的发现不在答复中展开。\n")
+	abouts, err := s.Store.Edges(ctx, taskID, rings.EdgeAbout)
+	if err == nil {
+		var anchors []string
+		assetTitle := map[string]string{}
+		if ag, gerr := s.Store.AssetGraph(ctx, taskID); gerr == nil {
+			for _, a := range ag.Assets {
+				assetTitle[a.ID] = a.Title
+			}
+		}
+		for _, e := range abouts {
+			if e.From != node.ID {
+				continue
+			}
+			if t := assetTitle[e.To]; t != "" {
+				anchors = append(anchors, fmt.Sprintf("%s(%s)", e.To, t))
+			} else {
+				anchors = append(anchors, e.To)
+			}
+		}
+		if len(anchors) > 0 {
+			fmt.Fprintf(&b, "关联资产:%s\n", strings.Join(anchors, "、"))
+		}
+	}
+	if unit, _ := node.Detail["unit_id"].(string); unit != "" {
+		fmt.Fprintf(&b, "发现单位:%s\n", unit)
+	}
+	if node.ConfirmedAt != "" {
+		fmt.Fprintf(&b, "确认时刻:%s\n", node.ConfirmedAt)
+	} else {
+		fmt.Fprintf(&b, "确认时刻:%s\n", node.AddedAt)
+	}
+	if head, _ := node.Detail["evidence_head"].(string); head != "" {
+		fmt.Fprintf(&b, "证据截头:%s\n", head)
+	}
+	b.WriteString("应答纪律:围绕该条目接待造物主。造物主问:先查账本(read_findings / read_progress)再答,人话陈述、数字精确,引用图上节点带编号(如 fact:ID、step:ID、claim:ID、asset:ID),造物主可点击核对,账本里没有的不编造。造物主吩咐(如\"继续深入\"\"方向拿账号\"):用 urgent_intent 登记高优先级意图落实成动作,并在答复里说明派发了什么。")
+	return b.String()
 }

@@ -8,7 +8,7 @@ import { PageHeader } from "@/components/page-header";
 // agent-page.js 正式页替换。)
 export function MCPPlaceholderPage() {
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-3">
       <PageHeader title="MCP" subtitle="外部工具接入" />
       <EmptyState
         icon="plug"
@@ -22,7 +22,7 @@ export function MCPPlaceholderPage() {
 
 export function SKILLPlaceholderPage() {
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-3">
       <PageHeader title="SKILL" subtitle="技能接入" />
       <EmptyState
         icon="sparkles"

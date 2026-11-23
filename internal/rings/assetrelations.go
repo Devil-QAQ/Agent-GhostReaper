@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"sort"
 	"strings"
 )
@@ -26,7 +28,7 @@ type AssetRelationView struct {
 }
 
 func AssetRelationWord(kind string) string {
-	return map[string]string{"resolves_to": "解析到", "hosted_on": "部署在", "related_to": "关联"}[kind]
+	return map[string]string{"resolves_to": "解析到", "hosted_on": "部署在", "related_to": "关联", "redirects_to": "跳转到", "same_system": "同一系统", "address": "入口地址"}[kind]
 }
 
 func (r AssetRelationView) Summary() string {
@@ -74,10 +76,10 @@ func AssetRelationsFromDetail(detail map[string]any) ([]AssetRelation, error) {
 		if r.From == "" || r.To == "" || r.From == r.To {
 			return nil, fmt.Errorf("资产关系两端须为不同资产")
 		}
-		if AssetRelationWord(r.Kind) == "" {
+		if AssetRelationWord(r.Kind) == "" || r.Kind == "address" {
 			return nil, fmt.Errorf("资产关系类型无效")
 		}
-		if r.Kind == "related_to" && r.From > r.To {
+		if (r.Kind == "related_to" || r.Kind == "same_system") && r.From > r.To {
 			r.From, r.To = r.To, r.From
 		}
 		if !seen[r] {
@@ -190,7 +192,7 @@ func validateObservedAssetBinding(tx *sql.Tx, task, fact, asset string) error {
 
 // Relations are projected from confirmed observations, not inferred from names
 // or co-occurrence. Multiple supporting facts remain independently traceable.
-func queryAssetRelations(ctx context.Context, tx *sql.Tx, task string, assets []AssetNodeView) ([]AssetRelationView, error) {
+func queryAssetRelations(ctx context.Context, tx *sql.Tx, task string, assets []AssetNodeView, aliasMaps ...map[string]string) ([]AssetRelationView, error) {
 	byID := map[string]AssetNodeView{}
 	for _, a := range assets {
 		byID[a.ID] = a
@@ -213,11 +215,18 @@ func queryAssetRelations(ctx context.Context, tx *sql.Tx, task string, assets []
 		return nil, err
 	}
 	boundRows.Close()
-	rows, err := tx.QueryContext(ctx, `SELECT node_id,detail FROM nodes WHERE task_id=? AND node_type='fact' AND status='confirmed' AND json_type(detail,'$.asset_relations')='array' ORDER BY created_rev,node_id`, task)
+	rows, err := tx.QueryContext(ctx, `SELECT node_id,detail FROM nodes WHERE task_id=? AND node_type='fact' AND status='confirmed' AND (json_type(detail,'$.asset_relations')='array' OR json_type(detail,'$.asset_observations')='object') ORDER BY created_rev,node_id`, task)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	identityIDs := map[string]string{}
+	for _, a := range assets {
+		_, _, key, e := AssetIdentity(a.AssetClass, a.Title)
+		if e == nil {
+			identityIDs[key] = a.ID
+		}
+	}
 	index := map[AssetRelation]int{}
 	out := []AssetRelationView{}
 	for rows.Next() {
@@ -233,12 +242,29 @@ func queryAssetRelations(ctx context.Context, tx *sql.Tx, task string, assets []
 		if err != nil {
 			return nil, err
 		}
+		observations, err := ObservedAssets(detail)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range observations.Relations {
+			_, _, from, _ := AssetIdentity(r.FromClass, r.From)
+			_, _, to, _ := AssetIdentity(r.ToClass, r.To)
+			relations = append(relations, AssetRelation{From: identityIDs[from], To: identityIDs[to], Kind: r.Kind})
+		}
 		for _, r := range relations {
 			if r.From == "$new" {
 				r.From = bindings[fid]
 			}
 			if r.To == "$new" {
 				r.To = bindings[fid]
+			}
+			if len(aliasMaps) > 0 {
+				if id := aliasMaps[0][r.From]; id != "" {
+					r.From = id
+				}
+				if id := aliasMaps[0][r.To]; id != "" {
+					r.To = id
+				}
 			}
 			from, ok := byID[r.From]
 			if !ok {
@@ -248,7 +274,7 @@ func queryAssetRelations(ctx context.Context, tx *sql.Tx, task string, assets []
 			if !ok || r.From == r.To {
 				continue
 			}
-			if r.Kind == "related_to" && r.From > r.To {
+			if (r.Kind == "related_to" || r.Kind == "same_system") && r.From > r.To {
 				r.From, r.To = r.To, r.From
 				from, to = to, from
 			}
@@ -262,6 +288,28 @@ func queryAssetRelations(ctx context.Context, tx *sql.Tx, task string, assets []
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	addresses := map[string]string{}
+	for _, a := range assets {
+		if c, title, _, e := AssetIdentity(a.AssetClass, a.Title); e == nil && (c == AssetDomain || c == AssetHost) {
+			addresses[title] = a.ID
+		}
+	}
+	for _, a := range assets {
+		if a.AssetClass != AssetService {
+			continue
+		}
+		_, address, _, e := AssetIdentity(AssetService, a.Title)
+		if e != nil {
+			continue
+		}
+		host, _, _ := net.SplitHostPort(address)
+		if u, e := url.Parse(address); e == nil && u.Hostname() != "" {
+			host = u.Hostname()
+		}
+		if id := addresses[host]; id != "" && id != a.ID {
+			out = append(out, AssetRelationView{AssetRelation: AssetRelation{From: a.ID, To: id, Kind: "address"}, Label: AssetRelationWord("address"), FromTitle: a.Title, ToTitle: byID[id].Title, FactIDs: []string{}})
+		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		a, b := out[i], out[j]
@@ -310,26 +358,46 @@ func (s *Store) BindObservedAssets(ctx context.Context, task string, assets []No
 		decl, _ := f.Detail["new_asset"].(map[string]any)
 		class, _ := decl["class"].(string)
 		title, _ := decl["title"].(string)
-		_, _, key, e := AssetIdentity(AssetClass(class), title)
-		id := identities[key]
-		if e != nil || id == "" {
-			continue
+		_, _, declaredKey, _ := AssetIdentity(AssetClass(class), title)
+		observed, err := ObservedAssets(f.Detail)
+		if err != nil {
+			return nil, err
 		}
-		types := []EdgeType{EdgeAbout}
-		relations, _ := AssetRelationsFromDetail(f.Detail)
-		for _, r := range relations {
-			if r.From == "$new" || r.To == "$new" {
-				types = append(types, EdgeObservedAsset)
-				break
+		observed.Assets = append(observed.Assets, AssetObservation{Class: AssetClass(class), Title: title})
+		entries := append([]AssetObservation{}, observed.Assets...)
+		for _, a := range entries {
+			if class, host, e := AssetAddress(a.Class, a.Title); e == nil {
+				observed.Assets = append(observed.Assets, AssetObservation{Class: class, Title: host})
+			}
+			if a.Class == AssetAPI {
+				address := AssetEntryAddress(a.Title)
+				observed.Assets = append(observed.Assets, AssetObservation{Class: AssetService, Title: AssetDisplayTitle(AssetService, address)})
 			}
 		}
-		for _, kind := range types {
-			k := [3]string{string(kind), f.ID, id}
-			if seen[k] {
+
+		for _, observation := range observed.Assets {
+			_, _, key, e := AssetIdentity(observation.Class, observation.Title)
+			id := identities[key]
+			if e != nil || id == "" {
 				continue
 			}
-			seen[k] = true
-			events = append(events, Event{Kind: EventEdgeAdded, Actor: actor, Payload: EdgeAdded{EdgeType: kind, FromNode: f.ID, ToNode: id}})
+
+			types := []EdgeType{EdgeAbout}
+			relations, _ := AssetRelationsFromDetail(f.Detail)
+			for _, r := range relations {
+				if key == declaredKey && (r.From == "$new" || r.To == "$new") {
+					types = append(types, EdgeObservedAsset)
+					break
+				}
+			}
+			for _, kind := range types {
+				k := [3]string{string(kind), f.ID, id}
+				if seen[k] {
+					continue
+				}
+				seen[k] = true
+				events = append(events, Event{Kind: EventEdgeAdded, Actor: actor, Payload: EdgeAdded{EdgeType: kind, FromNode: f.ID, ToNode: id}})
+			}
 		}
 	}
 	return events, nil

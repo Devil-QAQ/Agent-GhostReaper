@@ -46,7 +46,9 @@ type unitEnv struct {
 	callbackCancel  context.CancelFunc
 	callsClosed     bool
 	executionClosed bool
-	reviewMu        sync.Mutex      // one policy decision/approval ticket at a time per unit
+	reviewMu        sync.Mutex // one policy decision/approval ticket at a time per unit
+	reviewSources   map[string]string
+	reviewErr       error           // drained with callbacks; uses the existing model-fault recovery
 	mirror          *mirror.Session // 本单位的镜会话(nil=无镜直连,P1 行为);接管对工具透明
 
 	// Segment state is shared by parallel callbacks. The drive reads it only
@@ -608,7 +610,7 @@ const (
 	toolDescBash                = "在授权范围内执行 shell 命令(单条或管道),返回合并输出。单条命令默认限时 120 秒,可用 timeout_ms 自行调整(上限 600 秒);超时未完成的命令自动转入后台继续运行(输出落文件可稍后读取,sleep 类等待命令除外),也可用 run_in_background 直接后台跑。后台命令输出上限 100MB(超出省略)、最长运行 30 分钟。大输出会被存档并截断,需要全文时按存档引用查阅。"
 	toolDescPortProbe           = "只读探测:检测 host:port 的 TCP 开放状态并尝试读取服务 banner。banner 只取前 256 字节且可能静默——勿据此认为已测完;需要更多服务特征时改用 http_probe 或 bash 通道。"
 	toolDescHTTPProbe           = "只读 HTTP 探测:对指定 URL 发起 HTTP 请求(GET 或 HEAD),返回状态码、关键响应头(Server/Content-Type/Content-Length)与响应体开头内容。响应体只返回前 1536 字节——勿据此认为已读全,需要完整响应时改用 bash(curl)并注意该意图的审批分级。"
-	toolDescSubmitCandidateFact = "观察到资产解析、部署等关系时，随证据提交asset_relations；使用实际资产编号，已有资产不重复申报，申报的新对象可用$new引用。关系不等于父子层级、产生来源或授权。提交一条新进事实(你本次真实观察到的结论)。须经主宰检查归纳确认后才成为正式事实。陈述须有本次执行取得的证据。观察到清单以外的域名、IP或服务入口时，可随本条事实申报new_asset，操作者选择加入后才进入资产与后续规划。子域名仍选domain，IP选host，API路径归所属服务，不逐路径建资产。组织、人员、登记资料、文件、泄露内容写在事实和证据中，不申报资产；不得把文件名中的点号当成发现域名。独立应用或小程序仅在确为任务对象且有明确标识时申报。已知对象用 asset_id 锚定,两者不得同时给。只提交本次实际观察及证据，不提交未验证的猜测；意图之外的实际观察也可写回，由主宰决定是否跟进。本机回环(127.0.0.1/localhost/::1)与镜等测试环境自身设施不是发现对象——对它们的观察会被拒收并记为环境观察;任务资产清单内的目标不受此限。"
+	toolDescSubmitCandidateFact = "观察到资产解析、部署等关系时，随证据提交asset_relations；使用实际资产编号，已有资产不重复申报，申报的新对象可用$new引用。关系不等于父子层级、产生来源或授权。提交一条新进事实(你本次真实观察到的结论)。须经主宰检查归纳确认后才成为正式事实。陈述须有本次执行取得的证据。观察到清单以外的域名、IP或服务入口时，可随本条事实申报new_asset，明确目标内的发现自动归档，外部独立目标由操作者选择加入。子域名仍选domain，IP选host，网站入口选service；站内接口/API/URL直接随事实归到所属网站，不逐条申报独立资产，HTTP方法和参数只留在证据。组织、人员、登记资料、文件、泄露内容写在事实和证据中，不申报资产；不得把文件名中的点号当成发现域名。独立应用或小程序仅在确为任务对象且有明确标识时申报。已知对象用 asset_id 锚定；发现新对象时可同时保留来源资产编号。只提交本次实际观察及证据，不提交未验证的猜测；意图之外的实际观察也可写回，由主宰决定是否跟进。本机回环(127.0.0.1/localhost/::1)与镜等测试环境自身设施不是发现对象——对它们的观察会被拒收并记为环境观察;任务资产清单内的目标不受此限。"
 	toolDescSubmitClaim         = "交卷:把你在本会话真实坐实的漏洞交出去(探索→发现→证明→反证自查完成后调用,做完即停)。提交前先用 list_claims 查已报清单:同一资产上已报过的漏洞不得重复报(入口会拒收)。六字段全部必写:summary=漏洞一句话(本质+影响对象);severity=自报级别(critical|high|medium|low;" + SeverityAnchor + ");evidence_refs=证明证据引用列表(工具结果里 exchange= 行给出的交换编号,通常恰 1 条主证明——直接证明结论的那条;多步组合链按复现顺序逐环排列);proving_marker=从证据原文里抄的关键证明物字符串(如拿到的手机号、返回的敏感字段值——系统会机器核验它真的出现在证据响应体里,抄不准交不进);countercheck_note=反证自查结果自由文本(做了什么检查、为什么没翻车);impact_note=影响列点(可空,可列 1~3 条;只写有依据的,有几条写几条,猜测要标明是猜测,照实进报告)。交卷后系统即时机器核验:未过会告诉你缺什么,补做后带 claim_id 重交(补考只有一次)。立判门槛:" + ClaimHarmGate + "。本机回环(127.0.0.1/localhost/::1)与镜等测试环境自身设施不是目标攻击面——锚点或证据流量指向它们的交卷会被拒收并记为环境观察;任务资产清单内的目标不受此限。"
 	toolDescListClaims          = "只读查询:列出本任务已报的漏洞清单(ID、状态、锚定资产、判断摘要)。交卷前先查一遍——同一资产上已报过的漏洞不要重复交(重复提交会被入口直接拒收);确有新证据或不同影响面的,改写判断另立。"
 )
@@ -656,15 +658,15 @@ func candidateFactSchema() map[string]any {
 		"properties": map[string]any{
 			"statement":       map[string]any{"type": "string", "description": "新进事实陈述:一句话可复核命题,写明资产与完整定位要素(域名或 IP 起头、host:port 形态,不用裸端口/裸路径指代目标),使他人可独立重验"},
 			"evidence":        map[string]any{"type": "string", "description": "支撑证据:须含可独立复核的关键原文(请求/响应片段、命令与其输出);只写结论不附原文的证据过不了检查归纳"},
-			"asset_id":        map[string]any{"type": "string", "description": "关联资产节点 ID(可选;已知对象锚定用,与 new_asset 互斥)"},
-			"asset_relations": map[string]any{"type": "array", "maxItems": 64, "description": "本次证据直接观察到的资产关系；不是父子层级、产生来源或执行前置。from/to使用本任务资产编号；本条new_asset对象可用$new引用。已有资产之间的关系直接填编号，无需重复申报新资产。推断不得填写。", "items": map[string]any{"type": "object", "properties": map[string]any{"from": map[string]any{"type": "string"}, "to": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string", "enum": []string{"resolves_to", "hosted_on", "related_to"}, "description": "resolves_to=前者解析到后者；hosted_on=前者部署在后者；related_to=明确观察到的其他关联，陈述中写清含义"}}, "required": []string{"from", "to", "kind"}}},
+			"asset_id":        map[string]any{"type": "string", "description": "关联资产节点 ID(可选;已知对象锚定用,可同时记录来源资产与新发现对象)"},
+			"asset_relations": map[string]any{"type": "array", "maxItems": 64, "description": "本次证据直接观察到的资产关系；不是父子层级、产生来源或执行前置。from/to使用本任务资产编号；本条new_asset对象可用$new引用。已有资产之间的关系直接填编号，无需重复申报新资产。推断不得填写。", "items": map[string]any{"type": "object", "properties": map[string]any{"from": map[string]any{"type": "string"}, "to": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string", "enum": []string{"resolves_to", "hosted_on", "related_to", "redirects_to", "same_system"}, "description": "resolves_to=前者解析到后者；hosted_on=前者部署在后者；redirects_to=实测跳转；same_system=证据确认的同系统不同入口；related_to=明确观察到的其他关联，陈述中写清含义"}}, "required": []string{"from", "to", "kind"}}},
 			"result_types":    map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"credential", "data", "permission", "foothold", "plain", "unclassified"}}, "uniqueItems": true, "description": "本条事实实际取得的结果，可多选：credential=取得可用凭据；data=取得敏感数据；permission=实际取得访问能力；foothold=实际建立可用立足点。普通观察或未发现成果只选 plain；拿不准只选 unclassified。按本次证据判断，不按陈述出现的词判断；推断线索不能标成已取得成果。"},
 			"new_asset": map[string]any{
 				"type":        "object",
-				"description": "新对象申报(可选;本次观察到新的任务对象时随事实申报；操作者加入后才入资产清单，与asset_id互斥)",
+				"description": "新对象申报(可选;本次观察到新的任务对象时随事实申报；操作者加入后才入资产清单，asset_id可记录发现来源)",
 				"properties": map[string]any{
 					"class":  map[string]any{"type": "string", "enum": []string{"domain", "host", "service", "miniprogram", "app"}, "description": "域名domain、IP host、服务入口service，独立应用app或小程序miniprogram；不为背景资料建资产"},
-					"title":  map[string]any{"type": "string", "description": "域名、IP、完整服务地址或独立应用标识；API路径写入事实与证据，资产按服务入口归一"},
+					"title":  map[string]any{"type": "string", "description": "域名、IP、完整服务地址或独立应用标识；URL/API归到网站入口，不带HTTP方法"},
 					"parent": map[string]any{"type": "string", "description": "父资产节点 ID(可选；只填所属域名或服务地址本身。DNS解析、共享IP、部署关联不作为父子层级，另写asset_relations)"},
 				},
 				"required": []string{"class", "title"},
@@ -751,9 +753,6 @@ func (env *unitEnv) SubmitCandidateFactWithRelations(ctx context.Context, statem
 		return "", fmt.Errorf("swarm: 新进事实须同时具备陈述与证据")
 	}
 	if newAsset != nil {
-		if strings.TrimSpace(assetID) != "" {
-			return "", fmt.Errorf("swarm: asset_id 与 new_asset 不得同时给(锚定已知对象或申报新对象,二者择一)")
-		}
 		newAsset.Title = strings.TrimSpace(newAsset.Title)
 		if newAsset.Title == "" {
 			return "", fmt.Errorf("swarm: 新对象申报缺标识(title)")
@@ -764,7 +763,11 @@ func (env *unitEnv) SubmitCandidateFactWithRelations(ctx context.Context, statem
 		}
 		// Share identity rules with inventory/adoption, rather than inviting a
 		// new classification and asking the model to retry it downstream.
-		newAsset = &NewAssetDecl{Class: string(class), Title: title, Parent: strings.TrimSpace(newAsset.Parent)}
+		parentRef := strings.TrimSpace(newAsset.Parent)
+		if rings.AssetClass(newAsset.Class) == rings.AssetAPI {
+			parentRef = ""
+		}
+		newAsset = &NewAssetDecl{Class: string(class), Title: title, Parent: parentRef}
 		if p := strings.TrimSpace(newAsset.Parent); p != "" {
 			parent, err := env.Executor.Store.Node(ctx, env.TaskID, p)
 			if err != nil {

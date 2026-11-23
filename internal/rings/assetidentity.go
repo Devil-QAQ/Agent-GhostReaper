@@ -48,7 +48,17 @@ func NetworkAssetIdentity(class AssetClass, title string) (AssetClass, string, s
 		}
 		addr = addr.Unmap()
 		return AssetHost, addr.String(), "ip:" + addr.String(), nil
-	case AssetService, AssetAPI:
+	case AssetAPI:
+		// Legacy resource declarations belong to their serving website. HTTP
+		// request metadata never creates an asset identity.
+		address := AssetEntryAddress(title)
+		class, _, key, err := NetworkAssetIdentity(AssetService, address)
+		if err != nil {
+			return "", "", "", err
+		}
+		return class, strings.TrimPrefix(key, "service:"), key, nil
+
+	case AssetService:
 		if !strings.Contains(title, "://") {
 			host, port, err := net.SplitHostPort(title)
 			if err != nil {
@@ -111,6 +121,15 @@ func AssetIdentity(class AssetClass, title string) (AssetClass, string, string, 
 		if title == "" || strings.ContainsAny(title, "\r\n\x00") {
 			return "", "", "", fmt.Errorf("应用标识无效")
 		}
+		if class == AssetApp && strings.Contains(title, "://") {
+			_, address, _, err := NetworkAssetIdentity(AssetService, title)
+			if err != nil {
+				return "", "", "", err
+			}
+			u, _ := url.Parse(address)
+			u.Fragment, u.RawFragment, u.RawQuery = "", "", ""
+			title = strings.TrimSuffix(u.String(), "/")
+		}
 		return class, title, string(class) + ":" + title, nil
 	}
 	return NetworkAssetIdentity(class, title)
@@ -139,14 +158,18 @@ func AssetDisplayTitle(class AssetClass, title string) string {
 // and a service's literal hostname describe address structure; DNS/deployment
 // observations never become containment. This is a read projection, not a
 // ledger mutation, permission change, or discovery of a missing parent.
-func AssetDisplayHierarchy(assets []NodeFull, edges []EdgeView, members map[string]bool) []EdgeView {
+func AssetDisplayHierarchy(assets []NodeFull, edges []EdgeView, members map[string]bool, relations ...[]AssetRelationView) []EdgeView {
 	byID := map[string]NodeFull{}
 	byAddress := map[string][]string{}
+	byService := map[string][]string{}
 	for _, a := range assets {
 		if !members[a.ID] {
 			continue
 		}
 		byID[a.ID] = a
+		if c, _, key, e := AssetIdentity(a.AssetClass, a.Title); e == nil && c == AssetService && a.AssetClass != AssetAPI {
+			byService[key] = append(byService[key], a.ID)
+		}
 		if c, title, _, err := NetworkAssetIdentity(a.AssetClass, a.Title); err == nil && (c == AssetDomain || c == AssetHost) {
 			byAddress[title] = append(byAddress[title], a.ID)
 		}
@@ -155,7 +178,7 @@ func AssetDisplayHierarchy(assets []NodeFull, edges []EdgeView, members map[stri
 	for _, e := range edges {
 		child, c := byID[e.From]
 		parent, p := byID[e.To]
-		if e.Type != EdgeSubOf || !c || !p || ValidateAssetParent(child.AssetClass, child.Title, parent.AssetClass, parent.Title) != nil {
+		if e.Type != EdgeSubOf || !c || !p || DisplayAssetClass(child.AssetClass) == AssetService || ValidateAssetParent(child.AssetClass, child.Title, parent.AssetClass, parent.Title) != nil {
 			continue
 		}
 		prior, exists := parents[e.From]
@@ -167,7 +190,7 @@ func AssetDisplayHierarchy(assets []NodeFull, edges []EdgeView, members map[stri
 		if _, exists := parents[id]; exists {
 			continue
 		}
-		class, title, _, err := NetworkAssetIdentity(a.AssetClass, a.Title)
+		class, title, _, err := AssetIdentity(a.AssetClass, a.Title)
 		if err != nil {
 			continue
 		}
@@ -182,15 +205,39 @@ func AssetDisplayHierarchy(assets []NodeFull, edges []EdgeView, members map[stri
 					break
 				}
 			}
-		case AssetService:
-			if u, err := url.Parse(title); err == nil && u.Hostname() != "" {
-				address = u.Hostname()
-			} else {
-				address, _, _ = net.SplitHostPort(title)
+		case AssetApp:
+			endpoint := AssetEntryAddress(title)
+			_, _, key, e := AssetIdentity(AssetService, endpoint)
+			if ids := byService[key]; e == nil && len(ids) == 1 {
+				parents[id] = EdgeView{Type: EdgeSubOf, From: id, To: ids[0]}
 			}
+
 		}
 		if ids := byAddress[address]; len(ids) == 1 && ids[0] != id {
 			parents[id] = EdgeView{Type: EdgeSubOf, From: id, To: ids[0]}
+		}
+	}
+	if len(relations) > 0 {
+		for _, r := range relations[0] {
+			if len(r.FactIDs) == 0 || (r.Kind != "hosted_on" && r.Kind != "same_system") {
+				continue
+			}
+			from, f := byID[r.From]
+			to, t := byID[r.To]
+			if !f || !t {
+				continue
+			}
+			app, site := from, to
+			if from.AssetClass == AssetService && to.AssetClass == AssetApp {
+				app, site = to, from
+			}
+			if app.AssetClass == AssetApp && site.AssetClass == AssetService {
+				// A named system groups observed entries; shared addresses never do.
+				delete(parents, app.ID)
+				if prior, exists := parents[site.ID]; !exists || app.ID < prior.To {
+					parents[site.ID] = EdgeView{Type: EdgeSubOf, From: site.ID, To: app.ID}
+				}
+			}
 		}
 	}
 	out := make([]EdgeView, 0, len(parents))
@@ -209,13 +256,22 @@ func AssetDisplayHierarchy(assets []NodeFull, edges []EdgeView, members map[stri
 // ValidateAssetParent checks an explicitly supplied containment relation. It
 // never infers ownership from a shared IP, DNS answer, or a similar name.
 func ValidateAssetParent(childClass AssetClass, childTitle string, parentClass AssetClass, parentTitle string) error {
-	childClass, child, _, childErr := NetworkAssetIdentity(childClass, childTitle)
-	parentClass, parent, _, parentErr := NetworkAssetIdentity(parentClass, parentTitle)
+	childClass, child, _, childErr := AssetIdentity(childClass, childTitle)
+	parentClass, parent, _, parentErr := AssetIdentity(parentClass, parentTitle)
 	if childErr == nil && parentErr == nil {
 		if childClass == AssetDomain && parentClass == AssetDomain && child != parent && strings.HasSuffix(strings.TrimPrefix(child, "*."), "."+strings.TrimPrefix(parent, "*.")) {
 			return nil
 		}
+		if childClass == AssetApp && parentClass == AssetService {
+			address := AssetEntryAddress(child)
+			_, _, a, ea := AssetIdentity(AssetService, address)
+			_, _, b, eb := AssetIdentity(AssetService, parent)
+			if ea == nil && eb == nil && a == b {
+				return nil
+			}
+		}
 		if childClass == AssetService && (parentClass == AssetDomain || parentClass == AssetHost) {
+			child = AssetEntryAddress(child)
 			host, _, err := net.SplitHostPort(child)
 			if strings.Contains(child, "://") {
 				if u, e := url.Parse(child); e == nil {
@@ -236,14 +292,30 @@ func ValidateAssetParent(childClass AssetClass, childTitle string, parentClass A
 func InventoryAssetIDs(assets []NodeFull, roe RoeState) map[string]bool {
 	excluded := ExcludedCoveredAssetIDs(assets, roe.ExcludedAssetSet())
 	approved := roe.ScopeApprovedSet()
+	services := map[string]bool{}
+	for _, a := range assets {
+		if a.AssetClass != AssetService || a.Status == AssetStatusRetired {
+			continue
+		}
+		_, _, key, e := AssetIdentity(a.AssetClass, a.Title)
+		if e == nil {
+			services[key] = true
+		}
+	}
 	out := make(map[string]bool, len(assets))
 	for _, a := range assets {
 		if a.Type != NodeAsset || a.Status == AssetStatusRetired || excluded[a.ID] {
 			continue
 		}
+		if a.AssetClass == AssetAPI {
+			_, _, key, e := AssetIdentity(a.AssetClass, a.Title)
+			if AssetSourceOf(a.Detail) == AssetSourceDiscovered || e == nil && services[key] {
+				continue
+			}
+		}
 		if AssetSourceOf(a.Detail) == AssetSourceDiscovered {
 			switch DisplayAssetClass(a.AssetClass) {
-			case AssetDomain, AssetHost, AssetService, AssetApp, AssetMiniProgram:
+			case AssetDomain, AssetHost, AssetService, AssetAPI, AssetApp, AssetMiniProgram:
 			default:
 				continue
 			}
@@ -289,4 +361,113 @@ func (s *Store) AssetJoinEvents(ctx context.Context, task string, assets []NodeA
 		}
 	}
 	return events, nil
+}
+
+// AssetEntryAddress accepts historical decorated references without making
+// their request metadata part of the asset identity.
+func AssetEntryAddress(title string) string {
+	title = strings.TrimSpace(title)
+	if _, address, ok := strings.Cut(title, " "); ok && strings.Contains(address, "://") {
+		return strings.TrimSpace(address)
+	}
+	return title
+}
+
+// Inventory registration is not authorization. Only literal operator targets
+// and already admitted site origins admit automatic children; DNS answers and
+// discovered wildcard certificates cannot grow this set.
+func AutomaticallyInventory(class AssetClass, title string, assets []NodeFull, roe RoeState) bool {
+	address := AssetEntryAddress(title)
+	target, ok := ScopeAnchorOf(address)
+	if !ok {
+		return false
+	}
+	excluded := ExcludedCoveredAssetIDs(assets, roe.ExcludedAssetSet())
+	for _, a := range assets {
+		if a.Status == AssetStatusRetired || excluded[a.ID] {
+			continue
+		}
+		if class == AssetAPI && DisplayAssetClass(a.AssetClass) == AssetService {
+			_, _, root, e := AssetIdentity(AssetService, a.Title)
+			_, _, child, ec := AssetIdentity(AssetService, address)
+			if e == nil && ec == nil && root == child {
+				return true
+			}
+		}
+		if class == AssetAPI {
+			continue
+		}
+		if AssetSourceOf(a.Detail) == AssetSourceDiscovered {
+			adopted, _ := a.Detail["adopted"].(bool)
+			if !adopted || (a.AssetClass != AssetDomain && a.AssetClass != AssetHost) {
+				continue
+			}
+		}
+		seed, valid := ScopeAnchorOf(a.Title)
+		if !valid {
+			continue
+		}
+		if seed.Host == target.Host || seed.Wildcard && (target.Host == seed.Host || strings.HasSuffix(target.Host, "."+seed.Host)) {
+			if seed.Port == "" || a.AssetClass == AssetService || a.AssetClass == AssetAPI {
+				return true
+			}
+			if u, e := url.Parse(address); e == nil && u.Hostname() != "" {
+				target.Port = u.Port()
+				if target.Port == "" {
+					if u.Scheme == "https" {
+						target.Port = "443"
+					} else if u.Scheme == "http" {
+						target.Port = "80"
+					}
+				}
+			}
+			if target.Port == seed.Port {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Withdrawal follows the selected entity: a site withdraws its own resources,
+// an endpoint only itself, and an address its literal host (never reverse DNS).
+func AssetContainsIdentity(parentClass AssetClass, parentTitle string, childClass AssetClass, childTitle string) bool {
+	pc, pt, pk, pe := AssetIdentity(parentClass, parentTitle)
+	_, _, ck, ce := AssetIdentity(childClass, childTitle)
+	if pe != nil || ce != nil {
+		return false
+	}
+	if pk == ck {
+		return true
+	}
+	if pc == AssetAPI {
+		return false
+	}
+	address := AssetEntryAddress(childTitle)
+	if pc == AssetService {
+		_, _, key, err := AssetIdentity(AssetService, address)
+		return err == nil && pk == key
+	}
+	if pc == AssetDomain || pc == AssetHost {
+		child, ok := ScopeAnchorOf(address)
+		if !ok {
+			return false
+		}
+		return child.Host == pt || strings.HasPrefix(pt, "*.") && (child.Host == strings.TrimPrefix(pt, "*.") || strings.HasSuffix(child.Host, "."+strings.TrimPrefix(pt, "*.")))
+	}
+	return false
+}
+
+func AssetAddress(class AssetClass, title string) (AssetClass, string, error) {
+	if (class == AssetApp || class == AssetMiniProgram) && !strings.Contains(title, "://") {
+		return "", "", fmt.Errorf("系统标识没有网络地址")
+	}
+	address := AssetEntryAddress(title)
+	if u, err := url.Parse(address); err == nil && u.Hostname() != "" {
+		address = u.Hostname()
+	} else if host, _, err := net.SplitHostPort(address); err == nil {
+		address = host
+	}
+	c, host, _, err := AssetIdentity(AssetDomain, address)
+	return c, host, err
 }

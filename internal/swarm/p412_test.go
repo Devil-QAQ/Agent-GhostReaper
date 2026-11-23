@@ -40,9 +40,9 @@ func TestSubmitCandidateFactNewAsset(t *testing.T) {
 		t.Fatalf("new_asset 声明应随事实入 detail: %+v", n.Detail)
 	}
 
-	// asset_id 与 new_asset 互斥。
-	if _, err := env.SubmitCandidateFact(ctx, "s", "e", "target", &NewAssetDecl{Class: "host", Title: "x.example.com"}); err == nil {
-		t.Fatalf("asset_id 与 new_asset 同时给应拒绝")
+	// 同时保留来源资产与新对象声明。
+	if _, err := env.SubmitCandidateFact(ctx, "s", "e", "target", &NewAssetDecl{Class: "host", Title: "192.0.2.8"}); err != nil {
+		t.Fatalf("来源资产与发现对象不应互斥: %v", err)
 	}
 	// 类不在 12 类词表。
 	if _, err := env.SubmitCandidateFact(ctx, "s", "e", "", &NewAssetDecl{Class: "galaxy", Title: "x.example.com"}); err == nil {
@@ -56,9 +56,9 @@ func TestSubmitCandidateFactNewAsset(t *testing.T) {
 	if _, err := env.SubmitCandidateFact(ctx, "s", "e", "", &NewAssetDecl{Class: "host", Title: "x.example.com", Parent: "ghost"}); err == nil {
 		t.Fatalf("幽灵父资产应拒绝")
 	}
-	// 非法声明不落任何候选(五次拒绝,加上首条合法共 1 条)。
+	// 非法声明不落候选；两条合法提交均保留。
 	facts, _ := store.NodesByType(ctx, task, rings.NodeFact, "")
-	if len(facts) != 1 {
+	if len(facts) != 2 {
 		t.Fatalf("被拒提交不得落账: 实际 %d 条候选", len(facts))
 	}
 }

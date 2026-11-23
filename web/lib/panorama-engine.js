@@ -426,8 +426,15 @@ export class PanoramaEngine {
     else if (points.length === 3) ctx.quadraticCurveTo(...points[1],...points[2]);
     else ctx.bezierCurveTo(...points[1],...points[2],...points[3]);
     ctx.strokeStyle = active ? this.palette.primary : this.palette.mutedFg; ctx.lineWidth = active ? 1.1 + this.fade.value * .5 : this.cam.scale < .15 ? .8 : 1.1; ctx.globalAlpha = .8 * this._visibility(`e:${edgeKey(e)}`); ctx.setLineDash(e.dashed ? [4, 4] : []); ctx.stroke(); ctx.setLineDash([]);
-    if (progress === 1) {
+    if (progress === 1 && e.rel !== "asset_same_system" && e.rel !== "asset_related_to") {
       const [x2,y2] = points[points.length-1], [px,py] = points[points.length-2], angle = Math.atan2(y2-py,x2-px), length = Math.max(3.5, (active ? 8 : 6) * Math.min(1, this.cam.scale)); ctx.beginPath(); ctx.moveTo(x2,y2); ctx.lineTo(x2-length*Math.cos(angle-.45),y2-length*Math.sin(angle-.45)); ctx.lineTo(x2-length*Math.cos(angle+.45),y2-length*Math.sin(angle+.45)); ctx.closePath(); ctx.fillStyle = ctx.strokeStyle; ctx.fill();
+    }
+    if (e.label && progress === 1 && this.cam.scale >= .55) {
+      const weights = points.length === 4 ? [1/8,3/8,3/8,1/8] : points.map(() => 1/points.length);
+      const x = points.reduce((sum,p,i)=>sum+p[0]*weights[i],0), y = points.reduce((sum,p,i)=>sum+p[1]*weights[i],0);
+      ctx.save(); ctx.font = `11px ${this.fontFamily}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      const width = ctx.measureText(e.label).width + 12; ctx.fillStyle = this.palette.background; ctx.fillRect(x-width/2,y-9,width,18);
+      ctx.fillStyle = this.palette.mutedFg; ctx.fillText(e.label,x,y); ctx.restore();
     }
     ctx.globalAlpha = 1;
   }
@@ -453,7 +460,7 @@ export class PanoramaEngine {
     if (n.t === "asset" || n.t === "claim") { ctx.fillStyle = accent; ctx.fillRect(-s.w / 2 + 7 * s.z, -s.h / 2, Math.max(0, s.w - 14 * s.z), Math.max(.4, 1.5 * s.z)); }
     ctx.scale(s.z, s.z); ctx.textAlign = "center"; ctx.textBaseline = "alphabetic"; ctx.fillStyle = P.foreground; ctx.font = `12px ${this.fontFamily}`;
     const title = n.t === "step" ? `${n.id} ${n.ti}` : n.ti; this._text(ctx, title, 0, -3, 152);
-    ctx.fillStyle = P.mutedFg; ctx.font = `11px ${this.fontFamily}`; const results = this.focus && active && this.focusResults?.has(n.id) ? this.focusResults.get(n.id) : n.results; let sub = n.t === "asset" ? `${n.id} · 资产` : n.t === "claim" ? `${n.id} · ${n.sev || "未评级"}` : results?.length ? `${results[0].ti}${results?.length > 1 ? ` +${results?.length - 1}` : ""}` : this.focus && active ? "未关联事实" : "未产出事实";
+    ctx.fillStyle = P.mutedFg; ctx.font = `11px ${this.fontFamily}`; const results = this.focus && active && this.focusResults?.has(n.id) ? this.focusResults.get(n.id) : n.results; let sub = n.t === "asset" ? n.hint ? `${n.hint} · ${n.id}` : `${n.id} · 资产` : n.t === "claim" ? `${n.id} · ${n.sev || "未评级"}` : results?.length ? `${results[0].ti}${results?.length > 1 ? ` +${results?.length - 1}` : ""}` : this.focus && active ? "未关联事实" : "未产出事实";
     this._text(ctx, sub, this.focus && active ? -20 : 0, 14, this.focus && active ? 100 : 152);
     if (this.focus && active) { const b = DETAIL_BUTTON, hover = this.hoveredDetail === n.id; this._round(ctx, b.x, b.y, b.w, b.h, 5); ctx.save(); ctx.globalAlpha *= hover ? .22 : .1; ctx.fillStyle = accent; ctx.fill(); ctx.restore(); ctx.save(); ctx.globalAlpha *= hover ? .85 : .45; ctx.strokeStyle = accent; ctx.lineWidth = 1; ctx.stroke(); ctx.restore(); ctx.font = `11px ${this.fontFamily}`; ctx.fillStyle = accent; ctx.textAlign = "center"; ctx.fillText("详情", b.x + b.w / 2, b.y + 12); }
     ctx.restore();

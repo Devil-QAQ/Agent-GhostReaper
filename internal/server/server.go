@@ -1078,18 +1078,19 @@ type assetTreeView struct {
 }
 
 type assetNodeJSON struct {
-	ID           string `json:"id"`
-	Title        string `json:"title"`
-	DisplayTitle string `json:"display_title"`
-	Class        string `json:"class"`
-	Status       string `json:"status"`
-	Covered      bool   `json:"covered"`
-	FactCount    int    `json:"fact_count"`
-	Source       string `json:"source"`      // 来源三态:seed/manual/discovered(P4-05)
-	Excluded     bool   `json:"excluded"`    // 已从授权范围摘除(P4-05;范围外)
-	ScopeOut     bool   `json:"scope_out"`   // 入图冻结的范围归属(P4-44:true=种子闭包外)
-	ScopeState   string `json:"scope_state"` // 范围呈现态(P4-44:pending/out_open/""=范围内)
-	CreatedRev   int64  `json:"created_rev"`
+	SubjectIDs   []string `json:"subject_ids"`
+	ID           string   `json:"id"`
+	Title        string   `json:"title"`
+	DisplayTitle string   `json:"display_title"`
+	Class        string   `json:"class"`
+	Status       string   `json:"status"`
+	Covered      bool     `json:"covered"`
+	FactCount    int      `json:"fact_count"`
+	Source       string   `json:"source"`      // 来源三态:seed/manual/discovered(P4-05)
+	Excluded     bool     `json:"excluded"`    // 已从授权范围摘除(P4-05;范围外)
+	ScopeOut     bool     `json:"scope_out"`   // 入图冻结的范围归属(P4-44:true=种子闭包外)
+	ScopeState   string   `json:"scope_state"` // 范围呈现态(P4-44:pending/out_open/""=范围内)
+	CreatedRev   int64    `json:"created_rev"`
 	// 发现型资产的出生血缘(P4-12):发现单位/发现步骤/发现事实(收割入图时
 	// 冻结进 detail;非发现资产零值,如实断链)。
 	BirthUnit string `json:"birth_unit,omitempty"`
@@ -1117,8 +1118,8 @@ func (s *Server) handleAssetTree(w http.ResponseWriter, r *http.Request) {
 	for _, a := range ag.Assets {
 		v.Assets = append(v.Assets, assetNodeJSON{
 			ID: a.ID, Title: a.Title, Class: string(a.AssetClass), Status: a.Status,
-			DisplayTitle: rings.AssetDisplayTitle(a.AssetClass, a.Title),
-			Covered:      a.Covered, FactCount: a.FactCount,
+			DisplayTitle: a.DisplayTitle, SubjectIDs: a.SubjectIDs,
+			Covered: a.Covered, FactCount: a.FactCount,
 			Source:     a.Source,
 			CreatedRev: a.CreatedRev,
 		})
@@ -1325,7 +1326,12 @@ func (s *Server) buildManualAssets(ctx context.Context, taskID string, assets []
 	if err != nil {
 		return nil, err
 	}
-	return append(events, bindings...), nil
+	events = append(events, bindings...)
+	children, err := overmind.ObservedChildAssetEvents(ctx, s.Store, taskID, joined)
+	if err != nil {
+		return nil, err
+	}
+	return append(events, children...), nil
 }
 
 func (s *Server) handleAssetDetail(w http.ResponseWriter, r *http.Request) {
@@ -1344,6 +1350,24 @@ func (s *Server) handleAssetDetail(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("节点 %s 不是资产(%s)", nodeID, n.Type))
 		return
 	}
+	ag, graphErr := s.Store.AssetGraph(r.Context(), taskID)
+	if graphErr == nil {
+		if entry := ag.ResourceAliases[nodeID]; entry != "" {
+			n, err = s.Store.Node(r.Context(), taskID, entry)
+			if err != nil {
+				writeErr(w, 500, err)
+				return
+			}
+			nodeID = entry
+		}
+	}
+	if n.AssetClass == rings.AssetAPI {
+		_, title, _, e := rings.AssetIdentity(n.AssetClass, n.Title)
+		if e == nil {
+			n.Title = title
+			n.AssetClass = rings.AssetService
+		}
+	}
 	abouts, err := s.Store.Edges(r.Context(), taskID, rings.EdgeAbout)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
@@ -1351,7 +1375,7 @@ func (s *Server) handleAssetDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	anchored := make(map[string]bool, len(abouts))
 	for _, e := range abouts {
-		if e.To == nodeID {
+		if e.To == nodeID || graphErr == nil && ag.ResourceAliases[e.To] == nodeID {
 			anchored[e.From] = true
 		}
 	}
@@ -1394,7 +1418,7 @@ func (s *Server) handleAssetDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	// 覆盖标志与计数以 AssetGraph 投影为准(节点 detail 不承载派生值);
 	// 范围外(P4-05)与 RoE 摘除清单同源。
-	if ag, err := s.Store.AssetGraph(r.Context(), taskID); err == nil {
+	if graphErr == nil {
 		v.Relations = []rings.AssetRelationView{}
 		for _, r := range ag.Relations {
 			if r.From == nodeID || r.To == nodeID {

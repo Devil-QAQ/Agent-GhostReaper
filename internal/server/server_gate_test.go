@@ -124,12 +124,17 @@ func (m *smodel) handle(w http.ResponseWriter, r *http.Request) {
 	for _, t := range body.Tools {
 		rr.ToolsOffered = append(rr.ToolsOffered, t.Function.Name)
 	}
+
 	if strings.Contains(rr.System, "你负责判断任务中一次实际工具调用") {
 		decision := "allow"
 		if m.review != nil {
 			decision = m.review(&rr)
 		}
-		content, _ := json.Marshal(map[string]string{"decision": decision, "reason": "测试中的动作判断"})
+		verdict := map[string]any{"decision": decision, "reason": "测试中的动作判断"}
+		if decision == "approval" {
+			verdict["permission"] = rings.PurposePermission{Actions: []string{"create"}, Resource: "测试对象", Purpose: "执行测试动作", Targets: []string{"测试目标"}, Effects: "测试中要求人工确认的操作"}
+		}
+		content, _ := json.Marshal(verdict)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": string(content)}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 40, "completion_tokens": 10}})
 		return

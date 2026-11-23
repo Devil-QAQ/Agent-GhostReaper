@@ -203,7 +203,7 @@ const renderNode = (node, depth, visited) => {
             <span className="w-4 shrink-0" />
           )}
           <Icon className={cn("size-4 shrink-0", node.covered ? "text-status-success" : "text-muted-foreground/55")} />
-          <span className={cn("min-w-0 flex-1 truncate text-sm", node.covered ? "text-status-success" : "text-muted-foreground")} title={node.title || node.id}>{node.display_title || node.title || node.id}</span>
+          <span className={cn("min-w-0 flex-1 truncate text-sm", node.covered ? "text-status-success" : "text-muted-foreground")} title={node.title || node.id}>{node.display_title || node.title || node.id}{(node.class === "app" || node.class === "miniprogram") && node.display_title && node.title !== node.display_title && <span className="ml-2 text-xs text-muted-foreground">{node.title}</span>}</span>
           <SourceMark node={node} />
 		  <Badge variant={node.covered ? "success" : "outline"} className={node.covered ? "" : "text-muted-foreground"}>
 		    {node.covered ? "已覆盖" : "未测"}

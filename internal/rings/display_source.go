@@ -11,7 +11,7 @@ var ErrDisplayAlreadyGenerated = errors.New("该版本已有显示稿")
 // Content versions ignore execution status changes. A unit finishing must not
 // cause its unchanged intent text to be generated all over again.
 func (s *Store) NodeTextSourceRevs(ctx context.Context, task string) (map[string]int64, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT json_extract(payload,'$.node_id'),MAX(revision) FROM events WHERE task_id=? AND kind IN ('node.added','node.amended') GROUP BY json_extract(payload,'$.node_id')`, task)
+	rows, err := s.db.QueryContext(ctx, `SELECT json_extract(payload,'$.node_id'),MAX(revision) FROM events WHERE task_id=? AND kind IN ('node.added','node.amended') AND json_extract(payload,'$.detail.asset_discovery_source') IS NULL GROUP BY json_extract(payload,'$.node_id')`, task)
 	if err != nil {
 		return nil, err
 	}
@@ -33,7 +33,7 @@ func validateNodeTextSource(tx *sql.Tx, task, id string, source, applyingRev int
 		return nil
 	} // Existing event payloads predate content versions.
 	var current int64
-	if err := tx.QueryRow(`SELECT COALESCE(MAX(revision),0) FROM events WHERE task_id=? AND kind IN ('node.added','node.amended') AND json_extract(payload,'$.node_id')=? AND revision<?`, task, id, applyingRev).Scan(&current); err != nil {
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(revision),0) FROM events WHERE task_id=? AND kind IN ('node.added','node.amended') AND json_extract(payload,'$.detail.asset_discovery_source') IS NULL AND json_extract(payload,'$.node_id')=? AND revision<?`, task, id, applyingRev).Scan(&current); err != nil {
 		return err
 	}
 	if current != source {

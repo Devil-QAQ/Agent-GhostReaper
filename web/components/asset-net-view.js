@@ -16,7 +16,7 @@ export function AssetNetView({ assets, hierarchy, relations = [], focus, onOpenD
   const [selected, setSelected] = React.useState(null), [hover, setHover] = React.useState(null), [layout, setLayout] = React.useState(null), [failure, setFailure] = React.useState(""), [query, setQuery] = React.useState(""), [kind, setKind] = React.useState("all"), [retry, setRetry] = React.useState(0);
   const [location, setLocation] = React.useState(null);
   // Canonical structural key avoids rerunning layout for unchanged poll results.
-  const structure = JSON.stringify([assets.map(a => [a.id, a.class]).sort(), hierarchy.map(e => [e.from, e.to]).sort(), relations.map(e => [e.kind,e.from,e.to]).sort()]);
+  const structure = JSON.stringify([assets.map(a => [a.id, a.class, a.subject_ids]).sort(), hierarchy.map(e => [e.from, e.to]).sort(), relations.map(e => [e.kind,e.from,e.to]).sort()]);
   React.useEffect(() => {
     const eng = new AssetNetEngine(canvas.current, minimap.current, {
       onNodeClick: node => { setHover(null); eng.setHoveredAsset(null); eng.focusAsset(node.id); },

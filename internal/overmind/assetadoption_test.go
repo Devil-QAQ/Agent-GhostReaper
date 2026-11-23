@@ -66,16 +66,16 @@ func TestAssetAdoptionAddsOneAssetWithOriginalProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	assets, _ := store.NodesByType(t.Context(), task, rings.NodeAsset, "")
-	if len(assets) != 2 {
-		t.Fatalf("same service split by path: assets=%d", len(assets))
+	if len(assets) != 3 {
+		t.Fatalf("resources did not converge to their website: assets=%d", len(assets))
 	}
 	var added rings.NodeFull
 	for _, a := range assets {
-		if a.ID != "a-seed" {
+		if a.ID != "a-seed" && a.AssetClass == rings.AssetService {
 			added = a
 		}
 	}
-	if added.AssetClass != rings.AssetService || added.Detail["discovered_fact"] != "f1" || added.Detail["step_id"] != "s1" || added.Title != "https://api.example.org/v1/list" {
+	if added.AssetClass != rings.AssetService || added.Detail["discovered_fact"] != "f1" || added.Detail["step_id"] != "s1" || added.Title != "https://api.example.org" {
 		t.Fatalf("lost identity/address/provenance: %+v", added)
 	}
 	refs, _ := store.Edges(t.Context(), task, rings.EdgeAbout)

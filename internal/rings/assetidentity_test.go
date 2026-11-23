@@ -13,7 +13,7 @@ func TestNetworkAssetIdentity(t *testing.T) {
 		{AssetDomain, "例子.中国", "domain", "xn--fsqu00a.xn--fiqs8s", "domain:xn--fsqu00a.xn--fiqs8s"},
 		{AssetHost, "[2001:db8::1]", "host", "2001:db8::1", "ip:2001:db8::1"},
 		{AssetHost, "::ffff:192.0.2.1", "host", "192.0.2.1", "ip:192.0.2.1"},
-		{AssetAPI, "https://API.Example.org:443/v1/status?view=short", "service", "https://api.example.org/v1/status?view=short", "service:https://api.example.org"},
+		{AssetAPI, "https://API.Example.org:443/v1/status?view=short", "service", "https://api.example.org", "service:https://api.example.org"},
 		{AssetService, "http://[2001:db8::1]:8080/app", "service", "http://[2001:db8::1]:8080/app", "service:http://[2001:db8::1]:8080"},
 	} {
 		c, title, key, err := NetworkAssetIdentity(tc.class, tc.input)

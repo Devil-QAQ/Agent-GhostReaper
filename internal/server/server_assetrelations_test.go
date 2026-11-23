@@ -24,7 +24,7 @@ func TestAssetRelationsAPIAndPanoramaIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Append(ctx, task, rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u", Payload: rings.NodeAdded{NodeID: "f", NodeType: rings.NodeFact, Title: "observed", Status: "confirmed", Detail: map[string]any{"evidence": "DNS original", "new_asset": map[string]any{"class": "host", "title": "ip.test"}, "asset_relations": []rings.AssetRelation{{"a", "$new", "resolves_to"}, {"b", "$new", "resolves_to"}}}}}, rings.Event{Kind: rings.EventEdgeAdded, Actor: "overmind", Payload: rings.EdgeAdded{EdgeType: rings.EdgeObservedAsset, FromNode: "f", ToNode: "ip"}}); err != nil {
+	if _, err := s.Append(ctx, task, rings.Event{Kind: rings.EventNodeAdded, Actor: "swarm:u", Payload: rings.NodeAdded{NodeID: "f", NodeType: rings.NodeFact, Title: "observed", Status: "confirmed", Detail: map[string]any{"evidence": "DNS original", "new_asset": map[string]any{"class": "host", "title": "ip.test"}, "asset_relations": []rings.AssetRelation{{From: "a", To: "$new", Kind: "resolves_to"}, {From: "b", To: "$new", Kind: "resolves_to"}}}}}, rings.Event{Kind: rings.EventEdgeAdded, Actor: "overmind", Payload: rings.EdgeAdded{EdgeType: rings.EdgeObservedAsset, FromNode: "f", ToNode: "ip"}}); err != nil {
 		t.Fatal(err)
 	}
 	after, err := srv.panoSkeletonOf(ctx, task)

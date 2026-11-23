@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,6 +20,7 @@ import (
 // 参数"供造物主核对(v1 人即兜底,第四章 §3)。Note 携带弹门上下文
 // (P4-03 ②:拦截规则命中转人审时说明原因,命令原文在 ToolArgs)。
 type ApprovalRequest struct {
+	Permission     *rings.PurposePermission
 	owner          *rings.ExecutionOwner
 	ID             string
 	TaskID         string
@@ -28,9 +30,11 @@ type ApprovalRequest struct {
 	ActionLevel    rings.ActionLevel
 	HarmClass      rings.HarmClass
 	ToolName       string
-	ToolArgs       string // 原始 JSON 参数
-	Note           string // 弹门上下文(空 = 常规门槛弹门,无附加说明)
-	PolicyRevision int64  // operator policy used for this exact action; never a host permission
+	ToolArgs       string            // 原始 JSON 参数
+	Note           string            // 弹门上下文(空 = 常规门槛弹门,无附加说明)
+	Boundary       string            // full operator boundary at approval time
+	Sources        map[string]string // source fingerprints, absent after legacy/restart recovery requires review
+	PolicyRevision int64             // operator policy used for this exact action; never a host permission
 	CreatedAt      time.Time
 }
 
@@ -204,7 +208,7 @@ func (g *LedgerGate) Enter(req ApprovalRequest) (*GateTicket, error) {
 		RequestID: req.ID, StepID: req.StepID, UnitID: req.UnitID,
 		Type: typ, ActionLevel: req.ActionLevel,
 		HarmClass: req.HarmClass, Intent: req.Intent,
-		ToolName: req.ToolName, ToolArgs: []byte(req.ToolArgs), Note: req.Note,
+		ToolName: req.ToolName, ToolArgs: []byte(req.ToolArgs), Note: req.Note, SourceHashes: req.Sources, Permission: req.Permission,
 	}); err != nil {
 		t.closed = true
 		g.mu.Lock()
@@ -246,6 +250,9 @@ func (g *LedgerGate) Decide(_ context.Context, taskID, requestID string, d GateD
 	typ := rings.ApprovalRecDenied
 	denyLine := rings.DenyLinePanel
 	if d.Approved {
+		if t.Req.Permission != nil && strings.TrimSpace(d.Reason) == "" {
+			d.Reason = purposeApprovalMeaning
+		}
 		typ = rings.ApprovalRecApproved
 		denyLine = ""
 	}
@@ -257,7 +264,7 @@ func (g *LedgerGate) Decide(_ context.Context, taskID, requestID string, d GateD
 		RequestID: requestID, StepID: t.Req.StepID, UnitID: t.Req.UnitID,
 		Type: typ, ActionLevel: t.Req.ActionLevel, HarmClass: t.Req.HarmClass,
 		Intent: t.Req.Intent, ToolName: t.Req.ToolName, ToolArgs: []byte(t.Req.ToolArgs),
-		Note: t.Req.Note, DenyLine: denyLine, DecidedBy: by, Reason: d.Reason,
+		SourceHashes: t.Req.Sources, Permission: t.Req.Permission, Note: t.Req.Note, DenyLine: denyLine, DecidedBy: by, Reason: d.Reason,
 		WaitMillis: time.Since(t.requestedAt).Milliseconds(),
 	}); err != nil {
 		if errors.Is(err, rings.ErrExecutionEnded) {

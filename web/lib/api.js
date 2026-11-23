@@ -309,7 +309,7 @@ export const HARM_CLASS_LABELS = {
 export const ASSET_CLASSES = [
   ["domain", "域名", "globe"],
   ["host", "IP", "server"],
-  ["service", "服务入口", "plug"],
+  ["service", "网站与服务", "plug"],
   ["app", "应用", "appWindow"],
   ["miniprogram", "小程序", "appWindow"],
 ];

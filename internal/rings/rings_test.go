@@ -184,7 +184,6 @@ func TestAppendAndDualGraphProjection(t *testing.T) {
 		}
 	}
 	wantHierarchy := []EdgeView{
-		{Type: EdgeSubOf, From: "svc1", To: "host1", CreatedRev: 10},
 		{Type: EdgeSubOf, From: "www1", To: "dom1", CreatedRev: 6},
 	}
 	if !reflect.DeepEqual(ag.Hierarchy, wantHierarchy) {

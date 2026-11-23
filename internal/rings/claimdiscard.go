@@ -28,12 +28,16 @@ func ExcludedCoveredAssetIDs(assets []NodeFull, excluded map[string]bool) map[st
 		if covered[a.ID] {
 			continue
 		}
-		if anchor, ok := ScopeAnchorOf(a.Title); ok {
-			if ExcludedCoversTarget(assets, excluded, anchor.Host, anchor.Port) {
-				covered[a.ID] = true
+		if _, _, _, e := AssetIdentity(a.AssetClass, a.Title); e == nil {
+			for _, x := range assets {
+				if excluded[x.ID] && AssetContainsIdentity(x.AssetClass, x.Title, a.AssetClass, a.Title) {
+					covered[a.ID] = true
+					break
+				}
 			}
 			continue
 		}
+
 		// 无主机锚点的资产(收割入图的描述型标题):按排除锚点子串回退
 		// ——标题里出现被摘除资产的主机标识(host,端口限定摘除只认
 		// host:port 形态)即视为同一目标的呈现。

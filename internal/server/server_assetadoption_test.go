@@ -126,7 +126,7 @@ func TestAssetAdoptionManualJoinAfterDeclineAndPendingChoice(t *testing.T) {
 func TestAssetIdentitySeedCanonicalization(t *testing.T) {
 	for _, assets := range [][]assetIn{
 		{{Class: "domain", Title: "API.example.org."}, {Class: "subdomain", Title: "api.example.org"}},
-		{{Class: "service", Title: "https://app.example.org:443/a"}, {Class: "api", Title: "https://APP.example.org/b"}},
+		{{Class: "service", Title: "https://app.example.org:443/a"}, {Class: "service", Title: "https://APP.example.org/b"}},
 	} {
 		if _, err := buildAssetSeed(assets); err == nil {
 			t.Fatal("canonical duplicate seed accepted")

@@ -89,7 +89,7 @@ func TestManualAssetCreate(t *testing.T) {
 			}
 		}
 	}
-	if len(tree.Tree) != 2 {
+	if len(tree.Tree) != 1 {
 		t.Fatalf("批内+图上父子边共 2 条,实得 %d", len(tree.Tree))
 	}
 

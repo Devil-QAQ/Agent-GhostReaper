@@ -23,6 +23,7 @@ func (l *Loop) processResults(ctx context.Context) error {
 		return err
 	}
 	l.polishConfirmedFactsAsync(ctx, harvest.Confirmed)
+	l.syncRecordedAssets(ctx)
 	_, err = l.checkPendingClaims(ctx)
 	return err
 }

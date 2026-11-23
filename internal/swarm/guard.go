@@ -343,3 +343,19 @@ func (g *toolGuard) recordDeliveredBatch(dirs []rings.SteerRecord, atBoundary in
 	_, err := g.env.appendBusiness(steerCtx, events...)
 	return err
 }
+
+// This capability reads the platform's immutable output store, not a remote
+// target or an arbitrary local path. Its input cannot turn it into execution.
+func (env *unitEnv) internalArtifactRead(name string, input json.RawMessage) bool {
+	if name != "read" || env.Executor.Blobs == nil {
+		return false
+	}
+	var args struct {
+		Path string `json:"path"`
+	}
+	if json.Unmarshal(input, &args) != nil || !strings.HasPrefix(args.Path, BlobRefPrefix) {
+		return false
+	}
+	_, err := env.Executor.Blobs.Path(args.Path)
+	return err == nil
+}

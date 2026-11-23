@@ -1287,6 +1287,13 @@ func (e *Executor) drive(ctx context.Context, env *unitEnv, pack *TaskPack, budg
 		asst.Reset()
 
 		// ---- P2-06e/P4-27 ①⑥ 模型故障:长退避续试,确定性立即受阻 ----
+		// Policy-provider/format failures are model faults, not requests for
+		// authorization. Callbacks are drained here, so parallel tool callbacks
+		// cannot race this handoff to the existing retry/wait/resume path.
+		if env.reviewErr != nil {
+			res.Reason = string(harness.ReasonModelError)
+			termErr, env.reviewErr = env.reviewErr, nil
+		}
 		// 非取消的流断与 model_error 终因都是模型故障:退避等待不计
 		// 预算(blockWait),重试只追发短续跑指令(requestID 防续跑
 		// 消息重复注入);瞬时失败长退避循环(1m/5m/15m,模型不通
@@ -1753,7 +1760,7 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 		// Ledger submission text is evidence, not an environmental action.
 		// Matching its contents as a command would discard the very observation
 		// explaining a rejected action. The registered tool still validates it.
-		if guardExemptTool(toolName) {
+		if guardExemptTool(toolName) || env.internalArtifactRead(toolName, input) {
 			return permission.Allowed()
 		}
 		deny := func(line, reason string) permission.Decision {
@@ -1771,32 +1778,57 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 		} else if r.ID != "" {
 			return permission.Denied(env.denyHardAction(pack, toolName, input, r, matched, rings.DenyLineHardRule, ""))
 		}
-		if a := env.allowance; a != nil && a.toolName == toolName && jsonEquiv(a.args, string(input)) && a.policyRevision == roe.UpdatedRev {
-			env.allowance = nil
-			return permission.Allowed()
-		}
 		boundary, err := env.actionBoundary(ctx, pack, roe)
 		if err != nil {
 			return deny(rings.DenyLineRoeScope, err.Error())
 		}
+		if a := env.allowance; a != nil {
+			env.allowance = nil
+			if a.toolName == toolName && jsonEquiv(a.args, string(input)) && a.boundary == boundaryFingerprint(boundary) && env.reviewSourcesUnchanged(a.sources) && env.approvalStillActive(ctx, a.requestID) {
+				return permission.Allowed()
+			}
+		}
+
 		review := env.Executor.ReviewAction
 		if review == nil {
 			review = env.meteredActionReview()
 		}
-		reviewBy := "model"
+		refreshes := 0
+	reviewCurrentApproval:
+		env.reviewSources = map[string]string{}
 		result, reviewErr := review(ctx, ActionReviewInput{TaskType: string(pack.TaskType), Goal: pack.GoalTitle,
 			Intent: pack.StepIntent, Tool: toolName, Arguments: input, Boundaries: boundary})
 		if ctx.Err() != nil {
 			return permission.Denied("调用已取消，未执行")
 		}
-		if reviewErr != nil || (result.Decision != ActionAllow && result.Decision != ActionApproval) || strings.TrimSpace(result.Reason) == "" {
-			reviewBy = "system"
-			result = ActionReview{Decision: ActionApproval, Reason: "动作判断未完成，请核对当前调用后决定是否批准"}
+		if reviewErr != nil || (result.Decision != ActionAllow && result.Decision != ActionApproval && result.Decision != ActionDeny) || strings.TrimSpace(result.Reason) == "" {
+			// Never echo raw provider errors (they can contain credentials).
+			env.reviewErr = errors.New("动作判断未完成，等待模型恢复")
+			var category actionReviewError
+			if errors.As(reviewErr, &category) {
+				env.reviewErr = category
+			}
+			env.fuseSegment()
+			return permission.Denied(env.reviewErr.Error())
 		}
 		// An operator edit made while the model was answering invalidates its result.
 		current, err := env.Executor.Store.CurrentRoE(ctx, pack.TaskID)
-		if err != nil || current.UpdatedRev != roe.UpdatedRev {
+		if err != nil {
 			return deny(rings.DenyLineRoeScope, "任务边界已变化，本次调用未执行，请按当前边界重新发起")
+		}
+		latestBoundary, err := env.actionBoundary(ctx, pack, current)
+		if err != nil || !boundaryStillCurrent(boundary, latestBoundary) {
+			return deny(rings.DenyLineRoeScope, "任务边界已变化，本次调用未执行，请按当前边界重新发起")
+		}
+		if result.Decision == ActionApproval && len(latestBoundary.Approvals) > len(boundary.Approvals) {
+			if refreshes >= 2 {
+				env.reviewErr = actionReviewError("批准依据正在更新，等待重新判断")
+				env.fuseSegment()
+				return permission.Denied(env.reviewErr.Error())
+			}
+			refreshes++
+			boundary = latestBoundary
+			goto reviewCurrentApproval
 		}
 		if r, matched, err := matchHardRule(ctx, env.Executor.Store, toolName, input); err != nil {
 			return deny(rings.DenyLineHardRule, err.Error())
@@ -1806,7 +1838,7 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 		_, err = env.appendBusiness(guardLedgerCtx, rings.Event{Kind: rings.EventApprovalRecord,
 			Actor: "swarm:" + env.UnitID, Payload: rings.ApprovalRecord{StepID: pack.StepID, UnitID: env.UnitID,
 				RequestID: "ar-" + strings.TrimPrefix(gateRequestID(), "ap-"), Type: rings.ApprovalRecActionReview, ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
-				Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input, DecidedBy: reviewBy,
+				Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input, DecidedBy: "model",
 				Note: result.Decision, Reason: result.Reason}})
 		if err != nil {
 			return permission.Denied("动作判断记录未保存，本次调用未执行")
@@ -1814,12 +1846,15 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 		if result.Decision == ActionAllow {
 			return permission.Allowed()
 		}
+		if result.Decision == ActionDeny {
+			return deny(rings.DenyLineRoeScope, result.Reason)
+		}
 		if env.Executor.Gate == nil {
 			return deny(rings.DenyLineNoGate, "本次动作需要审批，审批入口不可用，未执行")
 		}
 		ticket, err := env.Executor.Gate.Enter(ApprovalRequest{TaskID: pack.TaskID, StepID: pack.StepID, UnitID: env.UnitID,
 			Intent: pack.StepIntent, ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass, ToolName: toolName,
-			ToolArgs: string(input), Note: result.Reason, PolicyRevision: roe.UpdatedRev, owner: env.owner})
+			ToolArgs: string(input), Note: approvalScopeNote(result), Permission: result.Permission, PolicyRevision: roe.UpdatedRev, Sources: env.reviewSources, Boundary: boundaryFingerprint(boundary), owner: env.owner})
 		if err != nil {
 			return permission.Denied("审批请求未保存，本次调用未执行")
 		}
@@ -1835,13 +1870,15 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 type gateAllowance struct {
 	policyRevision int64
 	requestID      string
+	boundary       string
+	sources        map[string]string
 	toolName       string
 	args           string
 }
 
 // armGateApproval permits only the approved invocation once.
 func (env *unitEnv) armGateApproval(req ApprovalRequest) {
-	env.allowance = &gateAllowance{requestID: req.ID, toolName: req.ToolName, args: req.ToolArgs, policyRevision: req.PolicyRevision}
+	env.allowance = &gateAllowance{requestID: req.ID, sources: req.Sources, boundary: req.Boundary, toolName: req.ToolName, args: req.ToolArgs, policyRevision: req.PolicyRevision}
 }
 
 // fuseSegment 收拢当前执行段(弹门挂起):取消段 ctx,引擎以 aborted

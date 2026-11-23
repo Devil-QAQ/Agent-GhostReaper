@@ -76,7 +76,7 @@ func TestServerTaskSeedFormAndAssetTree(t *testing.T) {
 		Tree   []struct{ From, To string } `json:"hierarchy"`
 	}
 	get(t, h, "/api/tasks/seed-form/assets", http.StatusOK, &tree)
-	if len(tree.Assets) != 5 || len(tree.Tree) != 2 {
+	if len(tree.Assets) != 5 || len(tree.Tree) != 1 {
 		t.Fatalf("资产树不符: %+v", tree)
 	}
 	byTitle := map[string]node{}
@@ -105,7 +105,7 @@ func TestServerTaskSeedFormAndAssetTree(t *testing.T) {
 		subOf[titleOf[e.From]] = titleOf[e.To]
 	}
 	if subOf["www.example.com"] != "example.com" || subOf["192.0.2.1"] != "" ||
-		subOf["http://192.0.2.1:8080"] != "192.0.2.1" {
+		subOf["http://192.0.2.1:8080"] != "" {
 		t.Fatalf("sub_of 层级不符: %+v", subOf)
 	}
 

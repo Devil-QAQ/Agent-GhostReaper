@@ -387,6 +387,9 @@ func discoveredAssetEvents(ctx context.Context, store *rings.Store, taskID strin
 		return nil, fmt.Errorf("查资产查重: %w", err)
 	}
 	for _, a := range assets {
+		if a.AssetClass == rings.AssetAPI {
+			continue
+		}
 		_, _, existing, e := rings.AssetIdentity(a.AssetClass, a.Title)
 		if e == nil && existing == key && a.Status != rings.AssetStatusRetired {
 			return store.BindObservedAssets(ctx, taskID, []rings.NodeAdded{{NodeID: a.ID, AssetClass: class, Title: title}}, []rings.NodeFull{fact}, ActorOvermind)

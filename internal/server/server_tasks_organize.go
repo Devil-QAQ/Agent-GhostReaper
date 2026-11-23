@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -88,7 +89,7 @@ func assetsOrganizeSystem() string {
 {"assets":[{"class":"资产类","title":"资产标识"}]}
 整理纪律(违反即失职):
 - 内容守恒,只规整不增删:输出的每一条都必须来自输入原文(截取或同义归并);输入里的每个资产实体都必须保留——绝不新增输入里没有的资产,绝不丢弃输入里的资产。
-- 允许的规整只有四种:合并同义(协议、前导 www.、末尾斜杠的差异视为同一实体,合并为一条)、拆行(一行多条拆成多条,行内说明文字丢弃)、归类(按 12 类词表)、去重(完全重复只留一条)。
+- 允许的规整只有四种:合并完全相同的定位(域名大小写和默认端口等价；不同协议、不同主机、不同端口不能合并)、拆行(一行多条拆成多条,行内说明文字丢弃)、归类(按 12 类词表)、去重(完全重复只留一条)。
 - 资产类 12 词:domain 域名 / subdomain 子域名 / host 主机 / service 服务 / api 接口 / organization 组织 / miniprogram 小程序 / app 应用 / wechat_account 公众号 / person 人员 / leak_info 泄露信息 / other 其他。URL、IP:端口 → service;纯 IP → host;点分域名 → subdomain 或 domain。
 - 与资产无关的整行说明文字不输出;标题保留原文里的标识写法,不改写。`
 }
@@ -170,10 +171,12 @@ var (
 // organizeNorm 标识规范化:小写、去协议、去前导 www.、去末尾斜杠——
 // 同义实体(协议/前导 www./末尾斜杠差异)规范化后相等。
 func organizeNorm(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	s = organizeSchemeRe.ReplaceAllString(s, "")
-	s = strings.TrimPrefix(s, "www.")
-	return strings.TrimRight(s, "/")
+	s = strings.TrimSpace(s)
+	if u, err := url.Parse(s); err == nil && u.Host != "" {
+		u.Scheme, u.Host = strings.ToLower(u.Scheme), strings.ToLower(u.Host)
+		return strings.TrimRight(u.String(), "/")
+	}
+	return strings.ToLower(strings.TrimSuffix(s, "."))
 }
 
 type organizeToken struct {

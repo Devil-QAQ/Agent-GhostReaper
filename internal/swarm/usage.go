@@ -42,7 +42,7 @@ func (env *unitEnv) meteredActionReview() ActionReviewFunc {
 	return ActionReviewFor(MeterProvider(env.Executor.Provider, env.Executor.Store, rings.TokenUsage{
 		TaskID: env.TaskID, Agent: "swarm:" + env.UnitID, Model: env.Executor.Model,
 		TranscriptID: env.TranscriptID, Purpose: "action_review",
-	}))
+	}), env.readReviewSource)
 }
 
 func (p *meteredProvider) callContext(ctx context.Context) context.Context {

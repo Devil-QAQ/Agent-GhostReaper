@@ -216,7 +216,7 @@ func TestServerP1ExitCriteriaE2E(t *testing.T) {
 	})
 	model.review = func(rr *srecorded) string {
 		var in swarm.ActionReviewInput
-		if json.Unmarshal([]byte(rr.LastUser), &in) == nil && strings.Contains(in.Intent, "畸形请求") {
+		if json.Unmarshal([]byte(rr.LastUser), &in) == nil && strings.Contains(string(in.Arguments), "/fuzz-probe") {
 			return "approval"
 		}
 		return "allow"

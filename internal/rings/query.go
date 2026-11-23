@@ -487,6 +487,8 @@ type EdgeView struct {
 
 // AssetNodeView carries coverage, fact counts and scope from the asset projection.
 type AssetNodeView struct {
+	SubjectIDs   []string
+	DisplayTitle string
 	NodeView
 	Covered   bool
 	FactCount int
@@ -496,9 +498,10 @@ type AssetNodeView struct {
 
 // AssetGraphView 资产图最小投影:目标环境真值库的读模型。
 type AssetGraphView struct {
-	Assets    []AssetNodeView
-	Hierarchy []EdgeView          // sub_of 层级边
-	Relations []AssetRelationView // 明确观察到的非层级关联，与来源和父子边独立
+	ResourceAliases map[string]string
+	Assets          []AssetNodeView
+	Hierarchy       []EdgeView          // sub_of 层级边
+	Relations       []AssetRelationView // 明确观察到的非层级关联，与来源和父子边独立
 }
 
 // AssetGraph 资产图最小投影查询。多语句读在同一事务快照内完成,
@@ -570,6 +573,12 @@ func (s *Store) AssetGraph(ctx context.Context, taskID string) (*AssetGraphView,
 	kept := view.Assets[:0]
 	for _, a := range view.Assets {
 		if members[a.ID] {
+			if a.AssetClass == AssetAPI {
+				_, title, _, e := AssetIdentity(a.AssetClass, a.Title)
+				if e == nil {
+					a.Title = title
+				}
+			}
 			a.AssetClass = DisplayAssetClass(a.AssetClass)
 			kept = append(kept, a)
 		}
@@ -580,10 +589,75 @@ func (s *Store) AssetGraph(ctx context.Context, taskID string) (*AssetGraphView,
 	if err != nil {
 		return nil, err
 	}
-	view.Hierarchy = AssetDisplayHierarchy(candidates, view.Hierarchy, members)
-	view.Relations, err = queryAssetRelations(ctx, tx, taskID, view.Assets)
+	// Historic URL/API nodes resolve to their website; all views consume this
+	// same alias map without inventing another asset or losing references.
+	entries := map[string]string{}
+	for _, a := range view.Assets {
+		if DisplayAssetClass(a.AssetClass) == AssetService {
+			_, _, key, e := AssetIdentity(a.AssetClass, a.Title)
+			if e == nil {
+				entries[key] = a.ID
+			}
+		}
+	}
+	view.ResourceAliases = map[string]string{}
+	for _, a := range candidates {
+		if a.AssetClass != AssetAPI {
+			continue
+		}
+		_, _, key, e := AssetIdentity(a.AssetClass, a.Title)
+		if e == nil && entries[key] != "" && entries[key] != a.ID {
+			view.ResourceAliases[a.ID] = entries[key]
+		}
+	}
+	if len(view.ResourceAliases) > 0 {
+		proof, e := tx.QueryContext(ctx, `SELECT e.from_node,e.to_node,e.edge_type,src.node_type FROM edges e JOIN nodes src ON src.task_id=e.task_id AND src.node_id=e.from_node WHERE e.task_id=? AND e.edge_type IN ('about','covers')`, taskID)
+		if e != nil {
+			return nil, e
+		}
+		facts := map[string]map[string]bool{}
+		covered := map[string]bool{}
+		for proof.Next() {
+			var from, to, kind, sourceType string
+			if e := proof.Scan(&from, &to, &kind, &sourceType); e != nil {
+				proof.Close()
+				return nil, e
+			}
+			if alias := view.ResourceAliases[to]; alias != "" {
+				to = alias
+			}
+			if kind == "covers" {
+				covered[to] = true
+			}
+			if kind == "about" && sourceType == "fact" {
+				if facts[to] == nil {
+					facts[to] = map[string]bool{}
+				}
+				facts[to][from] = true
+			}
+		}
+		if e := proof.Err(); e != nil {
+			proof.Close()
+			return nil, e
+		}
+		proof.Close()
+		for i := range view.Assets {
+			a := &view.Assets[i]
+			a.FactCount = len(facts[a.ID])
+			a.Covered = covered[a.ID]
+		}
+	}
+	view.Relations, err = queryAssetRelations(ctx, tx, taskID, view.Assets, view.ResourceAliases)
 	if err != nil {
 		return nil, err
+	}
+	view.Hierarchy = AssetDisplayHierarchy(candidates, view.Hierarchy, members, view.Relations)
+	subjects := AssetSubjectAliases(view.Assets, view.Hierarchy, view.Relations)
+	for i := range view.Assets {
+		view.Assets[i].SubjectIDs = subjects[view.Assets[i].ID]
+	}
+	for i := range view.Assets {
+		view.Assets[i].DisplayTitle = AssetSubjectTitle(view.Assets[i], view.Assets)
 	}
 	return view, nil
 }

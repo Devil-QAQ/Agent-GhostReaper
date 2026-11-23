@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,6 +35,7 @@ type panoNodeRow struct {
 	ID      string        `json:"id"`
 	T       string        `json:"t"`
 	Ti      string        `json:"ti"`
+	Hint    string        `json:"hint,omitempty"`
 	X       float64       `json:"x"`
 	Y       float64       `json:"y"`
 	Root    string        `json:"root,omitempty"`
@@ -47,6 +49,7 @@ type panoEdgeRow struct {
 	From    string   `json:"from"`
 	To      string   `json:"to"`
 	Rel     string   `json:"rel"`
+	Label   string   `json:"label,omitempty"`
 	Refs    []string `json:"refs,omitempty"`
 	Dashed  bool     `json:"dashed,omitempty"`
 	Blocked bool     `json:"blocked,omitempty"`
@@ -151,7 +154,11 @@ func (s *Server) panoSkeletonOf(ctx context.Context, task string) (*panoSkeleton
 	}
 	members := rings.InventoryAssetIDs(assetNodes, roe)
 	validAsset := func(id string) bool { return members[id] }
-	for _, e := range rings.AssetDisplayHierarchy(assetNodes, edges, members) {
+	inventory, err := s.Store.AssetGraph(ctx, task)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range inventory.Hierarchy {
 		parent[e.From] = e.To
 	}
 
@@ -164,12 +171,32 @@ func (s *Server) panoSkeletonOf(ctx context.Context, task string) (*panoSkeleton
 				}
 			}
 		case rings.EdgeCovers:
-			if validStep(e.From) && validAsset(e.To) {
-				covers[e.From] = append(covers[e.From], e.To)
+			target := e.To
+			if entry := inventory.ResourceAliases[target]; entry != "" {
+				target = entry
+			}
+			if validStep(e.From) && validAsset(target) {
+				covers[e.From] = append(covers[e.From], target)
 			}
 		}
 	}
+	subjects := map[string][]string{}
+	displayTitles := map[string]string{}
+	for _, a := range inventory.Assets {
+		subjects[a.ID] = a.SubjectIDs
+		displayTitles[a.ID] = a.DisplayTitle
+	}
+	for id, entry := range inventory.ResourceAliases {
+		subjects[id] = subjects[entry]
+	}
+
 	rootOf := func(id string) string {
+		if aliases, exists := subjects[id]; exists {
+			if len(aliases) == 0 {
+				return ""
+			}
+			return aliases[0]
+		}
 		if root, ok := roots[id]; ok {
 			return root
 		}
@@ -207,12 +234,17 @@ func (s *Server) panoSkeletonOf(ctx context.Context, task string) (*panoSkeleton
 				continue
 			}
 			root := rootOf(n.ID)
-			v.Aliases[n.ID] = []string{root}
-			if root != n.ID {
+			v.Aliases[n.ID] = subjects[n.ID]
+			if root == "" || root != n.ID {
 				continue
 			}
 			row.Root = root
-			row.Ti = rings.AssetDisplayTitle(n.AssetClass, n.Title)
+			row.Ti = displayTitles[n.ID]
+			if n.AssetClass == rings.AssetApp || n.AssetClass == rings.AssetMiniProgram {
+				row.Hint = n.Title
+			} else if u, e := url.Parse(n.Title); e == nil && u.Host != "" {
+				row.Hint = strings.ToUpper(u.Scheme)
+			}
 		case rings.NodeStep:
 			if !validStep(n.ID) {
 				continue
@@ -251,6 +283,9 @@ func (s *Server) panoSkeletonOf(ctx context.Context, task string) (*panoSkeleton
 		}
 		index[row.ID] = len(v.Nodes)
 		v.Nodes = append(v.Nodes, row)
+	}
+	for id, entry := range inventory.ResourceAliases {
+		v.Aliases[id] = v.Aliases[entry]
 	}
 	for _, n := range order {
 		if n.Type != rings.NodeFact || n.Status != "confirmed" {
@@ -298,6 +333,26 @@ func (s *Server) panoSkeletonOf(ctx context.Context, task string) (*panoSkeleton
 			}
 		}
 	}
+	for _, r := range inventory.Relations {
+		business := func(id string) bool {
+			a := all[id]
+			return a.AssetClass == rings.AssetService || a.AssetClass == rings.AssetApp || a.AssetClass == rings.AssetAPI || a.AssetClass == rings.AssetMiniProgram
+		}
+		if r.Kind == "address" || !business(r.From) || !business(r.To) {
+			continue
+		}
+		for _, ref := range r.FactIDs {
+			mapRelation(r.From, r.To, "asset_"+r.Kind, ref)
+		}
+		for _, a := range v.Aliases[r.From] {
+			for _, b := range v.Aliases[r.To] {
+				if i, ok := lineIndex[a+"\x00"+b]; ok {
+					v.Edges[i].Label = r.Label
+					v.Edges[i].Dashed = true
+				}
+			}
+		}
+	}
 	for _, e := range edges {
 		switch e.Type {
 		case rings.EdgeSourcedFrom:
@@ -329,6 +384,9 @@ func (s *Server) panoSkeletonOf(ctx context.Context, task string) (*panoSkeleton
 	// select from this same set, never create a different assignment graph.
 	adj, upstream := map[string][]string{}, map[string][]string{}
 	for _, edge := range v.Edges {
+		if strings.HasPrefix(edge.Rel, "asset_") {
+			continue
+		}
 		adj[edge.From] = append(adj[edge.From], edge.To)
 		upstream[edge.To] = append(upstream[edge.To], edge.From)
 	}
@@ -528,7 +586,7 @@ func finishPanoLayout(v *panoSkeletonView) {
 	for i := range v.Edges {
 		e := &v.Edges[i]
 		e.Blocked, e.Out, e.In = false, 0, 0
-		e.Dashed = false
+		e.Dashed = strings.HasPrefix(e.Rel, "asset_")
 		a, b := v.Nodes[index[e.From]], v.Nodes[index[e.To]]
 		if a.Y == b.Y {
 			for _, n := range v.Nodes {
@@ -643,6 +701,9 @@ func layoutPanoFocus(nodes []panoNodeRow, edges []panoEdgeRow, width, height int
 	degree, rank := map[string]int{}, map[string]int{}
 	children := map[string][]string{}
 	for _, edge := range edges {
+		if strings.HasPrefix(edge.Rel, "asset_") {
+			continue
+		}
 		degree[edge.To]++
 		children[edge.From] = append(children[edge.From], edge.To)
 	}

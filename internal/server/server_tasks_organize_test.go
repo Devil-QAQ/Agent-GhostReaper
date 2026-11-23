@@ -40,8 +40,8 @@ func TestParseAssetsOrganize(t *testing.T) {
 	}
 	// 输出应恰 5 条:原文 5 个实体(example.com 同义形合一),新增的
 	// admin.example.com 派生不过被丢弃;重复输出(乱类那条)去重。
-	if len(res.Assets) != 5 {
-		t.Fatalf("应恰 5 条(同义合并+新增丢弃+输出去重): %+v", res.Assets)
+	if len(res.Assets) != 6 {
+		t.Fatalf("应保留域名、网站入口与其他对象: %+v", res.Assets)
 	}
 	if byTitle["example.com"] != "domain" || byTitle["10.10.0.5:8080"] != "service" ||
 		byTitle["api.example.com"] != "subdomain" || byTitle["某科技有限公司"] != "organization" {
@@ -52,7 +52,7 @@ func TestParseAssetsOrganize(t *testing.T) {
 		t.Fatalf("重复输出的乱类不应覆盖首条: %+v", byTitle)
 	}
 	// issues:新增实体被丢弃 1 条;覆盖齐全(同义形规范化后相等),无补回。
-	if len(res.Issues) != 1 || !strings.Contains(res.Issues[0], "admin.example.com") {
+	if len(res.Issues) != 2 || !strings.Contains(res.Issues[0], "admin.example.com") {
 		t.Fatalf("应记 1 条新增丢弃: %+v", res.Issues)
 	}
 }
@@ -180,10 +180,10 @@ func TestAssetsOrganizeAPI(t *testing.T) {
 	var res organizeReply
 	post(t, h, "POST", "/api/tasks/assets-organize",
 		`{"lines":["https://example.com/","example.com"]}`, http.StatusOK, &res)
-	if len(res.Assets) != 1 || res.Assets[0].Title != "example.com" || res.Assets[0].Class != "domain" {
-		t.Fatalf("同义形应合并为一条: %+v", res.Assets)
+	if len(res.Assets) != 2 || res.Assets[0].Title != "example.com" || res.Assets[0].Class != "domain" {
+		t.Fatalf("域名与网站入口须分别保留: %+v", res.Assets)
 	}
-	if len(res.Issues) != 1 || !strings.Contains(res.Issues[0], "admin.example.com") {
+	if len(res.Issues) != 2 || !strings.Contains(res.Issues[0], "admin.example.com") {
 		t.Fatalf("新增实体应被丢弃并记 issue: %+v", res.Issues)
 	}
 }

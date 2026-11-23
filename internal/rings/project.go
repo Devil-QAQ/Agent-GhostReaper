@@ -1227,7 +1227,7 @@ func applyNodeAdded(tx *sql.Tx, taskID string, rev int64, p NodeAdded, occurredA
 var amendableKeys = map[NodeType]map[string]bool{
 	NodeGoal: {"predicate": true, "focus": true},
 	NodeStep: {"priority": true},
-	NodeFact: {"result_types": true},
+	NodeFact: {"result_types": true, "asset_discovery_source": true, "asset_observations": true},
 }
 
 // applyNodeAmended node.amended 投影(P4-54):节点标题(指针覆盖)与
@@ -1272,11 +1272,27 @@ func applyNodeAmended(tx *sql.Tx, taskID string, rev int64, p NodeAmended, occur
 		if p.Title != nil {
 			return fmt.Errorf("%w: 分类不能改写事实原文", ErrAmendNotAllowed)
 		}
-		if _, ok := p.Detail["result_types"]; !ok || strings.TrimSpace(p.Note) == "" {
-			return fmt.Errorf("%w: 事实分类需要类型与依据", ErrAmendNotAllowed)
-		}
-		if err := ValidateFactResult(m); err != nil {
-			return err
+		if marker, ok := p.Detail["asset_discovery_source"]; ok {
+			if len(p.Detail) > 2 || len(p.Detail) == 2 && p.Detail["asset_observations"] == nil {
+				return fmt.Errorf("%w: 资产识别记录不得改写事实分类", ErrAmendNotAllowed)
+			}
+			text, ok := marker.(string)
+			if !ok || len(text) != 64 || strings.Trim(text, "0123456789abcdef") != "" {
+				return fmt.Errorf("%w: 资产识别依据无效", ErrAmendNotAllowed)
+			}
+			if _, err := ObservedAssets(p.Detail); err != nil {
+				return err
+			}
+		} else {
+			if _, present := p.Detail["asset_observations"]; present {
+				return ErrAmendNotAllowed
+			}
+			if _, ok := p.Detail["result_types"]; !ok || strings.TrimSpace(p.Note) == "" {
+				return fmt.Errorf("%w: 事实分类需要类型与依据", ErrAmendNotAllowed)
+			}
+			if err := ValidateFactResult(m); err != nil {
+				return err
+			}
 		}
 	}
 	nextTitle := title

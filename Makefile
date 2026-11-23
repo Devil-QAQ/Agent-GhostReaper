@@ -11,7 +11,7 @@ WEB_DIST := internal/webui/dist
 VERSION  ?= v1.0.0-$(shell date -u +%Y%m%d)
 LDFLAGS  := -X ghostreaper/internal/buildinfo.Version=$(VERSION)
 
-.PHONY: all build build-all web test run clean \
+.PHONY: all build build-all web web-deps test run clean \
         dvwa-up dvwa-down dvwa-status dvwa-reset dvwa-clean \
         vulhub-fetch vulhub-up vulhub-down
 
@@ -54,7 +54,11 @@ build-all: web
 # 前置闸(P4-74 ④):审批记录折叠类级测试——机器放行留痕连续段折叠
 # 一行计数(明细可达零丢失)、操作者裁决与待决恒可见、空参数判定;
 # 折叠逻辑改动过不了构建。
-web:
+# 前端检查本身依赖 React/Next，干净目录先安装依赖再检查。
+web-deps:
+	cd $(WEB_DIR) && if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+web: web-deps
 	node $(WEB_DIR)/scripts/check-jsx-refs.mjs
 	node $(WEB_DIR)/scripts/check-ui-words.mjs
 	node $(WEB_DIR)/scripts/check-hardcoded-colors.mjs
@@ -72,10 +76,10 @@ web:
 	node $(WEB_DIR)/scripts/test-asset-net-layout.mjs
 	node $(WEB_DIR)/scripts/test-claim-chain.mjs
 	node $(WEB_DIR)/scripts/test-graph-retirement.mjs
-	cd $(WEB_DIR) && { [ -f package-lock.json ] && npm ci || npm install; } && NEXT_TELEMETRY_DISABLED=1 npm run build
+	cd $(WEB_DIR) && NEXT_TELEMETRY_DISABLED=1 npm run build
 	rm -rf $(WEB_DIST) && cp -R $(WEB_DIR)/out $(WEB_DIST)
 
-test:
+test: web-deps
 	node $(WEB_DIR)/scripts/check-ui-words.mjs
 	node $(WEB_DIR)/scripts/check-hardcoded-colors.mjs
 	node $(WEB_DIR)/scripts/check-status-words.mjs

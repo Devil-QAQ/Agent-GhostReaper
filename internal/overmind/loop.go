@@ -771,6 +771,16 @@ func (l *Loop) cycle(ctx context.Context, retryIdle bool) bool {
 				}
 				diveTriggered = true
 			}
+			for _, observation := range reply.AssetObservations {
+				fact, err := l.Store.Node(ctx, l.TaskID, observation.FactID)
+				if err != nil || fact.Type != rings.NodeFact || fact.Status != "confirmed" {
+					l.noteGuardReject("资产记录缺少已确认事实")
+					continue
+				}
+				if err := l.recordFactAssets(ctx, *fact, observation.AssetObservations); err != nil {
+					l.noteGuardReject("资产记录未保存：" + err.Error())
+				}
+			}
 			for _, control := range reply.WorkControls {
 				if err := l.applyWorkControl(ctx, control, reply.owners, evalRev); err != nil {
 					l.noteGuardReject(fmt.Sprintf("复查执行 %s/%s 的%s未确认完成: %v", control.StepID, control.UnitID, control.Action, err))
@@ -1011,13 +1021,14 @@ func (a *AssessmentPlan) hasContent() bool {
 }
 
 type decomposeReply struct {
-	WorkControls     []workControlPlan `json:"work_controls"`
-	CancelSteps      []cancelPlan      `json:"cancel_steps"`
-	queue            *QueueWatermark
-	Assessment       *AssessmentPlan       `json:"assessment"`
-	NewIntents       []IntentPlan          `json:"new_intents"`
-	Advices          []adviceVerdictPlan   `json:"advices"`           // 待裁决建议的裁决(P2-07 纳谏)
-	ReportExclusions []reportExclusionPlan `json:"report_exclusions"` // 信息性判断复核标记(P4-30 ③)
+	AssetObservations []factAssetObservation `json:"asset_observations,omitempty"`
+	WorkControls      []workControlPlan      `json:"work_controls"`
+	CancelSteps       []cancelPlan           `json:"cancel_steps"`
+	queue             *QueueWatermark
+	Assessment        *AssessmentPlan       `json:"assessment"`
+	NewIntents        []IntentPlan          `json:"new_intents"`
+	Advices           []adviceVerdictPlan   `json:"advices"`           // 待裁决建议的裁决(P2-07 纳谏)
+	ReportExclusions  []reportExclusionPlan `json:"report_exclusions"` // 信息性判断复核标记(P4-30 ③)
 
 	owners    map[string]rings.ExecutionOwner // 与实际快照相同的执行绑定，不由模型构造
 	sessionID string                          // 研判会话锚点(研判记录下钻转录用;不参与 JSON)
@@ -1052,7 +1063,7 @@ const overmindDisciplineRules = `态势规划标准五问(逐问给一句结论,
    - 主动测试:向目标发送测试载荷检验响应(注入探测、目录枚举、弱口令尝试、畸形请求);发了非正常业务流量但不利用成功结果、不落地持久物。
    - 利用深入:以利用已确认弱点为前提,实际取得未授权访问或数据(读敏感文件、无副作用命令回显、凭据试用、横向探测);仍不修改目标状态。
    - 修改与持久化:改变目标状态或留下长期存在物(写文件、建账号、改配置等)。动作分级仅描述预期工作，不自动授予或拒绝权限。
-5. 危害申报(harm_class):意图属数据销毁(data_destruction)或拒绝服务类(denial_of_service)时必须申报——此字段描述风险，不作为另一套硬规则。只有当前启用的硬规则直接拒绝；其余实际动作由动作审查模型判定，可通过则执行，否则请求操作者审批。普通意图留空。
+5. 危害申报(harm_class):意图属数据销毁(data_destruction)或拒绝服务类(denial_of_service)时必须申报——此字段描述风险，不作为另一套硬规则。只有当前启用的硬规则直接拒绝；其余实际动作按黑名单审批线判断：只对测试对象的实际增删改请求批准，同类目的沿用批准；明确禁止直接拒绝，不因本地产物或资产登记新增审批。普通意图留空。
 6. 预算耗尽(exhausted)的步骤是暂停接力,不是失败:其单位撞预算前已把发现写回图(见"预算耗尽步骤"轨迹)。同一条工作线值得继续时,派"接着上次进度继续"的意图(接力单位在任务包里能看到前序尝试与已确认事实,从暂停点续跑);不值得继续或方向应换时,按态势另派。接续意图要写明从哪条轨迹续起。
 7. 每条意图可带优先级(high|normal|low,缺省 normal)与前置步骤(depends_on,Step ID 清单;前置完成后才执行——只在后一步必须用到前一步产出时才声明,不设多余依赖)。new_intents 可另带 source_refs，列出本次判断实际依据的资产、意图、已确认事实或已确认漏洞编号；无明确依据时省略，不编造。来源引用只记血缘，不增加执行前置条件。
 8. 查阅公开资料与其他工具动作使用同一判断入口，不声明额外的信息源身份或站点许可；资料查阅不自动收编资产。
@@ -1074,6 +1085,7 @@ const overmindDisciplineRules = `态势规划标准五问(逐问给一句结论,
 // 展示字段的文风收口与正反样例(只管新生成,不改写图上已有步骤)。
 const overmindOutputContract = `只输出 JSON:{"assessment":{"q_access":"…","q_privilege":"…","q_combination":"…","q_unlock":"…","q_overturn":"…","note":"…"},"new_intents":[{"goal_id":"本条意图所服务的目标编号","intent":"一句话意图","expected_observation":"预期观察","action_level":"只读探测|主动测试|利用深入|修改与持久化","harm_class":"data_destruction|denial_of_service(仅危害类意图,普通意图省略)","covers":["资产ID"],"priority":"high|normal|low","depends_on":["StepID"]}],"advices":[{"id":"av-…","adopt":true,"reason":"判定理由(不采纳须基于图上事实)"}]}
 目标归属:new_intents每条明确填写快照中的goal_id，按本条实际服务的目标选择，不把全部工作挂到最新目标。聚焦方向仍按当前聚焦约束派发；跨目标组合可归到组合目标，前置资料按自身目标安排。goal_id是目标归属，不能放进source_refs；它不增加执行前置。
+资产归档随正常研判顺带记录，可选输出asset_observations:[{"fact_id":"已有已确认事实编号","assets":[{"class":"domain|host|service|app|miniprogram","title":"实际地址或系统标识","evidence":"对应事实/证据的连续原文"}],"relations":[{"from_class":"service","from":"实际入口","to_class":"app","to":"已确认系统","kind":"hosted_on|same_system|redirects_to|resolves_to|related_to","evidence":"连续原文"}]}]。网站/系统是主体，域名、IP、端口按实际地址记录；接口/API/URL资源直接归其网站，不逐条建资产，不把HTTP方法放进资产名称。只用已经发现的事实判断归属和关系，不能确定归属就先独立，允许少记录；不得为资产登记、分类、补全关系或把图做完整而另派探测/判断/重复测试。没有新记录时省略此字段，不为归档单开一轮研判。
 可选来源字段:new_intents 每条可带 "source_refs":["实际依据的节点ID"]，允许资产、意图、已确认事实及已确认漏洞。只引用真实依据；它不替代 covers 或 depends_on，不增加执行前置条件。没有明确引用时省略。首轮还没有事实或既有意图时，source_refs可省略，若填写只列实际作为来源的资产编号；不要把目标清单中的编号一起复制进来。任务目标说明要达成什么，不是来源节点。目标编号不能放入 source_refs；尚未创建的未来步骤也不能引用。depends_on 只引用图上实际已有步骤，不能猜测本批待派步骤将获得的编号。
 可选取消字段:"cancel_steps":[{"step_id":"sN","reason":"最新证据表明重复、过时或前提已失败的具体理由","evidence":["图上依据节点ID"]}]。取消后仍保留节点与轨迹；没有应取消步骤时输出空列表。
 执行复查字段:"work_controls":[{"step_id":"快照中的步骤ID","unit_id":"同一快照中的实际单位ID","action":"continue|steer|stop","reason":"具体进展或方向前提依据","message":"steer时必填，给当前单位的纠偏要求"}]。有本轮必须复查的告警时逐执行给决定；无须复查时省略或空列表。continue不发送新工作，steer与stop走已有舵杆；不替代cancel_steps，不更改授权。
@@ -1265,7 +1277,7 @@ func parseIntents(text string) (*decomposeReply, error) {
 	if err := json.Unmarshal([]byte(body), &r); err != nil {
 		return nil, fmt.Errorf("overmind: 拆解回复不是合法 JSON: %w", err)
 	}
-	out := &decomposeReply{Assessment: r.Assessment, Advices: r.Advices, WorkControls: r.WorkControls,
+	out := &decomposeReply{AssetObservations: r.AssetObservations, Assessment: r.Assessment, Advices: r.Advices, WorkControls: r.WorkControls,
 		CancelSteps: r.CancelSteps, ReportExclusions: r.ReportExclusions}
 	for _, p := range r.NewIntents {
 		if strings.TrimSpace(p.Intent) == "" {

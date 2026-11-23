@@ -35,8 +35,26 @@ export class AssetNetEngine extends PanoramaEngine {
     const ancestors = [...kept];
     for (let i = 0; i < ancestors.length; i++) for (const parent of parents.get(ancestors[i]) || []) if (!kept.has(parent)) { kept.add(parent); ancestors.push(parent); }
     const ids = [...kept];
+    // Focus uses a local view, rather than fitting distant overview positions
+    // (a shared address can otherwise keep the camera at overview scale).
+    const positions = [{ id, x: 0, y: 0 }];
+    const neighbors = ids.filter(member => member !== id).sort();
+    for (let offset = 0, ring = 1; offset < neighbors.length; ring++) {
+      const count = Math.min(ring * 6, neighbors.length - offset), radius = ring * 220;
+      for (let i = 0; i < count; i++) {
+        const angle = -Math.PI / 2 + i * Math.PI * 2 / count;
+        positions.push({ id: neighbors[offset + i], x: Math.cos(angle) * radius, y: Math.sin(angle) * radius });
+      }
+      offset += count;
+    }
+    const left = Math.min(...positions.map(p => p.x)) - 90, top = Math.min(...positions.map(p => p.y)) - 40;
+    const right = Math.max(...positions.map(p => p.x)) + 90, bottom = Math.max(...positions.map(p => p.y)) + 80;
     this.enterFocus({ id });
-    this.reconcileFocus({ node: { id }, ids, edges: this.edges?.filter(e => kept.has(e.from) && kept.has(e.to)) }, preserveCamera);
+    this.reconcileFocus({ node: { id }, ids, positions, bounds: [left, top, right - left, bottom - top], edges: this.edges?.filter(e => kept.has(e.from) && kept.has(e.to)) }, preserveCamera);
+  }
+  _focusCamera() {
+    const [x, y, w, h] = this.focusBounds;
+    return { x: x + w / 2, y: y + h / 2, scale: Math.max(.001, Math.min(1.5, (this.w - 128) / w, (this.h - 112) / h)), sy: 1 };
   }
   _pick(x, y) {
     const z = Math.min(1.5, this.cam.scale);
@@ -70,7 +88,7 @@ export class AssetNetEngine extends PanoramaEngine {
     ctx.globalAlpha = .7 * this._visibility(`e:${e.from}\0${e.to}\0${e.rel}`); ctx.lineWidth = active ? 1.2 : 1;
     ctx.setLineDash(e.rel === "sub_of" ? [] : [4, 4]);
     ctx.beginPath(); ctx.moveTo(start.x, start.y); ctx.lineTo(start.x + (end.x - start.x) * progress, start.y + (end.y - start.y) * progress); ctx.stroke(); ctx.setLineDash([]);
-    if (e.rel !== "related_to" && progress === 1) {
+    if (e.rel !== "related_to" && e.rel !== "same_system" && progress === 1) {
       ctx.translate(end.x, end.y); ctx.rotate(Math.atan2(dy, dx)); ctx.fillStyle = ctx.strokeStyle;
       const tip = Math.max(3.5, 6 * Math.min(1, z)); ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-tip, -tip / 2); ctx.lineTo(-tip, tip / 2); ctx.closePath(); ctx.fill();
     }

@@ -38,16 +38,17 @@ func TestAssetDisplayHierarchyUsesAddressStructureOnly(t *testing.T) {
 	}{
 		{"root", AssetDomain, "example.test"}, {"sub", AssetSubdomain, "api.example.test"},
 		{"deep", AssetDomain, "v1.api.example.test"}, {"ip", AssetHost, "192.0.2.21"},
+		{"site", AssetService, "https://api.example.test:8443/"},
 		{"service", AssetAPI, "https://api.example.test:8443/v1/items?q=one"},
 		{"ip-service", AssetService, "http://192.0.2.21:8080/path"},
 		{"outside", AssetDomain, "outside.example.test"},
 	} {
 		assets = append(assets, NodeFull{NodeView: NodeView{ID: a.id, Type: NodeAsset, AssetClass: a.class, Title: a.title}})
 	}
-	members := map[string]bool{"root": true, "sub": true, "deep": true, "ip": true, "service": true, "ip-service": true}
+	members := map[string]bool{"root": true, "sub": true, "deep": true, "ip": true, "site": true, "service": true, "ip-service": true}
 	edges := []EdgeView{{Type: EdgeSubOf, From: "ip", To: "root"}, {Type: EdgeSubOf, From: "service", To: "ip"}}
 	got := AssetDisplayHierarchy(assets, edges, members)
-	want := map[string]string{"sub": "root", "deep": "sub", "service": "sub", "ip-service": "ip"}
+	want := map[string]string{"sub": "root", "deep": "sub"}
 	if len(got) != len(want) {
 		t.Fatalf("hierarchy: %+v", got)
 	}
@@ -56,7 +57,7 @@ func TestAssetDisplayHierarchyUsesAddressStructureOnly(t *testing.T) {
 			t.Fatalf("DNS or unrelated host became containment: %+v", e)
 		}
 	}
-	if AssetDisplayTitle(AssetAPI, assets[4].Title) != "https://api.example.test:8443" || assets[4].Title != "https://api.example.test:8443/v1/items?q=one" {
+	if AssetDisplayTitle(AssetAPI, assets[5].Title) != "https://api.example.test:8443" || assets[5].Title != "https://api.example.test:8443/v1/items?q=one" {
 		t.Fatal("service label lost exact original resource")
 	}
 	// Identical identities have identical structure regardless of source.

@@ -613,20 +613,32 @@ func IsValidDenyLine(s string) bool { return denyLines[s] }
 // WaitMillis 是该请求从登记到裁决的等待时长(弹门等待期单位计时暂停
 // 的时间账,approved/denied 时携带)。
 type ApprovalRecord struct {
-	RequestID   string          `json:"request_id"`
-	StepID      string          `json:"step_id"`
-	UnitID      string          `json:"unit_id"`
-	Type        string          `json:"type"`
-	ActionLevel ActionLevel     `json:"action_level"`         // 触发本次审批判定的意图分级
-	HarmClass   HarmClass       `json:"harm_class,omitempty"` // 拒绝线的危害声明(数据销毁/拒绝服务类)
-	Intent      string          `json:"intent,omitempty"`     // 意图声明(Step 标题)
-	ToolName    string          `json:"tool_name"`            // 实际调用的工具
-	ToolArgs    json.RawMessage `json:"tool_args,omitempty"`  // 实际调用参数(人即兜底的核对物)
-	Note        string          `json:"note,omitempty"`       // 弹门上下文(如拦截规则命中转人审的原因)
-	DenyLine    string          `json:"deny_line,omitempty"`  // denied 时的拒绝线类别
-	DecidedBy   string          `json:"decided_by,omitempty"` // 裁决者(approved/denied/forced 时)
-	Reason      string          `json:"reason,omitempty"`     // 拒绝原因/批准备注
-	WaitMillis  int64           `json:"wait_millis,omitempty"`
+	Permission   *PurposePermission `json:"permission,omitempty"`
+	SourceHashes map[string]string  `json:"source_hashes,omitempty"`
+	RequestID    string             `json:"request_id"`
+	StepID       string             `json:"step_id"`
+	UnitID       string             `json:"unit_id"`
+	Type         string             `json:"type"`
+	ActionLevel  ActionLevel        `json:"action_level"`         // 触发本次审批判定的意图分级
+	HarmClass    HarmClass          `json:"harm_class,omitempty"` // 拒绝线的危害声明(数据销毁/拒绝服务类)
+	Intent       string             `json:"intent,omitempty"`     // 意图声明(Step 标题)
+	ToolName     string             `json:"tool_name"`            // 实际调用的工具
+	ToolArgs     json.RawMessage    `json:"tool_args,omitempty"`  // 实际调用参数(人即兜底的核对物)
+	Note         string             `json:"note,omitempty"`       // 弹门上下文(如拦截规则命中转人审的原因)
+	DenyLine     string             `json:"deny_line,omitempty"`  // denied 时的拒绝线类别
+	DecidedBy    string             `json:"decided_by,omitempty"` // 裁决者(approved/denied/forced 时)
+	Reason       string             `json:"reason,omitempty"`     // 拒绝原因/批准备注
+	WaitMillis   int64              `json:"wait_millis,omitempty"`
+}
+
+// A human approves the stated purpose, targets and effect, not a spelling of a
+// command. The action reviewer compares later concrete effects to this scope.
+type PurposePermission struct {
+	Actions  []string `json:"actions,omitempty"`
+	Resource string   `json:"resource,omitempty"`
+	Purpose  string   `json:"purpose"`
+	Targets  []string `json:"targets"`
+	Effects  string   `json:"effects"`
 }
 
 // 拦截判定记录类型白名单(P2-08e,受控入口)。

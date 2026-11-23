@@ -130,24 +130,11 @@ func stepsCoveringAssetsOf(ctx context.Context, store *rings.Store, taskID strin
 	} else {
 		return nil, fmt.Errorf("swarm: 范围影响查 covers 边: %w", err)
 	}
-	// 锚定命中:直接 ID ∈ 摘除集,或锚定资产的写法粒度落在摘除面内
-	//(同 host 不同端口的兄弟资产同样命中——与围栏/摘除的写法粒度
-	// 同口径)。
-	covered := func(assetID string) bool {
-		if want[assetID] {
-			return true
-		}
-		for _, a := range assets {
-			if a.ID != assetID {
-				continue
-			}
-			if anchor, ok := rings.ScopeAnchorOf(strings.TrimSpace(a.Title)); ok {
-				return rings.ExcludedCoversTarget(assets, want, anchor.Host, anchor.Port)
-			}
-			return false
-		}
-		return false
-	}
+	// Stop exactly the withdrawn entity and its actual contained resources.
+	// Inventory and execution use the same identity-based containment rule.
+	coveredAssets := rings.ExcludedCoveredAssetIDs(assets, want)
+	covered := func(assetID string) bool { return coveredAssets[assetID] }
+
 	var out []scopeHitStep
 	for _, s := range steps {
 		hit := false

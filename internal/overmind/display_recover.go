@@ -12,6 +12,7 @@ import (
 // event is the completion receipt. Overflow retains IDs in the ledger rather
 // than unbounded contexts, closures or model requests in memory.
 func (l *Loop) recoverDisplay(ctx context.Context) {
+	defer l.syncRecordedAssets(ctx)
 	if l.Provider == nil || ctx.Err() != nil {
 		return
 	}

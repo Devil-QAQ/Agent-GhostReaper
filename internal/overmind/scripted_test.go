@@ -145,6 +145,7 @@ func (m *gatedScriptedModel) handle(w http.ResponseWriter, r *http.Request) {
 	for _, t := range body.Tools {
 		rr.ToolsOffered = append(rr.ToolsOffered, t.Function.Name)
 	}
+
 	if strings.Contains(rr.System, "你负责判断任务中一次实际工具调用") {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": `{"decision":"allow","reason":"测试中的已授权动作"}`}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 40, "completion_tokens": 10}})

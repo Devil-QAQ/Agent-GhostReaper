@@ -103,7 +103,7 @@ func TestActionGateApprovalOnlyPermitsExactActionOnce(t *testing.T) {
 
 }
 
-func TestActionGateReviewFailureAsksHumanWithoutKillingUnit(t *testing.T) {
+func TestActionGateReviewFailureUsesModelRecoveryWithoutApproval(t *testing.T) {
 	for _, mode := range []string{"provider_error", "invalid_verdict", "missing_basis"} {
 		t.Run(mode, func(t *testing.T) {
 			env, pack, gate := actionGateFixture(t)
@@ -118,11 +118,64 @@ func TestActionGateReviewFailureAsksHumanWithoutKillingUnit(t *testing.T) {
 				}
 			}
 			d := callActionGate(env, pack, "bash", `{"command":"cat report.txt"}`)
-			if d.Behavior != permission.Deny || len(gate.Pending(pack.TaskID)) != 1 || env.deniedReason != "" {
+			if d.Behavior != permission.Deny || len(gate.Pending(pack.TaskID)) != 0 || env.deniedReason != "" || env.reviewErr == nil {
 				t.Fatalf("failure must not claim permission or kill unit: %+v", d)
 			}
-			if strings.Contains(gate.Pending(pack.TaskID)[0].Note, "private") {
-				t.Fatal("raw provider error entered approval record")
+			if strings.Contains(env.reviewErr.Error(), "private") {
+				t.Fatal("raw provider error entered recovery")
+			}
+		})
+	}
+}
+
+func seedReviewAuthorization(t *testing.T, env *unitEnv) {
+	t.Helper()
+	_, err := env.Executor.Store.Append(t.Context(), env.TaskID,
+		rings.Event{Kind: rings.EventTaskLifecycle, Actor: "creator", Payload: rings.TaskLifecycle{Action: "created", Detail: map[string]any{
+			"description": "对指定服务全面渗透测试，发现接口及漏洞", "task_type": "pentest"}}},
+		rings.Event{Kind: rings.EventNodeAdded, Actor: "creator", Payload: rings.NodeAdded{NodeID: "g1", NodeType: rings.NodeGoal, Title: "发现接口"}},
+		rings.Event{Kind: rings.EventNodeAdded, Actor: "creator", Payload: rings.NodeAdded{NodeID: "g2", NodeType: rings.NodeGoal, Title: "验证漏洞"}},
+		rings.Event{Kind: rings.EventNodeAdded, Actor: "creator", Payload: rings.NodeAdded{NodeID: "a1", NodeType: rings.NodeAsset, AssetClass: rings.AssetService, Title: "https://example.test:8443/"}},
+		rings.Event{Kind: rings.EventRoeUpdated, Actor: "creator", Payload: rings.RoeUpdated{CreatorNotes: new("不修改已有数据")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestActionGateReadsCompleteCurrentAuthorization(t *testing.T) {
+	env, pack, gate := actionGateFixture(t)
+	seedReviewAuthorization(t, env)
+	pack.GoalTitle, pack.StepIntent = "发现接口", "读取首页"
+	env.Executor.ReviewAction = func(_ context.Context, in ActionReviewInput) (ActionReview, error) {
+		b := in.Boundaries
+		if b.TaskDescription != "对指定服务全面渗透测试，发现接口及漏洞" || len(b.Goals) != 2 || b.Goals[1] != "验证漏洞" || len(b.Assets) != 1 || b.Notes != "不修改已有数据" {
+			t.Fatalf("incomplete authorization: %+v", b)
+		}
+		if in.Goal != pack.GoalTitle || in.Intent != pack.StepIntent {
+			t.Fatal("step context was lost or substituted for authorization")
+		}
+		return ActionReview{Decision: ActionAllow, Reason: "任务内正常资料处理"}, nil
+	}
+	if d := callActionGate(env, pack, "bash", `{"command":"echo review"}`); d.Behavior != permission.Allow || len(gate.Pending(env.TaskID)) != 0 {
+		t.Fatalf("complete authorization was not used: %+v", d)
+	}
+}
+
+func TestActionGateGoalOrAssetEditDuringReviewInvalidatesResult(t *testing.T) {
+	for _, node := range []string{"g2", "a1"} {
+		t.Run(node, func(t *testing.T) {
+			env, pack, gate := actionGateFixture(t)
+			seedReviewAuthorization(t, env)
+			env.Executor.ReviewAction = func(context.Context, ActionReviewInput) (ActionReview, error) {
+				event := rings.Event{Kind: rings.EventNodeAmended, Actor: "creator", Payload: rings.NodeAmended{NodeID: node, Title: new("操作者已修改任务目标")}}
+				if node == "a1" {
+					event = rings.Event{Kind: rings.EventNodeStateChanged, Actor: "creator", Payload: rings.NodeStateChanged{NodeID: node, Status: rings.AssetStatusRetired}}
+				}
+				_, err := env.Executor.Store.Append(t.Context(), env.TaskID, event)
+				return ActionReview{Decision: ActionAllow, Reason: "旧授权允许"}, err
+			}
+			if d := callActionGate(env, pack, "bash", `{"command":"echo review"}`); d.Behavior != permission.Deny || len(gate.Pending(env.TaskID)) != 0 || env.reviewErr != nil {
+				t.Fatalf("stale authorization used: %+v recovery=%v", d, env.reviewErr)
 			}
 		})
 	}
@@ -148,8 +201,14 @@ func TestActionReviewParserRejectsUncertainOrExtraResults(t *testing.T) {
 			t.Fatalf("accepted invalid review %q", text)
 		}
 	}
-	if _, err := parseActionReview(`{"decision":"allow","reason":"纯本地读操作"}`); err != nil {
-		t.Fatal(err)
+	for _, text := range []string{
+		`{"decision":"allow","reason":"纯本地读操作"}`,
+		"```json\n{\"decision\":\"allow\",\"reason\":\"本地读取\"}\n```",
+		"```\r\n{\"decision\":\"allow\",\"reason\":\"本地读取\"}\r\n```",
+	} {
+		if _, err := parseActionReview(text); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

@@ -55,7 +55,7 @@ const AGENT_GROUP_LABELS = {
   creator: "造物主",
 };
 
-const PURPOSE_LABELS = { interrupted: "未完成请求", triage: "边界判断", compaction: "会话摘要", rule_patterns: "规则生成" };
+const PURPOSE_LABELS = { interrupted: "未完成请求", triage: "边界判断", asset_discovery: "资产识别", compaction: "会话摘要", rule_patterns: "规则生成" };
 
 function agentGroupLabel(g) {
   return AGENT_GROUP_LABELS[g] || g;

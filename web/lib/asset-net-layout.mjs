@@ -13,7 +13,7 @@ export function assetNetLayout(assets = [], hierarchy = [], relations = []) {
   }
   for (const relation of relations) {
     if (!byID.has(relation?.from) || !byID.has(relation?.to) || relation.from === relation.to) continue;
-    const labels = { resolves_to: "解析到", hosted_on: "部署在", related_to: "关联" };
+    const labels = { resolves_to: "解析到", hosted_on: "部署在", related_to: "关联", redirects_to: "跳转到", same_system: "同一系统", address: "入口地址" };
     if (!labels[relation.kind]) continue;
     const key = `${relation.kind}\0${relation.from}\0${relation.to}`;
     if (seenEdges.has(key)) continue;
@@ -21,7 +21,9 @@ export function assetNetLayout(assets = [], hierarchy = [], relations = []) {
 
   }
   edges.sort((a, b) => String(a.from).localeCompare(b.from) || String(a.to).localeCompare(b.to) || String(a.rel).localeCompare(b.rel));
-  const roots = ids.filter(id => !parents.has(id)), memberships = new Map(), depth = new Map();
+  const rawRoots = ids.filter(id => !parents.has(id)), memberships = new Map(), depth = new Map();
+  const subjects = new Set(assets.flatMap(a => a.subject_ids || []));
+  const roots = subjects.size ? ids.filter(id => subjects.has(id)) : rawRoots;
   const visit = root => {
     const queue = [[root, 0]], visited = new Set();
     for (let i = 0; i < queue.length; i++) {
@@ -32,7 +34,12 @@ export function assetNetLayout(assets = [], hierarchy = [], relations = []) {
     }
   };
   for (const root of roots) visit(root);
-  // A malformed cycle is still visible, once, without inventing ledger edges.
+  // The server supplies the same subject mapping used by the panorama. Shared
+  // supporting addresses move between systems without adding hierarchy edges.
+  for (const id of ids) {
+    const declared = (byID.get(id).subject_ids || []).filter(root => subjects.has(root) && byID.has(root)).sort();
+    if (declared.length) { memberships.set(id, declared); depth.set(id, declared.includes(id) ? 0 : Math.max(1, depth.get(id) || 1)); }
+  }
   for (const id of ids) if (!memberships.has(id)) { roots.push(id); visit(id); }
   const groups = new Map(roots.map(id => [id, []]));
   for (const id of ids) if (!roots.includes(id)) groups.get(memberships.get(id)[0]).push(id);
@@ -46,7 +53,7 @@ export function assetNetLayout(assets = [], hierarchy = [], relations = []) {
   roots.forEach((id, i) => { const col = i % columns, row = Math.floor(i / columns), width = sizes.get(id) * 2 + 280; colWidths[col] = Math.max(colWidths[col] || 0, width); rowHeights[row] = Math.max(rowHeights[row] || 0, width); });
   const offset = (list, index) => list.slice(0, index).reduce((sum, n) => sum + n, 0) + list[index] / 2;
   roots.forEach((id, i) => centers.set(id, { x: offset(colWidths, i % columns), y: offset(rowHeights, Math.floor(i / columns)) }));
-  const positions = new Map(), targets = new Map(), rootSet = new Set(roots);
+  const positions = new Map(), targets = new Map(), rootSet = new Set(roots.filter(id => !(subjects.size && Array.isArray(byID.get(id).subject_ids) && byID.get(id)?.subject_ids?.length === 0)));
   for (const root of roots) {
     const center = centers.get(root); positions.set(root, { ...center }); targets.set(root, center);
     const members = groups.get(root).sort((a, b) => depth.get(a) - depth.get(b) || a.localeCompare(b));
@@ -91,5 +98,5 @@ export function assetNetLayout(assets = [], hierarchy = [], relations = []) {
   const nodes = ids.map(id => ({ ...byID.get(id), t: "asset", ti: byID.get(id).display_title || byID.get(id).title || id, ...positions.get(id), primary: rootSet.has(id), systems: memberships.get(id), orbit: sizes.get(id) || 0 }));
   let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
   for (const n of nodes) { left = Math.min(left, n.x - 100); right = Math.max(right, n.x + 100); top = Math.min(top, n.y - 56); bottom = Math.max(bottom, n.y + 72); }
-  return { nodes, edges, roots, bounds: nodes.length ? [left, top, right - left, bottom - top] : [0, 0, 1, 1] };
+  return { nodes, edges, roots: roots.filter(id => rootSet.has(id)), bounds: nodes.length ? [left, top, right - left, bottom - top] : [0, 0, 1, 1] };
 }

@@ -67,3 +67,38 @@ focused.focusAsset('one');assert.deepEqual(new Set(selection.ids),new Set(['root
 assert.equal(selection.ids.includes('two'),false);assert.equal(selection.ids.includes('unrelated'),false);
 focused.focusAsset('ip',true);assert.equal(preserve,true);assert.equal(selection.ids.includes('two'),false,'shared IP does not collect sibling services via their domain');
 assert.ok(selection.edges.every(e=>focused.edges.includes(e)),'asset focus never invents links');
+
+// A distant shared address must not prevent a click from zooming into the
+// selected asset. Exercise the real camera transition and overview restoration.
+for (const reduced of [false, true]) {
+  const zoomed = Object.create(AssetNetEngine.prototype);
+  const nodes = [{id:'site',x:0,y:0,primary:true},{id:'ip',x:12000,y:8000}];
+  Object.assign(zoomed, {nodes,byId:new Map(nodes.map(n=>[n.id,n])),aliases:{},edges:[{from:'site',to:'ip',rel:'address'}],
+    positions:new Map(),focusEdges:new Map(),focusBounds:null,focus:null,active:null,returnView:null,
+    cam:{x:6000,y:4000,scale:.05,sy:1},bounds:[-100,-100,12200,8200],w:1100,h:720,
+    reduced:{matches:reduced},cb:{},fade:{value:0},velocity:{x:0,y:0}});
+  const originalCamera={...zoomed.cam}, originalNodes=structuredClone(nodes);
+  zoomed.focusAsset('site');
+  const target=zoomed.flight?.to || zoomed.cam;
+  assert.ok(target.scale>1,'click zooms into a readable local view');
+  assert.deepEqual(zoomed.positions.get('site'),{id:'site',x:0,y:0});
+  assert.ok(Math.abs(zoomed.positions.get('ip').y)<=220,'related address is nearby in focus');
+  assert.deepEqual(nodes,originalNodes,'overview positions stay intact');
+  if(zoomed.flight) zoomed.cam={...target};
+  zoomed.flight=null;zoomed.positionFlight=null;
+  zoomed.cam.scale=.8;
+  zoomed.focusAsset('site',true);
+  assert.equal((zoomed.flight?.to || zoomed.cam).scale,.8,'refresh preserves manually adjusted zoom');
+  zoomed.exitFocus();
+  assert.deepEqual(zoomed.flight?.to || zoomed.cam,originalCamera,'background/back restores overview');
+  assert.equal(zoomed.positions.size,0);
+}
+
+const sites = [{id:"site-one",class:"service",title:"https://192.0.2.1:1122",subject_ids:["site-one"]},{id:"site-two",class:"service",title:"https://192.0.2.1:1123",subject_ids:["site-two"]},{id:"address",class:"host",title:"192.0.2.1",subject_ids:["site-one","site-two"]},{id:"login",class:"api",title:"POST https://192.0.2.1:1122/login",subject_ids:["site-one"]}];
+const siteChildren=[{from:"login",to:"site-one"}],addresses=[{from:"site-one",to:"address",kind:"address"},{from:"site-two",to:"address",kind:"address"}];
+const siteLayout=assetNetLayout(sites,siteChildren,addresses);
+assert.deepEqual(siteLayout.roots,["site-one","site-two"],"websites remain the two subjects");
+assert.equal(siteLayout.nodes.find(n=>n.id==="address").primary,false,"shared IP is supporting information");
+assert.deepEqual(siteLayout.nodes.find(n=>n.id==="address").systems,["site-one","site-two"]);
+assert.equal(siteLayout.edges.filter(e=>e.rel==="sub_of").length,1,"visual attachment never invents containment");
+assert.deepEqual(assetNetLayout([...sites].reverse(),[...siteChildren].reverse(),[...addresses].reverse()),siteLayout);

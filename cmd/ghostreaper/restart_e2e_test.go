@@ -102,6 +102,23 @@ func (m *mockLLM) handle(w http.ResponseWriter, r *http.Request) {
 			req.LastUser = msg.Content
 		}
 	}
+	for _, msg := range body.Messages {
+		if msg.Role != "system" {
+			continue
+		}
+		content := ""
+		if strings.Contains(msg.Content, "你负责判断任务中一次实际工具调用") {
+			content = `{"decision":"allow","reason":"测试中的已授权动作"}`
+		}
+		if strings.Contains(msg.Content, "你负责从已确认观察") {
+			content = `{"assets":[]}`
+		}
+		if content != "" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": content}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 40, "completion_tokens": 10}})
+			return
+		}
+	}
 	m.mu.Lock()
 	m.reqs = append(m.reqs, req)
 	m.mu.Unlock()

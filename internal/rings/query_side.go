@@ -230,6 +230,7 @@ func (s *Store) sessionLabelsOf(ctx context.Context, taskID string) (map[string]
 // ApprovalRow 审批记录投影行(字段与 ApprovalRecord 一一对应;occurred_at
 // 已换算呈现格式)。
 type ApprovalRow struct {
+	Permission  *PurposePermission `json:"permission,omitempty"`
 	Rev         int64
 	RequestID   string
 	StepID      string

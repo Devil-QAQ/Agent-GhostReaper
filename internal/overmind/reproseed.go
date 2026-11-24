@@ -24,7 +24,6 @@ package overmind
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/url"
 	"regexp"
 	"strings"
@@ -115,18 +114,15 @@ func toolProducible(taskID string, r rings.SwarmRecord) bool {
 // 不可追溯(确认门槛校验据此不确认)。blobs 为 nil 时证据全文退截头。
 func ResolveEvidenceSeeds(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore,
 	taskID, claimID string) ([]EvidenceSeed, error) {
-	campaignRev, err := claimCampaignRev(ctx, store, taskID, claimID)
+	view, err := readClaimEvidence(ctx, store, taskID, claimID)
 	if err != nil {
 		return nil, err
 	}
-	stepIDs, err := claimEvidenceSteps(ctx, store, taskID, claimID)
-	if err != nil {
-		return nil, err
-	}
-	evs, err := store.Events(ctx, taskID, 0, 0)
-	if err != nil {
-		return nil, fmt.Errorf("overmind: 种子解析读事件流: %w", err)
-	}
+	return resolveEvidenceSeedsFrom(blobs, taskID, claimID, view)
+}
+
+func resolveEvidenceSeedsFrom(blobs *swarm.BlobStore, taskID, claimID string, view *claimEvidenceView) ([]EvidenceSeed, error) {
+	campaignRev, stepIDs, evs := view.campaignRev, view.steps, view.events
 
 	// 战役内交卷单引用与旧反证证据文本:交换单 evidence_refs 是种子
 	// 引用来源(P5-01②;旧 falsify 记录的交换引用字段已删,只留证据

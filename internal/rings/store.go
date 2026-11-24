@@ -133,6 +133,7 @@ type onCommitFn struct {
 
 // SetOnCommit 注册事件批提交后的观察者钩子(P3-08):在单写者循环内
 // 同步调用——实现必须非阻塞且不得回调 Store(会死锁:写入通道无缓冲)。
+// 回调返回后调用方即可复用事件批，观察者不得保留其可变引用。
 // 线程安全;后注册覆盖先注册(单 Store 单观察者)。
 func (s *Store) SetOnCommit(fn func(taskID string, events []Event)) {
 	s.onCommit.Store(onCommitFn{fn: fn})
@@ -230,6 +231,7 @@ func Open(path string) (*Store, error) {
 //
 // 排队语义:ctx 只影响排队等待,已入队的写入必然执行到提交为止——
 // 账本写入不可凭取消消失。
+// 返回前完成既有同步提交通知；调用方随后可复用事件批及其负载。
 func (s *Store) Append(ctx context.Context, taskID string, events ...Event) ([]int64, error) {
 	return s.appendChecked(ctx, taskID, nil, events...)
 }
@@ -676,15 +678,16 @@ func (s *Store) writerLoop() {
 	armIdle()
 	handle := func(req writeRequest) {
 		res := s.handle(req)
-		req.resp <- res
 		// 提交后通知观察者(P3-08):仅在事件批成功落库时;失败批与
 		// 配置/token 写入不构成推送源。同步调用发生在单写者循环内,
-		// 观察者必须非阻塞。
+		// 观察者必须非阻塞。读完本批再返回，避免调用方复用载荷时
+		// 与通知读取竞争；实际网络广播仍由观察者自己的循环完成。
 		if res.err == nil && len(res.revisions) > 0 {
 			if v, ok := s.onCommit.Load().(onCommitFn); ok && v.fn != nil {
 				v.fn(req.taskID, req.events)
 			}
 		}
+		req.resp <- res
 		// P4-38 写后保养:暂存超阈值补一发被动回收(此刻无并发写)。
 		s.walKeepPostWrite()
 		armIdle()

@@ -153,10 +153,26 @@ func TestFactAttributionViewsAndExport(t *testing.T) {
 			t.Fatal(err)
 		}
 		stop := os.Getenv("GHOSTREAPER_FACT_PANEL_STOP")
+		added := false
 		deadline := time.Now().Add(15 * time.Minute)
 		for time.Now().Before(deadline) {
 			if _, err := os.Stat(stop); err == nil {
 				return
+			}
+			if trigger := os.Getenv("GHOSTREAPER_FACT_PANEL_ADD"); trigger != "" && !added {
+				if _, err := os.Stat(trigger); err == nil {
+					batch := []rings.Event{
+						{Kind: rings.EventNodeAdded, Actor: "test", Payload: rings.NodeAdded{NodeID: "f-live-refresh", NodeType: rings.NodeFact, Status: "confirmed", Title: "页面自动刷新验收记录", Detail: map[string]any{"evidence": "本机固定验收材料"}}},
+						{Kind: rings.EventEdgeAdded, Actor: "test", Payload: rings.EdgeAdded{EdgeType: rings.EdgeProduces, FromNode: "s-supplement", ToNode: "f-live-refresh"}},
+					}
+					appendEvents(t, s, task, batch...)
+					// Reuse immediately, as the original failing batch loader did.
+					clear(batch)
+					added = true
+					if err := os.WriteFile(ready+".updated", []byte("ok"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 			time.Sleep(200 * time.Millisecond)
 		}

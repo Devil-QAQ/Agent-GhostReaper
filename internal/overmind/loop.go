@@ -175,6 +175,7 @@ type Loop struct {
 	polishCtx       context.Context
 	polishQueue     []displayJob
 	polishKnown     map[string]bool
+	polishRunning   map[string]int64
 	polishActive    int
 	polishDeferred  bool
 	polishRecoverMu sync.Mutex
@@ -1052,11 +1053,11 @@ const overmindDisciplineRules = `态势规划标准五问(逐问给一句结论,
 1. 新身份能访问哪些已有资产?(新凭据/新会话/新入口对已有资产的可达性)
 2. 新权限是否改变其他漏洞的影响?(原有发现在新权限下的实际影响是否变化)
 3. 两条单独影响有限的线索是否组合成新的边界问题?(只提出待验证方向，再派普通意图，不直接创建漏洞)
-4. 新的可达关系是否解锁之前受阻的步骤?(exhausted/failed 的步骤是否值得换路重派)
+4. 新的可达关系是否解锁之前受阻的步骤?(原工作是否可继续，还是出现需要验证的新方向)
 5. 新证据是否推翻旧结论?(已有事实/判断是否与新证据矛盾)
 拆解规则:
 1. 只依据态势快照中真实存在的资产与已确认事实派发意图;意图必须具体、可执行、可观察。普通核对、无漏洞结果和验证通过只要求写回实际事实并结束意图，不要求“交卷”；交卷专指已经坐实且有实际影响的漏洞，不用交漏洞单表示任务完成。
-2. 不重复派发与现有步骤(任何状态)相同或等价的意图。
+2. 不重复派发与现有步骤(任何状态)相同或等价的意图。一条意图由原会话完成探索、证明、自查和交卷或原漏洞事实补充，不拆成发现、复核、交卷接力。中途事实回流不代表该意图结束；原意图仍在执行或等待恢复时，不另派同方向的复核交卷工作。确有新的问题或缺失验证时，在意图中写清新增要确认什么，复用已有证据，不以换标题、入口或数据字段重复交卷。
 3. 无值得新派发的意图时输出空列表,不要为了输出而编造意图——规划后确无工作时 0 条意图是完全正常的结果(收尾词;但受第 11 条硬底线约束)。
 4. 每条意图必须定动作分级,分档标准按动作对目标环境的因果方向从严选取:
    - 只读探测:只获取信息,不发送攻击载荷、不改变目标任何数据与状态,重复执行结果一致(端口判定、banner 抓取、GET 拉取页面、DNS/公开信息收集)。
@@ -1064,15 +1065,15 @@ const overmindDisciplineRules = `态势规划标准五问(逐问给一句结论,
    - 利用深入:以利用已确认弱点为前提,实际取得未授权访问或数据(读敏感文件、无副作用命令回显、凭据试用、横向探测);仍不修改目标状态。
    - 修改与持久化:改变目标状态或留下长期存在物(写文件、建账号、改配置等)。动作分级仅描述预期工作，不自动授予或拒绝权限。
 5. 危害申报(harm_class):意图属数据销毁(data_destruction)或拒绝服务类(denial_of_service)时必须申报——此字段描述风险，不作为另一套硬规则。只有当前启用的硬规则直接拒绝；其余实际动作按黑名单审批线判断：只对测试对象的实际增删改请求批准，同类目的沿用批准；明确禁止直接拒绝，不因本地产物或资产登记新增审批。普通意图留空。
-6. 预算耗尽(exhausted)的步骤是暂停接力,不是失败:其单位撞预算前已把发现写回图(见"预算耗尽步骤"轨迹)。同一条工作线值得继续时,派"接着上次进度继续"的意图(接力单位在任务包里能看到前序尝试与已确认事实,从暂停点续跑);不值得继续或方向应换时,按态势另派。接续意图要写明从哪条轨迹续起。
+6. 预算耗尽、暂停、模型等待、审批等待及重启恢复沿原意图的原会话继续，由既有恢复通道处理，不为恢复另派“接着做”的新意图。读取实际进度和等待原因，等待原工作恢复；新的运行单位编号不代表新的工作或新的会话。只有出现独立新方向才另派。
 7. 每条意图可带优先级(high|normal|low,缺省 normal)与前置步骤(depends_on,Step ID 清单;前置完成后才执行——只在后一步必须用到前一步产出时才声明,不设多余依赖)。new_intents 可另带 source_refs，列出本次判断实际依据的资产、意图、已确认事实或已确认漏洞编号；无明确依据时省略，不编造。来源引用只记血缘，不增加执行前置条件。
 8. 查阅公开资料与其他工具动作使用同一判断入口，不声明额外的信息源身份或站点许可；资料查阅不自动收编资产。
 9. 审批拒绝针对被审查的具体动作，不自动终止整个意图或禁止访问该资产；不得重复提交相同被拒动作。历史 approval_denied 步骤按其实际终态处理，不凭拒绝自行扩大禁令。
 10. 多条事实组合出的整体结论仍需验证：在 assessment 中写明方向，以普通 new_intents 指定缺少的预期观察。已确认且可追溯的事实和证据优先复用，只补缺失验证，不重做整条过程；实际执行后沿同一个 submit_claim 入口交卷，不自评成立，不将联想写进事实。
-11. 意图数量硬底线:图上无未完成步骤(dispatched/running)且仍有未达成目标时,必须派发至少 1 条意图;输出 0 条意图仅在两种情形正当——①在等在跑单位产出(图上有未完成步骤)②全部目标已达成。其余情形的 0 意图是停摆,不许。目标未达成且图上无在跑/待执行工作时,本轮必须产出至少一个新方向(新模块/新角度/更深一层),禁止重复已确认事实与已完成步骤。
+11. 意图数量硬底线:图上无未完成步骤且仍有未达成目标时,必须派发至少 1 条意图。未完成包括dispatched/running及scope_wait/gate_wait/pause_wait/model_wait，等待中的原会话仍持有工作，不是空闲。输出 0 条意图仅在两种情形正当——①在等在跑单位产出或原会话解除等待(图上有未完成步骤)②全部目标已达成。其余情形的 0 意图是停摆,不许。目标未达成且确实没有未完成工作时,本轮必须产出至少一个新方向(新模块/新角度/更深一层),禁止重复已确认事实与已完成步骤。
 12. 路线多样性:探索期理想同时维持 2~3 条机理不同的路线(不同入口、不同技术路径)并存,防单点钻牛角尖;多样性永远服从 RoE 与优先级,不为多而多。
 13. 规划只根据任务目标、实际观察与账本证据形成下一条意图；未验证的想法写在本轮研判及派发理由中，不能记成已确认事实。保留实际来源引用。复核上限:同一否定方向至多复核一次——复核后仍是否定,尊重结论,不再向该方向派发;后续新证据出现时走 TestClaim 重开和正常研判记录兜底,不靠重复派发。
-14. 重派判定树:停下的步骤按停法分别处置——done:检查归纳产出后按产出规划;exhausted:读"预算耗尽步骤"执行轨迹的真实进度(轮数、工具实调、产出物)决定接力或换向;blocked(受阻):按受阻原因换路绕行或换前提,仅当阻塞已解除才回原路。依据一律是轨迹真实进度,不是状态措辞。
+14. 重派判定树:停下的步骤按停法分别处置——done:检查实际产出与归属后规划新工作，不仅为复述或重新申报已证明的结果另派;exhausted:读“预算耗尽步骤”轨迹，原意图沿原会话恢复，不复制工作;blocked(受阻):等待原通道恢复，确有不同前提或新方法才规划新的验证，不能把等待当失败。依据一律是轨迹真实进度,不是状态措辞。
 15. 待判定建议(纳谏):快照「待判定建议」区每条都必须在 advices 里判定——adopt=true 须在本轮意图中体现或在理由中写明何时体现;adopt=false 的理由必须基于图上事实(不空泛)。牧者的建议是规划输入,不是命令;判定后规划随之改变,建议状态随之更新。
 16. 本机回环(127.0.0.1 / localhost / ::1)与镜等测试环境自身设施不是目标攻击面:不对其派发探测或验证意图,也不把虫群对它们的观察当作发现规划后续;虫群的相关提交会被入口拒收并记为环境观察。查阅资料不自动形成测试目标或任务成果；背景资料仍按来源保留，不因被提到就派新意图。任务资产清单内的目标(含操作者声明的本机测试靶标)不受此限。
 17. 队列治理:先读队列水位，等前置步骤也预留容量，避免前置完成时集中转排队突破上限。普通探索最多提交本轮还可新增数；容量满是正常等待，不是模型故障，不重复提交。操作者急活由各自入口豁免。每轮审视全部未领取步骤，结合最新证据取消重复、过时、前提失败的普通探索；用 cancel_steps 给步骤 ID、具体理由与图上依据 ID。急活及其关键前置保留，程序会复检并连带取消普通后继。cancel_steps只用于未领取步骤；在跑执行的复查使用work_controls，经现有舵杆纠偏或止损。刚派发新步骤不是继续规划的依据；一只单位结果落地就处理新结果，不等整批。
@@ -1548,12 +1549,42 @@ func (l *Loop) buildSnapshot(ctx context.Context) (string, int64, QueueWatermark
 	for _, e := range abouts {
 		factAssets[e.From] = append(factAssets[e.From], e.To)
 	}
+	// A fact returned by a running intent is progress, not a hand-off. Keep
+	// its recorded producer and claim ownership visible to the planner.
+	produces, err := l.Store.Edges(ctx, l.TaskID, rings.EdgeProduces)
+	if err != nil {
+		return "", 0, QueueWatermark{}, nil, err
+	}
+	factProducers := map[string][]string{}
+	for _, e := range produces {
+		factProducers[e.To] = append(factProducers[e.To], e.From)
+	}
+	sources, err := l.Store.Edges(ctx, l.TaskID, rings.EdgeSourcedFrom)
+	if err != nil {
+		return "", 0, QueueWatermark{}, nil, err
+	}
+	claimIDs := map[string]bool{}
+	for _, c := range claims {
+		claimIDs[c.ID] = true
+	}
+	factClaims := map[string][]string{}
+	for _, e := range sources {
+		if claimIDs[e.From] {
+			factClaims[e.To] = append(factClaims[e.To], e.From)
+		}
+	}
 	b.WriteString("\n已确认事实:\n")
 	if len(facts) == 0 {
 		b.WriteString("  (无)\n")
 	}
 	for _, f := range facts {
 		fmt.Fprintf(&b, "  - %s: %s", f.ID, f.Title)
+		if producers := factProducers[f.ID]; len(producers) > 0 {
+			fmt.Fprintf(&b, " (产出意图 %v)", producers)
+		}
+		if claims := factClaims[f.ID]; len(claims) > 0 {
+			fmt.Fprintf(&b, " (已归属漏洞 %v)", claims)
+		}
 		if decl := factNewAsset(f.Detail); decl != nil {
 			_, _, key, e := rings.AssetIdentity(rings.AssetClass(decl.Class), decl.Title)
 			if e != nil {

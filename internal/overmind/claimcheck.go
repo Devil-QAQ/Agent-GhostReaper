@@ -148,7 +148,7 @@ func readClaimSubmission(evs []rings.RawEvent, claimID string, campaignRev int64
 // ID 或直连 URL 回查命中可组包工具记录——与种子解析同源,范围=当前
 // 战役交卷步骤流量)、proving_marker 在命中引用的响应体原文中出现
 // (子串匹配)、冻结标准可解析。
-func (l *Loop) checkClaimFacts(ctx context.Context, claim rings.NodeFull, sub *claimSubmission) (arbiter.CheckFacts, error) {
+func (l *Loop) checkClaimFactsFrom(claim rings.NodeFull, sub *claimSubmission, view *claimEvidenceView) (arbiter.CheckFacts, error) {
 	f := arbiter.CheckFacts{Countercheck: sub.rec.CountercheckNote}
 	// 查三:创建事件冻结的判定标准存在且可解析(标准非法=被改/缺失)。
 	if raw, _ := claim.Detail["standard"].(map[string]any); raw != nil {
@@ -157,10 +157,7 @@ func (l *Loop) checkClaimFacts(ctx context.Context, claim rings.NodeFull, sub *c
 		}
 	}
 	// 查一:引用逐条命中 + marker 在命中引用的响应体中。
-	hits, err := l.resolveSubmitRefs(ctx, claim.ID, sub.rec)
-	if err != nil {
-		return f, err
-	}
+	hits := resolveSubmitRefsFrom(l.TaskID, sub.rec, view)
 	f.RefsTotal = len(sub.rec.EvidenceRefs)
 	marker := sub.rec.ProvingMarker
 	for i := range hits {
@@ -187,15 +184,8 @@ type submitRefHit struct {
 // (范围=当前战役交卷步骤流量,与种子解析同源);直连形态引用 URL 字
 // 符串(P5-01 注意事项 3:submit 侧只收不拦)按可组包工具记录回查命中
 // (P4-62 C(b) 通道)。悬空引用(查不到)如实不命中——查一据此拒。
-func (l *Loop) resolveSubmitRefs(ctx context.Context, claimID string, sub *rings.TestClaimRecord) ([]submitRefHit, error) {
-	stepIDs, err := claimEvidenceSteps(ctx, l.Store, l.TaskID, claimID)
-	if err != nil {
-		return nil, err
-	}
-	evs, err := l.Store.Events(ctx, l.TaskID, 0, 0)
-	if err != nil {
-		return nil, fmt.Errorf("overmind: 三查读事件流: %w", err)
-	}
+func resolveSubmitRefsFrom(taskID string, sub *rings.TestClaimRecord, view *claimEvidenceView) []submitRefHit {
+	stepIDs, evs := view.steps, view.events
 	byExchange := map[string]*rings.MirrorRecord{}
 	var tools []*rings.SwarmRecord
 	for i := range evs {
@@ -230,12 +220,12 @@ func (l *Loop) resolveSubmitRefs(ctx context.Context, claimID string, sub *rings
 		h := submitRefHit{ref: ref}
 		if m, ok := byExchange[strings.TrimSpace(ref)]; ok {
 			h.mirror, h.hit = m, true
-		} else if t := toolRecByURL(l.TaskID, tools, strings.TrimSpace(ref)); t != nil {
+		} else if t := toolRecByURL(taskID, tools, strings.TrimSpace(ref)); t != nil {
 			h.tool, h.hit = t, true
 		}
 		hits = append(hits, h)
 	}
-	return hits, nil
+	return hits
 }
 
 // toolRecByURL 直连形态的 URL 回查:引用是 URL 字符串时,命中参数/
@@ -307,7 +297,7 @@ func (l *Loop) markerInRefBody(h *submitRefHit, marker string) bool {
 
 // claimCampaignStepIDs 当前战役内该声明的交卷步骤集合(submit 记录的
 // StepID;旧账本 falsify 步骤并入——存量容错)。
-func claimCampaignStepIDs(ctx context.Context, store *rings.Store, taskID, claimID string, campaignRev int64) (map[string]bool, error) {
+func claimCampaignStepIDsFrom(ctx context.Context, store *rings.Store, taskID, claimID string, campaignRev int64, evs []rings.RawEvent) (map[string]bool, error) {
 	steps, err := store.NodesByType(ctx, taskID, rings.NodeStep, "")
 	if err != nil {
 		return nil, fmt.Errorf("overmind: 三查查步骤: %w", err)
@@ -326,10 +316,6 @@ func claimCampaignStepIDs(ctx context.Context, store *rings.Store, taskID, claim
 		}
 	}
 	// submit 记录的 StepID(意图步骤,不带 claim 绑定 detail)也并入。
-	evs, err := store.Events(ctx, taskID, 0, 0)
-	if err != nil {
-		return nil, fmt.Errorf("overmind: 三查读事件流: %w", err)
-	}
 	for _, ev := range evs {
 		if ev.Kind != rings.EventTestClaimRecord || ev.Revision <= campaignRev {
 			continue
@@ -396,14 +382,11 @@ func (l *Loop) checkClaimSubmission(ctx context.Context, taskID, claimID string)
 	if claim.Status != rings.TestClaimCandidate {
 		return l.recordedClaimCheck(ctx, taskID, claimID)
 	}
-	evs, err := l.Store.Events(ctx, taskID, 0, 0)
+	view, err := readClaimEvidence(ctx, l.Store, taskID, claimID)
 	if err != nil {
 		return nil, fmt.Errorf("overmind: 交卷即查读事件流: %w", err)
 	}
-	campaignRev, err := claimCampaignRev(ctx, l.Store, taskID, claimID)
-	if err != nil {
-		return nil, err
-	}
+	evs, campaignRev := view.events, view.campaignRev
 	sub, err := readClaimSubmission(evs, claimID, campaignRev)
 	if err != nil {
 		return nil, err
@@ -416,7 +399,7 @@ func (l *Loop) checkClaimSubmission(ctx context.Context, taskID, claimID string)
 	}
 	version := rings.ClaimSubmissionVersion{ClaimID: claimID, SubmitRev: sub.submitRev}
 
-	facts, err := l.checkClaimFacts(ctx, *claim, sub)
+	facts, err := l.checkClaimFactsFrom(*claim, sub, view)
 	if err != nil {
 		return nil, err
 	}
@@ -437,7 +420,7 @@ func (l *Loop) checkClaimSubmission(ctx context.Context, taskID, claimID string)
 		if l.Swarm != nil {
 			blobs = l.Swarm.Blobs
 		}
-		seeds, serr := ResolveEvidenceSeeds(ctx, l.Store, blobs, taskID, claimID)
+		seeds, serr := resolveEvidenceSeedsFrom(blobs, taskID, claimID, view)
 		if serr != nil {
 			return nil, fmt.Errorf("overmind: 确认判断 %s 证据种子: %w", claimID, serr)
 		}
@@ -460,7 +443,7 @@ func (l *Loop) checkClaimSubmission(ctx context.Context, taskID, claimID string)
 		if severity == "none" {
 			severity = ""
 		}
-		repro, _, seedSeqs, rerr := AssembleRepro(ctx, l.Store, blobs, rings.DefaultScopeResolver, taskID, claimID, severity, seeds)
+		repro, _, seedSeqs, rerr := assembleReproFrom(ctx, l.Store, blobs, rings.DefaultScopeResolver, taskID, claimID, severity, seeds, view)
 		if rerr != nil {
 			return nil, fmt.Errorf("overmind: 定稿判断 %s: %w", claimID, rerr)
 		}
@@ -489,7 +472,7 @@ func (l *Loop) checkClaimSubmission(ctx context.Context, taskID, claimID string)
 		if err != nil {
 			return nil, fmt.Errorf("overmind: 确认判断 %s 落账: %w", claimID, err)
 		}
-		l.polishClaimPackageAsync(ctx, claimID, written[len(written)-1], *repro, check.Verdict.Conditions, seedSeqs)
+		l.queueClaimTextAt(ctx, claimID, written[len(written)-1])
 		runlog.Infof("交卷即查:判断 %s 三查全过,已确认(复现包 %d 步)", claimID, len(repro.Steps))
 		return out, nil
 	case rings.TestClaimCandidate:

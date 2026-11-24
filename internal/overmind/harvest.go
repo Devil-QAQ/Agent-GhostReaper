@@ -464,11 +464,15 @@ func discoveredAssetEvents(ctx context.Context, store *rings.Store, taskID strin
 // 重开)——定稿组装(复现步骤归因范围)与证据种子解析(P4-73)共用,
 // 单源防漂移。
 func claimCampaignRev(ctx context.Context, store *rings.Store, taskID, claimID string) (int64, error) {
-	campaignRev := int64(0)
-	evs, err := store.Events(ctx, taskID, 0, 0)
+	evs, err := store.EventsByKinds(ctx, taskID, rings.EventTestClaimRecord)
 	if err != nil {
 		return 0, fmt.Errorf("overmind: 定稿查事件流: %w", err)
 	}
+	return claimCampaignRevFrom(evs, claimID)
+}
+
+func claimCampaignRevFrom(evs []rings.RawEvent, claimID string) (int64, error) {
+	campaignRev := int64(0)
 	for _, ev := range evs {
 		if ev.Kind != rings.EventTestClaimRecord {
 			continue
@@ -568,11 +572,17 @@ func ClaimFalsifySteps(ctx context.Context, store *rings.Store, taskID, claimID 
 // 由主宰循环与确认裁决同批落账。
 func AssembleRepro(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore,
 	resolve rings.ScopeResolver, taskID, claimID, severity string, seeds []EvidenceSeed) (*rings.TestClaimRecord, ReproPoolDiag, []int, error) {
-	diag := ReproPoolDiag{}
-	byID, err := claimEvidenceSteps(ctx, store, taskID, claimID)
+	view, err := readClaimEvidence(ctx, store, taskID, claimID)
 	if err != nil {
-		return nil, diag, nil, err
+		return nil, ReproPoolDiag{}, nil, err
 	}
+	return assembleReproFrom(ctx, store, blobs, resolve, taskID, claimID, severity, seeds, view)
+}
+
+func assembleReproFrom(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore,
+	resolve rings.ScopeResolver, taskID, claimID, severity string, seeds []EvidenceSeed, view *claimEvidenceView) (*rings.TestClaimRecord, ReproPoolDiag, []int, error) {
+	diag := ReproPoolDiag{}
+	byID := view.steps
 	// 目标流量过滤口径(P3-05b ①):任务授权范围 = 资产标识解析出的
 	// 目标源(host:port 精确;无端口的 host 级授权)。RoE 的资产引用与
 	// 意图拦截均锚定同一批资产节点,口径同源。
@@ -596,10 +606,7 @@ func AssembleRepro(ctx context.Context, store *rings.Store, blobs *swarm.BlobSto
 	allOrigin := []int{} // 与 all 平行:账本次序(镜=事件序,工具=事件序+事件总数)
 	allToolKey := []string{}
 	process := []rings.ReproProcessRef{}
-	evs, err := store.Events(ctx, taskID, 0, 0)
-	if err != nil {
-		return nil, diag, nil, fmt.Errorf("overmind: 定稿读事件流: %w", err)
-	}
+	evs := view.events
 	toolOriginOffset := len(evs) // 工具组包排在全部镜交换之后(与池构造次序一致)
 	for _, ev := range evs {
 		if ev.Kind != rings.EventSwarmRecord {

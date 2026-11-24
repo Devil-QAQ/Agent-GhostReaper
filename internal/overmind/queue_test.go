@@ -14,6 +14,26 @@ import (
 	"time"
 )
 
+func TestIdleFloorDoesNotReplaceWaitingOriginalIntent(t *testing.T) {
+	for _, status := range []string{"running", "dispatched", rings.StepScopeWait, rings.StepGateWait, rings.StepPauseWait, rings.StepModelWait, "done", "failed", "cancelled", "aborted"} {
+		t.Run(status, func(t *testing.T) {
+			s := openStore(t)
+			const task = "idle-original"
+			if _, err := s.Append(t.Context(), task,
+				rings.Event{Kind: rings.EventNodeAdded, Actor: "test", Payload: rings.NodeAdded{NodeID: "g", NodeType: rings.NodeGoal, Status: GoalStatusActive, Title: "未完成目标"}},
+				rings.Event{Kind: rings.EventNodeAdded, Actor: "test", Payload: rings.NodeAdded{NodeID: "s1", NodeType: rings.NodeStep, Status: status, Title: "原意图"}},
+			); err != nil {
+				t.Fatal(err)
+			}
+			loop := &Loop{Store: s, TaskID: task}
+			want := status == "done" || status == "failed" || status == "cancelled" || status == "aborted"
+			if got := loop.idleFloorDue(t.Context()); got != want {
+				t.Fatalf("status=%s idle=%v want=%v", status, got, want)
+			}
+		})
+	}
+}
+
 func TestQueueAdmissionConcurrentAndExemptions(t *testing.T) {
 	ctx := context.Background()
 	s := openStore(t)

@@ -44,7 +44,7 @@ func DefaultBudget() Budget {
 	return Budget{}.withDefaults()
 }
 
-const wrapupPrompt = `运行预算即将耗尽。立即收尾:把本次实际观察到、尚未提交的事实及证据用 submit_candidate_fact 写回；未验证的想法不要作为事实提交。然后用一句话说明进度与剩余工作。不要发起新的探测。`
+const wrapupPrompt = `运行预算即将耗尽。立即收尾:把本次实际观察到、尚未提交的事实及证据用 submit_candidate_fact 写回；本次已完成证明和自查的独立漏洞及时submit_claim，同根因补充归原漏洞，未验证的想法不要作为事实提交。然后用一句话说明进度与剩余工作，原意图续跑复用这些材料。不要发起新的探测。`
 
 // TaskPack 最小任务包七要素(第四章 §2):虫群单位换实例、换上下文
 // 仍能接着同一条工作线继续。Claim 时从图上构建并绑定图版本,

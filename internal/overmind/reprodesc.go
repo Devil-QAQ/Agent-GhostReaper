@@ -101,7 +101,7 @@ func (l *Loop) pickReproSteps(ctx context.Context, claimID string, rec *rings.Te
 	if n, err := l.Store.Node(ctx, l.TaskID, claimID); err == nil {
 		claimTitle = n.Title
 	}
-	facts := reproFactClip(l.reproFacts(rec))
+	facts := l.reproFacts(rec)
 	gs := l.newGenSession(reproDescSystem)
 	defer gs.close()
 	head := reproAskHead(claimTitle, facts, len(rec.Steps))
@@ -176,7 +176,7 @@ func (l *Loop) pickSeededReproSteps(ctx context.Context, claimID string, rec *ri
 	if n, err := l.Store.Node(ctx, l.TaskID, claimID); err == nil {
 		claimTitle = n.Title
 	}
-	facts := reproFactClip(l.reproFacts(rec, seedSeqs))
+	facts := l.reproFacts(rec, seedSeqs)
 	gs := l.newGenSession(reproDescSystem)
 	defer gs.close()
 	head := reproAskHead(claimTitle, facts, len(rec.Steps))
@@ -369,14 +369,24 @@ func (l *Loop) reproFacts(rec *rings.TestClaimRecord, seedSeqs ...[]int) []repro
 		}
 	}
 	facts := make([]reproFact, 0, len(rec.Steps))
+	refs := make(map[int]string, len(rec.Steps))
 	for _, st := range rec.Steps {
 		f := reproFact{
 			Seq: st.Seq, Method: st.Method, URL: st.URL,
 			RespStatus: st.Status, Note: st.Note,
 			Seed: seedSet[st.Seq],
 		}
-		if blobs != nil && st.BlobRef != "" {
-			if doc, err := blobs.Read(st.BlobRef); err == nil {
+		facts = append(facts, f)
+		refs[st.Seq] = st.BlobRef
+	}
+	// Select existing model-visible candidates before reading bodies. Large
+	// enumeration histories remain in the process ledger; reading every blob
+	// just to discard it after clipping adds no information to this request.
+	facts = reproFactClip(facts)
+	for i := range facts {
+		f := &facts[i]
+		if ref := refs[f.Seq]; blobs != nil && ref != "" {
+			if doc, err := blobs.Read(ref); err == nil {
 				var ex mirror.Exchange
 				if json.Unmarshal(doc, &ex) == nil {
 					f.Cred = credShape(ex.Request)
@@ -396,7 +406,6 @@ func (l *Loop) reproFacts(rec *rings.TestClaimRecord, seedSeqs ...[]int) []repro
 		if f.Cred == "" {
 			f.Cred = "未知(原文缺失)"
 		}
-		facts = append(facts, f)
 	}
 	return facts
 }
@@ -462,7 +471,7 @@ func reproAskHead(claimTitle string, facts []reproFact, total int) string {
 		head = "其中 \"seed\":true 的步骤是该发现结论依据的证明交换,已固定在包内(不可删、不可换);你的任务是为全部包内步骤写三段说明,并按需从其余步骤事实里补出复现所需的前置步骤。\n" + head
 	}
 	if total > len(facts) {
-		head = fmt.Sprintf("步骤共 %d 条,此处列前 %d 条与最近 %d 条:\n", total, len(facts)/2, len(facts)-len(facts)/2) + head
+		head = fmt.Sprintf("步骤共 %d 条,此处列 %d 条交换，证明交换全部保留，其他原始过程仍可查:\n", total, len(facts)) + head
 	}
 	return head
 }
@@ -479,16 +488,19 @@ func (l *Loop) askReproDescs(ctx context.Context, gs *genSession, head string) (
 	return parseReproDescs(text)
 }
 
-// reproFactClip 候选事实包的喂入截取(账次序取首尾各半;链式流程的
-// 关键交换在两端)。
+// Keep the existing first/last context budget plus every explicit proof.
+// Proofs in the middle of a large discovery must never disappear at clipping.
 func reproFactClip(facts []reproFact) []reproFact {
 	if len(facts) <= reproFactAskCap {
 		return facts
 	}
 	half := reproFactAskCap / 2
 	out := make([]reproFact, 0, reproFactAskCap)
-	out = append(out, facts[:half]...)
-	out = append(out, facts[len(facts)-half:]...)
+	for i, fact := range facts {
+		if i < half || i >= len(facts)-half || fact.Seed {
+			out = append(out, fact)
+		}
+	}
 	return out
 }
 

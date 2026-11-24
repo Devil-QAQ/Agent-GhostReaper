@@ -32,6 +32,16 @@ func (s *Store) ClaimTextSourceRev(ctx context.Context, task, id string) (int64,
 	return source, nil
 }
 
+// The accepted display event is the durable completion receipt. Use the
+// existing event-kind index; no second job table or cached business state.
+func (s *Store) HasClaimText(ctx context.Context, task, id string, source int64) (bool, error) {
+	var found bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events
+	 WHERE task_id=? AND kind=? AND json_extract(payload,'$.claim_id')=?
+	 AND json_extract(payload,'$.source_rev')=?)`, task, EventClaimText, id, source).Scan(&found)
+	return found, err
+}
+
 func applyClaimText(tx *sql.Tx, task string, rev int64, p ClaimTextPolish) error {
 	if p.ClaimID == "" || p.SourceRev <= 0 || (p.Repro == nil && (strings.TrimSpace(p.Title) == "" || strings.TrimSpace(p.Statement) == "")) {
 		return fmt.Errorf("rings: 漏洞显示稿缺对象、依据版本、名称或说明")

@@ -107,9 +107,9 @@ changes只记录本次动作直接要求的业务变化。系统处理请求时�
 操作者的task_description、goals、notes及工具限制是授权依据。实际命中明文禁止项返回prohibition，不转成人工审批，不被旧批准覆盖；操作者明确给出的条件和限额仍须遵守，不能假定缺失的条件依据已满足。未命中明文限制或业务增删改时，changes为空。
 authorized_targets是人工目标，target_scope是其主机范围，ports=all表示全部端口；入口URL的端口和路径不自动缩小授权。assets、asset_relationships只是事实分类与关系，不增加条件。资产加入由独立流程处理，changes不处理资产加入，行为批准也不扩大资产范围。
 只看tool、arguments和实际源码，不把步骤计划或文件提及的地址当作正在执行的动作。执行脚本而源码不可见时，先用read_context_file读取脚本及必要导入；读取不是执行，不能把可自行核查的内容交操作者审批，也不能按文件名猜影响。
-prior_approvals是未撤回的人工批准。同目的、同目标范围、同类业务影响沿用原许可，优先填写approved_by引用其request_id，不重命名类别或缩小许可。原命令、参数、账号、路径和数量是实例，除操作者原文或人工批备注明确限制外，不形成新的条件。approval_epoch和资产新增不撤销批准。旧批准没有permission时，结合原调用及人工批备注理解，不猜旧脚本内容。
+prior_approvals是未撤回的人工批准。同目的、同目标范围、同类业务影响沿用原许可，优先填写approved_by引用其request_id，不重命名类别或缩小许可。原命令、参数、账号、路径和数量是实例，除操作者原文或人工批备注明确限制外，不形成新的条件。approval_epoch和资产新增不撤销批准。旧批准没有permission时，索引保留编号、工具及批备注；需要沿用时先用read_approval按request_id读取原调用及批备注，不凭索引猜许可，不猜旧脚本内容。无业务变化不必读取批准。
 每项changes只填permission（actions=create/update/delete；resource=业务影响类别，保留实际权限层级差别，不含具体记录值；targets=所属系统入口；purpose=直接目的；effects=直接业务影响）和可选approved_by。已批准与未批准的变化分别填写，程序只对未授权变化申请审批。只有真实目的、目标范围或影响不同才重新判断，不能只因实例变化要求重批。
-只输出JSON：{"reason":"直接目的和实际影响依据","changes":[]}。实际业务变化写入changes：[{"permission":{"actions":["create"],"resource":"业务类别","targets":["系统入口"],"purpose":"直接目的","effects":"直接影响"},"approved_by":"适用批准编号，无则省略"}]。命中明文禁止时返回顶层prohibition及changes:[]；prohibition逐字引用禁止原文并说明实际命中。操作者明文授权覆盖本次变化时可附顶层operator_permission逐字引用该原文，仍如实记录changes，不扩大授权。不要输出decision，由程序统一生成唯一裁决。除read_context_file外不执行工具、不规划方向、不创建资产。`
+只输出JSON：{"reason":"直接目的和实际影响依据","changes":[]}。实际业务变化写入changes：[{"permission":{"actions":["create"],"resource":"业务类别","targets":["系统入口"],"purpose":"直接目的","effects":"直接影响"},"approved_by":"适用批准编号，无则省略"}]。命中明文禁止时返回顶层prohibition及changes:[]；prohibition逐字引用禁止原文并说明实际命中。操作者明文授权覆盖本次变化时可附顶层operator_permission逐字引用该原文，仍如实记录changes，不扩大授权。不要输出decision，由程序统一生成唯一裁决。工具只读源码或批准原文，不执行动作、不规划方向、不创建资产。`
 
 func ActionReviewFor(provider llm.Provider, readers ...func(string) ([]byte, error)) ActionReviewFunc {
 	return func(ctx context.Context, in ActionReviewInput) (ActionReview, error) {
@@ -118,21 +118,10 @@ func ActionReviewFor(provider llm.Provider, readers ...func(string) ([]byte, err
 		}
 		// A worker plan is neither an observed effect nor operator authority.
 		in.Goal, in.Intent = "", ""
-		in.Boundaries.Approvals = append([]rings.ApprovalRow(nil), in.Boundaries.Approvals...)
-		for i := range in.Boundaries.Approvals {
-			in.Boundaries.Approvals[i].Intent = ""
-			if in.Boundaries.Approvals[i].Permission != nil {
-				// A structured grant is purpose authority. Its original command
-				// stays in the audit ledger, not as a second narrower boundary.
-				in.Boundaries.Approvals[i].ToolName = ""
-				in.Boundaries.Approvals[i].ToolArgs = ""
-				in.Boundaries.Approvals[i].Note = ""
-			}
-		}
 		if len(in.Boundaries.TargetScope) == 0 {
 			in.Boundaries.TargetScope = actionTargetScopes(in.Boundaries.AuthorizedTargets)
 		}
-		body, err := json.Marshal(in)
+		body, legacy, err := actionReviewBody(in)
 		if err != nil {
 			return ActionReview{}, actionReviewError("动作判断参数无效")
 		}
@@ -141,8 +130,15 @@ func ActionReviewFor(provider llm.Provider, readers ...func(string) ([]byte, err
 		if len(readers) > 0 {
 			schemas = []llm.ToolSchema{{Name: "read_context_file", Description: "只读本次命令实际引用的脚本及导入源码。路径按实际工作目录解析，不得读取无关文件。", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}}, "required": []string{"path"}, "additionalProperties": false}}}
 		}
+		if len(legacy) > 0 {
+			schemas = append(schemas, llm.ToolSchema{Name: "read_approval", Description: "按索引编号读取一条有效旧批准的完整原调用及人工批备注。仅在需要沿用该批准时读取，不是执行或重新申请审批。", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"request_id": map[string]any{"type": "string"}}, "required": []string{"request_id"}, "additionalProperties": false}})
+		}
 		hashes := map[string][32]byte{}
-		for round := 0; round < 9; round++ {
+		readGrants := map[string]bool{}
+		// Approval lookups must not consume the existing source-read allowance.
+		// The finite input grant set bounds extra lookup turns, without adding
+		// another approval stage or truncating an otherwise valid script review.
+		for round := 0; round < 9+len(legacy); round++ {
 			msg, _, _, err := provider.Complete(ctx, llm.CompletionRequest{System: []string{actionReviewPrompt}, Messages: messages, Tools: schemas, MaxTokens: 1000, Thinking: "disabled", Temperature: new(float64)})
 			if err != nil {
 				return ActionReview{}, actionReviewError("动作判断调用未完成")
@@ -156,24 +152,49 @@ func ActionReviewFor(provider llm.Provider, readers ...func(string) ([]byte, err
 					}
 				}
 				verdict, err := parseActionEffects(msgText(msg), in.Boundaries)
+				if err == nil && unreadLegacyGrant(msgText(msg), legacy, readGrants) {
+					err = actionReviewError("动作判断未读取引用批准的原文")
+				}
 				if err != nil && round < 2 {
-					messages = append(messages, msg, llm.UserText(`返回格式不符。禁止调用请返回顶层对象 {"reason":"实际动作","prohibition":"操作者禁止原文与命中原因","changes":[]}，prohibition不放在changes里面。其他调用返回reason和changes，实际业务变化写changes的permission与适用approved_by；操作者明文免审时可附顶层operator_permission逐字引用覆盖本次动作的授权原文。不输出decision。`))
+					messages = append(messages, msg, llm.UserText(`返回格式或批准依据不符。沿用无permission的旧批准须先read_approval读取原文。禁止调用请返回顶层对象 {"reason":"实际动作","prohibition":"操作者禁止原文与命中原因","changes":[]}，prohibition不放在changes里面。其他调用返回reason和changes，实际业务变化写changes的permission与适用approved_by；操作者明文免审时可附顶层operator_permission逐字引用覆盖本次动作的授权原文。不输出decision。`))
 					continue
 				}
-				return verdict, err
-			}
-			if len(readers) == 0 {
-				return ActionReview{}, actionReviewError("动作判断请求了不可用工具")
+				if err != nil {
+					return ActionReview{}, err
+				}
+				return verdict, nil
 			}
 			messages = append(messages, msg)
 			results := llm.Message{Role: llm.RoleUser}
 			for _, use := range uses {
+				if use.Name == "read_approval" {
+					var args struct {
+						RequestID string `json:"request_id"`
+					}
+					if json.Unmarshal(use.Input, &args) != nil {
+						return ActionReview{}, actionReviewError("批准原文读取请求无效")
+					}
+					grant, ok := legacy[args.RequestID]
+					if !ok {
+						return ActionReview{}, actionReviewError("批准已失效或不在当前索引")
+					}
+					data, _ := json.Marshal(struct {
+						RequestID string `json:"request_id"`
+						Tool      string `json:"tool"`
+						Arguments string `json:"arguments"`
+						Note      string `json:"note"`
+						Reason    string `json:"reason"`
+					}{grant.RequestID, grant.ToolName, grant.ToolArgs, grant.Note, grant.Reason})
+					readGrants[args.RequestID] = true
+					results.Content = append(results.Content, llm.ToolResultText(use.ID, string(data), false))
+					continue
+				}
 				var args struct {
 					Path string `json:"path"`
 				}
 				var data []byte
 				var e error
-				if use.Name != "read_context_file" || json.Unmarshal(use.Input, &args) != nil || len(hashes) >= 8 {
+				if use.Name != "read_context_file" || len(readers) == 0 || json.Unmarshal(use.Input, &args) != nil || len(hashes) >= 8 {
 					e = errors.New("上下文读取请求无效或超过上限")
 				} else {
 					data, e = readers[0](args.Path)

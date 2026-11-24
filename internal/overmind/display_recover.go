@@ -116,20 +116,7 @@ func (l *Loop) recoverDisplay(ctx context.Context) {
 				}
 				continue
 			}
-			event, err := l.Store.EventByRevision(ctx, l.TaskID, row.Repro.Rev)
-			if err != nil {
-				l.setErr(err)
-				continue
-			}
-			var rec rings.TestClaimRecord
-			if json.Unmarshal(event.Payload, &rec) != nil {
-				continue
-			}
-			var verdict rings.TestClaimRecord
-			if event, err := l.Store.EventByRevision(ctx, l.TaskID, row.VerdictRev); err == nil {
-				_ = json.Unmarshal(event.Payload, &verdict)
-			}
-			l.polishClaimPackageAsync(ctx, n.ID, source, rec, verdict.Conditions, rec.ProofSeqs)
+			l.queueClaimTextAt(ctx, n.ID, source)
 		} else if n.Status == rings.TestClaimCandidate || n.Status == rings.TestClaimInsufficient || n.Status == rings.TestClaimRefuted {
 			l.polishClaimTextAsync(ctx, n.ID)
 		}

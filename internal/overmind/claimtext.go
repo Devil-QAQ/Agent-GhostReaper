@@ -332,7 +332,7 @@ func (l *Loop) polishClaimTextAsync(parent context.Context, claimID string) {
 		l.setErr(err)
 		return
 	}
-	l.queueDisplay(parent, []string{displayKey("claim", claimID, source)}, func(ctx context.Context, _ map[string]bool) { l.polishClaimTextAt(ctx, claimID, source) })
+	l.queueClaimTextAt(parent, claimID, source)
 }
 
 func (l *Loop) polishClaimText(ctx context.Context, claimID string) {
@@ -344,11 +344,33 @@ func (l *Loop) polishClaimText(ctx context.Context, claimID string) {
 }
 
 func (l *Loop) polishClaimTextAt(ctx context.Context, claimID string, source int64) {
-	if current, err := l.Store.ClaimTextSourceRev(ctx, l.TaskID, claimID); err != nil || current != source {
+	if !l.claimDisplayCurrent(ctx, claimID, source) {
+		return
+	}
+	done, err := l.Store.HasClaimText(ctx, l.TaskID, claimID, source)
+	if err != nil {
+		l.setErr(err)
+		return
+	}
+	if done {
+		return
+	}
+	row, found, err := l.Store.ClaimCaseOf(ctx, l.TaskID, claimID)
+	if err != nil {
+		l.setErr(err)
+		return
+	}
+	claim, err := l.Store.Node(ctx, l.TaskID, claimID)
+	if err != nil {
+		l.setErr(err)
+		return
+	}
+	if found && (claim.Status == rings.TestClaimConfirmed || claim.Status == rings.TestClaimFixed) && row.Repro != nil && row.Repro.StepsIncomplete == "流程步骤整理中" && len(row.Repro.ProofSeqs) > 0 {
+		l.polishClaimPackageAt(ctx, claimID, source, row)
 		return
 	}
 	p := l.genClaimSummaryText(ctx, claimID)
-	if p.Title == "" || p.Statement == "" {
+	if p.Title == "" || p.Statement == "" || !l.claimDisplayCurrent(ctx, claimID, source) {
 		return
 	}
 	if _, err := l.Store.AppendDisplay(ctx, l.TaskID, rings.Event{Kind: rings.EventClaimText, Actor: ActorOvermind, Payload: rings.ClaimTextPolish{ClaimID: claimID, SourceRev: source, Title: p.Title, Statement: p.Statement, Impact: p.Impact, Facts: p.Facts}}); err != nil {

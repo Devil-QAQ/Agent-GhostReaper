@@ -237,10 +237,12 @@ func (l *Loop) idleFloorDue(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
-	for _, s := range steps {
-		if s.Status == "dispatched" || s.Status == "running" {
-			return false
-		}
+	// A yielded original conversation still owns unfinished work. Reuse the
+	// queue's existing state classification instead of treating waits as an
+	// empty task and waking the planner to manufacture replacement intents.
+	water := QueueWatermarkOf(steps, nil, 0)
+	if water.Running+water.Queued+water.Waiting+water.Hold > 0 {
+		return false
 	}
 	goals, err := l.Store.NodesByType(ctx, l.TaskID, rings.NodeGoal, GoalStatusActive)
 	if err != nil {

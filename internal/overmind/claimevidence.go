@@ -7,16 +7,36 @@ import (
 	"ghostreaper/internal/rings"
 )
 
+// One read view supplies the submission check, seed resolution and package.
+// It is local to this operation, never a cache across evidence or policy edits.
+type claimEvidenceView struct {
+	events      []rings.RawEvent
+	steps       map[string]rings.NodeFull
+	campaignRev int64
+}
+
+func readClaimEvidence(ctx context.Context, store *rings.Store, task, claim string) (*claimEvidenceView, error) {
+	events, err := store.EventsByKinds(ctx, task, rings.EventTestClaimRecord, rings.EventMirrorRecord, rings.EventSwarmRecord)
+	if err != nil {
+		return nil, err
+	}
+	campaign, err := claimCampaignRevFrom(events, claim)
+	if err != nil {
+		return nil, err
+	}
+	steps, err := claimEvidenceStepsFrom(ctx, store, task, claim, campaign, events)
+	if err != nil {
+		return nil, err
+	}
+	return &claimEvidenceView{events: events, steps: steps, campaignRev: campaign}, nil
+}
+
 // claimEvidenceSteps adds only explicitly cited, confirmed provenance to the
 // current submission's execution scope. An asset is context, never permission
 // to collect every other unit's traffic. Historical campaign timing stays in
 // ClaimFalsifySteps; evidence reuse must not inflate that timing.
-func claimEvidenceSteps(ctx context.Context, store *rings.Store, task, claim string) (map[string]rings.NodeFull, error) {
-	campaign, err := claimCampaignRev(ctx, store, task, claim)
-	if err != nil {
-		return nil, err
-	}
-	current, err := claimCampaignStepIDs(ctx, store, task, claim, campaign)
+func claimEvidenceStepsFrom(ctx context.Context, store *rings.Store, task, claim string, campaign int64, events []rings.RawEvent) (map[string]rings.NodeFull, error) {
+	current, err := claimCampaignStepIDsFrom(ctx, store, task, claim, campaign, events)
 	if err != nil {
 		return nil, err
 	}

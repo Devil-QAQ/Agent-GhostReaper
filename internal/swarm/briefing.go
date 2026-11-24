@@ -36,8 +36,8 @@ type briefingJSON struct {
 	// ConfirmedFacts 已确认事实:总数 + 最新摘要(不含证据原文——按需
 	// 经查事实工具取)。
 	ConfirmedFacts struct {
-		Total  int              `json:"total"`
-		Latest []briefingItem   `json:"latest"`
+		Total  int            `json:"total"`
+		Latest []briefingItem `json:"latest"`
 	} `json:"confirmed_facts"`
 	// ConfirmedClaims 已确认漏洞清单(报漏洞前先核对,防重复上报)。
 	ConfirmedClaims []briefingClaim `json:"confirmed_claims"`
@@ -49,6 +49,7 @@ type briefingJSON struct {
 type briefingItem struct {
 	ID      string `json:"id"`
 	Summary string `json:"summary"`
+	ClaimID string `json:"claim_id,omitempty"`
 }
 
 type briefingClaim struct {
@@ -86,8 +87,9 @@ func assembleBriefing(ctx context.Context, store *rings.Store, taskID string) st
 	b.ConfirmedFacts.Total = len(facts)
 	// NodesByType 按创建序返回,最新 = 尾部。
 	for i := len(facts) - 1; i >= 0 && len(b.ConfirmedFacts.Latest) < briefingFactLatest; i-- {
+		claimID, _ := facts[i].Detail["claim_id"].(string)
 		b.ConfirmedFacts.Latest = append(b.ConfirmedFacts.Latest, briefingItem{
-			ID: facts[i].ID, Summary: clipLine(facts[i].Title, briefingFactClip),
+			ID: facts[i].ID, Summary: clipLine(facts[i].Title, briefingFactClip), ClaimID: claimID,
 		})
 	}
 

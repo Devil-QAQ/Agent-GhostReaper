@@ -44,7 +44,7 @@ func TestReviewReadsSourceAndDetectsChanges(t *testing.T) {
 				if change {
 					os.WriteFile(path, []byte("print('changed')"), 0600)
 				}
-				return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock(`{"decision":"allow","reason":"local"}`)}}
+				return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock(`{"reason":"local","changes":[]}`)}}
 			}}
 			_, err := ActionReviewFor(p, env.readReviewSource)(t.Context(), ActionReviewInput{Tool: "bash", Arguments: json.RawMessage(`{"command":"python3 work.py"}`)})
 			if (err != nil) != change || calls != 2 {

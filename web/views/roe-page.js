@@ -335,6 +335,20 @@ function ApprovalSection({ taskID }) {
   const { data: body, error } = usePolling(`/api/tasks/${taskID}/approvals`, 2000, {
     live: [`approval:${taskID}`],
   });
+  const [automation, setAutomation] = React.useState({ auto_approve: false, auto_join: false });
+  const [autoBusy, setAutoBusy] = React.useState(false);
+  React.useEffect(() => {
+    setAutomation({ auto_approve: Boolean(body?.automation?.auto_approve), auto_join: Boolean(body?.automation?.auto_join) });
+  }, [taskID, body?.automation?.auto_approve, body?.automation?.auto_join]);
+  const toggleAutomation = async (flag) => {
+    if (autoBusy) return;
+    setAutoBusy(true);
+    try {
+      const { ok, body: result } = await postJSON(`/api/tasks/${taskID}/approvals/automation`, { [flag]: !automation[flag] });
+      if (!ok) { toast.error(result.error || "自动处理设置未保存"); return; }
+      setAutomation(result.automation);
+    } catch { toast.error("自动处理设置未保存"); } finally { setAutoBusy(false); }
+  };
   const approvals = Array.isArray(body?.pending) ? body.pending : [];
   const records = Array.isArray(body?.records) ? body.records : [];
   // 待决卡统一混排(先到先决):弹门票 + 范围卡 + 待批资产卡。
@@ -393,6 +407,15 @@ function ApprovalSection({ taskID }) {
         <p className="text-xs text-muted-foreground">
           动作待批时暂停计时；资产加入与动作批准分别处理。
         </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant={automation.auto_approve ? "default" : "outline"} aria-pressed={automation.auto_approve} disabled={autoBusy || body?.frozen} onClick={() => toggleAutomation("auto_approve")}>
+            审批自动放行：{automation.auto_approve ? "开" : "关"}
+          </Button>
+          <Button size="sm" variant={automation.auto_join ? "default" : "outline"} aria-pressed={automation.auto_join} disabled={autoBusy || body?.frozen} onClick={() => toggleAutomation("auto_join")}>
+            资产自动加入：{automation.auto_join ? "开" : "关"}
+          </Button>
+          <span className="text-xs text-muted-foreground">仅当前任务；硬规则仍拒绝。</span>
+        </div>
         {error && <div className="text-xs text-status-danger">读取失败:{error}</div>}
         {cards.length === 0 ? (
           <div className="rounded-lg border border-dashed py-6 text-center text-sm text-muted-foreground">
@@ -797,7 +820,7 @@ function ApprovalCard({ taskID, approval, checkable, checked, onCheck }) {
 function approvalHint(approval) {
   return approval.kind === "asset"
     ? "不加入仅影响资产和后续规划，不禁止访问"
-    : "批准仅适用于本次调用；拒绝不终止单位";
+    : "批准后同目的、同类影响操作沿用；拒绝不终止单位";
 }
 
 // ---- 操作约束 ----

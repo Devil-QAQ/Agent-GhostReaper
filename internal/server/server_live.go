@@ -189,6 +189,9 @@ func (h *liveHub) onCommit(taskID string, events []rings.Event) {
 			topics = append(topics, liveTopicTasks)
 		case rings.EventEdgeAdded:
 			if e, ok := payloadAs[rings.EdgeAdded](ev.Payload); ok {
+				if e.EdgeType == rings.EdgeSourcedFrom {
+					topics = append(topics, claim)
+				}
 				switch e.EdgeType {
 				case rings.EdgeCovers, rings.EdgeProduces, rings.EdgeDerivedFrom, rings.EdgeDependsOn, rings.EdgeSourcedFrom, rings.EdgeSubOf:
 					pviewDirty = true

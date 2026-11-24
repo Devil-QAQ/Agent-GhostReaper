@@ -44,7 +44,7 @@ func TestPassiveAssetPlacementUsesFactsAndWebsiteIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(graph.Assets) != 3 || len(graph.Hierarchy) != 0 {
+	if len(graph.Assets) != 1 || len(graph.Hierarchy) != 0 {
 		t.Fatalf("resources became independent assets: %+v", graph)
 	}
 	for _, a := range graph.Assets {
@@ -59,8 +59,8 @@ func TestPassiveAssetPlacementUsesFactsAndWebsiteIdentity(t *testing.T) {
 		t.Fatal("recording existing facts is not idempotent")
 	}
 	cards, _ := store.PendingAssetProposals(t.Context(), task)
-	if len(cards) != 0 {
-		t.Fatal("site resources caused extra approval")
+	if len(cards) != 2 {
+		t.Fatal("unknown systems must each have one admission choice; APIs reuse the website choice")
 	}
 }
 

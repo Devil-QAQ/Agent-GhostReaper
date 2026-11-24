@@ -14,7 +14,7 @@ import (
 // Placement is passive: it consumes already recorded facts and declarations.
 // It never invokes a model, dispatches work, probes targets, or infers a parent.
 func (l *Loop) syncRecordedAssets(ctx context.Context) {
-	if err := l.reconcileAssetChoices(ctx); err != nil {
+	if _, err := AutoJoinPending(ctx, l.Store, l.TaskID); err != nil {
 		l.setErr(err)
 		return
 	}
@@ -37,7 +37,7 @@ func (l *Loop) syncRecordedAssets(ctx context.Context) {
 				exists = exists || e == nil && ea == nil && key == other
 			}
 			if !exists {
-				observations.Assets = append(observations.Assets, rings.AssetObservation{Class: rings.AssetClass(decl.Class), Title: decl.Title, Evidence: fact.Title})
+				observations.Assets = append(observations.Assets, rings.AssetObservation{Class: rings.AssetClass(decl.Class), Title: decl.Title, Evidence: fact.Title, Independent: decl.Independent})
 			}
 		}
 		if len(observations.Assets) == 0 && len(observations.Relations) == 0 {
@@ -83,7 +83,7 @@ func (l *Loop) recordFactAssets(ctx context.Context, fact rings.NodeFull, result
 	}
 	result = merged
 	raw, _ := json.Marshal(result)
-	hash := sha256.Sum256(append([]byte("asset-placement/v1\n"+fact.Title+"\n"), raw...))
+	hash := sha256.Sum256(append([]byte("asset-placement/v2\n"+fact.Title+"\n"), raw...))
 	source := hex.EncodeToString(hash[:])
 	if fact.Detail["asset_discovery_source"] == source {
 		return nil
@@ -122,10 +122,6 @@ func (l *Loop) recordFactAssets(ctx context.Context, fact rings.NodeFull, result
 		if err != nil {
 			return err
 		}
-		roe, err := l.Store.CurrentRoE(ctx, l.TaskID)
-		if err != nil {
-			return err
-		}
 		observations := result.Assets
 		result.Assets = observations
 		fact.Detail["asset_observations"] = result
@@ -142,17 +138,10 @@ func (l *Loop) recordFactAssets(ctx context.Context, fact rings.NodeFull, result
 				continue
 			}
 			seen[key] = true
-			decl := &swarm.NewAssetDecl{Class: string(class), Title: title}
+			decl := &swarm.NewAssetDecl{Class: string(class), Title: title, Independent: a.Independent}
 			var ev []rings.Event
-			automatic := rings.AutomaticallyInventory(class, title, assets, roe)
-			if (class == rings.AssetApp || class == rings.AssetMiniProgram) && !strings.Contains(title, "://") {
-				automatic = true
-			}
-			if automatic {
-				ev, e = automaticAssetEvents(ctx, l.Store, l.TaskID, fact, decl)
-			} else if class != rings.AssetAPI {
-				ev, e = proposedAssetEvents(ctx, l.Store, l.TaskID, fact, decl)
-			}
+			ev, e = proposedAssetEvents(ctx, l.Store, l.TaskID, fact, decl)
+
 			for _, event := range ev {
 				if n, ok := event.Payload.(rings.NodeAdded); ok && n.NodeType == rings.NodeAsset {
 					assets = append(assets, rings.NodeFull{NodeView: rings.NodeView{ID: n.NodeID, Type: n.NodeType, Title: n.Title, AssetClass: n.AssetClass, Status: n.Status}, Detail: n.Detail})

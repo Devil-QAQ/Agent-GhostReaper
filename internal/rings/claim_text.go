@@ -106,6 +106,9 @@ func applyClaimText(tx *sql.Tx, task string, rev int64, p ClaimTextPolish) error
 		row.summary = &SummaryDigest{Rev: rev, Title: p.Title, Statement: p.Statement, Impact: p.Impact, Facts: facts}
 		row.changedSummary = true
 	}
+	if err := row.includeSourceFacts(tx, task); err != nil {
+		return err
+	}
 	return row.save(tx, task)
 }
 

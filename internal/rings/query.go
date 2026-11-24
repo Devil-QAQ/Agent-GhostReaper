@@ -487,6 +487,7 @@ type EdgeView struct {
 
 // AssetNodeView carries coverage, fact counts and scope from the asset projection.
 type AssetNodeView struct {
+	Independent  bool
 	SubjectIDs   []string
 	DisplayTitle string
 	NodeView
@@ -555,6 +556,7 @@ func (s *Store) AssetGraph(ctx context.Context, taskID string) (*AssetGraphView,
 		if err := json.Unmarshal([]byte(detail), &fields); err != nil {
 			return nil, err
 		}
+		a.Independent = IndependentAsset(NodeFull{NodeView: a.NodeView, Detail: fields})
 		candidates = append(candidates, NodeFull{NodeView: a.NodeView, Detail: fields})
 		view.Assets = append(view.Assets, a)
 	}

@@ -482,24 +482,7 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 	// 声明文本优先定稿校对稿(P4-59 ①:报告级文风——描述=一句话本质+
 	// 影响对象,危害=直接说结果+数字精确);未生成/未过闸退节点原文
 	//(机器判定与审计仍读节点,包装不是证据)。
-	title, statement, impact := c.Title, c.Title, ""
-	if impactRaw, ok := c.Detail["impact"].(string); ok {
-		impact = impactRaw
-	}
-	if cs != nil && cs.Summary != nil {
-		if cs.Summary.Title != "" {
-			title = cs.Summary.Title
-		}
-		if cs.Summary.Statement != "" {
-			statement = cs.Summary.Statement
-			if cs.Summary.Title == "" {
-				title = statement
-			}
-		}
-		if cs.Summary.Impact != "" {
-			impact = cs.Summary.Impact
-		}
-	}
+	title, statement, impact := claimText(c, cs)
 	// 标题是一句话人话(判断原文),tc-ID 进条目内详情行,不作标题。
 	head := fmt.Sprintf("### %s-%d %s", prefix, n, title)
 	if vulnclass != "" {
@@ -513,6 +496,12 @@ func writeClaim(b *strings.Builder, n int, prefix string, c rings.NodeFull,
 	fmt.Fprintf(b, "- 存在性判断:%s\n", statement)
 	if impact != "" {
 		fmt.Fprintf(b, "- 影响面判断:%s\n", impact)
+	}
+	if cs != nil && cs.Summary != nil && len(cs.Summary.Facts) > 0 {
+		b.WriteString("- 关联事实:\n")
+		for _, fact := range cs.Summary.Facts {
+			fmt.Fprintf(b, "  - `%s`: %s\n", fact.FactID, fact.Statement)
+		}
 	}
 	// 影响(交卷申报)(P5-07⑦b):虫群交换单申报的影响列点,自由文本
 	// 如实呈现(单条一行,多条逐行列点);不进机器判定,包装不改原文。

@@ -1835,10 +1835,27 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 		} else if r.ID != "" {
 			return permission.Denied(env.denyHardAction(pack, toolName, input, r, matched, rings.DenyLineHardRule, ""))
 		}
+		automated := false
+		if result.Decision == ActionApproval {
+			enabled, err := env.Executor.Store.ApprovalAutomationFlag(ctx, pack.TaskID, "auto_approve")
+			if err != nil {
+				return deny(rings.DenyLineRoeScope, "无法读取自动审批设置，本次调用未执行")
+			}
+			if enabled {
+				result.Decision = ActionAllow
+				result.Reason = "审批自动放行：" + result.Reason
+				automated = true
+			}
+		}
+		decidedBy := "model"
+		if automated {
+			decidedBy = "automation"
+		}
+
 		_, err = env.appendBusiness(guardLedgerCtx, rings.Event{Kind: rings.EventApprovalRecord,
 			Actor: "swarm:" + env.UnitID, Payload: rings.ApprovalRecord{StepID: pack.StepID, UnitID: env.UnitID,
 				RequestID: "ar-" + strings.TrimPrefix(gateRequestID(), "ap-"), Type: rings.ApprovalRecActionReview, ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
-				Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input, DecidedBy: "model",
+				Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input, DecidedBy: decidedBy,
 				Note: result.Decision, Reason: result.Reason}})
 		if err != nil {
 			return permission.Denied("动作判断记录未保存，本次调用未执行")
@@ -1858,6 +1875,7 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 		if err != nil {
 			return permission.Denied("审批请求未保存，本次调用未执行")
 		}
+		_, _ = AutoApprovePending(ctx, env.Executor.Store, env.Executor.Gate, pack.TaskID)
 		env.park = ticket
 		env.fuseSegment()
 		return permission.Denied(fmt.Sprintf("%s(请求 %s)，批准后可重新发起本次调用", approvalPendingNote, ticket.Req.ID))

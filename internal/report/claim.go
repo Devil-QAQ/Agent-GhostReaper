@@ -350,6 +350,31 @@ func (cs *ClaimCase) ImpactNoteOf() string {
 	return cs.ImpactNote
 }
 
+// Current finding text is shared by all report formats. The original
+// submission remains available separately as ImpactNoteOf for the audit trail.
+func claimText(n rings.NodeFull, cs *ClaimCase) (title, statement, impact string) {
+	title, statement = n.Title, n.Title
+	impact, _ = n.Detail["impact"].(string)
+	if cs == nil {
+		return
+	}
+	if cs.Summary != nil {
+		if cs.Summary.Statement != "" {
+			statement, title = cs.Summary.Statement, cs.Summary.Statement
+		}
+		if cs.Summary.Title != "" {
+			title = cs.Summary.Title
+		}
+		if cs.Summary.Impact != "" {
+			impact = cs.Summary.Impact
+		}
+	}
+	if impact == "" {
+		impact = cs.ImpactNoteOf()
+	}
+	return
+}
+
 // ClaimCaseOf 单条声明卷宗(发现详情 API 入口;P4-36 起按条读投影,
 // 不再全量装配——详情按条取数,打开即回)。
 func ClaimCaseOf(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore, taskID, claimID string) (*ClaimCase, error) {

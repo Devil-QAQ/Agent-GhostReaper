@@ -178,7 +178,7 @@ func AssetDisplayHierarchy(assets []NodeFull, edges []EdgeView, members map[stri
 	for _, e := range edges {
 		child, c := byID[e.From]
 		parent, p := byID[e.To]
-		if e.Type != EdgeSubOf || !c || !p || DisplayAssetClass(child.AssetClass) == AssetService || ValidateAssetParent(child.AssetClass, child.Title, parent.AssetClass, parent.Title) != nil {
+		if e.Type != EdgeSubOf || !c || !p || WebsiteEntry(child.AssetClass, child.Title) || ValidateAssetParent(child.AssetClass, child.Title, parent.AssetClass, parent.Title) != nil {
 			continue
 		}
 		prior, exists := parents[e.From]
@@ -205,6 +205,13 @@ func AssetDisplayHierarchy(assets []NodeFull, edges []EdgeView, members map[stri
 					break
 				}
 			}
+		case AssetService:
+			if !WebsiteEntry(class, title) {
+				_, host, e := AssetAddress(class, title)
+				if e == nil {
+					address = host
+				}
+			}
 		case AssetApp:
 			endpoint := AssetEntryAddress(title)
 			_, _, key, e := AssetIdentity(AssetService, endpoint)
@@ -227,12 +234,35 @@ func AssetDisplayHierarchy(assets []NodeFull, edges []EdgeView, members map[stri
 			if !f || !t {
 				continue
 			}
+			if r.Kind == "same_system" && from.AssetClass == AssetService && to.AssetClass == AssetService {
+				root := func(id string) string {
+					seen := map[string]bool{}
+					for parents[id].To != "" && !seen[id] {
+						seen[id] = true
+						id = parents[id].To
+					}
+					return id
+				}
+				froot, troot := root(from.ID), root(to.ID)
+				if froot != troot {
+					first, second := byID[froot], byID[troot]
+					if first.CreatedRev > second.CreatedRev || first.CreatedRev == second.CreatedRev && first.ID > second.ID {
+						first, second = second, first
+					}
+					parents[second.ID] = EdgeView{Type: EdgeSubOf, From: second.ID, To: first.ID}
+				}
+				continue
+			}
 			app, site := from, to
 			if from.AssetClass == AssetService && to.AssetClass == AssetApp {
 				app, site = to, from
 			}
 			if app.AssetClass == AssetApp && site.AssetClass == AssetService {
 				// A named system groups observed entries; shared addresses never do.
+				if !IndependentAsset(app) {
+					parents[app.ID] = EdgeView{Type: EdgeSubOf, From: app.ID, To: site.ID}
+					continue
+				}
 				delete(parents, app.ID)
 				if prior, exists := parents[site.ID]; !exists || app.ID < prior.To {
 					parents[site.ID] = EdgeView{Type: EdgeSubOf, From: site.ID, To: app.ID}
@@ -377,56 +407,37 @@ func AssetEntryAddress(title string) string {
 // and already admitted site origins admit automatic children; DNS answers and
 // discovered wildcard certificates cannot grow this set.
 func AutomaticallyInventory(class AssetClass, title string, assets []NodeFull, roe RoeState) bool {
-	address := AssetEntryAddress(title)
-	target, ok := ScopeAnchorOf(address)
-	if !ok {
+	_, _, key, err := AssetIdentity(class, title)
+	if err != nil {
 		return false
 	}
-	excluded := ExcludedCoveredAssetIDs(assets, roe.ExcludedAssetSet())
+	members := InventoryAssetIDs(assets, roe)
 	for _, a := range assets {
-		if a.Status == AssetStatusRetired || excluded[a.ID] {
+		if !members[a.ID] {
 			continue
 		}
-		if class == AssetAPI && DisplayAssetClass(a.AssetClass) == AssetService {
-			_, _, root, e := AssetIdentity(AssetService, a.Title)
-			_, _, child, ec := AssetIdentity(AssetService, address)
-			if e == nil && ec == nil && root == child {
-				return true
-			}
-		}
-		if class == AssetAPI {
-			continue
-		}
-		if AssetSourceOf(a.Detail) == AssetSourceDiscovered {
-			adopted, _ := a.Detail["adopted"].(bool)
-			if !adopted || (a.AssetClass != AssetDomain && a.AssetClass != AssetHost) {
-				continue
-			}
-		}
-		seed, valid := ScopeAnchorOf(a.Title)
-		if !valid {
-			continue
-		}
-		if seed.Host == target.Host || seed.Wildcard && (target.Host == seed.Host || strings.HasSuffix(target.Host, "."+seed.Host)) {
-			if seed.Port == "" || a.AssetClass == AssetService || a.AssetClass == AssetAPI {
-				return true
-			}
-			if u, e := url.Parse(address); e == nil && u.Hostname() != "" {
-				target.Port = u.Port()
-				if target.Port == "" {
-					if u.Scheme == "https" {
-						target.Port = "443"
-					} else if u.Scheme == "http" {
-						target.Port = "80"
-					}
-				}
-			}
-			if target.Port == seed.Port {
-				return true
-			}
+		_, _, existing, e := AssetIdentity(a.AssetClass, a.Title)
+		if e == nil && existing == key {
+			return true
 		}
 	}
 	return false
+}
+
+// WebsiteEntry identifies an HTTP entry, not every network protocol endpoint.
+func WebsiteEntry(class AssetClass, title string) bool {
+	if DisplayAssetClass(class) != AssetService {
+		return false
+	}
+	u, err := url.Parse(AssetEntryAddress(title))
+	return err == nil && u.Hostname() != "" && (u.Scheme == "http" || u.Scheme == "https")
+}
+
+func IndependentAsset(a NodeFull) bool {
+	if independent, ok := a.Detail["independent"].(bool); ok {
+		return independent
+	}
+	return AssetSourceOf(a.Detail) != AssetSourceDiscovered
 }
 
 // Withdrawal follows the selected entity: a site withdraws its own resources,

@@ -53,6 +53,7 @@ type ActionTargetScope struct {
 }
 
 type ActionBoundary struct {
+	Subjects          map[string][]string       `json:"asset_subjects,omitempty"`
 	TargetScope       []ActionTargetScope       `json:"target_scope,omitempty"`
 	TaskDescription   string                    `json:"task_description"`
 	Goals             []string                  `json:"goals"`
@@ -101,13 +102,14 @@ func matchHardRule(ctx context.Context, store *rings.Store, tool string, args js
 	return HardRule{}, "", nil
 }
 
-const actionReviewPrompt = `你负责判断任务中一次实际工具调用是否命中操作者规定的审批边界。默认allow；默认需要审批的只有：对测试对象产生实际新增、删除、修改。测试对象不包含执行环境中的临时测试产物和工作文件。不要建立允许操作分类，不因“未逐项授权”、风险词、命令名称、HTTP方法、参数变化或步骤分工要求审批，也不能自行增设边界。操作者明确的范围和限额也是黑名单边界，未满足明文限制或无法核实有条件许可时不得假定满足；不能因为未增删改就忽略操作者的明文要求。操作者明确提供的禁止项优先，实际命中时输出deny直接拒绝，不转成人工审批，也不被旧批准覆盖；明确要求审批的事项按原文处理。未命中这些黑名单项不能自行增加限制或审批条件。
-任务原文task_description、当前目标goals、注意事项notes和工具限制来自操作者；authorized_targets是人工选定目标，target_scope是其主机范围，ports=all表示该主机全部端口。URL的端口、路径只是入口定位，不能缩小已经给出的目标范围；只有操作者明确写出的端口/路径限制才是限制。assets和asset_relationships是分类与证据关系，不是额外审批条件。人工加入表示纳入任务目标；自动归档不授予额外行为权限，不加入也不等于禁止资料访问。
-只根据tool、arguments及实际执行内容判断直接目的和影响，不把步骤计划或文件中出现的地址当成正在执行的动作。按真实业务效果识别增删改，伴随的日志、会话等变化不作为增删改理由；不能只因为用了POST就认定修改。执行既有脚本而实际源码不可见时，你必须先调用read_context_file读取脚本及必要导入源码；它是可用的只读上下文工具，不是在执行被审查动作。读取源码不等于执行源码，不得把可自行核查的内容交给操作者确认，不根据文件名猜效果。
-prior_approvals是未撤回的人工批准。已有permission时，比较实际动作与批准的purpose、targets、effects；同一目的、同目标范围、同类影响直接allow，换命令、工具、任意字段都不是重新审批的理由。只有真实目的、目标或影响超出该批准时才重新判断。旧记录没有permission时，结合原调用及批准备注理解，不假定旧脚本内容。approval_epoch只是授权编辑时间，资产更新不使批准失效；当前明确限制和撤回优先。permission只是目的与影响的摘要，不是模型追加限制的载体；原调用中具体参数值即使被写入摘要也只作示例定位，不能据此缩成一次性许可，只有操作者原文或人工批准备注明确限定的值才构成约束。
-命中尚未批准的增删改时输出approval，reason说明实际增删改；同时给出permission：actions只填create/update/delete的实际类别，resource只填业务对象类型，不能填具体记录、用户名、参数值或数量；targets只填所属网站入口或系统标识，不填某个业务记录。purpose和effects概括本类目的与影响，不限定这次实例。程序以actions与resource记录本类许可，操作者另写的批准备注才是额外限制。不要把某条命令、单个参数值、临时路径或payload抄成一次性许可，也不扩大成任意目标任意行为。操作者明确免审授权或已有适用批准时沿用，不重复提问。程序已执行当前启用的硬规则，命中直接拒绝，不能由你或批准覆盖。
-操作者自己写出的“仅限”“最多”“必须满足后才可”等要求是实际边界；依赖的事实缺失时不能假定已满足，应deny说明缺失依据，不另造人工审批项目。
-最终只输出一个JSON对象，decision为allow、deny或approval。allow和deny只需reason；approval必须附permission：{"decision":"approval","reason":"本次实际命中审批边界的原因","permission":{"actions":["create"],"resource":"业务对象类型","purpose":"本类目的","targets":["网站入口或系统标识"],"effects":"实际增删改及影响"}}。除read_context_file外不执行工具、不规划新方向、不创建资产。`
+const actionReviewPrompt = `你负责判断任务中一次实际工具调用的直接目的与业务影响。默认放行；需要审批的只有对测试对象业务对象的实际新增、删除、修改，或操作者原文明示需要审批的事项。测试对象不包括执行环境的临时测试产物和工作文件。用黑名单边界判断，不建立允许清单，不自行增设条件。
+changes只记录本次动作直接要求的业务变化。系统处理请求时伴随产生的运行日志、认证记录和会话状态，不是独立的业务增删改；不能把这些伴随结果、风险词或“可能发生”的影响当成申请理由。HTTP方法、命令名称、字段、账号、数量或步骤分工本身不决定审批。
+操作者的task_description、goals、notes及工具限制是授权依据。实际命中明文禁止项返回prohibition，不转成人工审批，不被旧批准覆盖；操作者明确给出的条件和限额仍须遵守，不能假定缺失的条件依据已满足。未命中明文限制或业务增删改时，changes为空。
+authorized_targets是人工目标，target_scope是其主机范围，ports=all表示全部端口；入口URL的端口和路径不自动缩小授权。assets、asset_relationships只是事实分类与关系，不增加条件。资产加入由独立流程处理，changes不处理资产加入，行为批准也不扩大资产范围。
+只看tool、arguments和实际源码，不把步骤计划或文件提及的地址当作正在执行的动作。执行脚本而源码不可见时，先用read_context_file读取脚本及必要导入；读取不是执行，不能把可自行核查的内容交操作者审批，也不能按文件名猜影响。
+prior_approvals是未撤回的人工批准。同目的、同目标范围、同类业务影响沿用原许可，优先填写approved_by引用其request_id，不重命名类别或缩小许可。原命令、参数、账号、路径和数量是实例，除操作者原文或人工批备注明确限制外，不形成新的条件。approval_epoch和资产新增不撤销批准。旧批准没有permission时，结合原调用及人工批备注理解，不猜旧脚本内容。
+每项changes只填permission（actions=create/update/delete；resource=业务影响类别，保留实际权限层级差别，不含具体记录值；targets=所属系统入口；purpose=直接目的；effects=直接业务影响）和可选approved_by。已批准与未批准的变化分别填写，程序只对未授权变化申请审批。只有真实目的、目标范围或影响不同才重新判断，不能只因实例变化要求重批。
+只输出JSON：{"reason":"直接目的和实际影响依据","changes":[]}。实际业务变化写入changes：[{"permission":{"actions":["create"],"resource":"业务类别","targets":["系统入口"],"purpose":"直接目的","effects":"直接影响"},"approved_by":"适用批准编号，无则省略"}]。命中明文禁止时返回顶层prohibition及changes:[]；prohibition逐字引用禁止原文并说明实际命中。操作者明文授权覆盖本次变化时可附顶层operator_permission逐字引用该原文，仍如实记录changes，不扩大授权。不要输出decision，由程序统一生成唯一裁决。除read_context_file外不执行工具、不规划方向、不创建资产。`
 
 func ActionReviewFor(provider llm.Provider, readers ...func(string) ([]byte, error)) ActionReviewFunc {
 	return func(ctx context.Context, in ActionReviewInput) (ActionReview, error) {
@@ -153,9 +155,9 @@ func ActionReviewFor(provider llm.Provider, readers ...func(string) ([]byte, err
 						return ActionReview{}, actionReviewError("判断期间脚本已变化")
 					}
 				}
-				verdict, err := parseActionReview(msgText(msg))
-				if err == actionReviewError("动作判断未给出可批准的目的范围") && round < 8 {
-					messages = append(messages, msg, llm.UserText("你的approval缺少完整permission。请给出actions(create/update/delete)、resource(业务对象类型，不能含具体实例值)、targets(网站/系统)，以及purpose与effects；这是本类目的的可复用批准，不限定原调用字段值。返回完整JSON，不新增限制。"))
+				verdict, err := parseActionEffects(msgText(msg), in.Boundaries)
+				if err != nil && round < 2 {
+					messages = append(messages, msg, llm.UserText(`返回格式不符。禁止调用请返回顶层对象 {"reason":"实际动作","prohibition":"操作者禁止原文与命中原因","changes":[]}，prohibition不放在changes里面。其他调用返回reason和changes，实际业务变化写changes的permission与适用approved_by；操作者明文免审时可附顶层operator_permission逐字引用覆盖本次动作的授权原文。不输出decision。`))
 					continue
 				}
 				return verdict, err
@@ -232,8 +234,11 @@ func parseActionReview(text string) (ActionReview, error) {
 				words = append(words, word)
 			}
 		}
+		// Concrete values belong to ToolArgs and the review reason. Persist a
+		// class permission, so an example record cannot become a new limit.
 		p.Purpose = strings.Join(words, "、") + strings.TrimSpace(p.Resource)
 		p.Effects = p.Purpose
+
 		for i, target := range p.Targets {
 			if _, _, _, err := rings.AssetIdentity(rings.AssetService, target); err == nil {
 				p.Targets[i] = rings.AssetDisplayTitle(rings.AssetService, target)
@@ -279,6 +284,10 @@ func (env *unitEnv) actionBoundary(ctx context.Context, pack *TaskPack, roe ring
 		return out, errors.New("无法读取资产关系")
 	}
 	out.Relationships = graph.Relations
+	out.Subjects = map[string][]string{}
+	for _, a := range graph.Assets {
+		out.Subjects[a.ID] = a.SubjectIDs
+	}
 	excluded := rings.ExcludedCoveredAssetIDs(assets, roe.ExcludedAssetSet())
 	members := rings.InventoryAssetIDs(assets, roe)
 	for _, a := range assets {
@@ -430,6 +439,7 @@ func (env *unitEnv) reviewSourcesUnchanged(sources map[string]string) bool {
 
 func boundaryFingerprint(b ActionBoundary) string {
 	b.Approvals = nil
+	b.Subjects = nil
 	b.Assets = nil
 	b.Relationships = nil
 	b.ApprovalEpoch = 0

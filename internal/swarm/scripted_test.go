@@ -78,12 +78,12 @@ func (m *scriptedModel) requireBashApproval() {
 		if json.Unmarshal([]byte(rr.LastUser), &in) == nil && in.Tool == "bash" {
 			for _, prior := range in.Boundaries.Approvals {
 				if prior.Permission != nil && prior.Permission.Resource == "本地测试对象" || prior.ToolName == in.Tool && jsonEquiv(prior.ToolArgs, string(in.Arguments)) {
-					return scriptedReply{Text: `{"decision":"allow","reason":"测试中已有人工批准仍然适用"}`}
+					return scriptedReply{Text: `{"reason":"测试中已有人工批准仍然适用","changes":[]}`}
 				}
 			}
-			return scriptedReply{Text: `{"decision":"approval","reason":"测试要求批准当前调用","permission":{"actions":["create"],"resource":"本地测试对象","purpose":"执行本地测试指令","targets":["本地测试环境"],"effects":"运行测试指令"}}`}
+			return scriptedReply{Text: `{"reason":"测试要求批准当前调用","changes":[{"permission":{"actions":["create"],"resource":"本地测试对象","purpose":"执行本地测试指令","targets":["本地测试环境"],"effects":"运行测试指令"}}]}`}
 		}
-		return scriptedReply{Text: `{"decision":"allow","reason":"测试中的已授权调用"}`}
+		return scriptedReply{Text: `{"reason":"测试中的已授权调用","changes":[]}`}
 	}
 }
 
@@ -165,7 +165,7 @@ func (m *scriptedModel) handle(w http.ResponseWriter, r *http.Request) {
 		m.reviews = append(m.reviews, rr)
 		review := m.review
 		m.mu.Unlock()
-		reply := scriptedReply{Text: `{"decision":"allow","reason":"测试中的已授权动作"}`}
+		reply := scriptedReply{Text: `{"reason":"测试中的已授权动作","changes":[]}`}
 		if review != nil {
 			reply = review(&rr)
 		}

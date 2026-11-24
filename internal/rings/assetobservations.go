@@ -9,9 +9,10 @@ import (
 // Extracted identities retain the observation that justified registration.
 // They never contribute authorization and never replace the original evidence.
 type AssetObservation struct {
-	Class    AssetClass `json:"class"`
-	Title    string     `json:"title"`
-	Evidence string     `json:"evidence"`
+	Independent bool       `json:"independent,omitempty"`
+	Class       AssetClass `json:"class"`
+	Title       string     `json:"title"`
+	Evidence    string     `json:"evidence"`
 }
 
 type AssetObservationLink struct {

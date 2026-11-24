@@ -23,7 +23,7 @@ func TestCandidateContractErrorsGiveExactFieldsWithoutWriting(t *testing.T) {
 		`{"statement":"实际观察","evidence":"实际证据"} {"statement":"other"}`,
 	} {
 		res, err := entry.Call(t.Context(), json.RawMessage(input), nil)
-		if err != nil || !res.IsError || !strings.Contains(res.Flatten(), "可用字段:") || !strings.Contains(res.Flatten(), "asset_id") || !strings.Contains(res.Flatten(), "new_asset字段: class, parent, title") {
+		if err != nil || !res.IsError || !strings.Contains(res.Flatten(), "可用字段:") || !strings.Contains(res.Flatten(), "asset_id") || !strings.Contains(res.Flatten(), "new_asset字段: class, independent, parent, title") {
 			t.Fatalf("contract feedback lacks actual supported fields: %v %s", err, res.Flatten())
 		}
 	}

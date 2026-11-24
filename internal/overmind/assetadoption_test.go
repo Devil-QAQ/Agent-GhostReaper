@@ -66,7 +66,7 @@ func TestAssetAdoptionAddsOneAssetWithOriginalProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	assets, _ := store.NodesByType(t.Context(), task, rings.NodeAsset, "")
-	if len(assets) != 3 {
+	if len(assets) != 2 {
 		t.Fatalf("resources did not converge to their website: assets=%d", len(assets))
 	}
 	var added rings.NodeFull

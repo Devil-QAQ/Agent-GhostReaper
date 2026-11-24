@@ -190,6 +190,38 @@ func (s *Server) chainLinksOf(ctx context.Context, taskID string, node *rings.No
 	return links
 }
 
+// claimFactRefs is shared by the finding list and detail. A new source fact
+// uses the same reference row as older derived facts, without a second UI path.
+func (s *Server) claimFactRefs(ctx context.Context, task string, edges []rings.EdgeView, polished map[string]string) map[string][]FactRefView {
+	out := map[string][]FactRefView{}
+	known := map[string]bool{}
+	titles := map[string]string{}
+	seen := map[[2]string]bool{}
+	for _, edge := range edges {
+		if edge.Type != rings.EdgeDerivedFrom && edge.Type != rings.EdgeSourcedFrom {
+			continue
+		}
+		key := [2]string{edge.From, edge.To}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if !known[edge.To] {
+			known[edge.To] = true
+			if n, err := s.Store.Node(ctx, task, edge.To); err == nil && n.Type == rings.NodeFact {
+				titles[n.ID] = n.Title
+			}
+		}
+		if title, ok := titles[edge.To]; ok {
+			if p := polished[edge.To]; p != "" {
+				title = p
+			}
+			out[edge.From] = append(out[edge.From], FactRefView{ID: edge.To, Title: title})
+		}
+	}
+	return out
+}
+
 // polishedFactMapOf 任务级"定稿校对后的事实描述"优先表(P4-59 ①):
 // 反查自各判断的声明摘要(claim_cases.summary 小列),后定稿覆盖先
 // 定稿——取代语义同其他冻结文本;读侧退节点标题。
@@ -340,23 +372,8 @@ func (s *Server) handleClaimDetail(w http.ResponseWriter, r *http.Request) {
 	v.Claim.VerdictRev = cs.VerdictRev()
 	// 显示键(P5-02⑤:详情头与列表同词同口径,机器状态直映射)。
 	v.Claim.Display, _ = rings.ClaimDisplay(node.Status)
-	// 血缘引用的事实(漏洞条目点回事实,详情同源;标题优先定稿校对稿)。
-	{
-		derivedEdges, derr := s.Store.Edges(ctx, taskID, rings.EdgeDerivedFrom)
-		if derr == nil {
-			for _, e := range derivedEdges {
-				if e.From != claimID {
-					continue
-				}
-				if n, nerr := s.Store.Node(ctx, taskID, e.To); nerr == nil && n.Type == rings.NodeFact {
-					title := n.Title
-					if p := polished[n.ID]; p != "" {
-						title = p
-					}
-					v.Claim.FactRefs = append(v.Claim.FactRefs, FactRefView{ID: n.ID, Title: title})
-				}
-			}
-		}
+	if edges, err := s.Store.Edges(ctx, taskID, rings.EdgeDerivedFrom, rings.EdgeSourcedFrom); err == nil {
+		v.Claim.FactRefs = s.claimFactRefs(ctx, taskID, edges, polished)[claimID]
 	}
 	v.Claim.ReportExcluded, v.Claim.ReportExcludedReason = cs.ReportExcluded, cs.ReportExcludedReason
 	v.Reopenable = node.Status == rings.TestClaimConfirmed || node.Status == rings.TestClaimRefuted || node.Status == rings.TestClaimInsufficient
@@ -570,7 +587,11 @@ func (s *Server) claimEvidenceOf(ctx context.Context, taskID, claimID string) ([
 	if err != nil || !ok {
 		return []claimEvidenceView{}, 0
 	}
-	version := int64(proj.EvidenceBinds + proj.ReproEvents)
+	versions, _, err := s.Store.EvidenceVersions(ctx, taskID)
+	if err != nil {
+		return nil, 0
+	}
+	version := versions[claimID]
 	if len(proj.Evidence) == 0 {
 		return []claimEvidenceView{}, version
 	}

@@ -119,6 +119,13 @@ func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
+	queueState := func(st string) bool {
+		switch st {
+		case "dispatched", rings.StepScopeWait, rings.StepGateWait, rings.StepPauseWait, rings.StepModelWait:
+			return true
+		}
+		return false
+	}
 	out := make([]UnitRow, 0, len(sessions))
 	for _, sess := range sessions {
 		row := UnitRow{
@@ -136,15 +143,15 @@ func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 		if sess.EndStatus != "" {
 			row.Status, row.Running, row.FinishedAt = sess.EndStatus, false, sess.FinishedAt
 			row.Finish = &finishView{Turns: sess.Turns, Reason: sess.Reason}
-			// P4-51 ①→P5-05:挂等让位停等态的会话,显示态随步骤现值走
+			// Latest resumable sessions, including checkpoint closeouts, follow
+			// the current step. Older conversations keep their own closeout.
 			// ——步骤还在停等(scope_wait/gate_wait/pause_wait/model_wait)
 			// = 排队中(显示层一律"排队中"不标原因);已被解除唤醒回
 			// dispatched = 已入队待领取;让位重领上位(步骤回 running,
 			// 原会话续跑——投影行残留收场列) = 回执行中(Running/Finish
 			// 随现值复位,在飞计费与等待字段随后续 Clock 补数);被收口
 			// = 中止等终态。
-			if sess.EndStatus == rings.StepScopeWait || sess.EndStatus == rings.StepGateWait ||
-				sess.EndStatus == rings.StepPauseWait || sess.EndStatus == rings.StepModelWait {
+			if queueState(sess.EndStatus) && latestSession[sess.StepID] == sess.Transcript {
 				if st, ok := steps[sess.StepID]; ok {
 					switch st.Status {
 					case rings.StepScopeWait, rings.StepGateWait, rings.StepPauseWait, rings.StepModelWait:
@@ -181,23 +188,12 @@ func (s *Server) handleUnitsList(w http.ResponseWriter, r *http.Request) {
 	// 上位序(StepLaunchLess 同源——已批准待上位/补做证据压队首的调度
 	// 序,展示与操作同源);同步骤以会话锚行呈现(保留插话/标记/置顶
 	// 锚点),不再另出排队条目双行。
-	queueState := func(st string) bool {
-		switch st {
-		case "dispatched", rings.StepScopeWait, rings.StepGateWait, rings.StepPauseWait, rings.StepModelWait:
-			return true
-		}
-		return false
-	}
 	rows := make([]UnitRow, 0, len(out)+len(steps))
 	queueSessByStep := map[string]UnitRow{}
 	for _, row := range out {
-		if queueState(row.Status) && row.SessionID != "" {
-			if _, ok := queueSessByStep[row.StepID]; !ok {
-				queueSessByStep[row.StepID] = row
-				continue
-			}
-			// 同步骤第二条停等/待领取会话(接力等历史形态):不代步骤,
-			// 原样随行(面板按状态自归排队段)。
+		if queueState(row.Status) && row.SessionID != "" && latestSession[row.StepID] == row.SessionID && queueState(steps[row.StepID].Status) {
+			queueSessByStep[row.StepID] = row
+			continue
 		}
 		rows = append(rows, row)
 	}

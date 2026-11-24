@@ -206,7 +206,11 @@ func (s *Store) EvidenceVersions(ctx context.Context, taskID string) (map[string
 		return nil, 0, ErrEmptyTaskID
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT claim_id, evidence_binds, repro_events FROM claim_cases WHERE task_id = ?`, taskID,
+		`SELECT c.claim_id, c.evidence_binds, c.repro_events,
+		 (SELECT COUNT(*) FROM edges e JOIN nodes n ON n.task_id=e.task_id AND n.node_id=e.to_node
+		  WHERE e.task_id=c.task_id AND e.from_node=c.claim_id AND e.edge_type='sourced_from'
+		  AND n.node_type='fact' AND n.status='confirmed' AND json_extract(n.detail,'$.claim_id')=c.claim_id)
+		 FROM claim_cases c WHERE c.task_id = ?`, taskID,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("rings: 证据版本查摘要 %s: %w", taskID, err)
@@ -216,12 +220,12 @@ func (s *Store) EvidenceVersions(ctx context.Context, taskID string) (map[string
 	var total int64
 	for rows.Next() {
 		var claimID string
-		var binds, reproEvents int64
-		if err := rows.Scan(&claimID, &binds, &reproEvents); err != nil {
+		var binds, reproEvents, attributedFacts int64
+		if err := rows.Scan(&claimID, &binds, &reproEvents, &attributedFacts); err != nil {
 			return nil, 0, fmt.Errorf("rings: 扫描证据版本 %s: %w", taskID, err)
 		}
-		perClaim[claimID] = binds + reproEvents
-		total += binds + reproEvents
+		perClaim[claimID] = binds + reproEvents + attributedFacts
+		total += perClaim[claimID]
 	}
 	return perClaim, total, rows.Err()
 }

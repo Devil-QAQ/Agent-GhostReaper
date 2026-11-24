@@ -130,9 +130,12 @@ func (m *smodel) handle(w http.ResponseWriter, r *http.Request) {
 		if m.review != nil {
 			decision = m.review(&rr)
 		}
-		verdict := map[string]any{"decision": decision, "reason": "测试中的动作判断"}
+		verdict := map[string]any{"reason": "测试中的动作判断", "changes": []any{}}
 		if decision == "approval" {
-			verdict["permission"] = rings.PurposePermission{Actions: []string{"create"}, Resource: "测试对象", Purpose: "执行测试动作", Targets: []string{"测试目标"}, Effects: "测试中要求人工确认的操作"}
+			verdict["changes"] = []any{map[string]any{"permission": rings.PurposePermission{Actions: []string{"create"}, Resource: "测试对象", Purpose: "执行测试动作", Targets: []string{"测试目标"}, Effects: "测试中要求人工确认的操作"}}}
+		}
+		if decision == "deny" {
+			verdict["prohibition"] = "测试策略禁止"
 		}
 		content, _ := json.Marshal(verdict)
 		w.Header().Set("Content-Type", "application/json")

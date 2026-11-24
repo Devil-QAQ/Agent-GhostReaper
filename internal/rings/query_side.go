@@ -89,14 +89,14 @@ func (s *Store) ClosureState(ctx context.Context, taskID string) (ClosureStateRo
 
 // ---- 单位会话汇总(unit_sessions) ----
 
-// UnitSessionRow 虫群会话列表行(started 升序 = 插入序;end_status 空 =
+// UnitSessionRow 虫群会话列表行(最新启动版本升序;end_status 空 =
 // 未收场,呈现层按步骤当前状态取态)。
 type UnitSessionRow struct {
 	StepID      string
 	Transcript  string
 	UnitID      string
 	StartedAt   string // 呈现格式(FmtLocal 已换算)
-	StartRev    int64
+	StartRev    int64  // 当前执行的启动版本；历史启动锚由原事件保留。
 	EndStatus   string
 	FinishedAt  string
 	Turns       int
@@ -104,7 +104,7 @@ type UnitSessionRow struct {
 	BillableSec float64
 }
 
-// UnitSessions 列任务的全部单位会话(start_rev 升序)。
+// UnitSessions 列任务的全部单位会话(最新start_rev升序)。
 func (s *Store) UnitSessions(ctx context.Context, taskID string) ([]UnitSessionRow, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT step_id, transcript_id, unit_id, started_at, start_rev,
@@ -129,19 +129,22 @@ func (s *Store) UnitSessions(ctx context.Context, taskID string) ([]UnitSessionR
 	return out, rows.Err()
 }
 
+// The shared query also uses the existing execution-event partial index.
+const sessionAnchorSQL = `SELECT json_extract(payload,'$.transcript_id') FROM events
+ WHERE task_id = ? AND kind='swarm.record'
+ AND json_extract(payload,'$.step_id') = ? AND json_extract(payload,'$.unit_id') = ?
+ AND json_extract(payload,'$.type') IN ('session_started','session_finished')
+ AND json_extract(payload,'$.type') = 'session_started'
+ AND COALESCE(json_extract(payload,'$.transcript_id'),'') <> ''
+ AND (? = 0 OR revision < ?) ORDER BY revision DESC LIMIT 1`
+
 // SessionAnchorOf 单位×步骤最近一次 session_started 的转录锚(溯源视图
 // 的会话跳转锚;rev 上界取 0 = 不限)。
 func (s *Store) SessionAnchorOf(ctx context.Context, taskID, unitID, stepID string, beforeRev int64) (string, error) {
-	q := `SELECT transcript_id FROM unit_sessions
-	      WHERE task_id = ? AND unit_id = ? AND step_id = ?`
-	args := []any{taskID, unitID, stepID}
-	if beforeRev > 0 {
-		q += ` AND start_rev < ?`
-		args = append(args, beforeRev)
-	}
-	q += ` ORDER BY start_rev DESC LIMIT 1`
+	// The row tracks the current unit; immutable start events retain the
+	// anchors of every earlier unit that continued this same conversation.
 	var sid string
-	err := s.db.QueryRowContext(ctx, q, args...).Scan(&sid)
+	err := s.db.QueryRowContext(ctx, sessionAnchorSQL, taskID, stepID, unitID, beforeRev, beforeRev).Scan(&sid)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}

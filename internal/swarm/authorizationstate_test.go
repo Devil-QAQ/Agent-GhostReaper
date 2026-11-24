@@ -85,7 +85,7 @@ func TestActualInvocationReviewDoesNotSendWorkerPlan(t *testing.T) {
 		if json.Unmarshal([]byte(request.Messages[0].Content[0].Text), &body) != nil || body["intent"] != nil || body["goal"] != nil {
 			t.Fatal("worker plan reached action adjudication")
 		}
-		return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock(`{"decision":"allow","reason":"实际调用只读本地文件"}`)}}
+		return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock(`{"reason":"实际调用只读本地文件","changes":[]}`)}}
 	}}
 	_, err := ActionReviewFor(provider)(t.Context(), ActionReviewInput{Tool: "read", Arguments: json.RawMessage(`{"path":"/tmp/report.txt"}`), Goal: "扫描外部", Intent: "连接其他端口"})
 	if err != nil {

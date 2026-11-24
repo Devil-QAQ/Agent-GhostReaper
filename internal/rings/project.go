@@ -1460,6 +1460,31 @@ func applyEdgeAdded(tx *sql.Tx, taskID string, rev int64, p EdgeAdded) error {
 	); err != nil {
 		return fmt.Errorf("rings: 投影写入边 %s(%s→%s): %w", et, p.FromNode, p.ToNode, err)
 	}
+	if et == EdgeSourcedFrom && fromType == NodeTestClaim && toType == NodeFact {
+		// Only the new observation-time attribution advances the business
+		// version. Legacy provenance events retain their historical versions
+		// so replay still accepts display events recorded by earlier releases.
+		var attributed string
+		if err := tx.QueryRow(`SELECT COALESCE(json_extract(detail,'$.claim_id'),'') FROM nodes WHERE task_id=? AND node_id=?`, taskID, p.ToNode).Scan(&attributed); err != nil {
+			return err
+		}
+		if attributed == p.FromNode {
+			if _, err := tx.Exec(`UPDATE nodes SET updated_rev=? WHERE task_id=? AND node_id=?`, rev, taskID, p.FromNode); err != nil {
+				return err
+			}
+		}
+		row, err := loadClaimCase(tx, taskID, p.FromNode)
+		if err != nil {
+			return err
+		}
+		if err := row.includeSourceFacts(tx, taskID); err != nil {
+			return err
+		}
+		row.summary.Rev = rev
+		if err := row.save(tx, taskID); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

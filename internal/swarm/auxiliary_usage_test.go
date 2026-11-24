@@ -64,7 +64,7 @@ func TestAuxiliaryActionReviewUsageIncludingParseFailure(t *testing.T) {
 		err         error
 		usage       llm.Usage
 	}{
-		{"valid", `{"decision":"allow","reason":"读取本地资料"}`, nil,
+		{"valid", `{"reason":"读取本地资料","changes":[]}`, nil,
 			llm.Usage{InputTokens: 120, OutputTokens: 30, CacheReadTokens: 50, CacheWriteTokens: 20}},
 		{"invalid_json", "invalid", nil, llm.Usage{InputTokens: 100, OutputTokens: 20}},
 		{"provider_error_with_usage", "", errors.New("local failure"), llm.Usage{InputTokens: 80}},
@@ -87,13 +87,18 @@ func TestAuxiliaryActionReviewUsageIncludingParseFailure(t *testing.T) {
 				t.Fatalf("unexpected triage result: %v", err)
 			}
 			rows, err := store.TokenUsageRows(t.Context(), env.TaskID)
-			if err != nil || len(rows) != 1 || calls != 1 {
+			wantCalls := 1
+			if tc.name == "invalid_json" {
+				wantCalls = 3
+			}
+			if err != nil || len(rows) != wantCalls || calls != wantCalls {
 				t.Fatalf("rows=%+v calls=%d err=%v", rows, calls, err)
 			}
-			r := rows[0]
-			got := llm.Usage{InputTokens: r.InputTokens, OutputTokens: r.OutputTokens, CacheReadTokens: r.CacheReadTokens, CacheWriteTokens: r.CacheWriteTokens}
-			if got != tc.usage || r.Purpose != "action_review" || r.Agent != "swarm:u7" || r.TranscriptID != "swarm-u2" || r.Model != "local-model" || r.Turn != 0 || r.UsageMissing != (tc.usage == (llm.Usage{})) {
-				t.Fatalf("wrong usage attribution: %+v", r)
+			for _, r := range rows {
+				got := llm.Usage{InputTokens: r.InputTokens, OutputTokens: r.OutputTokens, CacheReadTokens: r.CacheReadTokens, CacheWriteTokens: r.CacheWriteTokens}
+				if got != tc.usage || r.Purpose != "action_review" || r.Agent != "swarm:u7" || r.TranscriptID != "swarm-u2" || r.Model != "local-model" || r.Turn != 0 || r.UsageMissing != (tc.usage == (llm.Usage{})) {
+					t.Fatalf("wrong usage attribution: %+v", r)
+				}
 			}
 		})
 	}

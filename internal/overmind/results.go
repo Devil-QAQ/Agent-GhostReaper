@@ -23,6 +23,16 @@ func (l *Loop) processResults(ctx context.Context) error {
 		return err
 	}
 	l.polishConfirmedFactsAsync(ctx, harvest.Confirmed)
+	for _, id := range harvest.Confirmed {
+		if fact, err := l.Store.Node(ctx, l.TaskID, id); err == nil {
+			if claim, _ := fact.Detail["claim_id"].(string); claim != "" {
+				// Reuse recovery's package/summary choice. New facts must not
+				// replace an in-flight proof package with summary-only work.
+				l.recoverDisplay(ctx)
+				break
+			}
+		}
+	}
 	l.syncRecordedAssets(ctx)
 	_, err = l.checkPendingClaims(ctx)
 	return err

@@ -65,6 +65,38 @@ type SummaryDigest struct {
 	Facts     []FactStatement `json:"facts,omitempty"`
 }
 
+// Evidence is visible from the same durable projection even when display
+// generation is unavailable. A later display rewrite cannot drop its sources.
+func (row *claimCaseRow) includeSourceFacts(tx *sql.Tx, task string) error {
+	rows, err := tx.Query(`SELECT n.node_id,n.title FROM edges e JOIN nodes n
+	 ON n.task_id=e.task_id AND n.node_id=e.to_node
+	 WHERE e.task_id=? AND e.edge_type=? AND e.from_node=? AND n.node_type=? AND n.status='confirmed'
+	 ORDER BY e.created_rev,n.node_id`, task, string(EdgeSourcedFrom), row.claimID, string(NodeFact))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if row.summary == nil {
+		row.summary = &SummaryDigest{}
+	}
+	seen := map[string]bool{}
+	for _, fact := range row.summary.Facts {
+		seen[fact.FactID] = true
+	}
+	for rows.Next() {
+		var fact FactStatement
+		if err := rows.Scan(&fact.FactID, &fact.Statement); err != nil {
+			return err
+		}
+		if !seen[fact.FactID] {
+			row.summary.Facts = append(row.summary.Facts, fact)
+			seen[fact.FactID] = true
+		}
+	}
+	row.changedSummary = true
+	return rows.Err()
+}
+
 // CaseEvidenceBind 绑定流量证据条目(首绑次序)。
 type CaseEvidenceBind struct {
 	ExchangeID string `json:"id"`
@@ -394,10 +426,7 @@ func applyClaimNodeAdded(tx *sql.Tx, taskID string, rev int64, p NodeAdded, occu
 func lookupSessionAnchor(tx *sql.Tx, taskID, unitID, stepID string, rev int64) (string, error) {
 	var sid string
 	err := tx.QueryRow(
-		`SELECT transcript_id FROM unit_sessions
-		 WHERE task_id = ? AND unit_id = ? AND step_id = ? AND start_rev < ?
-		 ORDER BY start_rev DESC LIMIT 1`,
-		taskID, unitID, stepID, rev,
+		sessionAnchorSQL, taskID, stepID, unitID, rev, rev,
 	).Scan(&sid)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil

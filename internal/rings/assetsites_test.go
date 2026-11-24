@@ -58,8 +58,8 @@ func TestWebsitesRemainRootsWithSharedAddressAndMajorInterfaces(t *testing.T) {
 func TestInventoryAdmissionAndWithdrawalDoNotInventHostOwnership(t *testing.T) {
 	assets := []NodeFull{{NodeView: NodeView{ID: "seed", Type: NodeAsset, AssetClass: AssetService, Title: "https://[2001:db8::1]:1122/path"}}}
 	for _, title := range []string{"https://[2001:db8::1]:1123", "[2001:db8::1]:22"} {
-		if !AutomaticallyInventory(AssetService, title, assets, RoeState{}) {
-			t.Fatal("literal host discovery not registered", title)
+		if AutomaticallyInventory(AssetService, title, assets, RoeState{}) {
+			t.Fatal("shared host admitted an unconfirmed system", title)
 		}
 	}
 	if AutomaticallyInventory(AssetService, "https://elsewhere.test:1122", assets, RoeState{}) {

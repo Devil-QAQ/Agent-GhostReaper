@@ -86,7 +86,7 @@ func (l *Loop) summaryPack(ctx context.Context, claimID string) (*summaryPack, e
 	}
 	seen := map[string]bool{}
 	addFact := func(id string) {
-		if len(pack.Facts) >= summaryFactCap || seen[id] {
+		if seen[id] {
 			return
 		}
 		n, err := l.Store.Node(ctx, l.TaskID, id)
@@ -95,6 +95,17 @@ func (l *Loop) summaryPack(ctx context.Context, claimID string) (*summaryPack, e
 		}
 		seen[id] = true
 		pack.Facts = append(pack.Facts, summaryFactMaterial{FactID: id, Statement: n.Title})
+	}
+	// Explicit attribution wins over incidental observations from the original
+	// discovery step. Do not truncate later evidence behind that old context.
+	sources, err := l.Store.Edges(ctx, l.TaskID, rings.EdgeSourcedFrom)
+	if err != nil {
+		return nil, err
+	}
+	for _, edge := range sources {
+		if edge.From == claimID {
+			addFact(edge.To)
+		}
 	}
 	// 血缘目标分流:Fact 直入(组合链);Step 收集后走产出边(普通声明)。
 	var steps []string
@@ -123,6 +134,9 @@ func (l *Loop) summaryPack(ctx context.Context, claimID string) (*summaryPack, e
 			inStep[s] = true
 		}
 		for _, ev := range evs {
+			if len(pack.Facts) >= summaryFactCap {
+				break
+			}
 			if ev.Kind != rings.EventEdgeAdded {
 				continue
 			}
@@ -133,16 +147,12 @@ func (l *Loop) summaryPack(ctx context.Context, claimID string) (*summaryPack, e
 			addFact(e.ToNode)
 		}
 	}
-	sources, err := l.Store.Edges(ctx, l.TaskID, rings.EdgeSourcedFrom)
-	if err != nil {
-		return nil, err
-	}
 	owners := map[string]bool{claimID: true}
 	for _, step := range steps {
 		owners[step] = true
 	}
 	for _, edge := range sources {
-		if owners[edge.From] {
+		if len(pack.Facts) < summaryFactCap && owners[edge.From] {
 			addFact(edge.To)
 		}
 	}
@@ -319,4 +329,5 @@ func (l *Loop) rewriteSummary(ctx context.Context, gs *genSession, rec *rings.Te
 const summarySystem = `为安全测试面板整理漏洞的名称、说明和影响。名称是一小句，供列表辨认；说明让人直接看懂实际问题；影响只写证据支持的后果与范围。资产在页面单列，正文不重复堆放完整地址、状态码和参数，详细请求与响应由证据和复现提供。
 ` + displayExplanationStandard + `
 输入中的当前状态决定措辞：尚未确认时不得写成漏洞已成立；证据不足须保留未验证的边界。不能改变级别、确认状态或报告纳入决定，不补造影响。事实条目标识原样返回。
+原交卷与后来确认的事实一起构成当前材料；新事实已证实的内容应更新原说明和影响，不再沿用“尚未验证”的旧措辞。不把补充证据另写成一个漏洞，不把其他根因的影响混进来。
 只输出 JSON:{"title":"…","statement":"…","impact":"…","facts":[{"fact_id":"…","statement":"…"},…]}。`

@@ -26,7 +26,8 @@ func AssetSubjectAliases(assets []AssetNodeView, hierarchy []EdgeView, relations
 	}
 	business := func(id string) bool {
 		c := byID[id].AssetClass
-		return c == AssetService || c == AssetApp || c == AssetMiniProgram
+		a := byID[id]
+		return WebsiteEntry(c, a.Title) || (c == AssetApp || c == AssetMiniProgram || c == AssetService) && (a.Independent || a.Source != AssetSourceDiscovered)
 	}
 	technical := func(id string) bool {
 		c := byID[id].AssetClass
@@ -77,8 +78,12 @@ func AssetSubjectAliases(assets []AssetNodeView, hierarchy []EdgeView, relations
 	out := map[string][]string{}
 	for _, a := range assets {
 		root := rootOf(a.ID)
+		if !business(root) && !technical(a.ID) {
+			out[a.ID] = []string{}
+			continue
+		}
 		if len(attached[root]) == 0 {
-			if hasSystems && technical(root) {
+			if !business(root) && (!technical(root) || hasSystems) {
 				out[a.ID] = []string{}
 				continue
 			}

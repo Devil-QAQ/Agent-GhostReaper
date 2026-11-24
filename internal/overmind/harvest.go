@@ -332,6 +332,14 @@ func Harvest(ctx context.Context, store *rings.Store, taskID string) (*HarvestRe
 				Kind: rings.EventNodeStateChanged, Actor: ActorOvermind,
 				Payload: rings.NodeStateChanged{NodeID: c.ID, Status: "confirmed"},
 			}}
+			if claimID, _ := c.Detail["claim_id"].(string); claimID != "" {
+				claim, err := store.Node(ctx, taskID, claimID)
+				if err == nil && claim.Type == rings.NodeTestClaim && claim.Status != rings.TestClaimDiscarded && claim.Status != rings.TestClaimRefuted {
+					// The worker supplied the association with the observation.
+					// Confirmation and its existing provenance edge commit together.
+					events = append(events, rings.Event{Kind: rings.EventEdgeAdded, Actor: ActorOvermind, Payload: rings.EdgeAdded{EdgeType: rings.EdgeSourcedFrom, FromNode: claimID, ToNode: c.ID}})
+				}
+			}
 			if decl := factNewAsset(c.Detail); decl != nil {
 				assetEvents, err := proposedAssetEvents(ctx, store, taskID, *c, decl)
 				if err != nil {
@@ -369,6 +377,7 @@ func factNewAsset(detail map[string]any) *swarm.NewAssetDecl {
 	decl.Class, _ = raw["class"].(string)
 	decl.Title, _ = raw["title"].(string)
 	decl.Parent, _ = raw["parent"].(string)
+	decl.Independent, _ = raw["independent"].(bool)
 	if strings.TrimSpace(decl.Title) == "" {
 		return nil
 	}
@@ -416,6 +425,7 @@ func discoveredAssetEvents(ctx context.Context, store *rings.Store, taskID strin
 	}
 	detail["scope"] = rings.AssetScopeIn
 	detail["adopted"] = true
+	detail["independent"] = decl.Independent
 	if stepID != "" {
 		detail["step_id"] = stepID
 	}

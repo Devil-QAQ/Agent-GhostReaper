@@ -30,7 +30,7 @@ func TestPurposePermissionLiveAcrossToolAndArgumentChanges(t *testing.T) {
 		{"new_arguments", "bash", `{"command":"curl --silent --data-urlencode 'name=test-user-b' --data-urlencode 'email=test-b@example.test' https://example.test:1122/admin/users"}`, ActionAllow},
 		{"new_tool", "http_probe", `{"url":"https://example.test:1122/admin/users/create?name=test-user-c","method":"GET"}`, ActionAllow},
 		{"different_effect", "bash", `{"command":"curl -X DELETE https://example.test:1122/admin/users/1"}`, ActionDeny},
-		{"different_target", "bash", `{"command":"curl -s -X POST --data-urlencode name=test-user-a https://another.test/admin/users"}`, ActionDeny},
+		{"different_target_needs_own_action_grant", "bash", `{"command":"curl -s -X POST --data-urlencode name=test-user-a https://another.test/admin/users"}`, ActionApproval},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result := run(tc.tool, tc.args, boundary)

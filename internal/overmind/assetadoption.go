@@ -17,11 +17,66 @@ const AssetProposalPrefix = "ad-"
 
 var ErrAssetProposalDecided = errors.New("资产加入请求已处理或不存在")
 
+// Only an explicit observation of the same system can admit a new entry.
+// Address sharing, DNS, redirects and deployment are not that assertion.
+func observedSameSystem(fact rings.NodeFull, class rings.AssetClass, title string, assets []rings.NodeFull, roe rings.RoeState) bool {
+	_, _, key, err := rings.AssetIdentity(class, title)
+	if err != nil {
+		return false
+	}
+	members := rings.InventoryAssetIDs(assets, roe)
+	joined := map[string]bool{}
+	for _, a := range assets {
+		if !members[a.ID] {
+			continue
+		}
+		_, _, k, e := rings.AssetIdentity(a.AssetClass, a.Title)
+		if e == nil {
+			joined[k] = true
+		}
+	}
+	observations, err := rings.ObservedAssets(fact.Detail)
+	if err != nil {
+		return false
+	}
+	for _, r := range observations.Relations {
+		if r.Kind != "same_system" {
+			continue
+		}
+		_, _, from, ef := rings.AssetIdentity(r.FromClass, r.From)
+		_, _, to, et := rings.AssetIdentity(r.ToClass, r.To)
+		if ef == nil && et == nil && (from == key && joined[to] || to == key && joined[from]) {
+			return true
+		}
+	}
+	relations, err := rings.AssetRelationsFromDetail(fact.Detail)
+	if err != nil {
+		return false
+	}
+	for _, r := range relations {
+		if r.Kind != "same_system" {
+			continue
+		}
+		other := ""
+		if r.From == "$new" {
+			other = r.To
+		}
+		if r.To == "$new" {
+			other = r.From
+		}
+		if other != "" && members[other] {
+			return true
+		}
+	}
+	return false
+}
+
 type AssetProposal struct {
-	FactID string `json:"fact_id"`
-	Class  string `json:"class"`
-	Title  string `json:"title"`
-	Parent string `json:"parent,omitempty"`
+	FactID      string `json:"fact_id"`
+	Class       string `json:"class"`
+	Title       string `json:"title"`
+	Parent      string `json:"parent,omitempty"`
+	Independent bool   `json:"independent,omitempty"`
 }
 
 // proposedAssetEvents keeps the observation in the ledger and asks about
@@ -42,32 +97,29 @@ func proposedAssetEvents(ctx context.Context, store *rings.Store, task string, f
 		}
 		_, _, existing, e := rings.AssetIdentity(a.AssetClass, a.Title)
 		if e == nil && existing == key && a.Status != "retired" {
-			return discoveredAssetEvents(ctx, store, task, fact, &swarm.NewAssetDecl{Class: string(class), Title: a.Title})
+			return discoveredAssetEvents(ctx, store, task, fact, &swarm.NewAssetDecl{Class: string(class), Title: a.Title, Independent: rings.IndependentAsset(a)})
 		}
 	}
 
-	if (class == rings.AssetApp || class == rings.AssetMiniProgram) && !strings.Contains(title, "://") {
-		return automaticAssetEvents(ctx, store, task, fact, decl)
+	if (class == rings.AssetApp || class == rings.AssetMiniProgram) && !decl.Independent {
+		return nil, nil
 	}
 	roe, err := store.CurrentRoE(ctx, task)
 	if err != nil {
 		return nil, err
 	}
-	if rings.AutomaticallyInventory(class, title, assets, roe) {
+	if rings.AutomaticallyInventory(class, title, assets, roe) || observedSameSystem(fact, class, title, assets, roe) {
+		return automaticAssetEvents(ctx, store, task, fact, decl)
+	}
+	autoJoin, err := store.ApprovalAutomationFlag(ctx, task, "auto_join")
+	if err != nil {
+		return nil, err
+	}
+	if autoJoin {
 		return automaticAssetEvents(ctx, store, task, fact, decl)
 	}
 	parent := decl.Parent
-	if class != rings.AssetDomain && class != rings.AssetHost {
-		parent = ""
-		addressClass, address, e := rings.AssetAddress(class, title)
-		if e != nil {
-			return nil, nil
-		}
-		class, title, key, err = rings.AssetIdentity(addressClass, address)
-		if err != nil {
-			return nil, err
-		}
-	}
+
 	h := sha256.Sum256([]byte(key))
 	rid := AssetProposalPrefix + hex.EncodeToString(h[:12])
 	rows, err := store.ApprovalByRequest(ctx, task, rid)
@@ -77,7 +129,7 @@ func proposedAssetEvents(ctx context.Context, store *rings.Store, task string, f
 	if len(rows) > 0 {
 		return nil, nil
 	}
-	proposal := AssetProposal{FactID: fact.ID, Class: string(class), Title: title, Parent: parent}
+	proposal := AssetProposal{FactID: fact.ID, Class: string(class), Title: title, Parent: parent, Independent: decl.Independent}
 	args, err := json.Marshal(proposal)
 	if err != nil {
 		return nil, err
@@ -119,7 +171,7 @@ func DecideAssetProposal(ctx context.Context, store *rings.Store, task, rid stri
 		events := []rings.Event{}
 		if added {
 			typ = rings.ApprovalRecAssetAdded
-			events, err = discoveredAssetEvents(ctx, store, task, *fact, &swarm.NewAssetDecl{Class: p.Class, Title: p.Title, Parent: p.Parent})
+			events, err = discoveredAssetEvents(ctx, store, task, *fact, &swarm.NewAssetDecl{Class: p.Class, Title: p.Title, Parent: p.Parent, Independent: p.Independent})
 			if err != nil {
 				return "", err
 			}
@@ -190,6 +242,22 @@ func automaticAssetEvents(ctx context.Context, store *rings.Store, task string, 
 	if err != nil {
 		return nil, err
 	}
+	autoJoin, err := store.ApprovalAutomationFlag(ctx, task, "auto_join")
+	if err != nil {
+		return nil, err
+	}
+	if autoJoin {
+		for i, ev := range events {
+			if n, ok := ev.Payload.(rings.NodeAdded); ok && n.NodeType == rings.NodeAsset {
+				n.Detail["operator_target"] = true
+				events[i].Payload = n
+			}
+		}
+		if len(rows) == 0 {
+			raw, _ := json.Marshal(AssetProposal{FactID: fact.ID, Class: decl.Class, Title: decl.Title, Parent: decl.Parent, Independent: decl.Independent})
+			events = append(events, rings.Event{Kind: rings.EventApprovalRecord, Actor: "automation", Payload: rings.ApprovalRecord{RequestID: rid, Type: rings.ApprovalRecAssetAdded, UnitID: factUnitOf(fact), ToolArgs: raw, DecidedBy: "automation", Reason: "资产自动加入"}})
+		}
+	}
 	if len(rows) > 0 && rows[len(rows)-1].Type == rings.ApprovalRecAssetWait {
 		row := rows[len(rows)-1]
 		events = append(events, rings.Event{Kind: rings.EventApprovalRecord, Actor: ActorOvermind, Payload: rings.ApprovalRecord{RequestID: rid, Type: rings.ApprovalRecAssetAdded, UnitID: row.UnitID, Intent: row.Intent, ToolArgs: json.RawMessage(row.ToolArgs), DecidedBy: "model", Reason: "目标内发现自动归档"}})
@@ -236,7 +304,11 @@ func ObservedChildAssetEvents(ctx context.Context, store *rings.Store, task stri
 				if selected == key {
 					continue
 				}
-				if rings.AssetContainsIdentity(site.AssetClass, site.Title, a.Class, a.Title) {
+				joined := rings.NodeFull{NodeView: rings.NodeView{ID: site.NodeID, Type: rings.NodeAsset, Status: "active", AssetClass: site.AssetClass, Title: site.Title}, Detail: map[string]any{"source": rings.AssetSourceManual}}
+				if joined.ID == "" {
+					joined.ID = "joined:" + selected
+				}
+				if observedSameSystem(fact, a.Class, a.Title, []rings.NodeFull{joined}, rings.RoeState{}) {
 					covered = true
 					break
 				}
@@ -246,7 +318,7 @@ func ObservedChildAssetEvents(ctx context.Context, store *rings.Store, task stri
 				continue
 			}
 			seen[key] = true
-			ev, err := automaticAssetEvents(ctx, store, task, fact, &swarm.NewAssetDecl{Class: string(a.Class), Title: a.Title})
+			ev, err := automaticAssetEvents(ctx, store, task, fact, &swarm.NewAssetDecl{Class: string(a.Class), Title: a.Title, Independent: a.Independent})
 			if err != nil {
 				return nil, err
 			}
@@ -287,51 +359,29 @@ func uniqueAssetEvents(events []rings.Event) []rings.Event {
 	return out
 }
 
-// Legacy per-port choices are folded into the address-level choice. The old
-// record remains auditable; declining a folded card is not an access denial.
-func (l *Loop) reconcileAssetChoices(ctx context.Context) error {
-	rows, err := l.Store.PendingAssetProposals(ctx, l.TaskID)
+// AutoJoinPending reuses the asset decision path only. It does not grant any
+// business action and does not reverse previous declines or exclusions.
+func AutoJoinPending(ctx context.Context, store *rings.Store, task string) (int, error) {
+	rows, err := store.PendingAssetProposals(ctx, task)
 	if err != nil {
-		return err
+		return 0, err
 	}
+	handled := 0
 	for _, row := range rows {
-		var old AssetProposal
-		if json.Unmarshal([]byte(row.ToolArgs), &old) != nil || old.Class == string(rings.AssetDomain) || old.Class == string(rings.AssetHost) {
-			continue
+		enabled, err := store.ApprovalAutomationFlag(ctx, task, "auto_join")
+		if err != nil {
+			return handled, err
 		}
-		if _, _, e := rings.AssetAddress(rings.AssetClass(old.Class), old.Title); e != nil {
-			continue
-		}
-		for ctx.Err() == nil {
-			rev, e := l.Store.CurrentRevision(ctx, l.TaskID)
-			if e != nil {
-				return e
-			}
-			latest, e := l.Store.ApprovalByRequest(ctx, l.TaskID, row.RequestID)
-			if e != nil {
-				return e
-			}
-			if len(latest) == 0 || latest[len(latest)-1].Type != rings.ApprovalRecAssetWait {
-				break
-			}
-			fact, e := l.Store.Node(ctx, l.TaskID, old.FactID)
-			if e != nil {
-				return e
-			}
-			events, e := proposedAssetEvents(ctx, l.Store, l.TaskID, *fact, &swarm.NewAssetDecl{Class: old.Class, Title: old.Title})
-			if e != nil {
-				return e
-			}
-			events = append(events, rings.Event{Kind: rings.EventApprovalRecord, Actor: ActorOvermind, Payload: rings.ApprovalRecord{RequestID: row.RequestID, Type: rings.ApprovalRecAssetDeclined, UnitID: row.UnitID, Intent: row.Intent, ToolArgs: json.RawMessage(row.ToolArgs), DecidedBy: "model", Reason: "已合并至域名/IP加入选择"}})
-			_, e = l.Store.AppendAtRevision(ctx, l.TaskID, rev, uniqueAssetEvents(events)...)
-			if errors.Is(e, rings.ErrStaleRevision) {
-				continue
-			}
-			if e != nil {
-				return e
-			}
+		if !enabled {
 			break
 		}
+		if _, err := DecideAssetProposal(ctx, store, task, row.RequestID, true, "资产自动加入"); err != nil {
+			if errors.Is(err, ErrAssetProposalDecided) {
+				continue
+			}
+			return handled, err
+		}
+		handled++
 	}
-	return ctx.Err()
+	return handled, nil
 }

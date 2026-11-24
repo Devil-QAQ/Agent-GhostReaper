@@ -2,7 +2,9 @@ package swarm
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,8 +29,12 @@ func TestActionApprovalResumesOriginalSessionWithoutStepPass(t *testing.T) {
 		}
 	})
 	defer model.Close()
-	model.review = func(*recordedRequest) scriptedReply {
-		return scriptedReply{Text: `{"decision":"approval","reason":"测试要求逐次确认","permission":{"actions":["create"],"resource":"本地测试对象","purpose":"执行本地测试指令","targets":["本地测试环境"],"effects":"运行测试指令"}}`}
+	model.review = func(rr *recordedRequest) scriptedReply {
+		resource := "第一类测试对象"
+		if strings.Contains(rr.LastUser, "review-second-ok") {
+			resource = "第二类测试对象"
+		}
+		return scriptedReply{Text: fmt.Sprintf(`{"reason":"两类不同的实际影响","changes":[{"permission":{"actions":["create"],"resource":%q,"purpose":"测试","targets":["本地测试环境"],"effects":"测试"}}]}`, resource)}
 	}
 	provider, err := model.provider()
 	if err != nil {
@@ -106,7 +112,7 @@ func TestActionReviewFaultRecoversOriginalSessionWithoutHumanApproval(t *testing
 		if reviews.Add(1) == 1 {
 			return scriptedReply{Text: "invalid JSON"}
 		}
-		return scriptedReply{Text: `{"decision":"allow","reason":"任务内本地处理"}`}
+		return scriptedReply{Text: `{"reason":"任务内本地处理","changes":[]}`}
 	}
 	provider, err := model.provider()
 	if err != nil {

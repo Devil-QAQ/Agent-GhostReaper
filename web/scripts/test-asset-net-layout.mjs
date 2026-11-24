@@ -102,3 +102,10 @@ assert.equal(siteLayout.nodes.find(n=>n.id==="address").primary,false,"shared IP
 assert.deepEqual(siteLayout.nodes.find(n=>n.id==="address").systems,["site-one","site-two"]);
 assert.equal(siteLayout.edges.filter(e=>e.rel==="sub_of").length,1,"visual attachment never invents containment");
 assert.deepEqual(assetNetLayout([...sites].reverse(),[...siteChildren].reverse(),[...addresses].reverse()),siteLayout);
+
+// An explicit empty subject projection is supporting/unassigned data, even
+// before the first website has been identified. Never promote it by fallback.
+const supportingOnly=assetNetLayout([{id:"xmpp",class:"service",title:"xmpp://192.0.2.1:15222",subject_ids:[]}]);
+assert.equal(supportingOnly.nodes.length,1);
+assert.equal(supportingOnly.nodes[0].primary,false);
+assert.deepEqual(supportingOnly.roots,[]);

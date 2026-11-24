@@ -22,8 +22,9 @@ export function assetNetLayout(assets = [], hierarchy = [], relations = []) {
   }
   edges.sort((a, b) => String(a.from).localeCompare(b.from) || String(a.to).localeCompare(b.to) || String(a.rel).localeCompare(b.rel));
   const rawRoots = ids.filter(id => !parents.has(id)), memberships = new Map(), depth = new Map();
+  const hasSubjectProjection = assets.some(a => Array.isArray(a.subject_ids));
   const subjects = new Set(assets.flatMap(a => a.subject_ids || []));
-  const roots = subjects.size ? ids.filter(id => subjects.has(id)) : rawRoots;
+  const roots = hasSubjectProjection ? ids.filter(id => subjects.has(id)) : rawRoots;
   const visit = root => {
     const queue = [[root, 0]], visited = new Set();
     for (let i = 0; i < queue.length; i++) {
@@ -53,7 +54,7 @@ export function assetNetLayout(assets = [], hierarchy = [], relations = []) {
   roots.forEach((id, i) => { const col = i % columns, row = Math.floor(i / columns), width = sizes.get(id) * 2 + 280; colWidths[col] = Math.max(colWidths[col] || 0, width); rowHeights[row] = Math.max(rowHeights[row] || 0, width); });
   const offset = (list, index) => list.slice(0, index).reduce((sum, n) => sum + n, 0) + list[index] / 2;
   roots.forEach((id, i) => centers.set(id, { x: offset(colWidths, i % columns), y: offset(rowHeights, Math.floor(i / columns)) }));
-  const positions = new Map(), targets = new Map(), rootSet = new Set(roots.filter(id => !(subjects.size && Array.isArray(byID.get(id).subject_ids) && byID.get(id)?.subject_ids?.length === 0)));
+  const positions = new Map(), targets = new Map(), rootSet = new Set(roots.filter(id => !(hasSubjectProjection && Array.isArray(byID.get(id).subject_ids) && byID.get(id)?.subject_ids?.length === 0)));
   for (const root of roots) {
     const center = centers.get(root); positions.set(root, { ...center }); targets.set(root, center);
     const members = groups.get(root).sort((a, b) => depth.get(a) - depth.get(b) || a.localeCompare(b));

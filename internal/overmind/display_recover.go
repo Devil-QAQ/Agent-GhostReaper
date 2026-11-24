@@ -105,7 +105,15 @@ func (l *Loop) recoverDisplay(ctx context.Context) {
 		}
 		if n.Status == rings.TestClaimConfirmed || n.Status == rings.TestClaimFixed {
 			row, ok, err := l.Store.ClaimCaseOf(ctx, l.TaskID, n.ID)
-			if err != nil || !ok || row.Repro == nil || row.Repro.StepsIncomplete != "流程步骤整理中" || len(row.Repro.ProofSeqs) == 0 {
+			if err != nil || !ok {
+				continue
+			}
+			if row.Repro == nil || row.Repro.StepsIncomplete != "流程步骤整理中" || len(row.Repro.ProofSeqs) == 0 {
+				// Source additions also refresh already-complete packages. This
+				// uses the existing display queue, including after a restart.
+				if row.Summary != nil && row.Summary.Rev == n.UpdatedRev {
+					l.polishClaimTextAsync(ctx, n.ID)
+				}
 				continue
 			}
 			event, err := l.Store.EventByRevision(ctx, l.TaskID, row.Repro.Rev)

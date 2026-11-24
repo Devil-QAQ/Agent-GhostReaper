@@ -355,6 +355,7 @@ func (s *Server) Handler() *http.ServeMux {
 	mux.HandleFunc("GET /api/tasks/{id}/report/archives/{rev}", s.handleReportArchiveDownload)
 	mux.HandleFunc("GET /api/tasks/{id}/approvals", s.handleApprovalsList)
 	mux.HandleFunc("POST /api/tasks/{id}/approvals/{rid}", s.handleApprovalDecide)
+	mux.HandleFunc("POST /api/tasks/{id}/approvals/automation", s.handleApprovalAutomation)
 	mux.HandleFunc("POST /api/tasks/{id}/approvals/batch", s.handleApprovalBatch) // P4-52 ⑤ 范围卡勾选批量两键(P4-70 ① 批量第三键入口移除)
 	mux.HandleFunc("POST /api/tasks/{id}/wake", s.handleWake)
 
@@ -2113,10 +2114,14 @@ func (s *Server) handleClaimsList(w http.ResponseWriter, r *http.Request) {
 	// 校对后的事实描述优先(任务级反查自各判断的声明摘要,后定稿覆盖
 	// 先定稿——取代语义同其他冻结文本);P4-64 ③:事实确认批次文本
 	//(node_polish)再覆盖(不限于已定稿判断链上的事实)。
-	factTitle := map[string]string{}
-	factKnown := map[string]bool{}
 	polishedFact := polishedFactMapOf(digests)
 	s.overlayFactPolish(r.Context(), taskID, polishedFact)
+	sources, err := s.Store.Edges(r.Context(), taskID, rings.EdgeSourcedFrom)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	factRefs := s.claimFactRefs(r.Context(), taskID, append(append([]rings.EdgeView(nil), derived...), sources...), polishedFact)
 
 	contexts, err := s.assetContexts(r.Context(), taskID)
 	if err != nil {
@@ -2169,29 +2174,7 @@ func (s *Server) handleClaimsList(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		// 血缘引用的事实(漏洞条目点回事实;节点类型缓存防
-		// 重复查询,非事实目标〔发现步骤〕只查一次不再进引用行)。
-		for _, e := range derived {
-			if e.From != c.ID {
-				continue
-			}
-			isFact, seen := factKnown[e.To]
-			if !seen {
-				isFact = false
-				if n, err := s.Store.Node(r.Context(), taskID, e.To); err == nil && n.Type == rings.NodeFact {
-					isFact = true
-					factTitle[e.To] = n.Title
-				}
-				factKnown[e.To] = isFact
-			}
-			if isFact {
-				title := factTitle[e.To]
-				if p := polishedFact[e.To]; p != "" {
-					title = p
-				}
-				v.FactRefs = append(v.FactRefs, FactRefView{ID: e.To, Title: title})
-			}
-		}
+		v.FactRefs = factRefs[c.ID]
 		if d, ok := digests[c.ID]; ok {
 			v.Severity, v.ReproSteps = d.Severity, d.ReproSteps
 			v.PendingReason, v.VerdictRev = d.PendingReason, d.VerdictRev
@@ -2295,10 +2278,15 @@ func (s *Server) handleApprovalsList(w http.ResponseWriter, r *http.Request) {
 
 	// 待决区按登记时间稳定排序(弹门与范围卡混排,先到先决)。
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
+	automation, err := s.Store.ApprovalAutomation(r.Context(), taskID)
+	if err != nil {
+		writeErr(w, 500, errors.New("无法读取自动处理设置"))
+		return
+	}
 	// P2-08:冬眠中审批单冻结为只读(面板禁用裁决按钮并提示;唤醒恢复)。
 	writeJSON(w, http.StatusOK, map[string]any{
 		"pending": out,
-		"records": records, "frozen": s.taskHibernated(taskID),
+		"records": records, "frozen": s.taskHibernated(taskID), "automation": automation,
 	})
 }
 
@@ -2322,6 +2310,8 @@ func (s *Server) approvalRecords(ctx context.Context, taskID string) ([]approval
 			note = "需审批"
 			if r.Note == swarm.ActionAllow {
 				note = "允许执行"
+			} else if r.Note == swarm.ActionDeny {
+				note = "禁止执行"
 			}
 		}
 		recs = append(recs, approvalRecordView{

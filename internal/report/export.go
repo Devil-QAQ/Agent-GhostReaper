@@ -111,6 +111,9 @@ func ClaimExport(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore
 	if err := zipEvidence(zw, blobs, cs, "evidence", at); err != nil {
 		return nil, err
 	}
+	if err := zipFactEvidence(zw, ctx, store, blobs, taskID, cs, "evidence", at); err != nil {
+		return nil, err
+	}
 	if err := zw.Close(); err != nil {
 		return nil, fmt.Errorf("report: 收口 zip: %w", err)
 	}
@@ -248,6 +251,42 @@ func taskZipInto(zw *zip.Writer, ctx context.Context, store *rings.Store, blobs 
 			EnrichReproForEvent(ctx, store, taskID, cases[c.ID])
 		}
 		if err := zipEvidence(zw, blobs, cases[c.ID], prefix+"evidence", at); err != nil {
+			return err
+		}
+		if err := zipFactEvidence(zw, ctx, store, blobs, taskID, cases[c.ID], prefix+"evidence", at); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func zipFactEvidence(zw *zip.Writer, ctx context.Context, store *rings.Store, blobs *swarm.BlobStore, task string, cs *ClaimCase, dir string, at time.Time) error {
+	if cs == nil || cs.Summary == nil {
+		return nil
+	}
+	for _, ref := range cs.Summary.Facts {
+		n, err := store.Node(ctx, task, ref.FactID)
+		if err != nil || n.Type != rings.NodeFact || n.Status != "confirmed" {
+			continue
+		}
+		evidence, _ := n.Detail["evidence"].(string)
+		doc := map[string]any{"id": n.ID, "statement": n.Title}
+		if blob, _ := n.Detail["evidence_ref"].(string); blob != "" {
+			doc["evidence_ref"] = blob
+			doc["evidence_unavailable"] = true
+			if blobs != nil {
+				if raw, err := blobs.Read(blob); err == nil {
+					evidence = string(raw)
+					delete(doc, "evidence_unavailable")
+				}
+			}
+		}
+		doc["evidence"] = evidence
+		raw, err := json.MarshalIndent(doc, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := zipAdd(zw, path.Join(dir, cs.ClaimID, "facts", n.ID+".json"), raw, at); err != nil {
 			return err
 		}
 	}
@@ -513,11 +552,11 @@ func findingsCSVRows(ctx context.Context, store *rings.Store, taskID string, sco
 		vulnclass, _ := c.Detail["vulnclass"].(string)
 		// 影响面列 = 交卷申报的影响列点(P5-07⑦b:列点并入一格,换行
 		// 分隔;空 = 未申报)。
-		impact := cases[c.ID].ImpactNoteOf()
+		_, statement, impact := claimText(c, cs)
 		unit, _ := c.Detail["unit_id"].(string)
 		rows = append(rows, []string{
 			taskID, c.ID, claimStatusWord(c.Status), cs.Severity(),
-			vulnclass, c.Title, impact,
+			vulnclass, statement, impact,
 			strings.Join(anchors, " "),
 			unit, strconv.Itoa(reproN),
 			cs.PendingReason(),
@@ -548,19 +587,20 @@ func reportJSON(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore,
 		Rev    int64  `json:"ledger_rev"`
 	}
 	type finding struct {
-		ID            string      `json:"id"`
-		Status        string      `json:"status"`
-		StatusWord    string      `json:"status_word"`
-		Severity      string      `json:"severity,omitempty"`
-		Vulnclass     string      `json:"vulnclass,omitempty"`
-		Statement     string      `json:"statement"`
-		Impact        string      `json:"impact,omitempty"`
-		Assets        []string    `json:"assets,omitempty"`
-		Discoverer    string      `json:"discoverer_unit,omitempty"`
-		PendingReason string      `json:"pending_reason,omitempty"`
-		Timeline      []CaseEntry `json:"timeline"`
-		Repro         *ReproFinal `json:"repro,omitempty"`
-		Remediation   []string    `json:"remediation,omitempty"`
+		ID            string                `json:"id"`
+		Status        string                `json:"status"`
+		StatusWord    string                `json:"status_word"`
+		Severity      string                `json:"severity,omitempty"`
+		Vulnclass     string                `json:"vulnclass,omitempty"`
+		Statement     string                `json:"statement"`
+		Impact        string                `json:"impact,omitempty"`
+		Assets        []string              `json:"assets,omitempty"`
+		Discoverer    string                `json:"discoverer_unit,omitempty"`
+		PendingReason string                `json:"pending_reason,omitempty"`
+		Timeline      []CaseEntry           `json:"timeline"`
+		Repro         *ReproFinal           `json:"repro,omitempty"`
+		Remediation   []string              `json:"remediation,omitempty"`
+		Facts         []rings.FactStatement `json:"facts,omitempty"`
 	}
 	out := struct {
 		Task     taskInfo  `json:"task"`
@@ -582,7 +622,10 @@ func reportJSON(ctx context.Context, store *rings.Store, blobs *swarm.BlobStore,
 		}
 		f.Vulnclass, _ = c.Detail["vulnclass"].(string)
 		// 影响 = 交卷申报的影响列点(P5-07⑦b;多条换行分隔)。
-		f.Impact = cs.ImpactNoteOf()
+		_, f.Statement, f.Impact = claimText(c, cs)
+		if cs.Summary != nil {
+			f.Facts = cs.Summary.Facts
+		}
 		f.Discoverer, _ = c.Detail["unit_id"].(string)
 		f.PendingReason = cs.PendingReason()
 		for _, e := range abouts {

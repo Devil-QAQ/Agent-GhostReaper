@@ -216,7 +216,7 @@ func TestActionGateRealProviderBoundaryUsage(t *testing.T) {
 	env, pack, _ := actionGateFixture(t)
 	env.Executor.Provider = auxTestProvider{complete: func(ctx context.Context) (llm.Message, string, llm.Usage, error) {
 		return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
-			llm.TextBlock(`{"decision":"allow","reason":"读取本地测试输出"}`)}}, "stop", llm.Usage{InputTokens: 100, OutputTokens: 12}, nil
+			llm.TextBlock(`{"reason": "读取本地测试输出", "changes": []}`)}}, "stop", llm.Usage{InputTokens: 100, OutputTokens: 12}, nil
 	}}
 	if d := callActionGate(env, pack, "bash", `{"command":"cat result.txt"}`); d.Behavior != permission.Allow {
 		t.Fatalf("provider-backed review failed: %+v", d)

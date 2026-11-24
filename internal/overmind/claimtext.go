@@ -351,7 +351,7 @@ func (l *Loop) polishClaimTextAt(ctx context.Context, claimID string, source int
 	if p.Title == "" || p.Statement == "" {
 		return
 	}
-	if _, err := l.Store.AppendDisplay(ctx, l.TaskID, rings.Event{Kind: rings.EventClaimText, Actor: ActorOvermind, Payload: rings.ClaimTextPolish{ClaimID: claimID, SourceRev: source, Title: p.Title, Statement: p.Statement, Impact: p.Impact}}); err != nil {
+	if _, err := l.Store.AppendDisplay(ctx, l.TaskID, rings.Event{Kind: rings.EventClaimText, Actor: ActorOvermind, Payload: rings.ClaimTextPolish{ClaimID: claimID, SourceRev: source, Title: p.Title, Statement: p.Statement, Impact: p.Impact, Facts: p.Facts}}); err != nil {
 		runlog.Warnf("漏洞显示稿未保存: 任务 %s 判断 %s 原因 %s", l.TaskID, claimID, clipEval(err.Error()))
 	}
 }

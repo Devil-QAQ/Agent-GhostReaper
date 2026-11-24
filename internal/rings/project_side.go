@@ -95,7 +95,8 @@ func NoteStatus(note string) string {
 }
 
 // applySwarmSession swarm.record → unit_sessions:session_started(transcript
-// 非空)建行,键 = step+transcript(与会话列表去重键同源,幂等);
+// 非空)建行或恢复当前执行,键 = step+transcript(与会话列表去重键同源);
+// 恢复保留首次开始时刻与累计计时,更新当前单位和最新启动版本并清除旧终态。
 // session_finished 更新终态并累加 billable(原会话续跑链每段一记)。
 func applySwarmSession(tx *sql.Tx, taskID string, rev int64, p SwarmRecord, occurredAt time.Time) error {
 	if p.TranscriptID == "" {
@@ -104,9 +105,12 @@ func applySwarmSession(tx *sql.Tx, taskID string, rev int64, p SwarmRecord, occu
 	switch p.Type {
 	case SwarmRecSessionStarted:
 		if _, err := tx.Exec(
-			`INSERT OR IGNORE INTO unit_sessions
+			`INSERT INTO unit_sessions
 			 (task_id, step_id, transcript_id, unit_id, started_at, start_rev)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
+			 VALUES (?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(task_id,step_id,transcript_id) DO UPDATE SET
+			 unit_id=excluded.unit_id, start_rev=excluded.start_rev,
+			 end_status='', finished_at='', turns=0, reason=''`,
 			taskID, p.StepID, p.TranscriptID, p.UnitID,
 			fmtTimeUTC(occurredAt), rev,
 		); err != nil {
@@ -116,8 +120,8 @@ func applySwarmSession(tx *sql.Tx, taskID string, rev int64, p SwarmRecord, occu
 		var billable float64
 		if err := tx.QueryRow(
 			`SELECT billable FROM unit_sessions
-			 WHERE task_id = ? AND step_id = ? AND transcript_id = ?`,
-			taskID, p.StepID, p.TranscriptID,
+			 WHERE task_id = ? AND step_id = ? AND transcript_id = ? AND unit_id = ?`,
+			taskID, p.StepID, p.TranscriptID, p.UnitID,
 		).Scan(&billable); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil // 无 started 前导(不可能形态),与事件读侧同口径跳过

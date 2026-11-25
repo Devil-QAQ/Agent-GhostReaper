@@ -260,10 +260,13 @@ func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request)
 	if withDB {
 		if path, err := s.diagnosticsDBSnapshot(ctx); err != nil {
 			writeZipText(zw, "db/说明.txt", fmt.Sprintf("账本库快照导出失败: %v\n", err))
-		} else if body, err := os.ReadFile(path); err != nil {
-			writeZipText(zw, "db/说明.txt", fmt.Sprintf("账本库快照读取失败: %v\n", err))
 		} else {
-			writeZipBytes(zw, "db/"+filepath.Base(s.Config.System.DBPath), body)
+			defer os.RemoveAll(filepath.Dir(path))
+			if body, err := os.ReadFile(path); err != nil {
+				writeZipText(zw, "db/说明.txt", fmt.Sprintf("账本库快照读取失败: %v\n", err))
+			} else {
+				writeZipBytes(zw, "db/"+filepath.Base(s.Config.System.DBPath), body)
+			}
 		}
 	}
 
@@ -309,25 +312,28 @@ func filterLogLines(body string, kinds []string) string {
 // diagnosticsDBSnapshot 账本库一致性快照(VACUUM INTO)并就地脱敏:
 // 键值表敏感值(model.library.* / search.* / cred.* / mirror.ca.key)
 // 一律替换为占位——包内库可查结构与数据,拿不到任何密钥(P4-32 ③)。
-func (s *Server) diagnosticsDBSnapshot(ctx context.Context) (string, error) {
-	tmp, err := os.MkdirTemp("", "gr-diag-db-*")
+func (s *Server) diagnosticsDBSnapshot(ctx context.Context) (path string, err error) {
+	// 与账本同目录,不受 TMPDIR/TEMP/TMP 影响;成功后由导出方清理。
+	tmp, err := os.MkdirTemp(filepath.Dir(s.Config.System.DBPath), "gr-diag-db-*")
 	if err != nil {
 		return "", fmt.Errorf("建临时目录: %w", err)
 	}
-	path := filepath.Join(tmp, "snapshot.db")
+	defer func() {
+		if err != nil {
+			_ = os.RemoveAll(tmp)
+		}
+	}()
+	path = filepath.Join(tmp, "snapshot.db")
 	if err := s.Store.SnapshotTo(ctx, path); err != nil {
-		_ = os.RemoveAll(tmp)
 		return "", err
 	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
-		_ = os.RemoveAll(tmp)
 		return "", fmt.Errorf("开快照: %w", err)
 	}
 	defer db.Close()
 	rrows, err := db.QueryContext(ctx, `SELECT key FROM settings`)
 	if err != nil {
-		_ = os.RemoveAll(tmp)
 		return "", fmt.Errorf("读键值表: %w", err)
 	}
 	var keys []string
@@ -346,7 +352,6 @@ func (s *Server) diagnosticsDBSnapshot(ctx context.Context) (string, error) {
 			continue
 		}
 		if _, err := db.ExecContext(ctx, `UPDATE settings SET value='(脱敏)' WHERE key=?`, k); err != nil {
-			_ = os.RemoveAll(tmp)
 			return "", fmt.Errorf("脱敏 %s: %w", k, err)
 		}
 	}

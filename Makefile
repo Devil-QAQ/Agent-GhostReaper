@@ -6,9 +6,9 @@
 BINARY   := bin/ghostreaper
 WEB_DIR  := web
 WEB_DIST := internal/webui/dist
-# 版本号(P3-13b ③:运行日志日志头与诊断包携带):默认日期版本,可
+# 版本号(P3-13b ③:运行日志日志头与诊断包携带):默认发布版本,可
 # 环境变量覆盖;经 -ldflags 注入 internal/buildinfo.Version。
-VERSION  ?= v1.0.0-$(shell date -u +%Y%m%d)
+VERSION  ?= v1.3.4
 LDFLAGS  := -X ghostreaper/internal/buildinfo.Version=$(VERSION)
 
 .PHONY: all build build-all web web-deps test run clean \

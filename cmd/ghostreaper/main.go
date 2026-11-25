@@ -56,6 +56,28 @@ func main() {
 	tasksDir := flag.String("tasks", "tasks", "任务工作目录根(转录/blob)")
 	flag.Parse()
 
+	// 单文件部署以程序目录为运行基准,不继承双击/终端的工作目录。
+	// 显式绝对路径参数仍可用于独立部署,相对路径一律从程序目录解析。
+	executable, err := os.Executable()
+	if err != nil {
+		startupFatalf("定位程序目录: %v", err)
+	}
+	executable, err = filepath.EvalSymlinks(executable)
+	if err != nil {
+		startupFatalf("解析程序路径: %v", err)
+	}
+	if err := os.Chdir(filepath.Dir(executable)); err != nil {
+		startupFatalf("进入程序目录: %v", err)
+	}
+	*dbPath, err = filepath.Abs(*dbPath)
+	if err != nil {
+		startupFatalf("解析账本路径: %v", err)
+	}
+	*tasksDir, err = filepath.Abs(*tasksDir)
+	if err != nil {
+		startupFatalf("解析任务目录: %v", err)
+	}
+
 	// 运行日志(P3-13b ③):logs/ 目录滚动文件,日志头带版本 / 平台 /
 	// 启动配置;标准 log 库重定向进来(既有散点 log.Printf 行按 INFO 落)。
 	// 开档失败不致命(降级为仅标准错误),其余启动照常。

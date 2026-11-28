@@ -50,14 +50,7 @@ func (s *TaskSearch) Search(ctx context.Context, task string, cfg Config, query 
 	if strings.TrimSpace(query) == "" {
 		return nil, errors.New("搜索词为空:填入关键词后重发")
 	}
-	// Inactive credentials do not affect the effective configuration identity.
-	cfg.Backend = NormalizeBackend(cfg.Backend)
-	if cfg.Backend != BackendBrave {
-		cfg.BraveKey = ""
-	}
-	if cfg.Backend != BackendTavily {
-		cfg.TavilyKey = ""
-	}
+	task = task + "\x00" + cfg.ServiceID
 	encoded, _ := json.Marshal(cfg)
 	fingerprint := sha256.Sum256(encoded)
 	now := time.Now()

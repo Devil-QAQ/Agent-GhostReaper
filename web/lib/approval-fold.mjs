@@ -21,7 +21,11 @@ export const FOLDABLE_RECORD_TYPES = {
 // 字面),其余按类型(全局一族一行语义,跨步骤连续段自然分段)。
 function foldKeyOf(record) {
   if (record.type === "step_pass") return `step_pass:${record.step_id ?? ""}`;
-  return record.type;
+  return record.type === "action_review" ? `${record.type}:${actionReviewLabel(record)}` : record.type;
+}
+
+export function actionReviewLabel(record) {
+  return record?.decided_by === "automation" ? "自动放行" : "动作判断";
 }
 
 // foldApprovalRecords 审批记录 → 列表条目(倒序输入,倒序输出):
@@ -45,7 +49,7 @@ export function foldApprovalRecords(records) {
     segLabel = "";
   };
   for (const r of records ?? []) {
-    const label = FOLDABLE_RECORD_TYPES[r?.type];
+    const label = r?.type === "action_review" ? actionReviewLabel(r) : FOLDABLE_RECORD_TYPES[r?.type];
     if (!label) {
       flush();
       items.push({ kind: "record", record: r });

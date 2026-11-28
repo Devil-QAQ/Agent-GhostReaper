@@ -104,7 +104,7 @@ func TestRetestToolsetRestricted(t *testing.T) {
 	for _, tl := range env.toolset() {
 		got[tl.Name()] = true
 	}
-	want := []string{"bash", "port_probe", "http_probe", "read", "submit_retest_result"}
+	want := []string{"bash", "port_probe", "http_probe", "read", "resource_read", "submit_retest_result"}
 	if len(got) != len(want) {
 		t.Fatalf("受限集应恰 %d 只,得到 %v", len(want), got)
 	}

@@ -132,8 +132,8 @@ func TestAssetIdentitySeedCanonicalization(t *testing.T) {
 			t.Fatal("canonical duplicate seed accepted")
 		}
 	}
-	seed, err := buildAssetSeed([]assetIn{{Class: "subdomain", Title: "API.example.org."}, {Class: "service", Title: "http://one.example.org:8080/"}, {Class: "service", Title: "https://one.example.org:8080/"}, {Class: "service", Title: "http://two.example.org:8080/"}, {Class: "service", Title: "http://one.example.org:8081/"}})
-	if err != nil || len(seed.events) != 5 {
+	seed, err := buildAssetSeed([]assetIn{{Class: "subdomain", Title: "API.example.org."}, {Class: "service", Title: "http://one.example.org:8080/"}, {Class: "service", Title: "http://two.example.org:8080/"}, {Class: "service", Title: "http://one.example.org:8081/"}})
+	if err != nil || len(seed.events) != 4 {
 		t.Fatal("distinct services merged", err)
 	}
 	node := seed.events[0].Payload.(rings.NodeAdded)

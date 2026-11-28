@@ -572,9 +572,16 @@ func (s *Store) AssetGraph(ctx context.Context, taskID string) (*AssetGraphView,
 		return nil, err
 	}
 	members := InventoryAssetIDs(candidates, roe)
+	visible := []NodeFull{}
+	for _, a := range candidates {
+		if members[a.ID] {
+			visible = append(visible, a)
+		}
+	}
+	canonical := CanonicalAssetIDs(visible)
 	kept := view.Assets[:0]
 	for _, a := range view.Assets {
-		if members[a.ID] {
+		if members[a.ID] && canonical[a.ID] == a.ID {
 			if a.AssetClass == AssetAPI {
 				_, title, _, e := AssetIdentity(a.AssetClass, a.Title)
 				if e == nil {
@@ -591,22 +598,16 @@ func (s *Store) AssetGraph(ctx context.Context, taskID string) (*AssetGraphView,
 	if err != nil {
 		return nil, err
 	}
-	// Historic URL/API nodes resolve to their website; all views consume this
+	// Historic duplicate nodes resolve to one identity; all views consume this
 	// same alias map without inventing another asset or losing references.
 	entries := map[string]string{}
 	for _, a := range view.Assets {
-		if DisplayAssetClass(a.AssetClass) == AssetService {
-			_, _, key, e := AssetIdentity(a.AssetClass, a.Title)
-			if e == nil {
-				entries[key] = a.ID
-			}
+		if _, _, key, e := AssetIdentity(a.AssetClass, a.Title); e == nil {
+			entries[key] = a.ID
 		}
 	}
 	view.ResourceAliases = map[string]string{}
 	for _, a := range candidates {
-		if a.AssetClass != AssetAPI {
-			continue
-		}
 		_, _, key, e := AssetIdentity(a.AssetClass, a.Title)
 		if e == nil && entries[key] != "" && entries[key] != a.ID {
 			view.ResourceAliases[a.ID] = entries[key]
@@ -653,7 +654,27 @@ func (s *Store) AssetGraph(ctx context.Context, taskID string) (*AssetGraphView,
 	if err != nil {
 		return nil, err
 	}
-	view.Hierarchy = AssetDisplayHierarchy(candidates, view.Hierarchy, members, view.Relations)
+	normalizedEdges := []EdgeView{}
+	for _, edge := range view.Hierarchy {
+		if id := view.ResourceAliases[edge.From]; id != "" {
+			edge.From = id
+		}
+		if id := view.ResourceAliases[edge.To]; id != "" {
+			edge.To = id
+		}
+		if edge.From != edge.To {
+			normalizedEdges = append(normalizedEdges, edge)
+		}
+	}
+	visible = visible[:0]
+	visibleMembers := map[string]bool{}
+	for _, a := range candidates {
+		if members[a.ID] && canonical[a.ID] == a.ID {
+			visible = append(visible, a)
+			visibleMembers[a.ID] = true
+		}
+	}
+	view.Hierarchy = AssetDisplayHierarchy(visible, normalizedEdges, visibleMembers, view.Relations)
 	subjects := AssetSubjectAliases(view.Assets, view.Hierarchy, view.Relations)
 	for i := range view.Assets {
 		view.Assets[i].SubjectIDs = subjects[view.Assets[i].ID]

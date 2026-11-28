@@ -2,75 +2,19 @@ package swarm
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"ghostreaper/internal/secrets"
-	"net/url"
-	"os"
 	"testing"
 	"time"
 
 	"ghostreaper/internal/rings"
+	"ghostreaper/internal/testmodel"
 	"github.com/Autumn-27/norma/llm"
 )
 
 // Opt-in semantic acceptance. These actions are model inputs only: no command,
 // file tool, probe, or other target operation is executed by this test.
 // Configuration stays outside the repository and is never printed on failure.
-func liveActionReviewProvider(t *testing.T) llm.Provider {
-	t.Helper()
-	file := os.Getenv("GHOSTREAPER_REVIEW_MODEL_FILE")
-	var b []byte
-	var err error
-	if file != "" {
-		b, err = os.ReadFile(file)
-	} else if source := os.Getenv("GHOSTREAPER_REVIEW_SETTINGS_DB"); source != "" {
-		// Read-only access, no migrations or plaintext credential files.
-		db, e := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: source, RawQuery: "mode=ro"}).String())
-		if e != nil {
-			t.Fatal("cannot open model settings read-only")
-		}
-		defer db.Close()
-		var name, sealed string
-		if db.QueryRow("SELECT value FROM settings WHERE key='model.active.primary'").Scan(&name) != nil || db.QueryRow("SELECT value FROM settings WHERE key=?", "model.library."+name).Scan(&sealed) != nil {
-			t.Fatal("cannot read active model settings")
-		}
-		key, e := os.ReadFile(os.Getenv("GHOSTREAPER_REVIEW_KEY_FILE"))
-		if e != nil {
-			t.Fatal("cannot read model encryption key")
-		}
-		cipher, e := secrets.NewCipher(key)
-		if e != nil {
-			t.Fatal("cannot initialize model settings reader")
-		}
-		plain, e := cipher.Open(sealed)
-		if e != nil {
-			t.Fatal("cannot decrypt active model settings")
-		}
-		b = []byte(plain)
-	} else {
-		t.Skip("real-model configuration not supplied")
-	}
-	if err != nil {
-		t.Fatal("cannot read local real-model configuration")
-	}
-	var cfg struct{ Format, BaseURL, APIKey, Model string }
-	var raw struct {
-		Format  string `json:"format"`
-		BaseURL string `json:"base_url"`
-		APIKey  string `json:"api_key"`
-		Model   string `json:"model"`
-	}
-	if json.Unmarshal(b, &raw) != nil || raw.APIKey == "" {
-		t.Fatal("invalid local real-model configuration")
-	}
-	cfg.Format, cfg.BaseURL, cfg.APIKey, cfg.Model = raw.Format, raw.BaseURL, raw.APIKey, raw.Model
-	p, err := llm.NewProvider(llm.Config{Format: llm.Format(cfg.Format), BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Model: cfg.Model})
-	if err != nil {
-		t.Fatal("cannot initialize real-model provider")
-	}
-	return p
-}
+func liveActionReviewProvider(t *testing.T) llm.Provider { return testmodel.Provider(t) }
 
 type lookupReviewProvider struct {
 	llm.Provider

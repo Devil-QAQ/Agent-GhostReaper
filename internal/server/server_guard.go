@@ -174,9 +174,15 @@ func (s *Server) handleRoEAssetScope(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Excluded []string `json:"excluded"`
+		AssetID  string   `json:"asset_id"`
+		Include  *bool    `json:"include"`
 		Note     string   `json:"note"`
 	}
 	if !readJSON(w, r, &req) {
+		return
+	}
+	if (req.AssetID != "") != (req.Include != nil) {
+		writeErr(w, 400, errors.New("须同时指定资产与加入状态"))
 		return
 	}
 	ctx := r.Context()
@@ -191,6 +197,43 @@ func (s *Server) handleRoEAssetScope(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
+	}
+	assets, err := s.Store.NodesByType(ctx, taskID, rings.NodeAsset, "")
+	if err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	if req.Include != nil {
+		var selected *rings.NodeFull
+		for _, a := range assets {
+			if a.ID == req.AssetID {
+				x := a
+				selected = &x
+				break
+			}
+		}
+		if selected == nil {
+			writeErr(w, 400, errors.New("资产不存在"))
+			return
+		}
+		_, _, key, _ := rings.AssetIdentity(selected.AssetClass, selected.Title)
+		req.Excluded = []string{}
+		for _, id := range st.ExcludedAssets {
+			same := id == selected.ID
+			for _, a := range assets {
+				if a.ID == id {
+					_, _, other, e := rings.AssetIdentity(a.AssetClass, a.Title)
+					same = same || e == nil && key != "" && key == other
+					break
+				}
+			}
+			if !same {
+				req.Excluded = append(req.Excluded, id)
+			}
+		}
+		if !*req.Include {
+			req.Excluded = append(req.Excluded, selected.ID)
+		}
 	}
 	note := strings.TrimSpace(req.Note)
 	var removed []string // 本次新摘除(止损对象)
@@ -229,6 +272,16 @@ func (s *Server) handleRoEAssetScope(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if req.Include != nil && *req.Include && !idInList(added, req.AssetID) {
+		added = append(added, req.AssetID)
+	}
+	if strings.TrimSpace(req.Note) == "" && req.Include != nil {
+		verb := "摘除"
+		if *req.Include {
+			verb = "纳入"
+		}
+		note = verb + " " + req.AssetID
+	}
 	// P4-69 ②(状态互斥):排除清单成员一律从批准清单剔除——快照提交
 	// 不再原样透传 scope_approved(排除与批准不并存,实锤 a-72dab0e5
 	// 同列两清单)。
@@ -236,9 +289,14 @@ func (s *Server) handleRoEAssetScope(w http.ResponseWriter, r *http.Request) {
 	for _, id := range req.Excluded {
 		newSet[id] = true
 	}
+	removedSet := map[string]bool{}
+	for _, id := range removed {
+		removedSet[id] = true
+	}
+	removedCoverage := rings.ExcludedCoveredAssetIDs(assets, removedSet)
 	nextApproved := make([]string, 0, len(st.ScopeApproved))
 	for _, id := range st.ScopeApproved {
-		if !newSet[id] {
+		if !newSet[id] && !removedCoverage[id] {
 			nextApproved = append(nextApproved, id)
 		}
 	}
@@ -251,9 +309,7 @@ func (s *Server) handleRoEAssetScope(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, fmt.Errorf("勾回资产复活落账失败: %w", rerr))
 		return
 	}
-	revivedSet := map[string]bool{}
 	for _, id := range revived {
-		revivedSet[id] = true
 		if !idInList(nextApproved, id) {
 			nextApproved = append(nextApproved, id)
 		}
@@ -268,16 +324,36 @@ func (s *Server) handleRoEAssetScope(w http.ResponseWriter, r *http.Request) {
 	if len(revived) > 0 {
 		note = fmt.Sprintf("%s;复活 %s(退役转回测试范围)", note, strings.Join(revived, "、"))
 	}
-	if _, err := s.Store.Append(ctx, taskID, rings.Event{
-		Kind: rings.EventRoeUpdated, Actor: "creator",
-		Payload: rings.RoeUpdated{
-			AllowedTools: st.AllowedTools, DeniedTools: st.DeniedTools,
-			ApprovalThreshold: st.ApprovalThreshold, IntentRules: st.IntentRules,
-			ExcludedAssets: req.Excluded, ScopeApproved: nextApproved, Note: note,
-		},
-	}); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
+	for {
+		rev, e := s.Store.CurrentRevision(ctx, taskID)
+		if e != nil {
+			writeErr(w, 500, e)
+			return
+		}
+		latest, e := s.Store.CurrentRoE(ctx, taskID)
+		if e != nil {
+			writeErr(w, 500, e)
+			return
+		}
+		if latest.UpdatedRev != st.UpdatedRev {
+			writeErr(w, 409, errors.New("资产范围已变化，请重新操作"))
+			return
+		}
+		_, err = s.Store.AppendAtRevision(ctx, taskID, rev, rings.Event{
+			Kind: rings.EventRoeUpdated, Actor: "creator",
+			Payload: rings.RoeUpdated{
+				AllowedTools: st.AllowedTools, DeniedTools: st.DeniedTools,
+				ApprovalThreshold: st.ApprovalThreshold, IntentRules: st.IntentRules,
+				ExcludedAssets: req.Excluded, ScopeApproved: nextApproved, Note: note,
+			}})
+		if errors.Is(err, rings.ErrStaleRevision) {
+			continue
+		}
+		if err != nil {
+			writeErr(w, 400, err)
+			return
+		}
+		break
 	}
 	// 在途止损(P4-45 ①:roe.updated 先落账,守卫生效后再终止在途)。
 	var killed, aborted []swarm.ScopeHit

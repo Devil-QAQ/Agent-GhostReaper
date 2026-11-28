@@ -12,6 +12,7 @@ import { ThemeMenu } from "@/components/theme-menu";
 import { SettingsPage } from "@/views/settings-page";
 import { LLMPage } from "@/views/llm-page";
 import { AgentPage } from "@/views/agent-page";
+import { CapabilityPage } from "@/views/capability-page";
 import { MCPPlaceholderPage, SKILLPlaceholderPage } from "@/views/placeholder-page";
 import { ObservePage } from "@/views/observe-page";
 import { ReportsPage } from "@/views/reports-page";
@@ -52,6 +53,7 @@ const PAGE_OF = {
   // 三组提示词与运行参数),MCP/SKILL 有意占位。
   llm: LLMPage,
   agent: AgentPage,
+  capabilities: CapabilityPage,
   mcp: MCPPlaceholderPage,
   skill: SKILLPlaceholderPage,
   settings: SettingsPage,

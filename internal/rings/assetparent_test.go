@@ -57,7 +57,7 @@ func TestAssetDisplayHierarchyUsesAddressStructureOnly(t *testing.T) {
 			t.Fatalf("DNS or unrelated host became containment: %+v", e)
 		}
 	}
-	if AssetDisplayTitle(AssetAPI, assets[5].Title) != "https://api.example.test:8443" || assets[5].Title != "https://api.example.test:8443/v1/items?q=one" {
+	if AssetDisplayTitle(AssetAPI, assets[5].Title) != "api.example.test:8443" || assets[5].Title != "https://api.example.test:8443/v1/items?q=one" {
 		t.Fatal("service label lost exact original resource")
 	}
 	// Identical identities have identical structure regardless of source.

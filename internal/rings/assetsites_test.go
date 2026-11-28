@@ -65,7 +65,7 @@ func TestInventoryAdmissionAndWithdrawalDoNotInventHostOwnership(t *testing.T) {
 	if AutomaticallyInventory(AssetService, "https://elsewhere.test:1122", assets, RoeState{}) {
 		t.Fatal("unproven ownership admitted")
 	}
-	for _, child := range []string{"https://[2001:db8::1]:1123/", "http://[2001:db8::1]:1122/"} {
+	for _, child := range []string{"https://[2001:db8::1]:1123/"} {
 		if AssetContainsIdentity(AssetService, assets[0].Title, AssetService, child) {
 			t.Fatal("withdrawing a site removed another site", child)
 		}

@@ -31,7 +31,7 @@ import { HARD_RULE_GROUPS, usePolling, postJSON } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 // 系统设置(P2-08c 收窄 + P2-08d 再收窄:模型库与主备在 LLM配置 页,agent
-// 提示词与运行参数在 Agent 页;P2-08e 拦截规则;P3-03 搜索配置;P3-09 目标
+// 提示词与运行参数在 Agent 页;搜索配置在能力库;P2-08e 拦截规则;P3-09 目标
 // 凭据与面板密码)。P3-09 审核改版:全部条目统一概览卡形态(系统参数 /
 // 年轮账本为基准)——卡面只放一句话摘要与关键数值,操作与完整展示点卡
 // 弹二级界面(右上箭头示意可点)。
@@ -49,12 +49,10 @@ export function SettingsPage() {
         </div>
       )}
 
-      {/* 设置行卡列表(与任务列表同款形态):每行固定两行内容,八行天然
+      {/* 设置行卡列表(与任务列表同款形态):每行固定两行内容,各行天然
           同高——信息量差异收进右侧关键值与二级弹窗,卡面不再有高度差 */}
       <div className="flex flex-col gap-3">
         <SystemParamsRow sys={sys} />
-
-        <SearchConfigCard search={data?.search} />
 
         <SettingRow
           title="年轮账本"
@@ -81,9 +79,6 @@ export function SettingsPage() {
   );
 }
 
-// SettingRow 设置行卡(P4-31 返工:概览卡网格 → 行卡列表,与任务列表
-// 同款形态):左侧标题+摘要,右侧关键值,可点行带箭头弹二级界面;
-// 每行固定两行内容,八行天然同高。
 function SettingRow({ title, summary, value, valueMono, onOpen }) {
   return (
     <div
@@ -257,6 +252,7 @@ const GUARD_TOOL_SCOPES = [
   { value: "http_probe", label: "http_probe" },
   { value: "port_probe", label: "port_probe" },
   { value: "read", label: "read" },
+  { value: "resource_read", label: "资料查询" },
   { value: "web_search", label: "web_search" },
   { value: "web_fetch", label: "web_fetch" },
 ];
@@ -669,178 +665,6 @@ function ConfirmDeleteDialog({ rule, onClose }) {
           </Button>
           <Button variant="destructive" onClick={remove} disabled={busy}>
             确认删除
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-// ---- 搜索配置(P3-03,web_search 工具的后端与出口) ----
-
-// SEARCH_BACKENDS 后端选项(值与后端设置词汇一致)。
-const SEARCH_BACKENDS = [
-  { value: "ddgs", label: "DuckDuckGo(免 key)" },
-  { value: "brave", label: "Brave(免费 key)" },
-  { value: "tavily", label: "Tavily(付费 key)" },
-];
-
-function backendLabel(v) {
-  return SEARCH_BACKENDS.find((b) => b.value === v)?.label || v || "—";
-}
-
-// SearchConfigCard 概览卡:后端与 key/代理状态;点开弹配置表单。
-function SearchConfigCard({ search }) {
-  const [open, setOpen] = React.useState(false);
-  // override:保存响应的即时视图(远端轮询尚未带回新值时覆盖展示,
-  // 轮询追上后自然回落)。
-  const [override, setOverride] = React.useState(null);
-  const view = override ?? search;
-  React.useEffect(() => {
-    setOverride(null);
-  }, [search?.backend, search?.brave_has_key, search?.tavily_has_key, search?.proxy_set]);
-
-  return (
-    <>
-      <SettingRow
-        title="搜索配置"
-        summary="web_search 工具的搜索后端、key 与独立出口代理"
-        value={backendLabel(view?.backend)}
-        onOpen={() => setOpen(true)}
-      />
-      <SearchConfigDialog open={open} onOpenChange={setOpen} view={view} onSaved={setOverride} />
-    </>
-  );
-}
-
-// SearchConfigDialog 搜索配置表单:key 三态(未提交=不改、空串=清除、
-// 非空=设置);保存后关闭,卡面经 override 即时刷新。
-function SearchConfigDialog({ open, onOpenChange, view, onSaved }) {
-  const [backend, setBackend] = React.useState("ddgs");
-  const [keys, setKeys] = React.useState({ brave: "", tavily: "" });
-  const [proxy, setProxy] = React.useState("");
-  // 标记清除:key/代理已配置时可标记清除(保存时提交空串);再点取消。
-  const [marked, setMarked] = React.useState({ brave: false, tavily: false, proxy: false });
-  const [busy, setBusy] = React.useState(false);
-
-  // 打开时以远端生效值打底;关闭即弃本地态(下次打开重新同步)。
-  React.useEffect(() => {
-    if (open) {
-      setBackend(view?.backend || "ddgs");
-      setKeys({ brave: "", tavily: "" });
-      setProxy("");
-      setMarked({ brave: false, tavily: false, proxy: false });
-    }
-  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const keyField = (which, label, mask, hasKey) => (
-    <Field label={label}>
-      <Input
-        type="password"
-        autoComplete="off"
-        className={`min-w-0 flex-1 num text-xs ${INPUT}`}
-        value={marked[which] ? "" : keys[which]}
-        disabled={marked[which]}
-        onChange={(e) => setKeys({ ...keys, [which]: e.target.value })}
-        placeholder={
-          marked[which]
-            ? "保存后清除"
-            : hasKey
-              ? `已配置 ${mask}`
-              : which === "brave"
-                ? "免费 key"
-                : "付费 key"
-        }
-      />
-      {hasKey && (
-        <Button
-          size="sm"
-          variant={marked[which] ? "secondary" : "ghost"}
-          className="h-8 px-2 text-xs"
-          onClick={() => setMarked({ ...marked, [which]: !marked[which] })}
-        >
-          {marked[which] ? "取消清除" : "清除"}
-        </Button>
-      )}
-    </Field>
-  );
-
-  const submit = async () => {
-    setBusy(true);
-    const payload = { backend };
-    for (const which of ["brave", "tavily"]) {
-      if (marked[which]) payload[`${which}_key`] = "";
-      else if (keys[which].trim()) payload[`${which}_key`] = keys[which].trim();
-    }
-    if (marked.proxy) payload.proxy = "";
-    else if (proxy.trim()) payload.proxy = proxy.trim();
-    const { ok, body } = await postJSON("/api/config/search", payload);
-    setBusy(false);
-    if (!ok) {
-      toast.error(`保存失败:${body.error || "原因未说明"}`);
-      return;
-    }
-    onSaved(body);
-    onOpenChange(false);
-    toast.success("已保存,对下一次搜索生效");
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="w-[min(480px,94vw)] max-w-none gap-4 p-6">
-        <DialogHeader>
-          <DialogTitle>搜索配置</DialogTitle>
-          <DialogDescription>
-            web_search 工具的后端与出口;保存后对下一次搜索生效
-          </DialogDescription>
-        </DialogHeader>
-        <Field label="后端">
-          <Select value={backend} onValueChange={setBackend}>
-            <SelectTrigger className={INPUT}>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {SEARCH_BACKENDS.map((b) => (
-                <SelectItem key={b.value} value={b.value}>
-                  {b.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </Field>
-        {keyField("brave", "Brave key", view?.brave_key_mask, view?.brave_has_key)}
-        {keyField("tavily", "Tavily key", view?.tavily_key_mask, view?.tavily_has_key)}
-        <Field label="出口代理">
-          <Input
-            className={`min-w-0 flex-1 num text-xs ${INPUT}`}
-            value={marked.proxy ? "" : proxy}
-            disabled={marked.proxy}
-            onChange={(e) => setProxy(e.target.value)}
-            placeholder={
-              marked.proxy
-                ? "保存后清除(直连)"
-                : view?.proxy_set
-                  ? view.proxy_mask
-                  : "http://127.0.0.1:7890(可选,搜索流量专用)"
-            }
-          />
-          {view?.proxy_set && (
-            <Button
-              size="sm"
-              variant={marked.proxy ? "secondary" : "ghost"}
-              className="h-8 px-2 text-xs"
-              onClick={() => setMarked({ ...marked, proxy: !marked.proxy })}
-            >
-              {marked.proxy ? "取消清除" : "清除"}
-            </Button>
-          )}
-        </Field>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            取消
-          </Button>
-          <Button onClick={submit} disabled={busy}>
-            保存
           </Button>
         </DialogFooter>
       </DialogContent>

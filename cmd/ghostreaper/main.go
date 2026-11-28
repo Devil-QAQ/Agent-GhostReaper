@@ -11,13 +11,16 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Autumn-27/norma/llm"
 
+	"ghostreaper/internal/capability"
 	"ghostreaper/internal/ckpt"
 	"ghostreaper/internal/failover"
 	"ghostreaper/internal/hiber"
@@ -246,6 +249,7 @@ func main() {
 	// 发生在 manager.New 之前——重启收养的拉起判定(OnTaskRun 非空)
 	// 据此走重拉路径;启动时未就绪的,面板激活主用模型后经 06e 配置写
 	// 触发链重载的既有路径运行时补装配(免重启)。
+	resources, resourceErr := capability.NewCatalog(filepath.Join(filepath.Dir(executable), "capability-library"))
 	buildExec := func() {
 		assembleMu.Lock()
 		defer assembleMu.Unlock()
@@ -253,6 +257,7 @@ func main() {
 			return
 		}
 		exec = swarm.NewExecutor(store, provider, *tasksDir, swarm.Budget{})
+		exec.Capabilities = resources
 		exec.Gate = gate
 		exec.Hiber = hiberGate
 		exec.Ckpt = ckptGate
@@ -379,6 +384,26 @@ func main() {
 			srv.Config.LLM.Format = string(llm.FormatAnthropic)
 		}
 	}
+	srv.Capabilities = resources
+	if resourceErr != nil {
+		runlog.Warnf("能力库配置读取失败: %v", resourceErr)
+	}
+	terminated := false
+	defer func() {
+		if terminated {
+			signal.Reset(syscall.SIGTERM)
+			if process, err := os.FindProcess(os.Getpid()); err == nil {
+				_ = process.Signal(syscall.SIGTERM)
+			}
+		}
+	}()
+	indexCtx, stopIndex := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopIndex()
+	if srv.Capabilities != nil {
+		indexDone := make(chan struct{})
+		go func() { defer close(indexDone); srv.Capabilities.RunIndex(indexCtx) }()
+		defer func() { stopIndex(); <-indexDone; _ = srv.Capabilities.Close() }()
+	}
 	mux := srv.Handler()
 	mux.Handle("/", webui.Handler())
 
@@ -387,10 +412,12 @@ func main() {
 		Handler:           srv.WrapAuth(mux), // P3-09 面板认证:未登录不可访问面板与 API
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	go func() { <-indexCtx.Done(); _ = httpSrv.Close() }()
 	log.Printf("ghostreaper 面板: http://%s (db=%s, 密钥=%s)", *addr, *dbPath, keyPath)
 	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		startupFatalf("http server: %v", err)
 	}
+	terminated = indexCtx.Err() != nil
 }
 
 // envConfigFromOS 环境变量兜底配置(P1-02 惯例:运行时注入,零落盘)。

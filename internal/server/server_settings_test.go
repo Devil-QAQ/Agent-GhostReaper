@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,6 +14,49 @@ import (
 	"ghostreaper/internal/swarm"
 	"ghostreaper/internal/websearch"
 )
+
+func TestServerAssetCards(t *testing.T) {
+	srv, _ := newSettingsServer(t)
+	h := srv.Handler()
+	var catalog struct {
+		Services  []searchServiceView       `json:"services"`
+		Providers []websearch.AssetProvider `json:"providers"`
+	}
+	get(t, h, "/api/search-services", http.StatusOK, &catalog)
+	if len(catalog.Services) != 0 || len(catalog.Providers) != len(websearch.SiteProviders()) {
+		t.Fatal("support definitions created configured services")
+	}
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"error": false, "results": []any{}, "consumed_fpoint": 2})
+	}))
+	defer api.Close()
+	post(t, h, http.MethodPost, "/api/search-services", `{"name":"FOFA","kind":"fofa","enabled":true}`, http.StatusOK, &catalog)
+	card := catalog.Services[0]
+	if card.Available || card.HasKey || card.AssetQuota == nil {
+		t.Fatal("missing-key status")
+	}
+	endpoint := "/api/search-services/" + card.ID
+	post(t, h, http.MethodPost, endpoint+"/assets", `{"query":"domain=\"example.com\""}`, http.StatusBadRequest, nil)
+	b, _ := json.Marshal(map[string]any{"name": "FOFA", "kind": "fofa", "enabled": true, "api_key": "private-assets-key", "url": api.URL, "per_minute": 1})
+	post(t, h, http.MethodPost, endpoint, string(b), http.StatusOK, &catalog)
+	if !catalog.Services[0].Available || !catalog.Services[0].HasKey {
+		t.Fatal("configured service unavailable")
+	}
+	post(t, h, http.MethodPost, endpoint+"/assets", `{"query":"domain=\"example.com\""}`, http.StatusOK, nil)
+	post(t, h, http.MethodPost, endpoint+"/assets", `{"query":"domain=\"example.com\""}`, http.StatusBadRequest, nil)
+	r := doReq(t, h, http.MethodGet, "/api/search-services", "")
+	if strings.Contains(r.Body.String(), "private-assets-key") {
+		t.Fatal("key exposed")
+	}
+	json.Unmarshal(r.Body.Bytes(), &catalog)
+	if catalog.Services[0].AssetQuota.MinuteUsed != 1 || catalog.Services[0].AssetQuota.RetryAt.IsZero() {
+		t.Fatal("panel quota missing")
+	}
+	post(t, h, http.MethodDelete, endpoint, `{}`, http.StatusOK, &catalog)
+	if len(catalog.Services) != 0 {
+		t.Fatal("delete failed")
+	}
+}
 
 // newSettingsServer 构建带键值表的面板后端(设置页预算 API 测试共用)。
 func newSettingsServer(t *testing.T) (*Server, *rings.Store) {
@@ -47,73 +92,99 @@ func TestServerBudgetConfigAPIDeleted(t *testing.T) {
 	}
 }
 
-// TestServerSearchConfigAPI 搜索配置读写(P3-03):缺省 ddgs 免 key、
-// 写后读回同源、key 永不回显明文(响应只含打码)、代理去凭据、
-// 三态 key 语义(未提交=不改/空串=清除/非空=设置)、坏值 400 不落库。
-func TestServerSearchConfigAPI(t *testing.T) {
+func TestServerSearchServiceCards(t *testing.T) {
 	srv, store := newSettingsServer(t)
 	h := srv.Handler()
-	ctx := context.Background()
+	var catalog struct {
+		Services []searchServiceView `json:"services"`
+	}
+	get(t, h, "/api/search-services", http.StatusOK, &catalog)
+	if len(catalog.Services) != 0 {
+		t.Fatal("new installations must have no search services")
+	}
+	post(t, h, http.MethodPost, "/api/config/search", `{"backend":"ddgs"}`, http.StatusNotFound, nil)
+	post(t, h, http.MethodPost, "/api/search-services", `{"name":"资料搜索","url":"https://search.example/api","enabled":true,"api_key":"BSAverylongkey1234","proxy":"http://u:p@127.0.0.1:7890"}`, http.StatusOK, &catalog)
+	if len(catalog.Services) != 1 {
+		t.Fatal("service not added")
+	}
+	card := catalog.Services[0]
+	if !card.HasKey || !card.ProxySet || card.KeyMask == "BSAverylongkey1234" || card.ProxyMask != "http://***@127.0.0.1:7890" {
+		t.Fatalf("credentials not masked %+v", card)
+	}
+	response := doReq(t, h, http.MethodGet, "/api/search-services", "")
+	if strings.Contains(response.Body.String(), "BSAverylongkey1234") || strings.Contains(response.Body.String(), "u:p") {
+		t.Fatal("credentials returned in plaintext")
+	}
+	endpoint := "/api/search-services/" + card.ID
+	post(t, h, http.MethodPost, endpoint, `{"name":"改名","url":"https://search.example/api","enabled":false}`, http.StatusOK, &catalog)
+	if catalog.Services[0].Enabled || !catalog.Services[0].HasKey || !catalog.Services[0].ProxySet {
+		t.Fatal("omitted credentials were lost")
+	}
+	configured, err := websearch.Services(t.Context(), store)
+	if err != nil || configured[0].APIKey != "BSAverylongkey1234" {
+		t.Fatal("service credentials not persisted")
+	}
+	post(t, h, http.MethodPost, endpoint, `{"name":"改名","url":"https://search.example/api","enabled":true,"api_key":"","proxy":""}`, http.StatusOK, &catalog)
+	if catalog.Services[0].HasKey || catalog.Services[0].ProxySet {
+		t.Fatal("explicit credential removal failed")
+	}
+	post(t, h, http.MethodPost, endpoint, `{"name":"invalid","url":"ftp://invalid","enabled":true}`, http.StatusBadRequest, nil)
+	post(t, h, http.MethodPost, endpoint, `{"name":"invalid","enabled":true,"proxy":"ftp://x"}`, http.StatusBadRequest, nil)
+	post(t, h, http.MethodPost, "/api/search-services/missing", `{"name":"missing","enabled":true}`, http.StatusNotFound, nil)
+	post(t, h, http.MethodDelete, endpoint, `{}`, http.StatusOK, &catalog)
+	if len(catalog.Services) != 0 {
+		t.Fatal("service deletion failed")
+	}
+	get(t, h, "/api/search-services", http.StatusOK, &catalog)
+	if len(catalog.Services) != 0 {
+		t.Fatal("deleted service returned")
+	}
+	_, err = websearch.ResolveService(t.Context(), store, "")
+	if err != websearch.ErrNotConfigured {
+		t.Fatalf("empty configuration has an implicit provider: %v", err)
+	}
+}
 
-	// 缺省读:后端 ddgs,无 key 无代理。
-	var cfg ConfigView
-	get(t, h, "/api/config", http.StatusOK, &cfg)
-	if cfg.Search.Backend != websearch.BackendDDGS || cfg.Search.BraveHasKey || cfg.Search.ProxySet {
-		t.Fatalf("缺省搜索配置不符: %+v", cfg.Search)
+func TestServerGitHubCard(t *testing.T) {
+	srv, store := newSettingsServer(t)
+	h := srv.Handler()
+	var catalog struct {
+		Services []searchServiceView `json:"services"`
 	}
-
-	// 写:切 brave + key + 带凭据代理;响应与 GET 同源打码。
-	var sv SearchView
-	post(t, h, "POST", "/api/config/search",
-		`{"backend":"brave","brave_key":"BSAverylongkey1234","proxy":"http://u:p@127.0.0.1:7890"}`,
-		http.StatusOK, &sv)
-	if sv.Backend != websearch.BackendBrave || !sv.BraveHasKey || sv.BraveKeyMask == "" ||
-		strings.Contains(sv.BraveKeyMask, "longkey") || sv.BraveKeyMask == "BSAverylongkey1234" {
-		t.Fatalf("brave key 应打码呈现: %+v", sv)
+	post(t, h, http.MethodPost, "/api/search-services", `{"name":"GitHub","kind":"github","enabled":true}`, http.StatusOK, &catalog)
+	if len(catalog.Services) != 1 {
+		t.Fatal("missing card")
 	}
-	if !sv.ProxySet || sv.ProxyMask != "http://***@127.0.0.1:7890" {
-		t.Fatalf("代理应去凭据呈现: %+v", sv)
+	card := catalog.Services[0]
+	if card.PerMinute != 9 || card.PerHour != 54 || card.Quota == nil || card.HasKey {
+		t.Fatalf("anonymous %+v", card)
 	}
-	get(t, h, "/api/config", http.StatusOK, &cfg)
-	if cfg.Search.Backend != websearch.BackendBrave || cfg.Search.BraveKeyMask != sv.BraveKeyMask ||
-		cfg.Search.ProxyMask != sv.ProxyMask {
-		t.Fatalf("GET 应与写响应同源: %+v vs %+v", cfg.Search, sv)
+	endpoint := "/api/search-services/" + card.ID
+	post(t, h, http.MethodPost, endpoint, `{"name":"GitHub","kind":"github","enabled":true,"api_key":"private-pat-for-test"}`, http.StatusOK, &catalog)
+	if catalog.Services[0].PerMinute != 27 || catalog.Services[0].PerHour != 4500 || !catalog.Services[0].HasKey {
+		t.Fatal("authenticated defaults")
 	}
-
-	// 明文永不进任何响应体(全量响应文本级核对)。
-	rec := doReq(t, h, http.MethodGet, "/api/config", "")
-	if strings.Contains(rec.Body.String(), "BSAverylongkey1234") {
-		t.Fatalf("key 明文不得出现在响应体")
+	r := doReq(t, h, http.MethodGet, "/api/search-services", "")
+	if strings.Contains(r.Body.String(), "private-pat-for-test") {
+		t.Fatal("token leaked")
 	}
-	// 键值表存原文(工具运行时消费),带审计。
-	e, ok, err := store.Setting(ctx, websearch.SettingKeyBraveKey)
-	if err != nil || !ok || e.Value != "BSAverylongkey1234" || e.UpdatedBy != "creator" {
-		t.Fatalf("键值表直查不符: ok=%v err=%v %+v", ok, err, e)
+	entry, ok, err := store.Setting(t.Context(), websearch.SettingKeyServices)
+	if err != nil || !ok || !strings.Contains(entry.Value, "private-pat-for-test") {
+		t.Fatal("token not preserved through encrypted settings")
 	}
-
-	// 三态 key:未提交字段 = 不改;空串 = 清除(omitempty 字段用新变量
-	// 解码,防上次响应残值)。
-	post(t, h, "POST", "/api/config/search", `{"backend":"brave"}`, http.StatusOK, &sv)
-	if !sv.BraveHasKey {
-		t.Fatalf("未提交 brave_key 应保持已配置: %+v", sv)
+	post(t, h, http.MethodPost, endpoint, `{"name":"GitHub","kind":"github","enabled":false,"custom_limits":true,"per_minute":2,"per_hour":20}`, http.StatusOK, &catalog)
+	if !catalog.Services[0].HasKey || catalog.Services[0].PerMinute != 2 {
+		t.Fatal("custom/save token")
 	}
-	var cleared SearchView
-	post(t, h, "POST", "/api/config/search", `{"backend":"brave","brave_key":""}`, http.StatusOK, &cleared)
-	if cleared.BraveHasKey || cleared.BraveKeyMask != "" {
-		t.Fatalf("空串应清除 key: %+v", cleared)
+	post(t, h, http.MethodPost, endpoint+"/github", `{"query":"poc"}`, http.StatusBadRequest, nil)
+	post(t, h, http.MethodPost, endpoint, `{"name":"GitHub","kind":"github","enabled":true,"api_key":""}`, http.StatusOK, &catalog)
+	if catalog.Services[0].HasKey || catalog.Services[0].PerHour != 54 {
+		t.Fatal("clear token")
 	}
-
-	// 坏值:未知后端 400、坏代理 400,不落库。
-	post(t, h, "POST", "/api/config/search", `{"backend":"brav"}`, http.StatusBadRequest, nil)
-	post(t, h, "POST", "/api/config/search", `{"backend":"ddgs","proxy":"ftp://x"}`, http.StatusBadRequest, nil)
-	post(t, h, "POST", "/api/config/search", `not-json`, http.StatusBadRequest, nil)
-	if e, ok, _ := store.Setting(ctx, websearch.SettingKeyBackend); !ok || e.Value != "brave" {
-		t.Fatalf("非法请求不得改动后端: ok=%v %+v", ok, e)
-	}
-
-	// 切回 ddgs 默认:面板一次往返。
-	post(t, h, "POST", "/api/config/search", `{"backend":"ddgs","proxy":""}`, http.StatusOK, &sv)
-	if sv.Backend != websearch.BackendDDGS || sv.ProxySet {
-		t.Fatalf("切回默认不符: %+v", sv)
+	post(t, h, http.MethodPost, endpoint+"/github", `{"action":"read","repo":"../invalid","path":"x"}`, http.StatusBadRequest, nil)
+	post(t, h, http.MethodPost, "/api/search-services", `{"name":"duplicate","kind":"github","enabled":true}`, http.StatusBadRequest, nil)
+	post(t, h, http.MethodDelete, endpoint, `{}`, http.StatusOK, &catalog)
+	if len(catalog.Services) != 0 {
+		t.Fatal("delete")
 	}
 }

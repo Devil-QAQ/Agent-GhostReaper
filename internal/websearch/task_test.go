@@ -28,7 +28,7 @@ func TestTaskSearchSharesFailureAndBoundsRecovery(t *testing.T) {
 		}
 		return []Result{}, nil
 	}}
-	if _, err := s.Search(t.Context(), "one", Config{}, "first"); err == nil {
+	if _, err := s.Search(t.Context(), "one", Config{Endpoint: "https://old.example/search"}, "first"); err == nil {
 		t.Fatal("initial service failure lost")
 	}
 	var wg sync.WaitGroup
@@ -36,7 +36,7 @@ func TestTaskSearchSharesFailureAndBoundsRecovery(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := s.Search(t.Context(), "one", Config{}, "another query")
+			_, err := s.Search(t.Context(), "one", Config{Endpoint: "https://old.example/search"}, "another query")
 			if err == nil || !strings.Contains(err.Error(), "不重复请求") {
 				t.Error("cooldown did not return actual unavailability")
 			}
@@ -50,14 +50,14 @@ func TestTaskSearchSharesFailureAndBoundsRecovery(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, err := s.Search(t.Context(), "one", Config{}, "recover")
+		_, err := s.Search(t.Context(), "one", Config{Endpoint: "https://old.example/search"}, "recover")
 		if err != nil {
 			t.Error(err)
 		}
 	}()
 	<-probe
 	for range 32 {
-		_, err := s.Search(t.Context(), "one", Config{}, "waiting")
+		_, err := s.Search(t.Context(), "one", Config{Endpoint: "https://old.example/search"}, "waiting")
 		if err == nil || !strings.Contains(err.Error(), "检查恢复") {
 			t.Fatal("parallel recovery probe escaped")
 		}
@@ -68,7 +68,7 @@ func TestTaskSearchSharesFailureAndBoundsRecovery(t *testing.T) {
 	close(release)
 	wg.Wait()
 	for range 5 {
-		rs, err := s.Search(t.Context(), "one", Config{}, "new query")
+		rs, err := s.Search(t.Context(), "one", Config{Endpoint: "https://old.example/search"}, "new query")
 		if err != nil || len(rs) != 0 {
 			t.Fatal("normal empty result treated as unavailable")
 		}
@@ -91,26 +91,26 @@ func TestTaskSearchTaskConfigCancellationAndParameterIsolation(t *testing.T) {
 		return nil, unavailable("fixture unavailable", nil)
 	}}
 	for _, q := range []string{"parameter", "parameter", "cancel", "cancel"} {
-		_, _ = s.Search(t.Context(), "one", Config{}, q)
+		_, _ = s.Search(t.Context(), "one", Config{Endpoint: "https://old.example/search"}, q)
 	}
 	if calls.Load() != 4 {
 		t.Fatal("parameter errors or cancellation poisoned the service")
 	}
-	_, _ = s.Search(t.Context(), "one", Config{}, "outage")
-	_, _ = s.Search(t.Context(), "one", Config{BraveKey: "inactive-key"}, "blocked")
+	_, _ = s.Search(t.Context(), "one", Config{Endpoint: "https://old.example/search"}, "outage")
+	_, _ = s.Search(t.Context(), "one", Config{Endpoint: "https://old.example/search"}, "blocked")
 	if calls.Load() != 5 {
-		t.Fatal("inactive credential change reset an unrelated backend")
+		t.Fatal("unchanged configuration retried an unavailable service")
 	}
-	_, _ = s.Search(t.Context(), "two", Config{}, "separate task")
-	_, _ = s.Search(t.Context(), "one", Config{Backend: BackendBrave, BraveKey: "fixture-one"}, "changed backend")
-	_, _ = s.Search(t.Context(), "one", Config{Backend: BackendBrave, BraveKey: "fixture-two"}, "changed key")
+	_, _ = s.Search(t.Context(), "two", Config{Endpoint: "https://old.example/search"}, "separate task")
+	_, _ = s.Search(t.Context(), "one", Config{Endpoint: "https://new.example/search", APIKey: "fixture-one"}, "changed backend")
+	_, _ = s.Search(t.Context(), "one", Config{Endpoint: "https://new.example/search", APIKey: "fixture-two"}, "changed key")
 	if calls.Load() != 8 {
 		t.Fatal("task or effective configuration isolation failed")
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	_, _ = s.Search(ctx, "three", Config{}, "unused")
-	_, _ = s.Search(t.Context(), "three", Config{}, "   ")
+	_, _ = s.Search(ctx, "three", Config{Endpoint: "https://old.example/search"}, "unused")
+	_, _ = s.Search(t.Context(), "three", Config{Endpoint: "https://old.example/search"}, "   ")
 	if calls.Load() != 8 {
 		t.Fatal("canceled/empty query went outbound")
 	}
@@ -119,7 +119,7 @@ func TestTaskSearchTaskConfigCancellationAndParameterIsolation(t *testing.T) {
 func TestTaskSearchOldFailureCannotOwnNewConfiguration(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
 	s := TaskSearch{search: func(_ context.Context, cfg Config, _ string) ([]Result, error) {
-		if cfg.Backend == BackendDDGS {
+		if cfg.Endpoint == "https://old.example/search" {
 			close(started)
 			<-release
 			return nil, unavailable("old failure", nil)
@@ -128,9 +128,12 @@ func TestTaskSearchOldFailureCannotOwnNewConfiguration(t *testing.T) {
 	}}
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() { defer wg.Done(); _, _ = s.Search(t.Context(), "one", Config{}, "old") }()
+	go func() {
+		defer wg.Done()
+		_, _ = s.Search(t.Context(), "one", Config{Endpoint: "https://old.example/search"}, "old")
+	}()
 	<-started
-	newCfg := Config{Backend: BackendBrave, BraveKey: "fixture"}
+	newCfg := Config{Endpoint: "https://new.example/search", APIKey: "fixture"}
 	if _, err := s.Search(t.Context(), "one", newCfg, "new"); err != nil {
 		t.Fatal(err)
 	}
@@ -164,8 +167,8 @@ func TestTaskSearchHTTPClassificationAndEmptyResults(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	withEndpoints(t, srv.URL, srv.URL, srv.URL)
-	cfg := Config{Backend: BackendBrave, BraveKey: "fixture"}
+	cfg := testConfig(srv.URL)
+	cfg.ResultsPath = "web.results"
 	var search TaskSearch
 	_, err := search.Search(t.Context(), "outage", cfg, "one")
 	if err == nil || strings.Contains(err.Error(), "private-body-fixture") {
@@ -197,13 +200,38 @@ func TestTaskSearchHTTPClassificationAndEmptyResults(t *testing.T) {
 		t.Fatal("query-specific HTTP error cooled the service")
 	}
 	mode.Store("ddgs-empty")
-	rs, err := Search(t.Context(), Config{}, "none")
-	if err != nil || len(rs) != 0 {
-		t.Fatal("recognized empty page treated as failure")
+	rawCfg := cfg
+	rawCfg.ResponseMode = "text"
+	rs, err := Search(t.Context(), rawCfg, "none")
+	if err != nil || len(rs) != 1 || !rs[0].Raw {
+		t.Fatal("raw response was misrepresented as structured results")
 	}
 	mode.Store("ddgs-blocked")
-	_, err = Search(t.Context(), Config{}, "unknown")
+	_, err = Search(t.Context(), cfg, "unknown")
 	if !errors.As(err, &service) {
 		t.Fatal("unknown page fabricated an empty success")
+	}
+}
+
+func TestTaskSearchCooldownIsIsolatedPerService(t *testing.T) {
+	var calls atomic.Int32
+	s := TaskSearch{search: func(_ context.Context, cfg Config, _ string) ([]Result, error) {
+		calls.Add(1)
+		if cfg.ServiceID == "failed" {
+			return nil, unavailable("unavailable", nil)
+		}
+		return []Result{}, nil
+	}}
+	failed := Config{ServiceID: "failed", Endpoint: "https://failed.example/search"}
+	healthy := Config{ServiceID: "healthy", Endpoint: "https://healthy.example/search"}
+	_, _ = s.Search(t.Context(), "same-task", failed, "first")
+	if _, err := s.Search(t.Context(), "same-task", healthy, "different source"); err != nil {
+		t.Fatal("another service inherited the failure")
+	}
+	if _, err := s.Search(t.Context(), "same-task", failed, "still failed"); err == nil || !strings.Contains(err.Error(), "不重复请求") {
+		t.Fatal("switching service reset the failed service cooldown")
+	}
+	if calls.Load() != 2 {
+		t.Fatal("cooldown sent an extra request")
 	}
 }

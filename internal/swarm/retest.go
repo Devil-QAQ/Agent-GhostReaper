@@ -566,6 +566,7 @@ func (env *unitEnv) retestToolset() []tool.CoreTool {
 		env.portProbeTool(),
 		env.httpProbeTool(),
 		env.readTool(),
+		env.resourceReadTool(),
 		env.submitRetestResultTool(),
 	}
 }
@@ -597,7 +598,7 @@ const retestArtifactRules = `写回与收尾规约(代码固定,配置不可移�
 var RetestPromptSpec = PromptSpec{
 	SettingKey:      SettingKeyPromptRetest,
 	DefaultEditable: retestEditableDefault,
-	Fixed:           []string{retestSafetyRules, retestArtifactRules, ResidentStyleRules},
+	Fixed:           []string{retestSafetyRules, retestArtifactRules, ResourcePrinciples, ResidentStyleRules},
 }
 
 // retestWrapupPrompt 复测会话的收尾指令(Settlement):预算耗尽前把

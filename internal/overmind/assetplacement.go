@@ -55,6 +55,10 @@ type factAssetObservation struct {
 }
 
 func (l *Loop) recordFactAssets(ctx context.Context, fact rings.NodeFull, result rings.AssetObservations) error {
+	autoJoin, err := l.Store.ApprovalAutomationFlag(ctx, l.TaskID, "auto_join")
+	if err != nil {
+		return err
+	}
 	prior, err := rings.ObservedAssets(fact.Detail)
 	if err != nil {
 		return err
@@ -82,8 +86,11 @@ func (l *Loop) recordFactAssets(ctx context.Context, fact rings.NodeFull, result
 		}
 	}
 	result = merged
-	raw, _ := json.Marshal(result)
-	hash := sha256.Sum256(append([]byte("asset-placement/v2\n"+fact.Title+"\n"), raw...))
+	raw, _ := json.Marshal(struct {
+		Observations rings.AssetObservations `json:"observations"`
+		AutoJoin     bool                    `json:"auto_join"`
+	}{result, autoJoin})
+	hash := sha256.Sum256(append([]byte("asset-placement/v3\n"+fact.Title+"\n"), raw...))
 	source := hex.EncodeToString(hash[:])
 	if fact.Detail["asset_discovery_source"] == source {
 		return nil

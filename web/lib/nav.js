@@ -14,6 +14,7 @@ export const NAV_ITEMS = [
   { id: "traffic", title: "流量", icon: "waves", phase: "P3-02", enabled: true },
   { id: "llm", title: "LLM配置", icon: "cpu", phase: "P2-08c", enabled: true },
   { id: "agent", title: "Agent", icon: "bot", phase: "P2-08d", enabled: true },
+  { id: "capabilities", title: "能力库", icon: "braces", phase: "PoC 资料", enabled: true },
   { id: "mcp", title: "MCP", icon: "plug", phase: "占位(后续 P)", enabled: true },
   { id: "skill", title: "SKILL", icon: "sparkles", phase: "占位(后续 P)", enabled: true },
   { id: "settings", title: "系统设置", icon: "settings", phase: "P1 最简,P2-08c 收窄", enabled: true },
@@ -48,4 +49,4 @@ export const LEGACY_TASK_ROUTES = ["assets", "findings", "roe", "report"];
 
 // 当前点亮的平铺可路由页面(hash 路由 id → 组件);任务空间页走
 // #/task/<taskID>/<tab>,不在此列。
-export const ROUTES = ["tasks", "reports", "observe", "traffic", "llm", "agent", "mcp", "skill", "settings"];
+export const ROUTES = ["tasks", "reports", "observe", "traffic", "llm", "agent", "capabilities", "mcp", "skill", "settings"];

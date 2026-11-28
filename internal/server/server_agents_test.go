@@ -252,11 +252,11 @@ func TestAgentsViewSegmentsMatchAssembly(t *testing.T) {
 	segs := swarm.WorkerSystemSegments(ctx, store, roe, pack)
 	v := rep.Roles["swarm"]
 	// P3-11a:固定段三节(铁律/写回规约/常驻文风),视图与组装逐段一致。
-	if len(v.Fixed) != 3 || segs[1] != v.EditableNow || segs[2] != v.Fixed[0].Text ||
-		segs[3] != v.Fixed[1].Text || segs[4] != v.Fixed[2].Text {
+	if len(v.Fixed) != 4 || segs[1] != v.EditableNow || segs[2] != v.Fixed[0].Text ||
+		segs[3] != v.Fixed[1].Text || segs[4] != v.Fixed[2].Text || segs[5] != v.Fixed[3].Text {
 		t.Fatal("面板视图与执行链组装不一致")
 	}
-	if !strings.HasPrefix(segs[0], "【授权约束 · RoE】") || !strings.HasPrefix(segs[7], "【启动指令】") {
+	if !strings.HasPrefix(segs[0], "【授权约束 · RoE】") || !strings.HasPrefix(segs[8], "【启动指令】") {
 		t.Fatal("授权约束仍应置顶、启动指令仍应收尾")
 	}
 }

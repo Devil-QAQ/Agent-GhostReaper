@@ -120,7 +120,7 @@ func agentRoleSpecs() map[string]agentRoleSpec {
 			spec:        swarm.WorkerPromptSpec,
 			title:       "虫群",
 			summary:     "执行单位。领取一条意图,跑工具,写回发现",
-			fixedLabels: []string{"执行铁律", "写回与收尾规约"},
+			fixedLabels: []string{"执行铁律", "写回与收尾规约", "资源使用原则", "输出文风"},
 			note:        "每只单位起飞时按领取的授权与任务包组装;固定段由代码持有,编辑不可删。",
 		},
 		// 插话子会话(审核迭代加入):会话旁问/改的旁路 LLM 角色,问侧

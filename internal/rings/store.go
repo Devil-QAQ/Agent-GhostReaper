@@ -103,12 +103,14 @@ var (
 // journal_size_limit 收缩暂存)全部在单写者循环内执行——checkpoint
 // 进行期间结构上不可能并发写,也不阻塞读。
 type Store struct {
-	db        *sql.DB
-	writes    chan writeRequest
-	closing   chan struct{}
-	done      chan struct{}
-	closeOnce sync.Once
-	walPath   string // 暂存文件路径(P4-38 保养巡检用)
+	taskFilesOnce sync.Once
+	taskFiles     chan struct{}
+	db            *sql.DB
+	writes        chan writeRequest
+	closing       chan struct{}
+	done          chan struct{}
+	closeOnce     sync.Once
+	walPath       string // 暂存文件路径(P4-38 保养巡检用)
 	// atRest 静态加密封装器(P3-09):敏感键(secrets.SensitiveSetting)
 	// 的值入库前封装、出库后解封,对消费方透明。EnableAtRest 在开始
 	// 并发读写之前调用一次(启动装配期),此后只读——无锁安全。
@@ -912,4 +914,15 @@ func marshalPayload(p any) ([]byte, error) {
 		return nil, err
 	}
 	return b, nil
+}
+
+// LockTaskFiles serializes task directory deletion and supports cancellation.
+func (s *Store) LockTaskFiles(ctx context.Context) (func(), error) {
+	s.taskFilesOnce.Do(func() { s.taskFiles = make(chan struct{}, 1) })
+	select {
+	case s.taskFiles <- struct{}{}:
+		return func() { <-s.taskFiles }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }

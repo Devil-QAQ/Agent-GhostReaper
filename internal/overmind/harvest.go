@@ -134,11 +134,8 @@ func stepEvents(ctx context.Context, store *rings.Store, taskID, stepID, intent 
 				// 覆盖面单源判定(rings.ExcludedCoveredAssetIDs):精确命中 +
 				// 通配/端口写法覆盖 + 无锚点资产的排除标识子串回退——派发
 				// 守卫与摘除连坐废弃(P4-55 审核迭代)同一覆盖面,防两处漂移。
-				covered := rings.ExcludedCoveredAssetIDs(assets, ex)
+				covered := rings.ExcludedCoveredAssetIDs(assets, ex, roe.ScopeApprovedSet())
 				for _, a := range opt.CoversAssets {
-					if ex[a] {
-						return nil, fmt.Errorf("overmind: 派发 %s: 资产 %s 已从授权范围摘除(RoE),不派发覆盖它的意图", stepID, a)
-					}
 					if !covered[a] {
 						continue
 					}
@@ -146,7 +143,7 @@ func stepEvents(ctx context.Context, store *rings.Store, taskID, stepID, intent 
 					if err != nil {
 						continue
 					}
-					return nil, fmt.Errorf("overmind: 派发 %s: 资产 %s(%s) 命中摘除覆盖写法,不派发覆盖它的意图", stepID, a, node.Title)
+					return nil, fmt.Errorf("overmind: 派发 %s: 资产 %s(%s) 已从授权范围摘除，命中摘除覆盖写法，不派发覆盖它的意图", stepID, a, node.Title)
 				}
 			}
 		}

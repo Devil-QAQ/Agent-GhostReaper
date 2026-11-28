@@ -21,6 +21,7 @@ import (
 	"github.com/Autumn-27/norma/transcript"
 
 	"ghostreaper/internal/blackbox"
+	"ghostreaper/internal/capability"
 	"ghostreaper/internal/ckpt"
 	"ghostreaper/internal/failover"
 	"ghostreaper/internal/hiber"
@@ -41,11 +42,12 @@ var ErrStaleGraph = errors.New("swarm: 图版本已变化,拒绝按过期计划�
 // Executor 虫群执行器:一只单位领一条意图执行,完成即销毁
 // (一 Step 一单位,第四章 §2)。零值不可用,NewExecutor 构建。
 type Executor struct {
-	Store    *rings.Store
-	Provider llm.Provider
-	Blobs    *BlobStore
-	search   websearch.TaskSearch
-	Budget   Budget
+	Capabilities *capability.Catalog
+	Store        *rings.Store
+	Provider     llm.Provider
+	Blobs        *BlobStore
+	search       websearch.TaskSearch
+	Budget       Budget
 	// Model 模型名(token 独立表按模型记账,第四章 §6)。装配层从环境
 	// 变量注入;缺省空串如实记空(用量仍按任务/agent 可查)。
 	Model string
@@ -1736,8 +1738,8 @@ func isEngineInterrupt(text string) bool {
 }
 
 // approvalGate applies one chain to every environmental tool action: current
-// hard rules reject, otherwise the model allows or asks the existing human gate.
-// No filename/flag inference, host class, step pass, or rule group can bypass it.
+// hard rules reject; task automation skips model review, otherwise the model
+// allows or asks the existing human gate.
 func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 	return func(ctx context.Context, toolName string, input json.RawMessage, _ permission.Context) permission.Decision {
 		if !env.beginCallback(ctx) {
@@ -1760,7 +1762,7 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 		// Ledger submission text is evidence, not an environmental action.
 		// Matching its contents as a command would discard the very observation
 		// explaining a rejected action. The registered tool still validates it.
-		if guardExemptTool(toolName) || env.internalArtifactRead(toolName, input) {
+		if guardExemptTool(toolName) || toolName == "resource_read" || env.internalArtifactRead(toolName, input) {
 			return permission.Allowed()
 		}
 		deny := func(line, reason string) permission.Decision {
@@ -1769,14 +1771,26 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 				Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input, DenyLine: line, Reason: reason})
 			return permission.Denied(reason)
 		}
-		roe, err := env.Executor.Store.CurrentRoE(ctx, pack.TaskID)
-		if err != nil {
-			return deny(rings.DenyLineRoeScope, "无法读取当前任务边界，本次调用未执行")
-		}
 		if r, matched, err := matchHardRule(ctx, env.Executor.Store, toolName, input); err != nil {
 			return deny(rings.DenyLineHardRule, err.Error())
 		} else if r.ID != "" {
 			return permission.Denied(env.denyHardAction(pack, toolName, input, r, matched, rings.DenyLineHardRule, ""))
+		}
+		automatic, err := env.Executor.Store.ApprovalAutomationFlag(ctx, pack.TaskID, "auto_approve")
+		if err != nil {
+			return deny(rings.DenyLineRoeScope, "无法读取自动审批设置，本次调用未执行")
+		}
+		if automatic {
+			env.allowance = nil
+			env.reviewSources = nil
+			if err := env.recordActionReview(pack, toolName, input, ActionReview{Decision: ActionAllow, Reason: "审批自动放行"}, "automation"); err != nil {
+				return permission.Denied("动作记录未保存，本次调用未执行")
+			}
+			return permission.Allowed()
+		}
+		roe, err := env.Executor.Store.CurrentRoE(ctx, pack.TaskID)
+		if err != nil {
+			return deny(rings.DenyLineRoeScope, "无法读取当前任务边界，本次调用未执行")
 		}
 		boundary, err := env.actionBoundary(ctx, pack, roe)
 		if err != nil {
@@ -1801,13 +1815,16 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 		if ctx.Err() != nil {
 			return permission.Denied("调用已取消，未执行")
 		}
-		if reviewErr != nil || (result.Decision != ActionAllow && result.Decision != ActionApproval && result.Decision != ActionDeny) || strings.TrimSpace(result.Reason) == "" {
+		var localReviewError actionReviewError
+		if errors.As(reviewErr, &localReviewError) {
+			return permission.Denied(localReviewError.Error())
+		}
+		if reviewErr == nil && ((result.Decision != ActionAllow && result.Decision != ActionApproval && result.Decision != ActionDeny) || strings.TrimSpace(result.Reason) == "") {
+			return permission.Denied("动作判断结论或依据无效，本次调用未执行；请重新发起")
+		}
+		if reviewErr != nil {
 			// Never echo raw provider errors (they can contain credentials).
 			env.reviewErr = errors.New("动作判断未完成，等待模型恢复")
-			var category actionReviewError
-			if errors.As(reviewErr, &category) {
-				env.reviewErr = category
-			}
 			env.fuseSegment()
 			return permission.Denied(env.reviewErr.Error())
 		}
@@ -1822,9 +1839,7 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 		}
 		if result.Decision == ActionApproval && len(latestBoundary.Approvals) > len(boundary.Approvals) {
 			if refreshes >= 2 {
-				env.reviewErr = actionReviewError("批准依据正在更新，等待重新判断")
-				env.fuseSegment()
-				return permission.Denied(env.reviewErr.Error())
+				return permission.Denied("批准依据正在更新，本次调用未执行；请重新发起")
 			}
 			refreshes++
 			boundary = latestBoundary
@@ -1835,28 +1850,7 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 		} else if r.ID != "" {
 			return permission.Denied(env.denyHardAction(pack, toolName, input, r, matched, rings.DenyLineHardRule, ""))
 		}
-		automated := false
-		if result.Decision == ActionApproval {
-			enabled, err := env.Executor.Store.ApprovalAutomationFlag(ctx, pack.TaskID, "auto_approve")
-			if err != nil {
-				return deny(rings.DenyLineRoeScope, "无法读取自动审批设置，本次调用未执行")
-			}
-			if enabled {
-				result.Decision = ActionAllow
-				result.Reason = "审批自动放行：" + result.Reason
-				automated = true
-			}
-		}
-		decidedBy := "model"
-		if automated {
-			decidedBy = "automation"
-		}
-
-		_, err = env.appendBusiness(guardLedgerCtx, rings.Event{Kind: rings.EventApprovalRecord,
-			Actor: "swarm:" + env.UnitID, Payload: rings.ApprovalRecord{StepID: pack.StepID, UnitID: env.UnitID,
-				RequestID: "ar-" + strings.TrimPrefix(gateRequestID(), "ap-"), Type: rings.ApprovalRecActionReview, ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
-				Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input, DecidedBy: decidedBy,
-				Note: result.Decision, Reason: result.Reason}})
+		err = env.recordActionReview(pack, toolName, input, result, "model")
 		if err != nil {
 			return permission.Denied("动作判断记录未保存，本次调用未执行")
 		}
@@ -1880,6 +1874,14 @@ func (env *unitEnv) approvalGate(pack *TaskPack) permission.CanUseTool {
 		env.fuseSegment()
 		return permission.Denied(fmt.Sprintf("%s(请求 %s)，批准后可重新发起本次调用", approvalPendingNote, ticket.Req.ID))
 	}
+}
+
+// Both modes retain the same action record without manufacturing a manual grant.
+func (env *unitEnv) recordActionReview(pack *TaskPack, toolName string, input json.RawMessage, result ActionReview, decidedBy string) error {
+	_, err := env.appendBusiness(guardLedgerCtx, rings.Event{Kind: rings.EventApprovalRecord, Actor: "swarm:" + env.UnitID, Payload: rings.ApprovalRecord{
+		StepID: pack.StepID, UnitID: env.UnitID, RequestID: "ar-" + strings.TrimPrefix(gateRequestID(), "ap-"), Type: rings.ApprovalRecActionReview, ActionLevel: pack.ActionLevel, HarmClass: pack.HarmClass,
+		Intent: pack.StepIntent, ToolName: toolName, ToolArgs: input, DecidedBy: decidedBy, Note: result.Decision, Reason: result.Reason}})
+	return err
 }
 
 // gateAllowance 批准续跑的单次放行配额:面板批准后单位恢复,模型重新

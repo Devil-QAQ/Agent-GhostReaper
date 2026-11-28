@@ -418,6 +418,7 @@ func TestDiagnosticsContentDB(t *testing.T) {
 	for k, v := range map[string]string{
 		"model.library.m1":       `{"name":"m1","api_key":"sk-live-123456"}`,
 		"search.config":          `{"backend":"brave","brave_key":"BSAKEY"}`,
+		"search.services":        `[{"id":"fixture","name":"custom search","enabled":true,"url":"https://search.example/api","method":"GET","api_key":"PRIVATE-SEARCH-KEY","headers":{"X-Secret":"PRIVATE-HEADER"}}]`,
 		"cred.c1":                `{"name":"后台","username":"admin","secret":"P@ss"}`,
 		"mirror.ca.key":          "-----BEGIN PRIVATE KEY-----",
 		"auth.password":          `{"algo":"pbkdf2-sha256","salt":"abc"}`,
@@ -459,7 +460,7 @@ func TestDiagnosticsContentDB(t *testing.T) {
 		values[k] = v
 	}
 	rrows.Close()
-	for _, sens := range []string{"model.library.m1", "search.config", "cred.c1", "mirror.ca.key", "auth.password", "auth.token.abc"} {
+	for _, sens := range []string{"model.library.m1", "search.config", "search.services", "cred.c1", "mirror.ca.key", "auth.password", "auth.token.abc"} {
 		if values[sens] != "(脱敏)" {
 			t.Fatalf("敏感键 %s 未脱敏: %q", sens, values[sens])
 		}

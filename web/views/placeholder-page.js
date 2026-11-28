@@ -8,28 +8,25 @@ import { PageHeader } from "@/components/page-header";
 // agent-page.js 正式页替换。)
 export function MCPPlaceholderPage() {
   return (
-    <div className="flex flex-col gap-3">
-      <PageHeader title="MCP" subtitle="外部工具接入" />
-      <EmptyState
-        icon="plug"
-        title="MCP 未实现"
-        hint="MCP 接入属后续阶段,本栏为占位"
-        action={{ label: "去任务列表", href: "/tasks" }}
-      />
-    </div>
+    <PlaceholderPage title="MCP" subtitle="外部工具接入" icon="plug" emptyTitle="MCP 未实现" hint="MCP 接入属后续阶段,本栏为占位" />
   );
 }
 
 export function SKILLPlaceholderPage() {
   return (
+    <PlaceholderPage title="SKILL" subtitle="技能接入" icon="sparkles" emptyTitle="SKILL 未实现" hint="技能接入属后续阶段,本栏为占位" />
+  );
+}
+
+export function ToolsPlaceholderPage() {
+  return <PlaceholderPage title="工具管理" subtitle="工具配置与管理" icon="terminal" emptyTitle="工具管理未实现" hint="工具管理待开发" />;
+}
+
+function PlaceholderPage({ title, subtitle, icon, emptyTitle, hint }) {
+  return (
     <div className="flex flex-col gap-3">
-      <PageHeader title="SKILL" subtitle="技能接入" />
-      <EmptyState
-        icon="sparkles"
-        title="SKILL 未实现"
-        hint="技能接入属后续阶段,本栏为占位"
-        action={{ label: "去任务列表", href: "/tasks" }}
-      />
+      <PageHeader title={title} subtitle={subtitle} />
+      <EmptyState icon={icon} title={emptyTitle} hint={hint} action={{ label: "去任务列表", href: "/tasks" }} />
     </div>
   );
 }

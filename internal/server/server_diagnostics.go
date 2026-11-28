@@ -35,6 +35,7 @@ import (
 	"ghostreaper/internal/secrets"
 	"ghostreaper/internal/swarm"
 	"ghostreaper/internal/vault"
+	"ghostreaper/internal/websearch"
 )
 
 // logKind 日志类型(P4-32 ②):按日志行既有类型字样在导出时过滤,
@@ -382,9 +383,14 @@ func (s *Server) diagnosticsConfigSummary(ctx context.Context) string {
 	fmt.Fprintf(&b, "\n== Agent 参数 ==\n虫群并发: %d\n重锚定: %d 步\n心跳间隔: %d 秒\n",
 		params.Units.Value, params.Reanchor.Value, params.Heartbeat.Value)
 
-	search := s.effectiveSearch(ctx)
-	fmt.Fprintf(&b, "\n== 搜索 ==\n后端: %s\nbrave key: %s\ntavily key: %s\n代理: %s\n",
-		search.Backend, orDash(search.BraveKeyMask), orDash(search.TavilyKeyMask), orDash(search.ProxyMask))
+	if services, err := websearch.Services(ctx, s.Store); err == nil {
+		fmt.Fprintf(&b, "\n== 搜索服务 ==\n已配置: %d 个\n", len(services))
+		for _, service := range services {
+			fmt.Fprintf(&b, "- %s [%s] 启用=%t 密钥=%s 代理=%s\n", service.Name, service.Method, service.Enabled, orDash(failover.MaskKey(service.APIKey)), orDash(failover.MaskProxy(service.Proxy)))
+		}
+	} else {
+		fmt.Fprintf(&b, "\n== 搜索服务 ==\n读取失败: %v\n", err)
+	}
 
 	if cfgs, err := failover.ListModelConfigs(ctx, s.Store); err == nil {
 		b.WriteString("\n== 模型库 ==\n")

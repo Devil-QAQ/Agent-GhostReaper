@@ -19,7 +19,7 @@ var claimDiscardable = map[string]bool{
 // ExcludedCoveredAssetIDs 摘除清单当前覆盖的资产 ID 集:精确命中 +
 // 通配/端口写法覆盖(按资产锚点判定)+ 无锚点资产的排除标识子串回退
 // (与收割派发守卫同口径同覆盖面——派发不派的地方,废弃同样连坐)。
-func ExcludedCoveredAssetIDs(assets []NodeFull, excluded map[string]bool) map[string]bool {
+func ExcludedCoveredAssetIDs(assets []NodeFull, excluded map[string]bool, approvals ...map[string]bool) map[string]bool {
 	covered := map[string]bool{}
 	for id := range excluded {
 		covered[id] = true
@@ -43,6 +43,38 @@ func ExcludedCoveredAssetIDs(assets []NodeFull, excluded map[string]bool) map[st
 		// host:port 形态)即视为同一目标的呈现。
 		if excludedAnchorInTitle(assets, excluded, a.Title) {
 			covered[a.ID] = true
+		}
+	}
+	// A deliberate rejoin overrides an equal or broader withdrawal. A later
+	// withdrawal removes the matching approvals at the write boundary.
+	if len(approvals) > 0 && len(approvals[0]) > 0 {
+		for _, a := range assets {
+			if !covered[a.ID] {
+				continue
+			}
+			blocked := false
+			for _, x := range assets {
+				if !excluded[x.ID] || !AssetContainsIdentity(x.AssetClass, x.Title, a.AssetClass, a.Title) {
+					continue
+				}
+				overridden := false
+				for _, allow := range assets {
+					if approvals[0][allow.ID] && AssetContainsIdentity(x.AssetClass, x.Title, allow.AssetClass, allow.Title) && AssetContainsIdentity(allow.AssetClass, allow.Title, a.AssetClass, a.Title) {
+						overridden = true
+						break
+					}
+				}
+				if !overridden {
+					blocked = true
+					break
+				}
+			}
+			if !blocked {
+				_, _, _, err := AssetIdentity(a.AssetClass, a.Title)
+				if err == nil {
+					delete(covered, a.ID)
+				}
+			}
 		}
 	}
 	return covered
@@ -86,7 +118,7 @@ func DiscardAnchoredFindings(ctx context.Context, store *Store, taskID, reason, 
 	if err != nil {
 		return nil, fmt.Errorf("rings: 摘除废弃查资产: %w", err)
 	}
-	covered := ExcludedCoveredAssetIDs(assets, excluded)
+	covered := ExcludedCoveredAssetIDs(assets, excluded, roe.ScopeApprovedSet())
 	abouts, err := store.Edges(ctx, taskID, EdgeAbout)
 	if err != nil {
 		return nil, fmt.Errorf("rings: 摘除废弃查锚点: %w", err)

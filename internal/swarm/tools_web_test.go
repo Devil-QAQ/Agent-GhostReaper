@@ -15,11 +15,13 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Autumn-27/norma/tool"
 
 	"ghostreaper/internal/mirror"
 	"ghostreaper/internal/mocktarget"
+	"ghostreaper/internal/rings"
 	"ghostreaper/internal/websearch"
 )
 
@@ -34,26 +36,19 @@ func TestWebSearchUnitsShareOnlyUnavailableService(t *testing.T) {
 			w.WriteHeader(503)
 			return
 		}
-		_, _ = io.WriteString(w, `{"web":{"results":[]}}`)
+		_, _ = io.WriteString(w, `{"results":[]}`)
 	}))
 	defer srv.Close()
-	old := websearch.BraveEndpoint
-	websearch.BraveEndpoint = srv.URL
-	t.Cleanup(func() { websearch.BraveEndpoint = old })
-	cfg := websearch.Config{Backend: websearch.BackendBrave, BraveKey: "fixture-one"}
-	if err := websearch.Save(t.Context(), env.Executor.Store, cfg, "test"); err != nil {
-		t.Fatal(err)
-	}
+	cfg := searchFixtureConfig(srv.URL)
+	service := saveSearchService(t, env.Executor.Store, "", "fixture", cfg, nil)
 	first := callTool(t, env.webSearchTool(), `{"query":"first fixture"}`)
 	second := callTool(t, other.webSearchTool(), `{"query":"different fixture"}`)
 	if !first.IsError || !second.IsError || !strings.Contains(second.Flatten(), "不重复请求") || calls.Load() != 1 {
 		t.Fatal("another unit repeated the same unavailable service")
 	}
 	healthy.Store(true)
-	cfg.BraveKey = "fixture-two"
-	if err := websearch.Save(t.Context(), env.Executor.Store, cfg, "test"); err != nil {
-		t.Fatal(err)
-	}
+	changedKey := "fixture-two"
+	saveSearchService(t, env.Executor.Store, service.ID, service.Name, cfg, &changedKey)
 	res := callTool(t, other.webSearchTool(), `{"query":"after configuration change"}`)
 	if res.IsError || !strings.Contains(res.Flatten(), "0 条") || calls.Load() != 2 {
 		t.Fatal("changed configuration or a valid empty result remained blocked")
@@ -70,27 +65,26 @@ func webEnv(t *testing.T) *unitEnv {
 	return env
 }
 
-// mockSearchEndpoints 三后端 mock 一次挂齐;返回还原闭包。
-func mockSearchEndpoints(t *testing.T, ddgsHit, braveHit *bool) {
+func searchFixtureConfig(endpoint string) websearch.Config {
+	return websearch.Config{Endpoint: endpoint, Method: "GET", Params: map[string]any{"q": "{{query}}"}, ResponseMode: "json", ResultsPath: "results", TitlePath: "title", URLPath: "url", SnippetPath: "content"}
+}
+
+func saveSearchService(t *testing.T, store *rings.Store, id, name string, cfg websearch.Config, key *string) websearch.Service {
 	t.Helper()
-	ddgs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*ddgsHit = true
-		_, _ = io.WriteString(w, `<html><body>
-<div class="result"><h2><a class="result__a" href="https://nvd.example/CVE-2021-44228">NVD:CVE-2021-44228</a></h2>
-<a class="result__snippet">log4j RCE,10.0 严重级</a></div>
-</body></html>`)
-	}))
-	brave := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*braveHit = true
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"web":{"results":[{"title":"Brave 结果","url":"https://brave.example/x","description":"描述"}]}}`)
-	}))
-	t.Cleanup(func() { ddgs.Close(); brave.Close() })
-	oldD, oldB, oldT := websearch.DDGSEndpoint, websearch.BraveEndpoint, websearch.TavilyEndpoint
-	websearch.DDGSEndpoint, websearch.BraveEndpoint, websearch.TavilyEndpoint = ddgs.URL, brave.URL, oldT
-	t.Cleanup(func() {
-		websearch.DDGSEndpoint, websearch.BraveEndpoint, websearch.TavilyEndpoint = oldD, oldB, oldT
-	})
+	list, err := websearch.SaveService(t.Context(), store, websearch.ServiceChange{ID: id, Name: name, Enabled: true, Config: cfg, APIKey: key}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == "" {
+		return list[len(list)-1]
+	}
+	for _, item := range list {
+		if item.ID == id {
+			return item
+		}
+	}
+	t.Fatal("saved service missing")
+	return websearch.Service{}
 }
 
 func callTool(t *testing.T, tt tool.CoreTool, args string) tool.Result {
@@ -185,57 +179,129 @@ func TestReadToolLocalFile(t *testing.T) {
 	}
 }
 
-// TestWebSearchToolBackendSwitch 完成标准:默认 ddgs 免 key 裸跑(命中
-// 后端);面板设置切后端后工具下一次调用即走新后端;缺 key 如实拒。
-func TestWebSearchToolBackendSwitch(t *testing.T) {
+func TestWebSearchToolCustomServiceSelection(t *testing.T) {
 	env := webEnv(t)
-	var ddgsHit, braveHit bool
-	mockSearchEndpoints(t, &ddgsHit, &braveHit)
 	search := env.webSearchTool()
+	if result := callTool(t, search, `{"query":"reference"}`); !result.IsError || !strings.Contains(resultText(result), "尚未配置") {
+		t.Fatal("empty search configuration used a default")
+	}
+	var firstHits, secondHits atomic.Int32
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		firstHits.Add(1)
+		io.WriteString(w, `{"results":[{"title":"first","url":"https://first.example/document","content":"first reference"}]}`)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondHits.Add(1)
+		io.WriteString(w, `{"results":[{"title":"second","url":"https://second.example/document","content":"second reference"}]}`)
+	}))
+	defer second.Close()
+	a := saveSearchService(t, env.Executor.Store, "", "first custom", searchFixtureConfig(first.URL), nil)
+	b := saveSearchService(t, env.Executor.Store, "", "second custom", searchFixtureConfig(second.URL), nil)
+	result := callTool(t, search, `{"query":"reference"}`)
+	if result.IsError || !strings.Contains(resultText(result), a.ID) || !strings.Contains(resultText(result), b.ID) || firstHits.Load() != 0 || secondHits.Load() != 0 {
+		t.Fatal("multiple services were automatically searched")
+	}
+	result = callTool(t, search, fmt.Sprintf(`{"query":"reference","service_id":%q}`, a.ID))
+	if result.IsError || !strings.Contains(resultText(result), "https://first.example/document") || firstHits.Load() != 1 || secondHits.Load() != 0 {
+		t.Fatal("model-selected service was ignored")
+	}
+	saveSearchService(t, env.Executor.Store, a.ID, a.Name, searchFixtureConfig(second.URL), nil)
+	result = callTool(t, search, fmt.Sprintf(`{"query":"changed","service_id":%q}`, a.ID))
+	if result.IsError || !strings.Contains(resultText(result), "second reference") {
+		t.Fatal("edited API did not take effect")
+	}
+	if _, err := websearch.DeleteService(t.Context(), env.Executor.Store, a.ID, "test"); err != nil {
+		t.Fatal(err)
+	}
+	result = callTool(t, search, fmt.Sprintf(`{"query":"reference","service_id":%q}`, a.ID))
+	if !result.IsError {
+		t.Fatal("deleted service remained available")
+	}
+	if _, err := websearch.DeleteService(t.Context(), env.Executor.Store, b.ID, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if result := callTool(t, search, `{"query":"reference"}`); !result.IsError || !strings.Contains(resultText(result), "尚未配置") {
+		t.Fatal("deleting all services restored a default")
+	}
+}
 
-	// 默认(空设置):ddgs 免 key 裸跑。
-	res := callTool(t, search, `{"query":"CVE-2021-44228"}`)
-	if res.IsError {
-		t.Fatalf("默认 ddgs 搜索应成功: %s", resultText(res))
+func TestWebSearchToolRawResponse(t *testing.T) {
+	env := webEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"arbitrary":{"reference":"full raw response"}}`)
+	}))
+	defer srv.Close()
+	cfg := searchFixtureConfig(srv.URL)
+	cfg.ResponseMode = "text"
+	saveSearchService(t, env.Executor.Store, "", "raw custom", cfg, nil)
+	result := callTool(t, env.webSearchTool(), `{"query":"reference"}`)
+	if result.IsError || !strings.Contains(resultText(result), "full raw response") || strings.Contains(resultText(result), "1 条") {
+		t.Fatal("raw API response was lost or given a fabricated result count")
 	}
-	if !ddgsHit {
-		t.Fatalf("默认后端应命中 ddgs(免 key)")
-	}
-	text := resultText(res)
-	if !strings.Contains(text, "后端 DuckDuckGo") || !strings.Contains(text, "https://nvd.example/CVE-2021-44228") {
-		t.Fatalf("结果格式不符: %q", text)
-	}
+}
 
-	// 切后端生效:设置表写 brave + key,下一次调用即走 brave。
-	if err := websearch.Save(context.Background(), env.Executor.Store,
-		websearch.Config{Backend: websearch.BackendBrave, BraveKey: "bk"}, "creator"); err != nil {
-		t.Fatalf("写搜索配置失败: %v", err)
+func TestWebSearchGitHubCardDispatch(t *testing.T) {
+	env := webEnv(t)
+	service := saveSearchService(t, env.Executor.Store, "", "GitHub", websearch.Config{Kind: "github"}, nil)
+	listing := callTool(t, env.webSearchTool(), `{}`)
+	if listing.IsError || !strings.Contains(resultText(listing), "browse") || !strings.Contains(resultText(listing), service.ID) {
+		t.Fatal("site capabilities not discoverable")
 	}
-	res = callTool(t, search, `{"query":"cve"}`)
-	if res.IsError {
-		t.Fatalf("brave 搜索应成功: %s", resultText(res))
+	invalid := callTool(t, env.webSearchTool(), `{"action":"read","repo":"owner/repo","path":"../outside"}`)
+	if !invalid.IsError || !strings.Contains(resultText(invalid), "路径无效") {
+		t.Fatal("read action did not reach GitHub validation")
 	}
-	if !braveHit {
-		t.Fatalf("切后端后应命中 brave")
+	blocked, _ := json.Marshal(map[string]any{"blocked": time.Now().Add(time.Hour)})
+	if err := env.Executor.Store.SetSetting(t.Context(), "search.github.quota", string(blocked), "test"); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(resultText(res), "后端 Brave") {
-		t.Fatalf("结果应标注后端 Brave: %q", resultText(res))
+	other := &unitEnv{Executor: env.Executor, TaskID: "other-task", StepID: "s1", UnitID: "other"}
+	for _, e := range []*unitEnv{env, other} {
+		result := callTool(t, e.webSearchTool(), `{"query":"public poc"}`)
+		if !result.IsError || !strings.Contains(resultText(result), "请求额度暂不可用") {
+			t.Fatal("shared GitHub limit bypassed")
+		}
 	}
+	if _, err := websearch.DeleteService(t.Context(), env.Executor.Store, service.ID, "test"); err != nil {
+		t.Fatal(err)
+	}
+	deleted := callTool(t, env.webSearchTool(), `{"action":"browse","repo":"owner/repo"}`)
+	if !deleted.IsError || !strings.Contains(resultText(deleted), "尚未配置") {
+		t.Fatal("deleted site retained")
+	}
+}
 
-	// 缺 key:拒并指路系统设置。
-	if err := websearch.Save(context.Background(), env.Executor.Store,
-		websearch.Config{Backend: websearch.BackendTavily}, "creator"); err != nil {
-		t.Fatalf("写搜索配置失败: %v", err)
+func TestWebSearchAssetCardDispatch(t *testing.T) {
+	env := webEnv(t)
+	var calls atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		io.WriteString(w, `{"error":false,"results":[["https://example.com","192.0.2.1",443]],"credit_note":"original data"}`)
+	}))
+	defer api.Close()
+	missing := saveSearchService(t, env.Executor.Store, "", "鹰图", websearch.Config{Kind: "hunter"}, nil)
+	key := "test-assets-key"
+	fofa := saveSearchService(t, env.Executor.Store, "", "FOFA", websearch.Config{Kind: "fofa", Endpoint: api.URL, PerMinute: 1}, &key)
+	listing := callTool(t, env.webSearchTool(), `{}`)
+	if listing.IsError || !strings.Contains(resultText(listing), fofa.ID) || strings.Contains(resultText(listing), missing.ID) || calls.Load() != 0 {
+		t.Fatal("unconfigured service listed or discovery sent a request")
 	}
-	res = callTool(t, search, `{"query":"cve"}`)
-	if !res.IsError || !strings.Contains(resultText(res), "系统设置·搜索配置") {
-		t.Fatalf("缺 key 应拒并指路: %q", resultText(res))
+	result := callTool(t, env.webSearchTool(), fmt.Sprintf(`{"service_id":%q,"query":"domain=\"example.com\"","page":2,"size":10,"options":{"fields":"ip,port"}}`, fofa.ID))
+	if result.IsError || !strings.Contains(resultText(result), "original data") || calls.Load() != 1 {
+		t.Fatal("asset request did not reach native adapter", resultText(result))
 	}
-
-	// 空查询:入口拒。
-	res = callTool(t, search, `{"query":"  "}`)
-	if !res.IsError {
-		t.Fatalf("空查询应拒")
+	other := &unitEnv{Executor: env.Executor, TaskID: "other-task", StepID: "s1", UnitID: "other"}
+	result = callTool(t, other.webSearchTool(), fmt.Sprintf(`{"service_id":%q,"query":"another query"}`, fofa.ID))
+	if !result.IsError || !strings.Contains(resultText(result), "请求额度") || calls.Load() != 1 {
+		t.Fatal("agent budget differs from panel / task budget")
+	}
+	if _, err := websearch.DeleteService(t.Context(), env.Executor.Store, fofa.ID, "test"); err != nil {
+		t.Fatal(err)
+	}
+	result = callTool(t, env.webSearchTool(), fmt.Sprintf(`{"service_id":%q,"query":"x"}`, fofa.ID))
+	if !result.IsError || calls.Load() != 1 {
+		t.Fatal("deleted card retained")
 	}
 }
 
@@ -340,7 +406,7 @@ func TestWebToolsCatalogAndDescriptions(t *testing.T) {
 	}
 	for name, want := range map[string][]string{
 		"read":       {"offset/limit", "无任何写操作"},
-		"web_search": {"DuckDuckGo", "系统设置·搜索配置"},
+		"web_search": {"service_id", "能力库·搜索配置"},
 		"web_fetch":  {"经镜留痕", "二进制"},
 	} {
 		d, ok := catalog[name]
@@ -352,5 +418,64 @@ func TestWebToolsCatalogAndDescriptions(t *testing.T) {
 				t.Fatalf("%s 描述缺 %q: %q", name, w, d)
 			}
 		}
+	}
+}
+
+func TestWebSearchDDPocAccountPages(t *testing.T) {
+	env := webEnv(t)
+	var calls atomic.Int64
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Header.Get("Cookie") != "web1=fixture-session" {
+			t.Error("missing session")
+		}
+		switch r.URL.Path {
+		case "/list.html":
+			if r.URL.Query().Get("keyword") != "Example" {
+				t.Error("query missing")
+			}
+			io.WriteString(w, `<table><tr><th>编号</th><th>漏洞名称</th><th>类型</th></tr><tr><td>DVB-2026-1</td><td><a href="DVB-2026-1.html">Example</a></td><td>信息泄露</td></tr></table>`)
+		case "/DVB-2026-1.html":
+			io.WriteString(w, `<div class="project-details-area"><h2>Example</h2><p>当前账号可见详情</p><p>权限不足的部分由网站提示</p></div>`)
+		default:
+			t.Error("unexpected request", r.URL.Path)
+			w.WriteHeader(404)
+		}
+	}))
+	defer api.Close()
+	key := "fixture-session"
+	service := saveSearchService(t, env.Executor.Store, "", "DDPoc", websearch.Config{Kind: "ddpoc", Endpoint: api.URL}, &key)
+	discovery := callTool(t, env.webSearchTool(), `{}`)
+	if discovery.IsError || !strings.Contains(discovery.Flatten(), "action=read") {
+		t.Fatal("read capability not discoverable", discovery.Flatten())
+	}
+	result := callTool(t, env.webSearchTool(), fmt.Sprintf(`{"service_id":%q,"query":"Example"}`, service.ID))
+	if result.IsError || !strings.Contains(result.Flatten(), "DVB-2026-1") {
+		t.Fatal("search failed", result.Flatten())
+	}
+	result = callTool(t, env.webSearchTool(), fmt.Sprintf(`{"service_id":%q,"action":"read","path":"DVB-2026-1"}`, service.ID))
+	if result.IsError || !strings.Contains(result.Flatten(), "当前账号可见详情") || strings.Contains(result.Flatten(), key) {
+		t.Fatal("account read failed", result.Flatten())
+	}
+	if calls.Load() != 2 {
+		t.Fatal("unexpected automatic requests", calls.Load())
+	}
+}
+
+func TestWebSearchGitHubCodeEntry(t *testing.T) {
+	env := webEnv(t)
+	service := saveSearchService(t, env.Executor.Store, "", "GitHub", websearch.Config{Kind: "github"}, nil)
+	result := callTool(t, env.webSearchTool(), `{}`)
+	if result.IsError || !strings.Contains(result.Flatten(), "search_code") || !strings.Contains(result.Flatten(), "https://docs.github.com/en/rest") {
+		t.Fatal("code search not discoverable", result.Flatten())
+	}
+	input, _ := json.Marshal(map[string]any{"service_id": service.ID, "action": "search_code", "query": "example language:go"})
+	result = callTool(t, env.webSearchTool(), string(input))
+	if !result.IsError || !strings.Contains(result.Flatten(), "代码搜索需要 Token") {
+		t.Fatal("agent code request not routed to GitHub", result.Flatten())
+	}
+	usage, err := websearch.GitHubUsage(t.Context(), env.Executor.Store, service.Config)
+	if err != nil || usage.MinuteUsed != 0 || usage.CodeMinuteUsed != 0 || usage.HourUsed != 0 {
+		t.Fatal("unsent query consumed budget", usage, err)
 	}
 }

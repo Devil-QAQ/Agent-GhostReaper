@@ -347,7 +347,8 @@ func SaveHardRule(ctx context.Context, store *rings.Store, r HardRule, by string
 }
 
 var knownToolScopes = map[string]bool{
-	"bash": true, "port_probe": true, "http_probe": true,
+	"resource_read": true,
+	"bash":          true, "port_probe": true, "http_probe": true,
 	"list_claims":           true,
 	"submit_candidate_fact": true,
 	"submit_claim":          true,

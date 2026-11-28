@@ -87,6 +87,13 @@ func proposedAssetEvents(ctx context.Context, store *rings.Store, task string, f
 	if err != nil {
 		return nil, nil
 	} // background stays in the confirmed observation
+	autoJoin, err := store.ApprovalAutomationFlag(ctx, task, "auto_join")
+	if err != nil {
+		return nil, err
+	}
+	if autoJoin {
+		return automaticAssetEvents(ctx, store, task, fact, decl, autoJoin)
+	}
 	assets, err := store.NodesByType(ctx, task, rings.NodeAsset, "")
 	if err != nil {
 		return nil, err
@@ -109,14 +116,7 @@ func proposedAssetEvents(ctx context.Context, store *rings.Store, task string, f
 		return nil, err
 	}
 	if rings.AutomaticallyInventory(class, title, assets, roe) || observedSameSystem(fact, class, title, assets, roe) {
-		return automaticAssetEvents(ctx, store, task, fact, decl)
-	}
-	autoJoin, err := store.ApprovalAutomationFlag(ctx, task, "auto_join")
-	if err != nil {
-		return nil, err
-	}
-	if autoJoin {
-		return automaticAssetEvents(ctx, store, task, fact, decl)
+		return automaticAssetEvents(ctx, store, task, fact, decl, autoJoin)
 	}
 	parent := decl.Parent
 
@@ -224,7 +224,7 @@ func DecideAssetProposal(ctx context.Context, store *rings.Store, task, rid stri
 	return "", ctx.Err()
 }
 
-func automaticAssetEvents(ctx context.Context, store *rings.Store, task string, fact rings.NodeFull, decl *swarm.NewAssetDecl) ([]rings.Event, error) {
+func automaticAssetEvents(ctx context.Context, store *rings.Store, task string, fact rings.NodeFull, decl *swarm.NewAssetDecl, autoJoin bool) ([]rings.Event, error) {
 	_, _, key, err := rings.AssetIdentity(rings.AssetClass(decl.Class), decl.Title)
 	if err != nil {
 		return nil, err
@@ -239,10 +239,6 @@ func automaticAssetEvents(ctx context.Context, store *rings.Store, task string, 
 		return nil, nil
 	}
 	events, err := discoveredAssetEvents(ctx, store, task, fact, decl)
-	if err != nil {
-		return nil, err
-	}
-	autoJoin, err := store.ApprovalAutomationFlag(ctx, task, "auto_join")
 	if err != nil {
 		return nil, err
 	}
@@ -271,6 +267,10 @@ func ObservedChildAssetEvents(ctx context.Context, store *rings.Store, task stri
 	if len(sites) == 0 {
 		return nil, nil
 	}
+	autoJoin, err := store.ApprovalAutomationFlag(ctx, task, "auto_join")
+	if err != nil {
+		return nil, err
+	}
 	facts, err := store.NodesByType(ctx, task, rings.NodeFact, "confirmed")
 	if err != nil {
 		return nil, err
@@ -298,27 +298,29 @@ func ObservedChildAssetEvents(ctx context.Context, store *rings.Store, task stri
 			if ek != nil || normalizedClass == rings.AssetDomain || normalizedClass == rings.AssetHost {
 				continue
 			}
-			covered := false
-			for _, site := range sites {
-				_, _, selected, _ := rings.AssetIdentity(site.AssetClass, site.Title)
-				if selected == key {
-					continue
+			covered := autoJoin
+			if !covered {
+				for _, site := range sites {
+					_, _, selected, _ := rings.AssetIdentity(site.AssetClass, site.Title)
+					if selected == key {
+						continue
+					}
+					joined := rings.NodeFull{NodeView: rings.NodeView{ID: site.NodeID, Type: rings.NodeAsset, Status: "active", AssetClass: site.AssetClass, Title: site.Title}, Detail: map[string]any{"source": rings.AssetSourceManual}}
+					if joined.ID == "" {
+						joined.ID = "joined:" + selected
+					}
+					if observedSameSystem(fact, a.Class, a.Title, []rings.NodeFull{joined}, rings.RoeState{}) {
+						covered = true
+						break
+					}
 				}
-				joined := rings.NodeFull{NodeView: rings.NodeView{ID: site.NodeID, Type: rings.NodeAsset, Status: "active", AssetClass: site.AssetClass, Title: site.Title}, Detail: map[string]any{"source": rings.AssetSourceManual}}
-				if joined.ID == "" {
-					joined.ID = "joined:" + selected
-				}
-				if observedSameSystem(fact, a.Class, a.Title, []rings.NodeFull{joined}, rings.RoeState{}) {
-					covered = true
-					break
-				}
-			}
 
+			}
 			if ek != nil || !covered || seen[key] {
 				continue
 			}
 			seen[key] = true
-			ev, err := automaticAssetEvents(ctx, store, task, fact, &swarm.NewAssetDecl{Class: string(a.Class), Title: a.Title, Independent: a.Independent})
+			ev, err := automaticAssetEvents(ctx, store, task, fact, &swarm.NewAssetDecl{Class: string(a.Class), Title: a.Title, Independent: a.Independent}, autoJoin)
 			if err != nil {
 				return nil, err
 			}

@@ -103,14 +103,18 @@ func TestActionGateApprovalOnlyPermitsExactActionOnce(t *testing.T) {
 
 }
 
-func TestActionGateReviewFailureUsesModelRecoveryWithoutApproval(t *testing.T) {
-	for _, mode := range []string{"provider_error", "invalid_verdict", "missing_basis"} {
+func TestActionGateReviewFailureSeparatesProviderFromLocalErrors(t *testing.T) {
+	for _, mode := range []string{"provider_error", "source_error", "approval_error", "invalid_verdict", "missing_basis"} {
 		t.Run(mode, func(t *testing.T) {
 			env, pack, gate := actionGateFixture(t)
 			env.Executor.ReviewAction = func(context.Context, ActionReviewInput) (ActionReview, error) {
 				switch mode {
 				case "provider_error":
 					return ActionReview{}, errors.New("private provider response")
+				case "source_error":
+					return ActionReview{}, actionReviewError("动作判断所需源码不可读取")
+				case "approval_error":
+					return ActionReview{}, actionReviewError("批准已失效或不在当前索引")
 				case "invalid_verdict":
 					return ActionReview{Decision: "unknown", Reason: "不可用"}, nil
 				default:
@@ -118,10 +122,10 @@ func TestActionGateReviewFailureUsesModelRecoveryWithoutApproval(t *testing.T) {
 				}
 			}
 			d := callActionGate(env, pack, "bash", `{"command":"cat report.txt"}`)
-			if d.Behavior != permission.Deny || len(gate.Pending(pack.TaskID)) != 0 || env.deniedReason != "" || env.reviewErr == nil {
+			if d.Behavior != permission.Deny || len(gate.Pending(pack.TaskID)) != 0 || env.deniedReason != "" || (env.reviewErr != nil) != (mode == "provider_error") {
 				t.Fatalf("failure must not claim permission or kill unit: %+v", d)
 			}
-			if strings.Contains(env.reviewErr.Error(), "private") {
+			if env.reviewErr != nil && strings.Contains(env.reviewErr.Error(), "private") {
 				t.Fatal("raw provider error entered recovery")
 			}
 		})

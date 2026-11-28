@@ -114,7 +114,7 @@ prior_approvals是未撤回的人工批准。同目的、同目标范围、同�
 func ActionReviewFor(provider llm.Provider, readers ...func(string) ([]byte, error)) ActionReviewFunc {
 	return func(ctx context.Context, in ActionReviewInput) (ActionReview, error) {
 		if provider == nil {
-			return ActionReview{}, actionReviewError("动作判断无可用模型")
+			return ActionReview{}, errors.New("动作判断无可用模型")
 		}
 		// A worker plan is neither an observed effect nor operator authority.
 		in.Goal, in.Intent = "", ""
@@ -141,7 +141,7 @@ func ActionReviewFor(provider llm.Provider, readers ...func(string) ([]byte, err
 		for round := 0; round < 9+len(legacy); round++ {
 			msg, _, _, err := provider.Complete(ctx, llm.CompletionRequest{System: []string{actionReviewPrompt}, Messages: messages, Tools: schemas, MaxTokens: 1000, Thinking: "disabled", Temperature: new(float64)})
 			if err != nil {
-				return ActionReview{}, actionReviewError("动作判断调用未完成")
+				return ActionReview{}, errors.New("动作判断调用未完成")
 			}
 			uses := msg.ToolUses()
 			if len(uses) == 0 {
@@ -172,11 +172,13 @@ func ActionReviewFor(provider llm.Provider, readers ...func(string) ([]byte, err
 						RequestID string `json:"request_id"`
 					}
 					if json.Unmarshal(use.Input, &args) != nil {
-						return ActionReview{}, actionReviewError("批准原文读取请求无效")
+						results.Content = append(results.Content, llm.ToolResultText(use.ID, "批准原文读取请求无效，请使用当前批准索引中的 request_id", true))
+						continue
 					}
 					grant, ok := legacy[args.RequestID]
 					if !ok {
-						return ActionReview{}, actionReviewError("批准已失效或不在当前索引")
+						results.Content = append(results.Content, llm.ToolResultText(use.ID, "批准编号不在当前可读取的旧批准索引中，请核对当前索引；已有 permission 的批准无需读取原文", true))
+						continue
 					}
 					data, _ := json.Marshal(struct {
 						RequestID string `json:"request_id"`
@@ -200,14 +202,11 @@ func ActionReviewFor(provider llm.Provider, readers ...func(string) ([]byte, err
 					data, e = readers[0](args.Path)
 				}
 				if e != nil {
-					return ActionReview{}, actionReviewError("动作判断所需源码不可读取")
+					results.Content = append(results.Content, llm.ToolResultText(use.ID, e.Error(), true))
+					continue
 				}
-				text := ""
-				if e == nil {
-					hashes[args.Path] = sha256.Sum256(data)
-					text = string(data)
-				}
-				results.Content = append(results.Content, llm.ToolResultText(use.ID, text, e != nil))
+				hashes[args.Path] = sha256.Sum256(data)
+				results.Content = append(results.Content, llm.ToolResultText(use.ID, string(data), false))
 			}
 			messages = append(messages, results)
 		}
@@ -309,7 +308,7 @@ func (env *unitEnv) actionBoundary(ctx context.Context, pack *TaskPack, roe ring
 	for _, a := range graph.Assets {
 		out.Subjects[a.ID] = a.SubjectIDs
 	}
-	excluded := rings.ExcludedCoveredAssetIDs(assets, roe.ExcludedAssetSet())
+	excluded := rings.ExcludedCoveredAssetIDs(assets, roe.ExcludedAssetSet(), roe.ScopeApprovedSet())
 	members := rings.InventoryAssetIDs(assets, roe)
 	for _, a := range assets {
 		if a.Status == "retired" && !roe.ExcludedAssetSet()[a.ID] {
@@ -320,7 +319,7 @@ func (env *unitEnv) actionBoundary(ctx context.Context, pack *TaskPack, roe ring
 		if (rings.AssetSourceOf(a.Detail) != rings.AssetSourceDiscovered || operatorTarget) && !excluded[a.ID] {
 			out.AuthorizedTargets = append(out.AuthorizedTargets, brief)
 		}
-		if roe.ExcludedAssetSet()[a.ID] {
+		if excluded[a.ID] {
 			out.ExcludedAssets = append(out.ExcludedAssets, brief)
 		} else if members[a.ID] {
 			out.Assets = append(out.Assets, brief)

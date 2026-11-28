@@ -213,8 +213,8 @@ func TestBlobStore(t *testing.T) {
 func TestFilterTools(t *testing.T) {
 	env := &unitEnv{Executor: &Executor{Store: nil}}
 	all := env.toolset()
-	if len(all) != 15 {
-		t.Fatalf("工具全集应为 15 个(bash/port_probe/http_probe/read/web_search/web_fetch/list_claims + P5-04 知情查询六件:search_facts/list_assets/search_trails/traffic_search/traffic_get/traffic_blob + 两个受控入口:事实/交卷), 实际 %d", len(all))
+	if len(all) != 16 {
+		t.Fatalf("工具全集应为 16 个（含资料阅读）(bash/port_probe/http_probe/read/web_search/web_fetch/list_claims + P5-04 知情查询六件:search_facts/list_assets/search_trails/traffic_search/traffic_get/traffic_blob + 两个受控入口:事实/交卷), 实际 %d", len(all))
 	}
 	names := func(ts []tool.CoreTool) string {
 		var ns []string
@@ -223,10 +223,10 @@ func TestFilterTools(t *testing.T) {
 		}
 		return strings.Join(ns, ",")
 	}
-	if got := names(filterTools(all, RoE{})); got != "bash,port_probe,http_probe,read,web_search,web_fetch,list_claims,search_facts,list_assets,search_trails,traffic_search,traffic_get,traffic_blob,submit_candidate_fact,submit_claim" {
+	if got := names(filterTools(all, RoE{})); got != "bash,port_probe,http_probe,read,resource_read,web_search,web_fetch,list_claims,search_facts,list_assets,search_trails,traffic_search,traffic_get,traffic_blob,submit_candidate_fact,submit_claim" {
 		t.Fatalf("无 RoE 应全集放行: %s", got)
 	}
-	if got := names(filterTools(all, RoE{DeniedTools: []string{"bash"}})); got != "port_probe,http_probe,read,web_search,web_fetch,list_claims,search_facts,list_assets,search_trails,traffic_search,traffic_get,traffic_blob,submit_candidate_fact,submit_claim" {
+	if got := names(filterTools(all, RoE{DeniedTools: []string{"bash"}})); got != "port_probe,http_probe,read,resource_read,web_search,web_fetch,list_claims,search_facts,list_assets,search_trails,traffic_search,traffic_get,traffic_blob,submit_candidate_fact,submit_claim" {
 		t.Fatalf("黑名单应移除 bash: %s", got)
 	}
 	if got := names(filterTools(all, RoE{AllowedTools: []string{"port_probe"}})); got != "port_probe" {

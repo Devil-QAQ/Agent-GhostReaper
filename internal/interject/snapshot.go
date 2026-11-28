@@ -125,13 +125,18 @@ func (s *Service) unitSnapshot(ctx context.Context, taskID, sessionID string) (s
 	}
 	b.WriteString("\n【目标的系统提示(按当前配置重建)】\n")
 	b.WriteString(swarm.RenderRoEConstraint("你的探索手段受此框定。",
-		roe.AllowedTools, roe.DeniedTools, nil, rings.PolicyNotes(roe.CreatorNotes,roe.IntentRules)))
+		roe.AllowedTools, roe.DeniedTools, nil, rings.PolicyNotes(roe.CreatorNotes, roe.IntentRules)))
 	b.WriteString("\n")
-	b.WriteString(strings.Join(swarm.WorkerPromptSpec.Assemble(ctx, s.Store), "\n\n"))
+	spec := swarm.WorkerPromptSpec
+	isRetest := strings.HasPrefix(stepID, "retest-")
+	if isRetest {
+		spec = swarm.RetestPromptSpec
+	}
+	b.WriteString(strings.Join(spec.Assemble(ctx, s.Store), "\n\n"))
 
 	// 工具目录(只读呈现;应答自身无工具)。
 	b.WriteString("\n\n【目标的可用工具(只读目录)】\n")
-	for _, t := range swarm.ToolCatalog() {
+	for _, t := range swarm.ToolCatalogFor(swarm.RoE{AllowedTools: roe.AllowedTools, DeniedTools: roe.DeniedTools}, isRetest) {
 		fmt.Fprintf(&b, "- %s: %s\n", t.Name, t.Desc)
 	}
 
@@ -201,7 +206,7 @@ func (s *Service) overmindSnapshot(ctx context.Context, taskID string) (string, 
 	b.WriteString("\n【目标的系统提示(按当前配置重建)】\n")
 
 	b.WriteString(swarm.RenderRoEConstraint("派发的意图与采用的手段不得越出此边界。",
-		roe.AllowedTools, roe.DeniedTools, excluded, rings.PolicyNotes(roe.CreatorNotes,roe.IntentRules)))
+		roe.AllowedTools, roe.DeniedTools, excluded, rings.PolicyNotes(roe.CreatorNotes, roe.IntentRules)))
 	b.WriteString("\n")
 	b.WriteString(strings.Join(overmind.OvermindPromptSpec.Assemble(ctx, s.Store), "\n\n"))
 	b.WriteString("\n\n【目标的可用工具(只读目录)】研判会话无工具(态势快照经 user turn 注入,重放里可见)。\n")

@@ -52,11 +52,16 @@ func NetworkAssetIdentity(class AssetClass, title string) (AssetClass, string, s
 		// Legacy resource declarations belong to their serving website. HTTP
 		// request metadata never creates an asset identity.
 		address := AssetEntryAddress(title)
-		class, _, key, err := NetworkAssetIdentity(AssetService, address)
+		class, normalized, key, err := NetworkAssetIdentity(AssetService, address)
 		if err != nil {
 			return "", "", "", err
 		}
-		return class, strings.TrimPrefix(key, "service:"), key, nil
+		u, err := url.Parse(normalized)
+		if err == nil && u.Host != "" {
+			u.Path, u.RawPath, u.RawQuery, u.Fragment, u.RawFragment = "", "", "", "", ""
+			normalized = u.String()
+		}
+		return class, normalized, key, nil
 
 	case AssetService:
 		if !strings.Contains(title, "://") {
@@ -107,7 +112,15 @@ func NetworkAssetIdentity(class AssetClass, title string) (AssetClass, string, s
 			address = "[" + host + "]"
 		}
 		u.Scheme, u.Host = scheme, address
-		return AssetService, u.String(), "service:" + scheme + "://" + address, nil
+		identityPort := port
+		if identityPort == "" {
+			identityPort = map[string]string{"http": "80", "https": "443"}[scheme]
+		}
+		key := "service:" + scheme + "://" + address
+		if identityPort != "" {
+			key = "service:" + net.JoinHostPort(host, identityPort)
+		}
+		return AssetService, u.String(), key, nil
 	default:
 		return "", "", "", fmt.Errorf("该内容作为资料保留，不是网络资产")
 	}
@@ -206,7 +219,7 @@ func AssetDisplayHierarchy(assets []NodeFull, edges []EdgeView, members map[stri
 				}
 			}
 		case AssetService:
-			if !WebsiteEntry(class, title) {
+			if !WebsiteEntry(a.AssetClass, a.Title) {
 				_, host, e := AssetAddress(class, title)
 				if e == nil {
 					address = host
@@ -320,7 +333,7 @@ func ValidateAssetParent(childClass AssetClass, childTitle string, parentClass A
 // asset views. It does not mutate historical nodes, permissions or evidence.
 // Old explicit exclusions stay exclusions; they are not rewritten as declines.
 func InventoryAssetIDs(assets []NodeFull, roe RoeState) map[string]bool {
-	excluded := ExcludedCoveredAssetIDs(assets, roe.ExcludedAssetSet())
+	excluded := ExcludedCoveredAssetIDs(assets, roe.ExcludedAssetSet(), roe.ScopeApprovedSet())
 	approved := roe.ScopeApprovedSet()
 	services := map[string]bool{}
 	for _, a := range assets {
@@ -335,6 +348,10 @@ func InventoryAssetIDs(assets []NodeFull, roe RoeState) map[string]bool {
 	out := make(map[string]bool, len(assets))
 	for _, a := range assets {
 		if a.Type != NodeAsset || a.Status == AssetStatusRetired || excluded[a.ID] {
+			continue
+		}
+		if approved[a.ID] {
+			out[a.ID] = true
 			continue
 		}
 		if a.AssetClass == AssetAPI {
@@ -481,4 +498,36 @@ func AssetAddress(class AssetClass, title string) (AssetClass, string, error) {
 	}
 	c, host, _, err := AssetIdentity(AssetDomain, address)
 	return c, host, err
+}
+
+// CanonicalAssetIDs groups existing identities without rewriting history. Prefer
+// active service nodes to legacy resource nodes, then keep the earliest identity.
+func CanonicalAssetIDs(assets []NodeFull) map[string]string {
+	ordered := append([]NodeFull(nil), assets...)
+	sort.Slice(ordered, func(i, j int) bool {
+		a, b := ordered[i], ordered[j]
+		if (a.Status == AssetStatusRetired) != (b.Status == AssetStatusRetired) {
+			return a.Status != AssetStatusRetired
+		}
+		if (a.AssetClass == AssetAPI) != (b.AssetClass == AssetAPI) {
+			return a.AssetClass != AssetAPI
+		}
+		if a.CreatedRev != b.CreatedRev {
+			return a.CreatedRev < b.CreatedRev
+		}
+		return a.ID < b.ID
+	})
+	groups := map[string]string{}
+	out := map[string]string{}
+	for _, a := range ordered {
+		_, _, key, err := AssetIdentity(a.AssetClass, a.Title)
+		if err != nil {
+			key = "node:" + a.ID
+		}
+		if groups[key] == "" {
+			groups[key] = a.ID
+		}
+		out[a.ID] = groups[key]
+	}
+	return out
 }

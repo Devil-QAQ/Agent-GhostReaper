@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -208,10 +209,8 @@ func (env *unitEnv) readTool() tool.CoreTool {
 
 // ---- web_search:外网搜索(多后端) ----
 
-// webSearchTool 外网查证 CVE / 公开信息:后端与出口在系统设置·搜索
-// 配置(ddgs 默认免 key / brave / tavily + 独立出口代理),每次调用
-// 现读配置——面板切后端对下一次搜索即生效。搜索流量走独立出口
-// (不经镜:镜管目标流量,外网查证不混入目标对账)。
+// Search services are user configured in the capability library and loaded on
+// every call. The model can select a service; there is no implicit provider.
 func (env *unitEnv) webSearchTool() tool.CoreTool {
 	return tool.Build(tool.Spec{
 		Name:        "web_search",
@@ -219,28 +218,115 @@ func (env *unitEnv) webSearchTool() tool.CoreTool {
 		Schema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"query": map[string]any{"type": "string", "description": "搜索词(CVE 编号、漏洞名、报错原文等;换关键词比重发同一查询有效)"},
+				"query":      map[string]any{"type": "string", "description": "搜索词或站点原生查询语句"},
+				"service_id": map[string]any{"type": "string", "description": "搜索服务编号；query 留空可列出可用服务"},
+				"action":     map[string]any{"type": "string", "description": "默认 search；GitHub 还支持 search_code/browse/read，DDPoc 还支持 read"},
+				"repo":       map[string]any{"type": "string", "description": "GitHub 仓库 owner/repo"},
+				"path":       map[string]any{"type": "string", "description": "GitHub 库内路径；DDPoc 阅读时填写漏洞编号或本站详情链接"},
+				"ref":        map[string]any{"type": "string", "description": "GitHub 可选分支、标签或提交号"},
+				"page":       map[string]any{"type": "integer", "description": "页码，从 1 起"},
+				"size":       map[string]any{"type": "integer", "description": "返回条数，留空使用卡片配置"},
+				"options":    map[string]any{"type": "object", "description": "站点原生附加参数，语法可查站点文档"},
 			},
-			"required": []string{"query"},
 		},
 		ReadOnly:    alwaysRO,
 		Concurrent:  alwaysRO,
 		Permissions: allowReadOnly,
 		Run: func(ctx context.Context, in json.RawMessage, _ *tool.ToolContext) (tool.Result, error) {
 			var args struct {
-				Query string `json:"query"`
+				Query     string         `json:"query"`
+				ServiceID string         `json:"service_id"`
+				Action    string         `json:"action"`
+				Repo      string         `json:"repo"`
+				Path      string         `json:"path"`
+				Ref       string         `json:"ref"`
+				Page      int            `json:"page"`
+				Size      int            `json:"size"`
+				Options   map[string]any `json:"options"`
 			}
 			if err := json.Unmarshal(in, &args); err != nil {
 				return tool.Errorf("bad input: " + err.Error()), nil
 			}
-			cfg := websearch.Load(ctx, env.Executor.Store)
-			results, err := env.Executor.search.Search(ctx, env.TaskID, cfg, args.Query)
+			service, err := websearch.ResolveService(ctx, env.Executor.Store, args.ServiceID)
+			if (strings.TrimSpace(args.Query) == "" && args.Action != "browse" && args.Action != "read") || errors.Is(err, websearch.ErrServiceRequired) {
+				list, readErr := websearch.Services(ctx, env.Executor.Store)
+				if readErr != nil {
+					return tool.Errorf(readErr.Error()), nil
+				}
+				var available strings.Builder
+				for _, item := range list {
+					if websearch.Available(item) {
+						if item.Kind == "github" {
+							fmt.Fprintf(&available, "- %s：%s（GitHub；search 搜仓库，search_code 搜代码（需 Token），browse 列目录，read 读文件；文档 https://docs.github.com/en/rest）\n", item.ID, item.Name)
+						} else if websearch.IsNative(item.Kind) {
+							for _, p := range websearch.SiteProviders() {
+								if p.Kind == item.Kind {
+									hint := ""
+									if p.Kind == "ddpoc" {
+										hint = "；action=read、path=编号或链接，读账号可见页面"
+									}
+									fmt.Fprintf(&available, "- %s：%s（%s%s；参考 %s）\n", item.ID, item.Name, p.Name, hint, p.Docs)
+								}
+							}
+						} else {
+							fmt.Fprintf(&available, "- %s：%s（%s）\n", item.ID, item.Name, item.Method)
+						}
+					}
+				}
+				if available.Len() == 0 {
+					return tool.Errorf(websearch.ErrNotConfigured.Error()), nil
+				}
+				return tool.Text("可用搜索服务：用 service_id 选择、query 查询；站点语法可自行查阅文档。\n" + available.String()), nil
+			}
+			if err != nil {
+				return tool.Errorf(err.Error()), nil
+			}
+			if websearch.IsNative(service.Kind) {
+				if args.Action != "" && args.Action != "search" && !(service.Kind == "ddpoc" && args.Action == "read") {
+					return tool.Errorf("该站点支持 search 查询；DDPoc 另支持 read 阅读结果页面"), nil
+				}
+				result, e := websearch.AssetSearch(ctx, env.Executor.Store, service.ID, websearch.AssetQuery{Action: args.Action, Path: args.Path, Query: args.Query, Page: args.Page, Size: args.Size, Options: args.Options})
+				if e != nil {
+					return tool.Errorf(e.Error()), nil
+				}
+				b, _ := json.Marshal(result)
+				if ref, head := env.Executor.Blobs.spill(string(b)); ref != "" {
+					return tool.Text(head + "\n[全文已存档: " + ref + "]"), nil
+				}
+				return tool.Text(string(b)), nil
+			}
+			if service.Kind == "github" {
+				result, e := websearch.GitHub(ctx, env.Executor.Store, service.ID, websearch.GitHubQuery{Action: args.Action, Query: args.Query, Repo: args.Repo, Path: args.Path, Ref: args.Ref, Page: args.Page})
+				if e != nil {
+					return tool.Errorf(e.Error()), nil
+				}
+				b, _ := json.Marshal(result)
+				if ref, head := env.Executor.Blobs.spill(string(b)); ref != "" {
+					return tool.Text(head + "\n[全文已存档: " + ref + "]"), nil
+				}
+				return tool.Text(string(b)), nil
+			}
+			if args.Action != "" && args.Action != "search" {
+				return tool.Errorf("该服务仅支持 query 搜索"), nil
+			}
+			results, err := env.Executor.search.Search(ctx, env.TaskID, service.Config, args.Query)
 			if err != nil {
 				return tool.Errorf("搜索失败: " + err.Error()), nil
 			}
 			var b strings.Builder
-			fmt.Fprintf(&b, "搜索完成(后端 %s,%d 条):\n", websearch.BackendLabel(cfg.Backend), len(results))
+			if len(results) == 1 && results[0].Raw {
+				fmt.Fprintf(&b, "搜索响应(服务 %s)：\n", service.Name)
+			} else {
+				fmt.Fprintf(&b, "搜索完成(服务 %s,%d 条):\n", service.Name, len(results))
+			}
 			for i, r := range results {
+				if r.Raw {
+					fmt.Fprintf(&b, "原始响应（%s）：\n%s\n", r.URL, r.Snippet)
+					if r.Truncated {
+						b.WriteString("[原始响应仅返回前 64 KiB]\n")
+					}
+					continue
+				}
 				fmt.Fprintf(&b, "%d. %s\n   %s\n", i+1, r.Title, r.URL)
 				if r.Snippet != "" {
 					fmt.Fprintf(&b, "   %s\n", clipLine(r.Snippet, 300))
@@ -432,6 +518,6 @@ func replaceAllFold(s, old, new string) string {
 
 const (
 	toolDescRead      = "只读文件工具:读取本机文本文件内容(带行号),用于分析执行中下载或落盘的产物(配置、源码、响应存档等)。一次最多 1000 行、每行最多 2000 字符，大文件用 offset/limit 分段读；单行未读完时按返回提示用 column 继续，column 为起始行的起始字符(从 1 起)。工具输出存档时，把 sha256: 开头的完整引用原样作为 path，不能拼成本地路径。本工具无任何写操作,二进制文件不归本工具(用 bash 的 file/strings/xxd 分析)。"
-	toolDescWebSearch = "外网搜索公开信息(CVE 详情、公开漏洞分析、报错原文查证),返回标题、链接与摘要。默认 DuckDuckGo 免 key;后端(Brave/Tavily 需 key)与独立出口代理在系统设置·搜索配置。结果不足时换关键词重搜,不要重复同一查询。"
+	toolDescWebSearch = "使用能力库·搜索配置中的服务。query 留空列出可用服务及文档，用 service_id 选择。按需自行查阅站点文档和查询语法；这些入口不限定你的搜索方法。"
 	toolDescWebFetch  = "取回外网 URL 的原文(网页返回正文文本而非 HTML 源码;JSON/XML 等文本原样;二进制只报类型与大小)。流量强制经镜留痕,可在流量页回放查证。正文超长会截断存档;查 CVE 详情、 advisory 原文、公开报告时用本工具。"
 )

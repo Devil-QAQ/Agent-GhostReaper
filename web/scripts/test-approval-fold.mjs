@@ -112,6 +112,13 @@ const rec = (type, i, over = {}) => ({
   ok("无工具名的卡不判参数(资产类)", argsKnownOnCard("", "") === true);
 }
 
+{
+ const records=[{type:"action_review",decided_by:"automation",request_id:"a"},{type:"action_review",decided_by:"model",request_id:"b"},{type:"action_review",decided_by:"automation",request_id:"c"}];
+ const items=foldApprovalRecords(records);
+ ok("自动放行与模型判断分别显示",items.length===3 && items[0].label==="自动放行" && items[1].label==="动作判断" && items[2].label==="自动放行");
+ ok("自动与模型记录完整保留",items.reduce((n,item)=>n+item.count,0)===3);
+}
+
 if (failed > 0) {
   console.error(`approval-fold: ${failed} 项断言失败`);
   process.exit(1);

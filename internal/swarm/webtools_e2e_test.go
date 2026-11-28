@@ -18,7 +18,6 @@ import (
 	"ghostreaper/internal/mirror"
 	"ghostreaper/internal/mocktarget"
 	"ghostreaper/internal/rings"
-	"ghostreaper/internal/websearch"
 )
 
 func TestWebToolsE2E(t *testing.T) {
@@ -33,13 +32,11 @@ func TestWebToolsE2E(t *testing.T) {
 	}
 	defer target.Close()
 
-	// 搜索后端指向本地 mock(ddgs 免 key 裸跑的确定性替身;真实端点的
-	// 实跑验证在完成记录单独呈现)。
+	// This installed search service is explicit task infrastructure, not an
+	// implicit provider bundled into a new installation.
 	var ddgsHit bool
-	ddgs := newMockDDGS(t, &ddgsHit)
-	oldD := websearch.DDGSEndpoint
-	websearch.DDGSEndpoint = ddgs.URL
-	t.Cleanup(func() { websearch.DDGSEndpoint = oldD })
+	endpoint := newMockSearchAPI(t, &ddgsHit)
+	saveSearchService(t, store, "", "公开资料 API", searchFixtureConfig(endpoint.URL), nil)
 
 	intent := "分析下载物并查证公开信息"
 	seedGraph(t, store, task, intent)
@@ -114,10 +111,10 @@ func TestWebToolsE2E(t *testing.T) {
 		t.Fatalf("收口文本不符: %q", res.FinalText)
 	}
 
-	// web_search:默认 ddgs(免 key)命中 mock,结果回到模型(脚本第
+	// web_search:已配置的自定义 API 命中 mock,结果回到模型(脚本第
 	//三分支能等到 CVE 标记即已证明,这里再核后端命中)。
 	if !ddgsHit {
-		t.Fatalf("默认后端应命中 ddgs mock")
+		t.Fatalf("已配置的 API 应被实际调用")
 	}
 
 	// web_fetch:流量 100% 经镜留痕 + 回放逐字一致。
@@ -140,14 +137,12 @@ func TestWebToolsE2E(t *testing.T) {
 	}
 }
 
-// newMockDDGS ddgs 后端的本地确定性替身(真实页面结构的最小形态)。
-func newMockDDGS(t *testing.T, hit *bool) *httptest.Server {
+// newMockSearchAPI is an ordinary JSON search API with configurable fields.
+func newMockSearchAPI(t *testing.T, hit *bool) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		*hit = true
-		_, _ = io.WriteString(w, `<html><body><div class="result">
-<h2><a class="result__a" href="https://nvd.example/CVE-2021-44228">NVD:CVE-2021-44228</a></h2>
-<a class="result__snippet">log4j RCE</a></div></body></html>`)
+		io.WriteString(w, `{"results":[{"title":"CVE-2021-44228","url":"https://nvd.example/CVE-2021-44228","content":"public reference"}]}`)
 	}))
 	t.Cleanup(srv.Close)
 	return srv

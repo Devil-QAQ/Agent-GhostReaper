@@ -273,6 +273,11 @@ const purgeWaitCap = 90 * time.Second
 // 引用全集,引用归零才删,有其他任务引用的一律保留)→ 运行日志一行
 // 留痕。
 func (s *Server) deleteTask(ctx context.Context, taskID, reason string, purge bool) error {
+	unlock, lockErr := s.Store.LockTaskFiles(ctx)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
 	row, err := s.Store.Task(ctx, taskID)
 	if err != nil {
 		return fmt.Errorf("任务 %s 不存在", taskID)

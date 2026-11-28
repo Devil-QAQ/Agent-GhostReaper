@@ -244,9 +244,7 @@ func BuildProvider(cfg ModelConfig, opts func(*llm.Config)) (llm.Provider, error
 	} else if client != nil {
 		lc.HTTPClient = client
 	}
-	if cfg.RatePerSecond > 0 || cfg.RatePerMinute > 0 {
-		lc.RateLimit = &llm.RateLimit{PerSecond: cfg.RatePerSecond, PerMinute: cfg.RatePerMinute}
-	}
+	// Shared admission below enforces rates across provider instances.
 	if cfg.RetryConnect != 0 { // ①建连重试:0=引擎默认 -1=关 >0=值
 		lc.MaxRetries = cfg.RetryConnect
 	}
@@ -266,7 +264,7 @@ func BuildProvider(cfg ModelConfig, opts func(*llm.Config)) (llm.Provider, error
 	if cfg.MaxTokens > 0 {
 		prov = capTokensProvider{inner: prov, cap: cfg.MaxTokens} // 输出上限压到配置值
 	}
-	return prov, nil
+	return coordinated(prov, cfg), nil
 }
 
 // capTokensProvider 输出上限包装:请求未设或超上限时压到配置值(配置的

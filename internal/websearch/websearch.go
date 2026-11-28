@@ -1,3 +1,4 @@
+// Package websearch executes user-configured HTTP search APIs.
 package websearch
 
 import (
@@ -5,188 +6,357 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"io"
+	"net"
 	"net/http"
+	"net/textproto"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"golang.org/x/net/http/httpguts"
 	"golang.org/x/net/proxy"
-
-	"ghostreaper/internal/rings"
 )
 
-// 后端标识(设置值,面板与工具同一份词汇)。
-const (
-	BackendDDGS   = "ddgs"
-	BackendBrave  = "brave"
-	BackendTavily = "tavily"
-)
-
-// 设置键(rings 通用配置键值表,命名空间 search.*;与 swarm.budget.* /
-// mirror.ca.* 同款形态)。key 明文存库(P3-09 凭据静态加密时随 LLM key
-// 一并收口),读侧打码由 server 视图承担——本包只给工具用的原文形态。
-const (
-	SettingKeyBackend   = "search.backend"
-	SettingKeyBraveKey  = "search.brave.key"
-	SettingKeyTavilyKey = "search.tavily.key"
-	SettingKeyProxy     = "search.proxy"
-)
-
-// Config 一次搜索的生效配置(Load 从设置表拼出;零值 = 全默认)。
-type Config struct {
-	Backend   string // ddgs(默认)|brave|tavily
-	BraveKey  string // Brave API key(免费档)
-	TavilyKey string // Tavily API key(付费)
-	Proxy     string // 独立出口代理(http/https/socks5,可带凭据;空=直连)
-}
-
-// NormalizeBackend 归一后端标识:已知三值原样,其余(含空)归 ddgs
-// ——默认免 key 后端是设计决策(子计划 P3-03),未知值不报错按默认跑。
-func NormalizeBackend(s string) string {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case BackendBrave:
-		return BackendBrave
-	case BackendTavily:
-		return BackendTavily
-	default:
-		return BackendDDGS
-	}
-}
-
-// BackendLabel 后端的展示名(工具返回与面板共用,操作者语言)。
-func BackendLabel(b string) string {
-	switch NormalizeBackend(b) {
-	case BackendBrave:
-		return "Brave"
-	case BackendTavily:
-		return "Tavily"
-	default:
-		return "DuckDuckGo"
-	}
-}
-
-// Load 从设置表拼出生效配置。fail-safe:读失败/缺键一律按默认(ddgs、
-// 无 key、直连)——配置问题由设置页读路径呈现,不挡工具。
-func Load(ctx context.Context, store *rings.Store) Config {
-	cfg := Config{Backend: BackendDDGS}
-	if store == nil {
-		return cfg
-	}
-	get := func(key string) string {
-		e, ok, err := store.Setting(ctx, key)
-		if err != nil || !ok {
-			return ""
-		}
-		return strings.TrimSpace(e.Value)
-	}
-	cfg.Backend = NormalizeBackend(get(SettingKeyBackend))
-	cfg.BraveKey = get(SettingKeyBraveKey)
-	cfg.TavilyKey = get(SettingKeyTavilyKey)
-	cfg.Proxy = get(SettingKeyProxy)
-	return cfg
-}
-
-// Save 整份写入设置表:空值 = 删键(键值表值非空约束下,删键即"恢复
-// 装配默认"的既定语义)。by 为写者标记(面板路径恒 creator),随键值
-// 表轻量审计。
-func Save(ctx context.Context, store *rings.Store, cfg Config, by string) error {
-	kv := map[string]string{
-		SettingKeyBackend:   NormalizeBackend(cfg.Backend),
-		SettingKeyBraveKey:  cfg.BraveKey,
-		SettingKeyTavilyKey: cfg.TavilyKey,
-		SettingKeyProxy:     cfg.Proxy,
-	}
-	for k, v := range kv {
-		var err error
-		if v == "" {
-			err = store.DeleteSetting(ctx, k)
-		} else {
-			err = store.SetSetting(ctx, k, v, by)
-		}
-		if err != nil {
-			return fmt.Errorf("websearch: 写配置 %s: %w", k, err)
-		}
-	}
-	return nil
-}
-
-// ValidateProxy 出口代理合法性(与 LLM 代理同口径:http/https/socks5,
-// 可带 user:pass@)。空串合法(=直连)。
-func ValidateProxy(p string) error {
-	if strings.TrimSpace(p) == "" {
-		return nil
-	}
-	u, err := url.Parse(strings.TrimSpace(p))
-	if err != nil || u.Host == "" {
-		return errors.New("代理地址解析失败(形如 http://127.0.0.1:7890 或 socks5://host:port)")
-	}
-	switch u.Scheme {
-	case "http", "https", "socks5":
-		return nil
-	default:
-		return fmt.Errorf("代理协议 %q 不受支持(仅 http/https/socks5)", u.Scheme)
-	}
-}
-
-// Result 一条搜索结果(三后端归一的形态)。
-type Result struct {
-	Title   string
-	URL     string
-	Snippet string
-}
-
-// MaxResults 单次搜索返回上限(三家一致;多给无益于模型,少给换词重搜)。
 const MaxResults = 8
-
-// 搜索端点(包级变量:测试与自托管网关场景可覆写;生产值不动)。
-var (
-	DDGSEndpoint   = "https://html.duckduckgo.com/html/"
-	BraveEndpoint  = "https://api.search.brave.com/res/v1/web/search"
-	TavilyEndpoint = "https://api.tavily.com/search"
-)
-
-// searchTimeout 单次搜索的整段时限(出口代理慢时也别把单位拖死)。
 const searchTimeout = 20 * time.Second
+const maxSearchBody = 2 << 20
+const maxRawText = 64 << 10
 
-// ddgsUA DuckDuckGo HTML 端点对非浏览器 UA 有拦截倾向,按桌面浏览器
-// 形态发(与 ddgs 生态工具同款做法)。
-const ddgsUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+// Config describes HTTP request data and response fields, never provider code.
+type Config struct {
+	CustomLimits  bool              `json:"custom_limits,omitempty"`
+	Kind          string            `json:"kind,omitempty"`
+	PerMinute     int               `json:"per_minute,omitempty"`
+	CodePerMinute int               `json:"code_per_minute,omitempty"`
+	PerHour       int               `json:"per_hour,omitempty"`
+	PerDay        int               `json:"per_day,omitempty"`
+	PageSize      int               `json:"page_size,omitempty"`
+	QPS           float64           `json:"qps,omitempty"`
+	LimitPlan     string            `json:"limit_plan,omitempty"`
+	LimitsVersion int               `json:"limits_version,omitempty"`
+	Endpoint      string            `json:"url"`
+	Method        string            `json:"method"`
+	Encoding      string            `json:"encoding"`
+	Headers       map[string]string `json:"headers"`
+	Params        map[string]any    `json:"params"`
+	ResponseMode  string            `json:"response_mode"`
+	ResultsPath   string            `json:"results_path"`
+	TitlePath     string            `json:"title_path"`
+	URLPath       string            `json:"url_path"`
+	SnippetPath   string            `json:"snippet_path"`
+	APIKey        string            `json:"api_key,omitempty"`
+	Proxy         string            `json:"proxy,omitempty"`
+	ServiceID     string            `json:"-"`
+}
 
-// Search 按配置执行一次外网搜索。错误面向模型(工具直接上抛),写清
-// 原因与出路(配置在系统设置·搜索配置)。
+type Result struct {
+	Title     string
+	URL       string
+	Snippet   string
+	Raw       bool
+	Truncated bool
+}
+
+func normalizeConfig(cfg Config) (Config, error) {
+	if IsNative(cfg.Kind) {
+		return normalizeAsset(cfg)
+	}
+	if cfg.Kind == "github" {
+		return normalizeGitHub(cfg)
+	}
+	if cfg.Kind != "" && cfg.Kind != "custom" {
+		return cfg, errors.New("搜索站点类型无效")
+	}
+	cfg.Endpoint = strings.TrimSpace(cfg.Endpoint)
+	u, err := url.Parse(cfg.Endpoint)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+		return cfg, errors.New("填写搜索接口的 HTTP 或 HTTPS 地址，凭据单独配置")
+	}
+	cfg.Method = strings.ToUpper(strings.TrimSpace(cfg.Method))
+	if cfg.Method == "" {
+		cfg.Method = http.MethodGet
+	}
+	if cfg.Method != http.MethodGet && cfg.Method != http.MethodPost {
+		return cfg, errors.New("搜索请求方式须为 GET 或 POST")
+	}
+	if cfg.Encoding == "" {
+		cfg.Encoding = "json"
+	}
+	if cfg.Encoding != "json" && cfg.Encoding != "form" {
+		return cfg, errors.New("请求正文须为 JSON 或表单")
+	}
+	if cfg.ResponseMode == "" {
+		cfg.ResponseMode = "text"
+	}
+	if cfg.ResponseMode != "json" && cfg.ResponseMode != "text" {
+		return cfg, errors.New("返回格式须为结构化结果或原始响应")
+	}
+	for name, value := range cfg.Headers {
+		if !httpguts.ValidHeaderFieldName(name) || !httpguts.ValidHeaderFieldValue(value) {
+			return cfg, errors.New("请求头格式无效")
+		}
+	}
+	if err := ValidateProxy(cfg.Proxy); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
+}
+
 func Search(ctx context.Context, cfg Config, query string) ([]Result, error) {
-	q := strings.TrimSpace(query)
-	if q == "" {
-		return nil, errors.New("搜索词为空:填入要查证的关键词(如 CVE 编号)后重发")
+	if IsNative(cfg.Kind) {
+		return nil, errors.New("资产查询使用站点入口，统一核对请求额度")
+	}
+	if cfg.Kind == "github" {
+		return nil, errors.New("GitHub 使用站点查询入口，以便统一核对请求额度")
+	}
+	if strings.TrimSpace(query) == "" {
+		return nil, errors.New("搜索词为空，填写关键词后重发")
+	}
+	if cfg.Endpoint == "" {
+		return nil, ErrNotConfigured
+	}
+	cfg, err := normalizeConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	render := func(value string) (string, error) {
+		if strings.Contains(value, "{{api_key}}") && cfg.APIKey == "" {
+			return "", errors.New("请求配置引用了密钥，但尚未配置密钥")
+		}
+		return strings.NewReplacer("{{api_key}}", cfg.APIKey, "{{query}}", query).Replace(value), nil
+	}
+	params, err := renderValue(cfg.Params, render)
+	if err != nil {
+		return nil, err
+	}
+	var body io.Reader
+	u, _ := url.Parse(cfg.Endpoint)
+	if cfg.Method == http.MethodGet {
+		values := u.Query()
+		addParams(values, params)
+		u.RawQuery = values.Encode()
+	} else if cfg.Encoding == "form" {
+		values := url.Values{}
+		addParams(values, params)
+		body = strings.NewReader(values.Encode())
+	} else {
+		encoded, err := json.Marshal(params)
+		if err != nil {
+			return nil, errors.New("请求参数无法编码")
+		}
+		body = strings.NewReader(string(encoded))
+	}
+	request, err := http.NewRequestWithContext(ctx, cfg.Method, u.String(), body)
+	if err != nil {
+		return nil, errors.New("搜索请求无法创建")
+	}
+	request.Header.Set("Accept", "application/json")
+	if cfg.Method == http.MethodPost {
+		if cfg.Encoding == "form" {
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		} else {
+			request.Header.Set("Content-Type", "application/json")
+		}
+	}
+	for name, value := range cfg.Headers {
+		rendered, err := render(value)
+		if err != nil {
+			return nil, err
+		}
+		if !httpguts.ValidHeaderFieldValue(rendered) {
+			return nil, errors.New("搜索词或密钥不适用于当前请求头，核对请求配置")
+		}
+		request.Header.Set(textproto.CanonicalMIMEHeaderKey(name), rendered)
 	}
 	client, err := clientFor(cfg.Proxy)
 	if err != nil {
 		return nil, err
 	}
-	switch NormalizeBackend(cfg.Backend) {
-	case BackendBrave:
-		if cfg.BraveKey == "" {
-			return nil, errors.New("Brave 后端需要 key:在系统设置·搜索配置填写 Brave key,或切回 DuckDuckGo(免 key)")
+	defer client.CloseIdleConnections()
+	client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("搜索接口重定向次数过多")
 		}
-		return searchBrave(ctx, client, cfg.BraveKey, q)
-	case BackendTavily:
-		if cfg.TavilyKey == "" {
-			return nil, errors.New("Tavily 后端需要 key:在系统设置·搜索配置填写 Tavily key,或切回 DuckDuckGo(免 key)")
+		if !strings.EqualFold(next.URL.Scheme, u.Scheme) || !strings.EqualFold(next.URL.Host, u.Host) {
+			return errors.New("搜索接口跳转至其他站点，配置最终接口地址")
 		}
-		return searchTavily(ctx, client, cfg.TavilyKey, q)
+		return nil
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, unavailable("搜索请求失败，检查接口地址、网络或出口代理", err)
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, maxSearchBody+1))
+	if err != nil {
+		return nil, unavailable("搜索响应读取失败", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		return nil, searchStatusError("搜索服务", response.StatusCode)
+	}
+	if len(raw) > maxSearchBody {
+		return nil, unavailable("搜索响应超过 2 MiB，调整服务的返回数量", nil)
+	}
+	redact := func(value string) string {
+		if cfg.APIKey != "" {
+			return strings.ReplaceAll(value, cfg.APIKey, "[密钥已隐藏]")
+		}
+		return value
+	}
+	if cfg.ResponseMode == "text" {
+		truncated := len(raw) > maxRawText
+		if truncated {
+			raw = raw[:maxRawText]
+			for n := 0; n < utf8.UTFMax-1 && len(raw) > 0 && !utf8.Valid(raw); n++ {
+				raw = raw[:len(raw)-1]
+			}
+		}
+		if !utf8.Valid(raw) {
+			return nil, unavailable("原始响应不是 UTF-8 文本，核对接口返回格式", nil)
+		}
+		return []Result{{URL: cfg.Endpoint, Snippet: redact(string(raw)), Raw: true, Truncated: truncated}}, nil
+	}
+	var decoded any
+	if json.Unmarshal(raw, &decoded) != nil {
+		return nil, unavailable("响应不是有效 JSON，可核对格式或选择原始响应", nil)
+	}
+	rows, ok := valueAt(decoded, cfg.ResultsPath)
+	items, okArray := rows.([]any)
+	if !ok || !okArray {
+		return nil, unavailable("响应中的结果列表路径不匹配，不能判断为无搜索结果", nil)
+	}
+	results := make([]Result, 0, len(items))
+	for _, item := range items {
+		title, _ := valueAt(item, cfg.TitlePath)
+		link, _ := valueAt(item, cfg.URLPath)
+		snippet, _ := valueAt(item, cfg.SnippetPath)
+		address, ok := link.(string)
+		if !ok || address == "" {
+			continue
+		}
+		addressURL, err := url.Parse(address)
+		if err != nil {
+			continue
+		}
+		addressURL = u.ResolveReference(addressURL)
+		if addressURL.Scheme != "http" && addressURL.Scheme != "https" {
+			continue
+		}
+		name, _ := title.(string)
+		text, _ := snippet.(string)
+		results = append(results, Result{Title: redact(name), URL: redact(addressURL.String()), Snippet: redact(text)})
+		if len(results) == MaxResults {
+			break
+		}
+	}
+	if len(items) > 0 && len(results) == 0 {
+		return nil, unavailable("结果链接字段不匹配，可核对字段或选择原始响应", nil)
+	}
+	return results, nil
+}
+
+func renderValue(value any, render func(string) (string, error)) (any, error) {
+	switch v := value.(type) {
+	case string:
+		return render(v)
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			next, err := renderValue(item, render)
+			if err != nil {
+				return nil, err
+			}
+			out[key] = next
+		}
+		return out, nil
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			next, err := renderValue(item, render)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = next
+		}
+		return out, nil
 	default:
-		return searchDDGS(ctx, client, q)
+		return value, nil
 	}
 }
 
-// clientFor 出口 HTTP 客户端:配了独立出口代理走代理(http/https 经
-// ProxyURL,socks5 经 x/net/proxy 拨号),没配直连。每次搜索新建——
-// 搜索是低频动作,不值得为代理热切换维护客户端池。
+func addParams(values url.Values, params any) {
+	entries, _ := params.(map[string]any)
+	add := func(key string, value any) {
+		if s, ok := value.(string); ok {
+			values.Add(key, s)
+		} else {
+			encoded, _ := json.Marshal(value)
+			values.Add(key, string(encoded))
+		}
+	}
+	for key, value := range entries {
+		if items, ok := value.([]any); ok {
+			for _, item := range items {
+				add(key, item)
+			}
+		} else {
+			add(key, value)
+		}
+	}
+}
+
+// Dot paths cover common API fields; JSON pointers cover literal dots/slashes.
+func valueAt(value any, path string) (any, bool) {
+	if path == "" {
+		return value, true
+	}
+	parts := strings.Split(path, ".")
+	if strings.HasPrefix(path, "/") {
+		parts = strings.Split(path[1:], "/")
+		for i, part := range parts {
+			parts[i] = strings.ReplaceAll(strings.ReplaceAll(part, "~1", "/"), "~0", "~")
+		}
+	}
+	for _, part := range parts {
+		switch current := value.(type) {
+		case map[string]any:
+			var ok bool
+			value, ok = current[part]
+			if !ok {
+				return nil, false
+			}
+		case []any:
+			n, err := strconv.Atoi(part)
+			if err != nil || n < 0 || n >= len(current) {
+				return nil, false
+			}
+			value = current[n]
+		default:
+			return nil, false
+		}
+	}
+	return value, true
+}
+
+func searchStatusError(label string, status int) error {
+	message := fmt.Sprintf("%s返回 %d", label, status)
+	if status == 401 || status == 403 {
+		message += "，核对能力库中的搜索接口和密钥"
+	}
+	if status == 429 || status >= 500 || status == 401 || status == 403 {
+		return unavailable(message, nil)
+	}
+	return errors.New(message + "，核对请求参数")
+}
 func clientFor(proxyURL string) (*http.Client, error) {
+	if err := ValidateProxy(proxyURL); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(proxyURL) == "" {
-		return &http.Client{Timeout: searchTimeout}, nil
+		return &http.Client{Timeout: searchTimeout, Transport: &http.Transport{}}, nil
 	}
 	u, err := url.Parse(strings.TrimSpace(proxyURL))
 	if err != nil {
@@ -199,6 +369,9 @@ func clientFor(proxyURL string) (*http.Client, error) {
 			Transport: &http.Transport{Proxy: http.ProxyURL(u)},
 		}, nil
 	case "socks5":
+		if u.Port() == "" {
+			u.Host = net.JoinHostPort(u.Hostname(), "1080")
+		}
 		dialer, derr := proxy.FromURL(u, proxy.Direct)
 		if derr != nil {
 			return nil, fmt.Errorf("socks5 代理不可用: %w", derr)
@@ -211,271 +384,11 @@ func clientFor(proxyURL string) (*http.Client, error) {
 			Timeout:   searchTimeout,
 			Transport: &http.Transport{DialContext: cd.DialContext},
 		}, nil
+	case "socks4a":
+		return &http.Client{Timeout: searchTimeout, Transport: &http.Transport{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialSOCKS4a(ctx, u, network, address)
+		}}}, nil
 	default:
-		return nil, fmt.Errorf("出口代理协议 %q 不受支持(仅 http/https/socks5)", u.Scheme)
+		return nil, errors.New("出口代理协议不受支持")
 	}
-}
-
-// ---- DuckDuckGo(默认免 key 后端) ----
-
-// searchDDGS DuckDuckGo HTML 端点:POST 表单取结果页,解析 result__a /
-// result__snippet。零结果/异常页如实报错(可能被限流或网络受阻)。
-func searchDDGS(ctx context.Context, client *http.Client, query string) ([]Result, error) {
-	form := url.Values{"q": []string{query}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, DDGSEndpoint, strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", ddgsUA)
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, unavailable("DuckDuckGo 请求失败(网络或搜索出口不可用)", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if err != nil {
-		return nil, unavailable("DuckDuckGo 响应读取失败", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, searchStatusError("DuckDuckGo", resp.StatusCode)
-	}
-	results := parseDDGS(body)
-	if len(results) == 0 {
-		page := strings.ToLower(string(body))
-		if strings.Contains(page, `class="no-results`) || strings.Contains(page, "class='no-results") {
-			return []Result{}, nil
-		}
-		return nil, unavailable("DuckDuckGo 页面没有可解析结果，尚不能判断为空结果(可能被拦截或页面格式变化)", nil)
-	}
-	return results, nil
-}
-
-// parseDDGS 解析 DuckDuckGo HTML 结果页:锚点 class 含 result__a 的是
-// 结果链接、result__snippet 是摘要;链接多为 //duckduckgo.com/l/?uddg=
-// 跳转形态,解出真实 URL。标题/摘要内的 <b> 高亮与实体照实还原。
-func parseDDGS(body []byte) []Result {
-	var out []Result
-	for _, a := range anchorTags(string(body)) {
-		class := attrOf(a.tag, "class")
-		href := attrOf(a.tag, "href")
-		switch {
-		case strings.Contains(class, "result__a") && href != "":
-			out = append(out, Result{URL: decodeDDGHref(href), Title: htmlText(a.inner)})
-		case strings.Contains(class, "result__snippet") && len(out) > 0:
-			if out[len(out)-1].Snippet == "" {
-				out[len(out)-1].Snippet = htmlText(a.inner)
-			}
-		}
-		if len(out) > MaxResults {
-			break
-		}
-	}
-	trimmed := out[:0]
-	for _, r := range out {
-		if r.URL != "" {
-			trimmed = append(trimmed, r)
-		}
-	}
-	if len(trimmed) > MaxResults {
-		trimmed = trimmed[:MaxResults]
-	}
-	return trimmed
-}
-
-// anchor 一个锚点的整标签与内层 HTML(<a …> 到最近 </a>;DDG 结果锚
-// 内无嵌套锚,就近配对足够)。
-type anchor struct {
-	tag   string
-	inner string
-}
-
-// anchorTags 扫出页面全部锚点(属性序不定,逐标签解析而非整页正则)。
-func anchorTags(s string) []anchor {
-	var out []anchor
-	for rest := s; ; {
-		i := strings.Index(rest, "<a ")
-		if i < 0 {
-			return out
-		}
-		rest = rest[i:]
-		j := strings.Index(rest, ">")
-		if j < 0 {
-			return out
-		}
-		tag := rest[:j]
-		after := rest[j+1:]
-		k := strings.Index(after, "</a>")
-		if k < 0 {
-			return out
-		}
-		out = append(out, anchor{tag: tag, inner: after[:k]})
-		rest = after[k+4:]
-	}
-}
-
-// attrOf 取标签属性值(双引号形态;DDG 页面稳定双引号)。
-func attrOf(tag, name string) string {
-	i := strings.Index(tag, name+"=\"")
-	if i < 0 {
-		return ""
-	}
-	rest := tag[i+len(name)+2:]
-	if j := strings.Index(rest, "\""); j >= 0 {
-		return rest[:j]
-	}
-	return ""
-}
-
-// decodeDDGHref 还原 DDG 跳转链接为真实 URL://duckduckgo.com/l/?uddg=
-// <percent 编码> 解出;协议相对 //host/path 补 https:;其余(http/https
-// 直链)原样。
-func decodeDDGHref(href string) string {
-	h := href
-	if strings.HasPrefix(h, "//") {
-		h = "https:" + h
-	}
-	u, err := url.Parse(h)
-	if err != nil {
-		return h
-	}
-	if strings.HasSuffix(u.Host, ".duckduckgo.com") || u.Host == "duckduckgo.com" {
-		if u.Path == "/l/" {
-			if raw := u.Query().Get("uddg"); raw != "" {
-				if dec, derr := url.QueryUnescape(raw); derr == nil {
-					return dec
-				}
-			}
-		}
-	}
-	return u.String()
-}
-
-// ---- Brave / Tavily(JSON API 后端) ----
-
-// searchBrave Brave Search API(免费 key):GET + X-Subscription-Token。
-func searchBrave(ctx context.Context, client *http.Client, key, query string) ([]Result, error) {
-	u := BraveEndpoint + "?" + url.Values{
-		"q": []string{query}, "count": []string{fmt.Sprintf("%d", MaxResults)},
-	}.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Subscription-Token", key)
-	body, err := doSearchRequest(ctx, client, req, "Brave")
-	if err != nil {
-		return nil, err
-	}
-	var out struct {
-		Web *struct {
-			Results *[]struct {
-				Title       string `json:"title"`
-				URL         string `json:"url"`
-				Description string `json:"description"`
-			} `json:"results"`
-		} `json:"web"`
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, unavailable("Brave 响应解码失败", err)
-	}
-	if out.Web == nil || out.Web.Results == nil {
-		return nil, unavailable("Brave 响应缺少搜索结果字段，不能判断为空结果", nil)
-	}
-	rs := make([]Result, 0, len(*out.Web.Results))
-	for _, r := range *out.Web.Results {
-		rs = append(rs, Result{Title: r.Title, URL: r.URL, Snippet: r.Description})
-	}
-	return rs, nil
-}
-
-// searchTavily Tavily API(付费 key):POST JSON + Bearer。
-func searchTavily(ctx context.Context, client *http.Client, key, query string) ([]Result, error) {
-	body, _ := json.Marshal(map[string]any{"query": query, "max_results": MaxResults})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, TavilyEndpoint, strings.NewReader(string(body)))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+key)
-	raw, err := doSearchRequest(ctx, client, req, "Tavily")
-	if err != nil {
-		return nil, err
-	}
-	var out struct {
-		Results *[]struct {
-			Title   string `json:"title"`
-			URL     string `json:"url"`
-			Content string `json:"content"`
-		} `json:"results"`
-	}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, unavailable("Tavily 响应解码失败", err)
-	}
-	if out.Results == nil {
-		return nil, unavailable("Tavily 响应缺少搜索结果字段，不能判断为空结果", nil)
-	}
-	rs := make([]Result, 0, len(*out.Results))
-	for _, r := range *out.Results {
-		rs = append(rs, Result{Title: r.Title, URL: r.URL, Snippet: r.Content})
-	}
-	return rs, nil
-}
-
-// doSearchRequest JSON 后端公共骨架:发请求、限长读体、状态码分级报错
-// (401/403=key 问题;其余非 200 带状态与响应截头)。
-func doSearchRequest(ctx context.Context, client *http.Client, req *http.Request, backend string) ([]byte, error) {
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, unavailable(backend+" 请求失败(网络或搜索出口不可用)", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, unavailable(backend+" 响应读取失败", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, searchStatusError(backend, resp.StatusCode)
-	}
-	return body, nil
-}
-
-// Only service/configuration failures share a short unavailability period.
-func searchStatusError(backend string, status int) error {
-	message := fmt.Sprintf("%s 返回 %d", backend, status)
-	if status == http.StatusUnauthorized || status == http.StatusForbidden {
-		message += ":key 无效或过期，或服务拒绝访问；核对系统设置·搜索配置"
-	}
-	if status == http.StatusTooManyRequests || status >= 500 || status == http.StatusUnauthorized || status == http.StatusForbidden {
-		return unavailable(message, nil)
-	}
-	return errors.New(message + ":核对当前查询参数")
-}
-
-// ---- 小件 ----
-
-// htmlText HTML 片段转纯文本:剥内层标签、还原实体、收空白。
-func htmlText(s string) string {
-	var b strings.Builder
-	depth := 0
-	for _, r := range s {
-		switch {
-		case r == '<':
-			depth++
-		case r == '>' && depth > 0:
-			depth--
-		case depth == 0:
-			b.WriteRune(r)
-		}
-	}
-	text := strings.Join(strings.Fields(html.UnescapeString(b.String())), " ")
-	return clipStr(text, 500)
-}
-
-func clipStr(s string, n int) string {
-	if len(s) > n {
-		return s[:n] + "…"
-	}
-	return s
 }

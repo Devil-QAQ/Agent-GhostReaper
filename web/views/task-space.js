@@ -2,6 +2,7 @@
 
 import * as React from "react";
 
+import { TopTabs } from "@/components/top-tabs";
 import { EmptyState } from "@/components/empty-state";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { iconOf } from "@/components/icons";
@@ -94,67 +95,56 @@ export function TaskSpace({ tasks, taskID, tab, focus, unit }) {
     tab === "sessions" ? { currentTask: current, unitFocus: unit } : { currentTask: current, focus };
   return (
     <div className="task-space flex min-w-0 flex-col gap-3">
-      <div className="sticky top-14 z-30 -mx-2 bg-background/95 px-2 backdrop-blur" data-task-navigation>
-        {/* 8.9 质感:分段控件去描边靠表面色阶,当前项浅表面+微投影(克制,
-            不整块铺品牌色),hover 所在层提亮 */}
-        <div className="flex w-fit max-w-full flex-wrap gap-0.5 rounded-lg bg-muted p-1">
-          {tabs.map((t) => (
-            <button
-              key={t.id}
-              className={
-                "flex items-center rounded-md px-3 py-1 text-[13px] transition-colors duration-150 cursor-pointer " +
-                (tab === t.id
-                  ? "bg-popover text-foreground shadow-xs"
-                  : "text-muted-foreground hover:bg-hover-lift hover:text-foreground")
-              }
-              onClick={() => {
-                location.hash = `/task/${current.id}/${t.id}`;
-              }}
-            >
-              {t.title}
-              {/* 受阻红点+计数挂"会话"标签(P4-57 ⑤ 三层递进之二:
-                  点进会话页看到受阻单位与事件;悬停按归因分文案;头部
-                  状态徽标不动——普遍故障单显"受阻",状态不是红点) */}
-              {t.id === "sessions" &&
-                (() => {
-                  const bd = taskBlockedDot(current);
-                  return bd ? (
-                    <span
-                      className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold leading-none text-primary-foreground num"
-                      title={bd.title}
-                    >
-                      {bd.count}
-                    </span>
-                  ) : null;
-                })()}
-              {/* 待审批红点+计数(P4-23):只标需要动作的事项,处理即消 */}
-              {t.id === "roe" && roePending > 0 && (
-                <span
-                  className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold leading-none text-primary-foreground num"
-                  title={`待审批 ${roePending} 笔`}
-                >
-                  {roePending}
-                </span>
-              )}
-              {/* 发现未读红点+计数(P5-08⑤ 三页签汇总):意图/事实/漏洞
-                  任一有新即亮,三页全进过才灭;点击进发现页 */}
-              {t.id === "findings" &&
-                (current.unread_intents > 0 ||
-                  current.unread_claims > 0 ||
-                  current.unread_facts > 0) && (
+      <TopTabs
+        tabs={tabs}
+        value={tab}
+        label="任务标签"
+        data-task-navigation
+        onSelect={(next) => { location.hash = `/task/${current.id}/${next}`; }}
+        renderSuffix={(t) => (
+          <>
+            {/* 受阻红点+计数挂"会话"标签(P4-57 ⑤ 三层递进之二:
+                点进会话页看到受阻单位与事件;悬停按归因分文案;头部
+                状态徽标不动——普遍故障单显"受阻",状态不是红点) */}
+            {t.id === "sessions" &&
+              (() => {
+                const bd = taskBlockedDot(current);
+                return bd ? (
                   <span
                     className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold leading-none text-primary-foreground num"
-                    title={`未读:意图 ${current.unread_intents ?? 0} 条 · 事实 ${current.unread_facts ?? 0} 条 · 漏洞 ${current.unread_claims ?? 0} 条`}
+                    title={bd.title}
                   >
-                    {(current.unread_intents ?? 0) +
-                      (current.unread_claims ?? 0) +
-                      (current.unread_facts ?? 0)}
+                    {bd.count}
                   </span>
-                )}
-            </button>
-          ))}
-        </div>
-      </div>
+                ) : null;
+              })()}
+            {/* 待审批红点+计数(P4-23):只标需要动作的事项,处理即消 */}
+            {t.id === "roe" && roePending > 0 && (
+              <span
+                className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold leading-none text-primary-foreground num"
+                title={`待审批 ${roePending} 笔`}
+              >
+                {roePending}
+              </span>
+            )}
+            {/* 发现未读红点+计数(P5-08⑤ 三页签汇总):意图/事实/漏洞
+                任一有新即亮,三页全进过才灭;点击进发现页 */}
+            {t.id === "findings" &&
+              (current.unread_intents > 0 ||
+                current.unread_claims > 0 ||
+                current.unread_facts > 0) && (
+                <span
+                  className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-status-danger px-1 text-[10px] font-semibold leading-none text-primary-foreground num"
+                  title={`未读:意图 ${current.unread_intents ?? 0} 条 · 事实 ${current.unread_facts ?? 0} 条 · 漏洞 ${current.unread_claims ?? 0} 条`}
+                >
+                  {(current.unread_intents ?? 0) +
+                    (current.unread_claims ?? 0) +
+                    (current.unread_facts ?? 0)}
+                </span>
+              )}
+          </>
+        )}
+      />
       {current.status === "hibernated" && <HibernateBanner task={current} />}
       {/* 页面级渲染错误边界(P4-60 ④):标签页崩降级为区块错误,标签栏
           与冬眠提醒不受影响、其余标签可用;key 随任务与标签换页重挂。 */}

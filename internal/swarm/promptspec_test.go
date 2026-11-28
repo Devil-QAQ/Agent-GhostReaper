@@ -158,8 +158,8 @@ func assertWorkerSystem(t *testing.T, sys, editable, intent, observation, asset 
 func TestWorkerSystemSegmentsPositions(t *testing.T) {
 	pack := demoPack()
 	segs := WorkerSystemSegments(context.Background(), nil, pack.Authorization, pack)
-	if len(segs) != 8 {
-		t.Fatalf("虫群 system 应为 8 段(RoE/A/B/C/文风/意图/资产/启动),实际 %d", len(segs))
+	if len(segs) != 9 {
+		t.Fatalf("虫群 system 应为 9 段(RoE/A/B/C/资源/文风/意图/资产/启动),实际 %d", len(segs))
 	}
 	assertWorkerSystem(t, strings.Join(segs, "\n\n"), workerEditableDefault,
 		"探测靶标开放端口与服务指纹", "端口开放状态与 banner 证据", "a1 [service] 演示站点")

@@ -24,6 +24,7 @@ import (
 	"sync"
 
 	"ghostreaper/internal/buildinfo"
+	"ghostreaper/internal/capability"
 	"ghostreaper/internal/failover"
 	"ghostreaper/internal/hiber"
 	"ghostreaper/internal/interject"
@@ -34,7 +35,6 @@ import (
 	"ghostreaper/internal/shepherd"
 	"ghostreaper/internal/swarm"
 	"ghostreaper/internal/uapolicy"
-	"ghostreaper/internal/websearch"
 )
 
 // Health 报告进程存活,供面板与监控探活(P1-01 起,保持不动)。
@@ -90,6 +90,8 @@ type Server struct {
 	// 子目录,单位执行轨迹与研判原文下钻的数据源)。空 = 转录读端点
 	// 如实报 exists=false。
 	RootDir string
+	// Capabilities stores downloaded reference files separately from task data.
+	Capabilities *capability.Catalog
 	// Config 系统装配信息(设置页视图的静态部分:LLM/并发/纠偏节奏);
 	// 零值=LLM 未注入,main.go 装配时填入真实值。
 	Config ConfigView
@@ -141,39 +143,9 @@ type ConfigView struct {
 		// 默认 + 覆盖审计;写入口 POST /api/config/system。
 		TaskConcurrency agentIntParam `json:"task_concurrency"`
 	} `json:"system"`
-	// Search 搜索配置(P3-03,系统设置「搜索配置」卡):key 与代理凭据
-	// 永不回显明文——只给打码视图与"是否已配置"。
-	Search SearchView `json:"search"`
 	// UA 出站 UA 策略(P3-13c,系统设置「UA 策略」卡):http_probe /
 	// web_fetch 的 User-Agent(随机池/固定自定义/模拟工具)。
 	UA uapolicy.Config `json:"ua"`
-}
-
-// SearchView 搜索配置的服务端视图(key 打码 / 代理去凭据;设置表原值
-// 仅工具运行时读取)。
-type SearchView struct {
-	Backend       string `json:"backend"` // ddgs|brave|tavily
-	BraveKeyMask  string `json:"brave_key_mask,omitempty"`
-	BraveHasKey   bool   `json:"brave_has_key"`
-	TavilyKeyMask string `json:"tavily_key_mask,omitempty"`
-	TavilyHasKey  bool   `json:"tavily_has_key"`
-	ProxyMask     string `json:"proxy_mask,omitempty"`
-	ProxySet      bool   `json:"proxy_set"`
-}
-
-// effectiveSearch 读设置表拼搜索配置视图(打码;handleConfig 每次重算,
-// 写路径保存后同源返回)。
-func (s *Server) effectiveSearch(ctx context.Context) SearchView {
-	cfg := websearch.Load(ctx, s.Store)
-	return SearchView{
-		Backend:       websearch.NormalizeBackend(cfg.Backend),
-		BraveKeyMask:  failover.MaskKey(cfg.BraveKey),
-		BraveHasKey:   cfg.BraveKey != "",
-		TavilyKeyMask: failover.MaskKey(cfg.TavilyKey),
-		TavilyHasKey:  cfg.TavilyKey != "",
-		ProxyMask:     failover.MaskProxy(cfg.Proxy),
-		ProxySet:      cfg.Proxy != "",
-	}
 }
 
 // DefaultConfig 零值 Config 的补全:并发取包默认值,LLM 未注入。
@@ -275,6 +247,20 @@ func (s *Server) Handler() *http.ServeMux {
 	mux.HandleFunc("POST /api/task-drafts", s.handleTaskDraftSave)
 	mux.HandleFunc("DELETE /api/task-drafts/{id}", s.handleTaskDraftDelete)
 	mux.HandleFunc("GET /api/search", s.handleSearch) // P3-10 命令面板:跨任务搜任务与发现
+	mux.HandleFunc("GET /api/capability-library/search", s.handleCapabilitySearch)
+	mux.HandleFunc("GET /api/capability-library/repositories/{source}/content", s.handleCapabilityContent)
+	mux.HandleFunc("GET /api/capability-library", s.handleCapabilitySources)
+	mux.HandleFunc("POST /api/capability-library/repositories", s.handleCapabilitySave)
+	mux.HandleFunc("POST /api/capability-library/import", s.handleCapabilityImport)
+	mux.HandleFunc("POST /api/capability-library/repositories/{source}", s.handleCapabilitySave)
+	mux.HandleFunc("DELETE /api/capability-library/repositories/{source}", s.handleCapabilityDelete)
+	mux.HandleFunc("GET /api/capability-library/repositories/{source}", s.handleCapabilityStatus)
+	mux.HandleFunc("POST /api/capability-library/repositories/{source}/update", s.handleCapabilityUpdate)
+	mux.HandleFunc("POST /api/capability-library/repositories/{source}/cleanup", s.handleCapabilityCleanup)
+	mux.HandleFunc("GET /api/capability-library/repositories/{source}/files", s.handleCapabilityFiles)
+	mux.HandleFunc("GET /api/capability-library/repositories/{source}/file", s.handleCapabilityFile)
+	mux.HandleFunc("POST /api/capability-library/repositories/{source}/file", s.handleCapabilityMutation)
+	mux.HandleFunc("GET /api/capability-library/repositories/{source}/changes", s.handleCapabilityChanges)
 	mux.HandleFunc("GET /api/tasks/{id}/assets", s.handleAssetTree)
 	mux.HandleFunc("POST /api/tasks/{id}/assets", s.handleAssetCreate) // P4-05 手动新增资产(批量,来源=手动)
 	mux.HandleFunc("GET /api/tasks/{id}/assets/{nid}", s.handleAssetDetail)
@@ -292,8 +278,15 @@ func (s *Server) Handler() *http.ServeMux {
 	mux.HandleFunc("GET /api/tasks/{id}/pview/search", s.handlePanoSearch)
 	mux.HandleFunc("GET /api/tasks/{id}/pview/details/{nid}", s.handlePanoDetail)
 	mux.HandleFunc("GET /api/config", s.handleConfig)
+	mux.HandleFunc("GET /api/search-services", s.handleSearchServices)
+	mux.HandleFunc("POST /api/search-services", s.handleSearchServiceSave)
+	mux.HandleFunc("POST /api/search-services/{service}", s.handleSearchServiceSave)
+	mux.HandleFunc("POST /api/search-services/{service}/github", s.handleGitHubQuery)
+	mux.HandleFunc("POST /api/search-services/{service}/assets", s.handleAssetQuery)
+	mux.HandleFunc("POST /api/search-services/test", s.handleSearchServiceTest)
+	mux.HandleFunc("POST /api/search-services/{service}/test", s.handleSearchServiceTest)
+	mux.HandleFunc("DELETE /api/search-services/{service}", s.handleSearchServiceDelete)
 	mux.HandleFunc("POST /api/config/system", s.handleSystemParamsUpdate) // P4-34 任务并发写
-	mux.HandleFunc("POST /api/config/search", s.handleSearchUpdate)       // P3-03 搜索配置(后端/key/独立出口代理)
 	mux.HandleFunc("POST /api/config/ua", s.handleUAUpdate)               // P3-13c UA 策略(随机池/固定自定义/模拟工具)
 	mux.HandleFunc("GET /api/diagnostics", s.handleDiagnosticsExport)     // P3-13b ④ 诊断包(日志+版本+平台+脱敏配置 zip;P4-32 范围过滤与内容勾选)
 
@@ -1486,11 +1479,10 @@ func (s *Server) effectiveBudget(ctx context.Context) BudgetView {
 }
 
 // configView 设置页读模型(GET 与写路径同源返回):监听/路径为装配
-// 只读段;搜索/UA/任务并发自设置表每次活算。执行预算读写在 Agent 配置
+// 只读段;UA/任务并发自设置表每次活算。执行预算读写在 Agent 配置
 // 栏(/api/agents)。
 func (s *Server) configView(ctx context.Context) ConfigView {
 	v := s.Config
-	v.Search = s.effectiveSearch(ctx)
 	v.UA = s.effectiveUA(ctx)
 	v.System.TaskConcurrency = s.agentIntEffective(ctx,
 		manager.SettingKeyMaxConcurrentTasks, manager.DefaultMaxConcurrentTasks)
@@ -1564,56 +1556,6 @@ const (
 	budgetRunSecondsLimit = 86400
 )
 
-// ---- 搜索配置(P3-03,系统设置「搜索配置」卡) ----
-
-// searchBody 搜索配置写体:key 三态(未提交=不改、空串=清除、非空=
-// 设置);backend 缺省按默认 ddgs;proxy 空串 = 清除(直连)。
-type searchBody struct {
-	Backend   string  `json:"backend"`
-	BraveKey  *string `json:"brave_key"`
-	TavilyKey *string `json:"tavily_key"`
-	Proxy     *string `json:"proxy"`
-}
-
-// handleSearchUpdate 搜索配置写 API:写设置表(search.* 键值),对
-// 下一次 web_search 调用即生效(工具每次现读配置)。key 明文只进
-// 服务端存储,响应恒为打码视图(第七章 §5:web 端永不回显明文)。
-func (s *Server) handleSearchUpdate(w http.ResponseWriter, r *http.Request) {
-	var body searchBody
-	if !readJSON(w, r, &body) {
-		return
-	}
-	// 后端显式校验(不静默归一):拼错(如 "brav")如实 400,防误存默认。
-	switch strings.ToLower(strings.TrimSpace(body.Backend)) {
-	case websearch.BackendDDGS, websearch.BackendBrave, websearch.BackendTavily:
-	default:
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("后端须为 ddgs/brave/tavily 之一"))
-		return
-	}
-	// 缺 key 的后端照存(切后端与配 key 分两步是合法操作);工具侧
-	// 用时如实报"需要 key"。代理校验先行,坏地址不入库。
-	cfg := websearch.Load(r.Context(), s.Store)
-	cfg.Backend = websearch.NormalizeBackend(body.Backend)
-	if body.BraveKey != nil {
-		cfg.BraveKey = strings.TrimSpace(*body.BraveKey)
-	}
-	if body.TavilyKey != nil {
-		cfg.TavilyKey = strings.TrimSpace(*body.TavilyKey)
-	}
-	if body.Proxy != nil {
-		cfg.Proxy = strings.TrimSpace(*body.Proxy)
-		if err := websearch.ValidateProxy(cfg.Proxy); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
-			return
-		}
-	}
-	if err := websearch.Save(r.Context(), s.Store, cfg, "creator"); err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, s.effectiveSearch(r.Context()))
-}
-
 // ---- RoE 面板(操作约束区) ----
 
 // roeBody RoE 提交体(面板表单/JSON 双用)。IntentRules 是任务级拦截
@@ -1664,13 +1606,15 @@ func normalizeCreatorNotesIn(p *string) (*string, error) {
 
 // roeView RoE 当前值(显式给出生效的审批门槛,面板不必懂默认值)。
 type roeExcludedTarget struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-	Class string `json:"class"`
+	Source string `json:"source,omitempty"`
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Class  string `json:"class"`
 }
 
 type roeView struct {
 	ExcludedTargets   []roeExcludedTarget `json:"excluded_targets"`
+	ScopeTargets      []roeExcludedTarget `json:"scope_targets"`
 	AllowedTools      []string            `json:"allowed_tools"`
 	DeniedTools       []string            `json:"denied_tools"`
 	ApprovalThreshold string              `json:"approval_threshold"` // 已归一的生效审批门槛
@@ -1686,29 +1630,43 @@ func (s *Server) currentRoE(taskID string) (roeView, error) {
 	if err != nil {
 		return roeView{}, err
 	}
+	assets, err := s.Store.NodesByType(context.Background(), taskID, rings.NodeAsset, "")
+	if err != nil {
+		return roeView{}, err
+	}
+	effectiveExcluded := rings.ExcludedCoveredAssetIDs(assets, st.ExcludedAssetSet(), st.ScopeApprovedSet())
+	eligible := st
+	eligible.ExcludedAssets = nil
+	members := rings.InventoryAssetIDs(assets, eligible)
+	targets := []rings.NodeFull{}
+	for _, a := range assets {
+		if members[a.ID] || st.ExcludedAssetSet()[a.ID] {
+			targets = append(targets, a)
+		}
+	}
+	canonical := rings.CanonicalAssetIDs(targets)
 	excluded := []roeExcludedTarget{}
-	if len(st.ExcludedAssets) > 0 {
-		assets, err := s.Store.NodesByType(context.Background(), taskID, rings.NodeAsset, "")
-		if err != nil {
-			return roeView{}, err
+	scopeTargets := []roeExcludedTarget{}
+	excludedIDs := []string{}
+	for _, a := range targets {
+		if canonical[a.ID] != a.ID {
+			continue
 		}
-		byID := map[string]rings.NodeFull{}
-		for _, a := range assets {
-			byID[a.ID] = a
-		}
-		for _, id := range st.ExcludedAssets {
-			if a, ok := byID[id]; ok {
-				excluded = append(excluded, roeExcludedTarget{ID: id, Title: a.Title, Class: string(rings.DisplayAssetClass(a.AssetClass))})
-			}
+		target := roeExcludedTarget{ID: a.ID, Title: rings.AssetDisplayTitle(a.AssetClass, a.Title), Class: string(rings.DisplayAssetClass(a.AssetClass)), Source: rings.AssetSourceOf(a.Detail)}
+		scopeTargets = append(scopeTargets, target)
+		if effectiveExcluded[a.ID] {
+			excluded = append(excluded, target)
+			excludedIDs = append(excludedIDs, a.ID)
 		}
 	}
 	return roeView{
 		ExcludedTargets:   excluded,
+		ScopeTargets:      scopeTargets,
 		AllowedTools:      st.AllowedTools,
 		DeniedTools:       st.DeniedTools,
 		ApprovalThreshold: string(swarm.NormalizeApprovalThreshold(st.ApprovalThreshold)),
 		IntentRules:       s.intentRuleViews(taskID, st.IntentRules),
-		ExcludedAssets:    st.ExcludedAssets,
+		ExcludedAssets:    excludedIDs,
 		CreatorNotes:      st.CreatorNotes,
 		Note:              st.Note,
 		UpdatedRev:        st.UpdatedRev,

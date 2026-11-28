@@ -153,6 +153,9 @@ func permissionSystemTargets(targets []string, boundary ActionBoundary) []string
 			}
 		}
 		if !found {
+			if _, _, key, err := rings.AssetIdentity(rings.AssetService, target); err == nil {
+				target = key
+			}
 			out = append(out, target)
 		}
 	}

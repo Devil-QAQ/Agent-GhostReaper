@@ -13,8 +13,8 @@ func TestNetworkAssetIdentity(t *testing.T) {
 		{AssetDomain, "例子.中国", "domain", "xn--fsqu00a.xn--fiqs8s", "domain:xn--fsqu00a.xn--fiqs8s"},
 		{AssetHost, "[2001:db8::1]", "host", "2001:db8::1", "ip:2001:db8::1"},
 		{AssetHost, "::ffff:192.0.2.1", "host", "192.0.2.1", "ip:192.0.2.1"},
-		{AssetAPI, "https://API.Example.org:443/v1/status?view=short", "service", "https://api.example.org", "service:https://api.example.org"},
-		{AssetService, "http://[2001:db8::1]:8080/app", "service", "http://[2001:db8::1]:8080/app", "service:http://[2001:db8::1]:8080"},
+		{AssetAPI, "https://API.Example.org:443/v1/status?view=short", "service", "https://api.example.org", "service:api.example.org:443"},
+		{AssetService, "http://[2001:db8::1]:8080/app", "service", "http://[2001:db8::1]:8080/app", "service:[2001:db8::1]:8080"},
 	} {
 		c, title, key, err := NetworkAssetIdentity(tc.class, tc.input)
 		if err != nil || string(c) != tc.wantClass || title != tc.wantTitle || key != tc.wantKey {
@@ -25,7 +25,7 @@ func TestNetworkAssetIdentity(t *testing.T) {
 
 func TestNetworkAssetIdentityDoesNotMergeDistinctServices(t *testing.T) {
 	keys := map[string]bool{}
-	for _, title := range []string{"http://one.example.org:8080/", "http://two.example.org:8080/", "https://one.example.org:8080/", "http://one.example.org:8081/"} {
+	for _, title := range []string{"http://one.example.org:8080/", "http://two.example.org:8080/", "http://one.example.org:8081/"} {
 		_, _, key, err := NetworkAssetIdentity(AssetService, title)
 		if err != nil || keys[key] {
 			t.Fatalf("distinct service merged: %s %v", key, err)

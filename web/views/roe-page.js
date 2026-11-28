@@ -3,7 +3,7 @@
 import * as React from "react";
 import { toast } from "sonner";
 
-import { argsKnownOnCard, foldApprovalRecords } from "@/lib/approval-fold";
+import { actionReviewLabel, argsKnownOnCard, foldApprovalRecords } from "@/lib/approval-fold";
 import { EmptyState } from "@/components/empty-state";
 import { Field, Fold, INPUT } from "@/components/form-bits";
 import { LongText } from "@/components/long-text";
@@ -80,6 +80,7 @@ function decidedByLabel(v, type) {
   if (v === "creator") return "造物主";
   if (v === "model") return "模型";
   if (v === "system") return "系统";
+  if (v === "automation") return "自动处理";
   // !v 兼容字段缺失:后端 decided_by 带 omitempty,机器产生的记录
   // (requested 登记/自动拒绝/scope_wait 挂起)无裁决人时字段整体不出现。
   if (!v) return type === "requested" || type === "scope_wait" || type === "attack_wait" ? "未处理" : "—";
@@ -158,11 +159,9 @@ function sameIDSet(a, b) {
 // P4-47 B ① 乐观更新:勾选点下即翻、后台提交、失败回弹+人话提示,
 // 界面不等网络往返;本地覆盖在服务端轮询跟上一致后自动交还。
 function AssetScopeSection({ taskID }) {
-  const { data: roe, error } = usePolling(`/api/tasks/${taskID}/roe`, 2000);
-  const { data: assetData } = usePolling(`/api/tasks/${taskID}/assets`, 5000);
-  const currentAssets = Array.isArray(assetData?.assets) ? assetData.assets : [];
-  const excludedTargets = Array.isArray(roe?.excluded_targets) ? roe.excluded_targets : [];
-  const assets = [...new Map([...currentAssets, ...excludedTargets].map(asset => [asset.id, asset])).values()];
+  const { data: roe, error, setData: setRoe } = usePolling(`/api/tasks/${taskID}/roe`, 2000);
+  const assets = Array.isArray(roe?.scope_targets) ? roe.scope_targets : [];
+  const [busy, setBusy] = React.useState(false);
   const serverExcluded = new Set(roe?.excluded_assets || []);
   const [overlay, setOverlay] = React.useState(null); // Set|null;null=跟随服务端
   // 服务端已与本地说一致(轮询跟上)→ 交还服务端数据源。
@@ -173,23 +172,27 @@ function AssetScopeSection({ taskID }) {
   // 摘除确认弹窗(P4-45):pending = {asset, impact} 影响预览;null 关闭。
   const [pending, setPending] = React.useState(null);
 
-  const submit = async (asset, include, next, prevSet) => {
+  const submit = async (asset, include) => {
     // 网络/服务端失败统一走回弹(postJSON 在网络不通时抛异常,一并兜住)。
     let ok = false;
     let body = null;
+    setBusy(true);
     try {
       ({ ok, body } = await postJSON(`/api/tasks/${taskID}/roe/assets`, {
-        excluded: [...next],
+        asset_id: asset.id, include,
       }));
     } catch {
       ok = false;
     }
+    setBusy(false);
     if (!ok) {
       // 失败回弹:还原到本次点击前的呈现;授权范围未被改动。
-      setOverlay(sameIDSet(prevSet, serverExcluded) ? null : prevSet);
+      setOverlay(null);
       toast.error(`未生效:${body?.error || "网络未连通"},已还原勾选`);
       return;
     }
+    setRoe(body);
+    setOverlay(new Set(body.excluded_assets || []));
     if (include) {
       toast.success(`已纳入授权:${asset.title}`);
       return;
@@ -206,12 +209,11 @@ function AssetScopeSection({ taskID }) {
   // 勾上(纳入)点下即翻、直接提交;取消勾(摘除)先取影响预览再弹
   // 确认——确认按下时乐观翻勾并后台提交(确认才是决策时刻)。
   const toggle = async (asset, include) => {
-    const prevSet = excluded;
-    const next = new Set(prevSet);
+    const next = new Set(excluded);
     if (include) {
       next.delete(asset.id);
       setOverlay(next);
-      await submit(asset, true, next, prevSet);
+      await submit(asset, true);
       return;
     }
     const r = await fetchJSON(
@@ -225,7 +227,6 @@ function AssetScopeSection({ taskID }) {
     setPending({
       asset,
       next,
-      prevSet,
       units: r.body?.units?.length || 0,
       steps: r.body?.queued?.length || 0,
     });
@@ -257,6 +258,7 @@ function AssetScopeSection({ taskID }) {
                 className="flex items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors duration-150 hover:bg-hover-lift cursor-pointer"
               >
                 <Checkbox
+                  disabled={busy}
                   checked={!excluded.has(a.id)}
                   onCheckedChange={(v) => toggle(a, Boolean(v))}
                 />
@@ -282,7 +284,7 @@ function AssetScopeSection({ taskID }) {
             if (!pending) return;
             setPending(null);
             setOverlay(pending.next);
-            submit(pending.asset, false, pending.next, pending.prevSet);
+            submit(pending.asset, false);
           }}
         />
       </CardContent>
@@ -414,7 +416,7 @@ function ApprovalSection({ taskID }) {
           <Button size="sm" variant={automation.auto_join ? "default" : "outline"} aria-pressed={automation.auto_join} disabled={autoBusy || body?.frozen} onClick={() => toggleAutomation("auto_join")}>
             资产自动加入：{automation.auto_join ? "开" : "关"}
           </Button>
-          <span className="text-xs text-muted-foreground">仅当前任务；硬规则仍拒绝。</span>
+          <span className="text-xs text-muted-foreground">仅当前任务；开启后跳过对应判断，硬规则仍生效。</span>
         </div>
         {error && <div className="text-xs text-status-danger">读取失败:{error}</div>}
         {cards.length === 0 ? (
@@ -495,7 +497,7 @@ function ApprovalRecords({ taskID, records }) {
         onClick={() => setDetail({ ...r, task_id: taskID })}
       >
         <span className="num shrink-0">{r.occurred_at}</span>
-        <span className="shrink-0">{APPROVAL_TYPE_LABELS[r.type] || r.type}</span>
+        <span className="shrink-0">{r.type === "action_review" ? actionReviewLabel(r) : APPROVAL_TYPE_LABELS[r.type] || r.type}</span>
         <span className={`min-w-0 max-w-64 truncate ${subject.mono ? "num" : ""}`} title={subject.text}>
           {subject.text}
         </span>
@@ -616,7 +618,7 @@ function ApprovalRecordSheet({ record, onClose }) {
             </RecordField>
             <RecordField label="性质">
               <div className="flex flex-wrap items-center gap-2">
-                <Badge variant="outline">{APPROVAL_TYPE_LABELS[record.type] || record.type}</Badge>
+                <Badge variant="outline">{record.type === "action_review" ? actionReviewLabel(record) : APPROVAL_TYPE_LABELS[record.type] || record.type}</Badge>
                 {record.action_level && (
                   <Badge variant={levelVariant(record.action_level)}>{record.action_level}</Badge>
                 )}
@@ -841,7 +843,7 @@ function ConstraintSection({ taskID }) {
           <div className="text-sm text-muted-foreground">读取中…</div>
         ) : (
           <div className="flex flex-col gap-2 text-sm">
-            <div className="text-xs text-muted-foreground">硬规则命中拒绝；其余按实际动作判断，需要人工决定时审批。</div>
+            <div className="text-xs text-muted-foreground">硬规则命中拒绝；自动放行关闭时，按实际动作判断是否审批。</div>
             <ConstraintRow label="禁止工具" values={roe.denied_tools} empty="无" />
             <ConstraintRow label="仅允许工具" values={roe.allowed_tools} empty="不设白名单" />
             {/* 注意事项(P4-49):对做法的软要求,建后在变更约束弹窗改,

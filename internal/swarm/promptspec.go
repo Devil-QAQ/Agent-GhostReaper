@@ -100,7 +100,7 @@ const SeverityAnchor = "定级只跟直接影响走:critical=系统级权限或�
 var WorkerPromptSpec = PromptSpec{
 	SettingKey:      SettingKeyPromptSwarm,
 	DefaultEditable: workerEditableDefault,
-	Fixed:           []string{workerSafetyRules, workerArtifactRules, ResidentStyleRules},
+	Fixed:           []string{workerSafetyRules, workerArtifactRules, ResourcePrinciples, ResidentStyleRules},
 }
 
 // PromptSpec 三段式组装规约:SettingKey 指向 A 段在通用配置键值表的
